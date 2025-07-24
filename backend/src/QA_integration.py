@@ -38,6 +38,7 @@ from src.shared.constants import *
 load_dotenv() 
 
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
+print("EMBEDDING_MODEL",EMBEDDING_MODEL)
 EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL) 
 
 class SessionChatHistory:

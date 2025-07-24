@@ -22,6 +22,7 @@ def get_llm(model: str):
     """Retrieve the specified language model based on the model name."""
     model = model.lower().strip()
     env_key = f"LLM_MODEL_CONFIG_{model}"
+    print("env_key",env_key)
     env_value = os.environ.get(env_key)
 
     if not env_value:
