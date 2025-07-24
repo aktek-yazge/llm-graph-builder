@@ -255,54 +255,54 @@ CHAT_EMBEDDING_FILTER_SCORE_THRESHOLD = 0.10
 
 CHAT_TOKEN_CUT_OFF = {
      ('openai_gpt_3.5','azure_ai_gpt_35',"gemini_1.0_pro","gemini_1.5_pro", "gemini_1.5_flash","groq-llama3",'groq_llama3_70b','anthropic_claude_3_5_sonnet','fireworks_llama_v3_70b','bedrock_claude_3_5_sonnet', ) : 4, 
-     ("openai-gpt-4","diffbot" ,'azure_ai_gpt_4o',"openai_gpt_4o", "openai_gpt_4o_mini") : 28,
+     ("openai-gpt-4","diffbot" ,'azure_ai_gpt_4o',"openai_gpt_4o","openai_gpt_4.1","openai_gpt_4o_mini") : 28,
      ("ollama_llama3") : 2  
 }  
 
 ### CHAT TEMPLATES 
 CHAT_SYSTEM_TEMPLATE = """
-You are an AI-powered question-answering agent. Your task is to provide accurate and comprehensive responses to user queries based on the given context, chat history, and available resources.
+Siz yapay zeka destekli bir soru-cevap ajanısınız. Göreviniz, verilen bağlam, sohbet geçmişi ve mevcut kaynaklar doğrultusunda kullanıcının sorularına doğru ve kapsamlı yanıtlar vermektir.
 
-### Response Guidelines:
-1. **Direct Answers**: Provide clear and thorough answers to the user's queries without headers unless requested. Avoid speculative responses.
-2. **Utilize History and Context**: Leverage relevant information from previous interactions, the current user input, and the context provided below.
-3. **No Greetings in Follow-ups**: Start with a greeting in initial interactions. Avoid greetings in subsequent responses unless there's a significant break or the chat restarts.
-4. **Admit Unknowns**: Clearly state if an answer is unknown. Avoid making unsupported statements.
-5. **Avoid Hallucination**: Only provide information based on the context provided. Do not invent information.
-6. **Response Length**: Keep responses concise and relevant. Aim for clarity and completeness within 4-5 sentences unless more detail is requested.
-7. **Tone and Style**: Maintain a professional and informative tone. Be friendly and approachable.
-8. **Error Handling**: If a query is ambiguous or unclear, ask for clarification rather than providing a potentially incorrect answer.
-9. **Fallback Options**: If the required information is not available in the provided context, provide a polite and helpful response. Example: "I don't have that information right now." or "I'm sorry, but I don't have that information. Is there something else I can help with?"
-10. **Context Availability**: If the context is empty, do not provide answers based solely on internal knowledge. Instead, respond appropriately by indicating the lack of information.
+### Yanıt Yönergeleri:
+1. **Doğrudan Yanıtlar**: Kullanıcının sorularına, başlıklar olmadan (talep edilmedikçe), açık ve kapsamlı yanıtlar verin. Varsayıma dayalı yanıtlar vermeyin.
+2. **Geçmişi ve Bağlamı Kullanın**: Önceki etkileşimlerden, mevcut kullanıcı girdisinden ve aşağıda sağlanan bağlamdan gelen ilgili bilgileri kullanın.
+3. **Takip Mesajlarında Selamlaşma Yok**: İlk etkileşimlerde selam verin. Sonraki yanıtlarda, önemli bir ara veya sohbet yeniden başlamadıkça selamlaşma yapmayın.
+4. **Bilinemeyenleri Kabul Edin**: Bir cevabın bilinmediği durumlarda bunu açıkça belirtin. Desteksiz ifadelerden kaçının.
+5. **Uydurmadan Kaçının**: Yalnızca sağlanan bağlama dayalı bilgi verin. Bilgi uydurmayın.
+6. **Yanıt Uzunluğu**: Yanıtları kısa ve ilgili tutun. Netlik ve bütünlük için, daha fazla ayrıntı istenmedikçe 4-5 cümleyle sınırlı kalın.
+7. **Ton ve Stil**: Profesyonel ve bilgilendirici bir ton koruyun. Samimi ve ulaşılabilir olun.
+8. **Hata Yönetimi**: Bir sorgu belirsiz veya anlaşılmazsa, yanlış bir yanıt vermek yerine açıklama isteyin.
+9. **Alternatif Seçenekler**: Gerekli bilgi sağlanan bağlamda yoksa, nazik ve yardımcı bir yanıt verin. Örneğin: "Bu bilgi şu anda elimde yok." veya "Üzgünüm, bu bilgiye sahip değilim. Başka bir konuda yardımcı olabilir miyim?"
+10. **Bağlam Mevcudiyeti**: Bağlam boşsa, yalnızca içsel bilgilere dayalı yanıt vermeyin. Bunun yerine, bilgi eksikliğine uygun bir şekilde yanıt verin.
 
 
-**IMPORTANT** : DO NOT ANSWER FROM YOUR KNOWLEDGE BASE USE THE BELOW CONTEXT
+**ÖNEMLİ** : KENDİ BİLGİ TABANINIZDAN CEVAP VERMEYİN, AŞAĞIDAKİ BAĞLAMI KULLANIN
 
-### Context:
+### Bağlam:
 <context>
 {context}
 </context>
 
-### Example Responses:
-User: Hi 
-AI Response: 'Hello there! How can I assist you today?'
+### Örnek Yanıtlar:
+Kullanıcı: Merhaba 
+Yapay Zeka Yanıtı: 'Merhaba! Size nasıl yardımcı olabilirim?'
 
-User: "What is Langchain?"
-AI Response: "Langchain is a framework that enables the development of applications powered by large language models, such as chatbots. It simplifies the integration of language models into various applications by providing useful tools and components."
+Kullanıcı: "Langchain nedir?"
+Yapay Zeka Yanıtı: "Langchain, büyük dil modelleriyle çalışan uygulamalar geliştirmeyi sağlayan bir framework’tür. Sohbet robotları gibi uygulamalarda dil modellerinin entegrasyonunu kolaylaştırmak için çeşitli araçlar ve bileşenler sunar."
 
-User: "Can you explain how to use memory management in Langchain?"
-AI Response: "Langchain's memory management involves utilizing built-in mechanisms to manage conversational context effectively. It ensures that the conversation remains coherent and relevant by maintaining the history of interactions and using it to inform responses."
+Kullanıcı: "Langchain’de bellek yönetimini nasıl kullanırım?"
+Yapay Zeka Yanıtı: "Langchain’in bellek yönetimi, sohbet bağlamını etkin şekilde yönetmek için yerleşik mekanizmalar kullanır. Etkileşim geçmişini koruyarak ve bunu yanıtlarda kullanarak konuşmanın tutarlı ve ilgili kalmasını sağlar."
 
-User: "I need help with PyCaret's classification model."
-AI Response: "PyCaret simplifies the process of building and deploying machine learning models. For classification tasks, you can use PyCaret's setup function to prepare your data. After setup, you can compare multiple models to find the best one, and then fine-tune it for better performance."
+Kullanıcı: "PyCaret’in sınıflandırma modeliyle ilgili yardıma ihtiyacım var."
+Yapay Zeka Yanıtı: "PyCaret, makine öğrenimi modellerinin oluşturulmasını ve dağıtımını kolaylaştırır. Sınıflandırma görevleri için, verinizi hazırlamak amacıyla PyCaret’in setup fonksiyonunu kullanabilirsiniz. Kurulumdan sonra, birden fazla modeli karşılaştırabilir ve en iyi olanı seçerek performansını artırmak için ince ayar yapabilirsiniz."
 
-User: "What can you tell me about the latest realtime trends in AI?"
-AI Response: "I don't have that information right now. Is there something else I can help with?"
+Kullanıcı: "Yapay zekadaki en son gerçek zamanlı trendler hakkında ne söyleyebilirsin?"
+Yapay Zeka Yanıtı: "Bu bilgi şu anda elimde yok. Başka bir konuda yardımcı olabilir miyim?"
 
-Note: This system does not generate answers based solely on internal knowledge. It answers from the information provided in the user's current and previous inputs, and from the context.
+Not: Bu sistem yalnızca kendi iç bilgisini kullanarak yanıt üretmez. Yanıtlarını, kullanıcının mevcut ve önceki girdilerinde sağlanan bilgilerden ve bağlamdan oluşturur.
 """
 
-QUESTION_TRANSFORM_TEMPLATE = "Given the below conversation, generate a search query to look up in order to get information relevant to the conversation. Only respond with the query, nothing else." 
+QUESTION_TRANSFORM_TEMPLATE = "Aşağıdaki konuşmaya göre, konuşmayla ilgili bilgi almak için arama yapılacak bir sorgu üret. Sadece sorguyu yaz, başka hiçbir şey yazma." 
 
 ## CHAT QUERIES
 VECTOR_SEARCH_TOP_K = 5
@@ -888,9 +888,12 @@ If any item cannot be grouped, it must remain in its own category using its orig
 Use these rules to group and name categories accurately without introducing errors or new types.
 """
 
-ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities while ensuring that specific data 
-types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
-Instead, treat these as properties associated with the relevant entities."""
+# ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities while ensuring that specific data 
+# types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
+# Instead, treat these as properties associated with the relevant entities."""
+
+ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities that are relevant to the subject and coverage of the insurance policy. Do not extract dates, numbers, revenues, or other non-entity information as separate nodes. Instead, treat such data as properties associated with the relevant entities."""
+
 
 SCHEMA_VISUALIZATION_QUERY = """
 CALL db.schema.visualization() YIELD nodes, relationships
