@@ -71,6 +71,7 @@ const DropZone: FunctionComponent = () => {
           });
         }
       }
+      copiedFilesData.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
       setFilesData(copiedFilesData);
     }
   };
