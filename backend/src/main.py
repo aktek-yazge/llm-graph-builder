@@ -610,7 +610,7 @@ def merge_chunks_local(file_name, total_chunks, chunk_dir, merged_dir):
           logging.info(f'Chunk File Path While Merging Parts:{chunk_file_path}')
           with open(chunk_file_path, "rb") as chunk_file:
               shutil.copyfileobj(chunk_file, write_stream)
-          # os.unlink(chunk_file_path)  # Delete the individual chunk file after merging
+          os.unlink(chunk_file_path)  # Delete the individual chunk file after merging
   logging.info("Chunks merged successfully and return file size")
   
   file_size = os.path.getsize(merged_file_path)
