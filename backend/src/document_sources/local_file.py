@@ -29,15 +29,15 @@ def load_document_content(file_path):
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
         logging.info(f"Detected encoding for {file_path}: {encoding}")
-        # if encoding.lower() == "utf-8":
-        #     loader = UnstructuredFileLoader(file_path, mode="elements",autodetect_encoding=True)
-        #     return loader,encoding_flag
-        # else:
-        with open(file_path, encoding=encoding, errors="replace") as f:
-            content = f.read()
-        loader = ListLoader([Document(page_content=content, metadata={"source": file_path})])
-        encoding_flag =  True
-        return loader,encoding_flag
+        if encoding.lower() == "utf-8":
+            loader = UnstructuredFileLoader(file_path, mode="elements",autodetect_encoding=True)
+            return loader,encoding_flag
+        else:
+            with open(file_path, encoding=encoding, errors="replace") as f:
+                content = f.read()
+            loader = ListLoader([Document(page_content=content, metadata={"source": file_path})])
+            encoding_flag =  True
+            return loader,encoding_flag
     else:
         loader = UnstructuredFileLoader(file_path, mode="elements",autodetect_encoding=True)
         return loader,encoding_flag
