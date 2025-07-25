@@ -27,7 +27,8 @@ def load_document_content(file_path):
     file_extension = Path(file_path).suffix.lower()
     encoding_flag = False
     if file_extension == '.pdf':
-        loader = DoclingLoader(file_path,converter=DocumentConverter,export_type=ExportType.MARKDOWN)
+        converter = DocumentConverter()
+        loader = DoclingLoader(file_path,converter=converter,export_type=ExportType.MARKDOWN)
         return loader,encoding_flag
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
