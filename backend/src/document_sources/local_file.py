@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_docling import DoclingLoader
 from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_core.documents import Document
 import chardet
@@ -24,7 +25,7 @@ def load_document_content(file_path):
     file_extension = Path(file_path).suffix.lower()
     encoding_flag = False
     if file_extension == '.pdf':
-        loader = PyMuPDFLoader(file_path)
+        loader = DoclingLoader(file_path)
         return loader,encoding_flag
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
