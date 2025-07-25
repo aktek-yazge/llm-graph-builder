@@ -57,16 +57,6 @@ def get_documents_from_file_by_path(file_path,file_name):
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
             pages = loader.load()
-            from langchain_text_splitters import MarkdownHeaderTextSplitter
-
-            splitter = MarkdownHeaderTextSplitter(
-                headers_to_split_on=[
-                    ("#", "Header_1"),
-                    ("##", "Header_2"),
-                    ("###", "Header_3"),
-                ],
-            )
-            pages = [split for doc in pages for split in splitter.split_text(doc.page_content)]
         else:
             unstructured_pages = loader.load()
             pages = get_pages_with_page_numbers(unstructured_pages)
