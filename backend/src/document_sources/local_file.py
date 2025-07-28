@@ -307,11 +307,17 @@ def get_documents_from_file_by_path(file_path, file_name):
                 page_texts = loaded_docs[0].page_content.split("[PAGE BREAK]")
                 # Metadata'yı koru
                 metadata = loaded_docs[0].metadata
-                pages = [
-                    Document(page_content=txt.strip(), metadata=metadata)
-                    for txt in page_texts
-                    if txt.strip()
-                ]
+
+                pages = []
+                for idx, txt_part in enumerate(page_texts, start=1):
+                    if txt_part.strip():
+                        page_metadata = dict(metadata) if metadata else {}
+                        page_metadata["page_number"] = idx
+                        pages.append(
+                            Document(
+                                page_content=txt_part.strip(), metadata=page_metadata
+                            )
+                        )
             else:
                 pages = loaded_docs
         else:
