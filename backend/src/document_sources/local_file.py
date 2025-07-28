@@ -8,6 +8,8 @@ from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_core.documents import Document
 import chardet
 from langchain_core.document_loaders import BaseLoader
+from docling_core.types.doc import DocItemLabel
+from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
 
 
 class ListLoader(BaseLoader):
@@ -47,7 +49,7 @@ def load_document_content(file_path):
                 "labels": labels,
             },
         )
-        loader = DoclingLoader(file_path, export_type=ExportType.MARKDOWN)
+        # loader = DoclingLoader(file_path, export_type=ExportType.MARKDOWN)
         return loader, encoding_flag
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
