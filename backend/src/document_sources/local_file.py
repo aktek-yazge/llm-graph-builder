@@ -84,7 +84,15 @@ def get_documents_from_file_by_path(file_path, file_name):
         loader, encoding_flag = load_document_content(file_path)
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
-            pages = loader.load_and_split()
+            loaded_docs = loader.load()
+            # Eğer sadece bir Document ve içinde [PAGE BREAK] varsa split et
+            if file_extension == ".pdf" and len(loaded_docs) == 1 and "[PAGE BREAK]" in loaded_docs[0].page_content:
+                page_texts = loaded_docs[0].page_content.split("[PAGE BREAK]")
+                # Metadata'yı koru
+                metadata = loaded_docs[0].metadata
+                pages = [Document(page_content=txt.strip(), metadata=metadata) for txt in page_texts if txt.strip()]
+            else:
+                pages = loaded_docs
         else:
             unstructured_pages = loader.load()
             pages = get_pages_with_page_numbers(unstructured_pages)
