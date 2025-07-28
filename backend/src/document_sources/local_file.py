@@ -313,6 +313,7 @@ def get_documents_from_file_by_path(file_path, file_name):
                     if txt_part.strip():
                         page_metadata = dict(metadata) if metadata else {}
                         page_metadata["page_number"] = idx
+                        page_metadata["page"] = idx
                         pages.append(
                             Document(
                                 page_content=txt_part.strip(), metadata=page_metadata

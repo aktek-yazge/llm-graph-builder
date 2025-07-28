@@ -1051,7 +1051,7 @@ def get_chunkId_chunkDoc_list(
                     text = text.replace(j, "")
             pages[i] = Document(page_content=str(text), metadata=pages[i].metadata)
 
-        print("pages2:", pages[:3])
+        print("pages2:", pages)
         create_chunks_obj = CreateChunksofDocument(pages, graph)
         chunks = create_chunks_obj.split_file_into_chunks(
             token_chunk_size, chunk_overlap
