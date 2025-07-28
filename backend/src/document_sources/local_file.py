@@ -27,8 +27,9 @@ def load_document_content(file_path):
     file_extension = Path(file_path).suffix.lower()
     encoding_flag = False
     if file_extension == '.pdf':
-        converter = DocumentConverter()
-        loader = DoclingLoader(file_path,export_type=ExportType.MARKDOWN)
+        # converter = DocumentConverter()
+        # loader = PyMuPDFLoader(file_path)
+        loader = DoclingLoader(file_path, export_type=ExportType.MARKDOWN)
         return loader,encoding_flag
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
@@ -56,7 +57,7 @@ def get_documents_from_file_by_path(file_path,file_name):
         loader, encoding_flag = load_document_content(file_path)
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
-            pages = loader.load()
+            pages = loader.load_and_split()
         else:
             unstructured_pages = loader.load()
             pages = get_pages_with_page_numbers(unstructured_pages)
