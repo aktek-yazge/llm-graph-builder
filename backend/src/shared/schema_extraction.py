@@ -20,8 +20,9 @@ class Schema(BaseModel):
 PROMPT_TEMPLATE_WITH_SCHEMA = (
     "You are an expert in schema extraction, especially for extracting graph schema information from various formats. "
     "You will extract a graph knowledge base schema specifically from insurance policy documents. "
-    "Only identify and extract entities and relationships that are related to the subject and coverage of the policy, "
-    "based strictly on the information provided in the given document. "
+    "Only identify and extract entities and relationships that are directly and explicitly mentioned in the provided text. "
+    "Do NOT infer or assume relationships that are not clearly stated. "
+    "This prompt is for a single page of a document. Do NOT relate entities from this page to entities from other pages. "
     "Generate the generalized graph schema based on input text. Identify key entities and their relationships, "
     "and provide a generalized label for the overall context. "
     "Schema representation formats can contain extra symbols, quotes, or comments. Ignore all that extra markup. "
@@ -41,14 +42,16 @@ PROMPT_TEMPLATE_WITH_SCHEMA = (
 
 PROMPT_TEMPLATE_WITHOUT_SCHEMA = (
     """
-You are an expert in schema extraction, especially in identifying node and relationship types from example texts.
-Analyze the following text, which is from an insurance policy document, and extract only the types of entities (node types) and their relationship types.
-Only identify entities and relationships that are directly related to the subject and coverage of the policy, based strictly on the information provided in the document.
-Do not return specific instances or attributes — only abstract schema information.
-Return the result in the following format:
-{{"triplets": ["<NodeType1>-<RELATIONSHIP_TYPE>-><NodeType2>"]}}
-For example, if the text says “John works at Microsoft”, the output should be:
-{{"triplets": ["Person-WORKS_AT->Company"]}}
+You are an expert in schema extraction, especially in identifying node and relationship types from example texts.\n"
+"Analyze the following text, which is from a single page of an insurance policy document.\n"
+"Extract only the types of entities (node types) and their relationship types that are explicitly and directly mentioned in the text.\n"
+"Do NOT infer or assume relationships that are not clearly stated.\n"
+"Do NOT relate entities from this page to entities from other pages.\n"
+"Do not return specific instances or attributes — only abstract schema information.\n"
+"Return the result in the following format:\n"
+"{{\"triplets\": [\"<NodeType1>-<RELATIONSHIP_TYPE>-><NodeType2>\"]}}\n"
+"For example, if the text says 'John works at Microsoft', the output should be:\n"
+"{{\"triplets\": [\"Person-WORKS_AT->Company\"]}}\n"
 """
 )
 
