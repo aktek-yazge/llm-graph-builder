@@ -32,6 +32,11 @@ import shutil
 import urllib.parse
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+import markdown_to_json
+
+import pandas as pd
+import re
+from io import StringIO
 
 warnings.filterwarnings("ignore")
 load_dotenv()
@@ -237,6 +242,7 @@ async def extract_graph_from_file_local_file(uri, userName, password, database, 
       file_name, pages = get_documents_from_gcs( PROJECT_ID, BUCKET_UPLOAD, folder_name, fileName)
     else:
       file_name, pages, file_extension = get_documents_from_file_by_path(merged_file_path,fileName)
+      print("pages",pages[:3])
     if pages==None or len(pages)==0:
       raise LLMGraphBuilderException(f'File content is not available for file : {file_name}')
     return await processing_source(uri, userName, password, database, model, file_name, pages, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, True, merged_file_path, additional_instructions=additional_instructions)
@@ -516,14 +522,27 @@ def get_chunkId_chunkDoc_list(graph, file_name, pages, token_chunk_size, chunk_o
     bad_chars = ['"', "\n", "'"]
     for i in range(0,len(pages)):
       text = pages[i].page_content
-      for j in bad_chars:
-        if j == '\n':
-          text = text.replace(j, ' ')
-        else:
-          text = text.replace(j, '')
-      pages[i]=Document(page_content=str(text), metadata=pages[i].metadata)
+      # The simple way:
+      
+      # for j in bad_chars:
+      #   if j == '\n':
+      #     text = text.replace(j, ' ')
+      #   else:
+      #     text = text.replace(j, '')
+          
+      json_string = markdown_to_json.dictify(text)
+      print("json_string",json_string)
+      if isinstance(json_string, dict):
+          df = pd.DataFrame([json_string])
+      else:
+          df = pd.DataFrame(json_string)
+      csv_string = df.to_csv(index=False)
+      pages[i]=Document(page_content=str(csv_string), metadata=pages[i].metadata)
+      
+    print("pages2:", pages[:3])
     create_chunks_obj = CreateChunksofDocument(pages, graph)
     chunks = create_chunks_obj.split_file_into_chunks(token_chunk_size, chunk_overlap)
+    print("chunks: ", chunks)
     chunkId_chunkDoc_list = create_relation_between_chunks(graph,file_name,chunks)
     return len(chunks), chunkId_chunkDoc_list
   
