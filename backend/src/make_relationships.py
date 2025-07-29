@@ -7,6 +7,8 @@ from typing import List
 import os
 import hashlib
 import time
+import re
+from datetime import datetime
 from langchain_neo4j import Neo4jVector
 import json
 from src.shared.constants import CHUNK_CONTINUATION_PROMPT
@@ -181,6 +183,118 @@ def create_chunk_vector_index(graph):
         else:
             raise
 
+def create_entity_vector_index(graph: Neo4jGraph):
+    """
+    Create a vector index for entity nodes to enable semantic search.
+    """
+    start_time = time.time()
+    try:
+        vector_index_query = "SHOW INDEXES YIELD name, type, labelsOrTypes, properties WHERE name = 'entity_vector' AND type = 'VECTOR' AND '__Entity__' IN labelsOrTypes AND 'embedding' IN properties RETURN name"
+        vector_index = execute_graph_query(graph, vector_index_query)
+        if not vector_index:
+            vector_store = Neo4jVector(embedding=EMBEDDING_FUNCTION,
+                                    graph=graph,
+                                    node_label="__Entity__", 
+                                    embedding_node_property="embedding",
+                                    index_name="entity_vector",
+                                    embedding_dimension=EMBEDDING_DIMENSION
+                                    )
+            vector_store.create_new_index()
+            logging.info(f"Entity vector index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+        else:
+            logging.info(f"Entity vector index already exists. Time taken: {time.time() - start_time:.2f} seconds")
+    except Exception as e:
+        if ("EquivalentSchemaRuleAlreadyExists" in str(e) or "An equivalent index already exists" in str(e)):
+            logging.info("Entity vector index already exists, skipping creation.")
+        else:
+            raise
+
+def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
+    """
+    Create entity nodes for document metadata: year, owner, document name, page count, document type
+    """
+    logging.info(f"Creating document metadata entities for {file_name}")
+    
+    # Query to get document metadata
+    query = """
+    MATCH (d:Document {fileName: $fileName})
+    RETURN d.fileName as fileName, 
+           d.fileType as fileType, 
+           d.fileSize as fileSize, 
+           d.createdAt as createdAt
+    """
+    
+    result = execute_graph_query(graph, query, params={"fileName": file_name})
+    if not result:
+        logging.warning(f"Document {file_name} not found or has no metadata")
+        return
+    
+    doc_data = result[0]
+    year = None
+    if doc_data.get("createdAt"):
+        try:
+            year = str(datetime.fromisoformat(doc_data.get("createdAt")).year)
+        except:
+            # Extract year from filename if possible
+            year_match = re.search(r'(19|20)\d{2}', file_name)
+            if year_match:
+                year = year_match.group(0)
+    
+    # Extract owner from filename
+    owner = None
+    name_match = re.search(r'^([A-Za-zÀ-ÖØ-öø-ÿ\s]+)', file_name)
+    if name_match:
+        owner = name_match.group(1).strip()
+    
+    # Document name is the filename
+    doc_name = file_name
+    
+    # File type from metadata
+    doc_type = doc_data.get("fileType", "unknown")
+    
+    # Count pages by counting chunks
+    page_count_query = """
+    MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
+    RETURN count(c) as pageCount
+    """
+    page_count_result = execute_graph_query(graph, page_count_query, params={"fileName": file_name})
+    page_count = str(page_count_result[0]["pageCount"]) if page_count_result else "0"
+    
+    # Create entity nodes and relationships to document
+    entities = []
+    
+    if year:
+        entities.append({"type": "Year", "id": year, "property": "year"})
+    if owner:
+        entities.append({"type": "Owner", "id": owner, "property": "owner"})
+    if doc_name:
+        entities.append({"type": "DocumentName", "id": doc_name, "property": "documentName"})
+    if page_count:
+        entities.append({"type": "PageCount", "id": page_count, "property": "pageCount"})
+    if doc_type:
+        entities.append({"type": "DocumentType", "id": doc_type, "property": "documentType"})
+    
+    # Create entities and relationships in batch
+    if entities:
+        entity_query = """
+        MATCH (d:Document {fileName: $fileName})
+        UNWIND $entities as entity
+        CALL apoc.merge.node([entity.type, '__Entity__'], {id: entity.id}) YIELD node
+        SET d[entity.property] = entity.id
+        MERGE (d)-[:HAS_METADATA]->(node)
+        RETURN node
+        """
+        execute_graph_query(graph, entity_query, params={"fileName": file_name, "entities": entities})
+        
+        # Create embeddings for the new entity nodes
+        for entity in entities:
+            embedding = EMBEDDING_FUNCTION.embed_query(entity["id"])
+            embedding_query = """
+            MATCH (e:__Entity__ {id: $id})
+            SET e.embedding = $embedding
+            """
+            execute_graph_query(graph, embedding_query, params={"id": entity["id"], "embedding": embedding})
+
 def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_threshold: float = None):
     """
     Create cross-chunk relationships based on vector similarity using Neo4j vector index.
@@ -197,6 +311,9 @@ def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_t
     SET r.score = score
     """
     execute_graph_query(graph, query, params={"fileName": file_name, "threshold": similarity_threshold})
+    
+    # Create entity vector index if it doesn't exist
+    create_entity_vector_index(graph)
 
 async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, additional_instructions=None):
     """
