@@ -400,6 +400,9 @@ def create_retriever(neo_db, document_names, chat_mode_settings,search_k, score_
 def get_neo4j_retriever(graph, document_names,chat_mode_settings, score_threshold=CHAT_SEARCH_KWARG_SCORE_THRESHOLD):
     try:
 
+        # Ensure retrieval_query is provided to avoid null query errors in Neo4jVector
+        if not chat_mode_settings.get("retrieval_query"):
+            raise ValueError(f"Missing 'retrieval_query' for chat mode '{chat_mode_settings.get('mode')}'")
         neo_db = initialize_neo4j_vector(graph, chat_mode_settings)
         # document_names= list(map(str.strip, json.loads(document_names)))
         search_k = chat_mode_settings["top_k"]
@@ -438,282 +441,24 @@ def process_chat_response(messages, history, question, model, graph, document_na
         llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         
         docs, transformed_question = retrieve_documents(doc_retriever, messages)
-        if docs:
-            # Expand with SIMILAR-related chunks for top chunk
+        # In pure vector mode, also add graph-based context
+        if chat_mode_settings.get("mode") == CHAT_VECTOR_MODE:
             try:
-                top_meta = docs[0].metadata.get('chunkdetails', [])
-                if top_meta:
-                    top_id = top_meta[0]['id']
-                    # fetch SIMILAR neighbors
-                    sim_rows = graph.query(
-                        """
-                        MATCH (c:Chunk {id:$id})-[r:SIMILAR]-(n:Chunk)
-                        RETURN n.text AS text, n.id AS id, r.score AS score
-                        ORDER BY r.score DESC LIMIT $limit
-                        """,
-                        {'id': top_id, 'limit': chat_mode_settings.get('top_k', 5)}
-                    )
-                    for row in sim_rows:
-                        docs.append(Document(
-                            page_content=row['text'],
-                            metadata={
-                                'source': row['text'],
-                                'chunkdetails': [{'id': row['id'], 'score': row['score']}]
-                            }
-                        ))
+                graph_chain, _, _ = create_graph_chain(model, graph)
+                graph_res = get_graph_response(graph_chain, question)
+                for ctx in graph_res.get("context", []):
+                    docs.append(Document(
+                        page_content=ctx,
+                        metadata={"source": "graph", "chunkdetails": [{"id": "graph", "score": 1.0}]}
+                    ))
             except Exception:
                 pass
 
-            content, result, total_tokens, formatted_docs = process_documents(
-                docs, question, messages, llm, model, chat_mode_settings
-            )
-        else:
-            content = "I couldn't find any relevant documents to answer your question."
-            result = {"sources": list(), "nodedetails": list(), "entities": list()}
-            total_tokens = 0
-            formatted_docs = ""
-        
-        ai_response = AIMessage(content=content)
-        messages.append(ai_response)
-
-        summarization_thread = threading.Thread(target=summarize_and_log, args=(history, messages, llm))
-        summarization_thread.start()
-        logging.info("Summarization thread started.")
-        # summarize_and_log(history, messages, llm)
-        metric_details = {"question":question,"contexts":formatted_docs,"answer":content}
-        return {
-            "session_id": "",  
-            "message": content,
-            "info": {
-                # "metrics" : metrics,
-                "sources": result["sources"],
-                "model": model_version,
-                "nodedetails": result["nodedetails"],
-                "total_tokens": total_tokens,
-                "response_time": 0,
-                "mode": chat_mode_settings["mode"],
-                "entities": result["entities"],
-                "metric_details": metric_details,
-            },
-            
-            "user": "chatbot"
-        }
-    
-    except Exception as e:
-        logging.exception(f"Error processing chat response at {datetime.now()}: {str(e)}")
-        return {
-            "session_id": "",
-            "message": "Something went wrong",
-            "info": {
-                "metrics" : [],
-                "sources": [],
-                "nodedetails": [],
-                "total_tokens": 0,
-                "response_time": 0,
-                "error": f"{type(e).__name__}: {str(e)}",
-                "mode": chat_mode_settings["mode"],
-                "entities": [],
-                "metric_details": {},
-            },
-            "user": "chatbot"
-        }
-
-def summarize_and_log(history, stored_messages, llm):
-    logging.info("Starting summarization in a separate thread.")
-    if not stored_messages:
-        logging.info("No messages to summarize.")
-        return False
-
-    try:
-        start_time = time.time()
-
-        summarization_prompt = ChatPromptTemplate.from_messages(
-            [
-                MessagesPlaceholder(variable_name="chat_history"),
-                (
-                    "human",
-                    "Summarize the above chat messages into a concise message, focusing on key points and relevant details that could be useful for future conversations. Exclude all introductions and extraneous information."
-                ),
-            ]
+        content, result, total_tokens, formatted_docs = process_documents(
+            docs, question, messages, llm, model, chat_mode_settings
         )
-        summarization_chain = summarization_prompt | llm
-
-        summary_message = summarization_chain.invoke({"chat_history": stored_messages})
-
-        with threading.Lock():
-            history.clear()
-            history.add_user_message("Our current conversation summary till now")
-            history.add_message(summary_message)
-
-        history_summarized_time = time.time() - start_time
-        logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
-
-        return True
-
     except Exception as e:
-        logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
-        return False 
-    
-def create_graph_chain(model, graph):
-    try:
-        logging.info(f"Graph QA Chain using LLM model: {model}")
-
-        cypher_llm,model_name = get_llm(model)
-        qa_llm,model_name = get_llm(model)
-        graph_chain = GraphCypherQAChain.from_llm(
-            cypher_llm=cypher_llm,
-            qa_llm=qa_llm,
-            validate_cypher= True,
-            graph=graph,
-            # verbose=True, 
-            allow_dangerous_requests=True,
-            return_intermediate_steps = True,
-            top_k=3
-        )
-
-        logging.info("GraphCypherQAChain instance created successfully.")
-        return graph_chain,qa_llm,model_name
-
-    except Exception as e:
-        logging.error(f"An error occurred while creating the GraphCypherQAChain instance. : {e}") 
-
-def get_graph_response(graph_chain, question):
-    try:
-        cypher_res = graph_chain.invoke({"query": question})
-        
-        response = cypher_res.get("result")
-        cypher_query = ""
-        context = []
-
-        for step in cypher_res.get("intermediate_steps", []):
-            if "query" in step:
-                cypher_string = step["query"]
-                cypher_query = cypher_string.replace("cypher\n", "").replace("\n", " ").strip() 
-            elif "context" in step:
-                context = step["context"]
-        return {
-            "response": response,
-            "cypher_query": cypher_query,
-            "context": context
-        }
-    
-    except Exception as e:
-        logging.error(f"An error occurred while getting the graph response : {e}")
-
-def process_graph_response(model, graph, question, messages, history):
-    try:
-        graph_chain, qa_llm, model_version = create_graph_chain(model, graph)
-        
-        graph_response = get_graph_response(graph_chain, question)
-        
-        ai_response_content = graph_response.get("response", "Something went wrong")
-        ai_response = AIMessage(content=ai_response_content)
-        
-        messages.append(ai_response)
-        # summarize_and_log(history, messages, qa_llm)
-        summarization_thread = threading.Thread(target=summarize_and_log, args=(history, messages, qa_llm))
-        summarization_thread.start()
-        logging.info("Summarization thread started.")
-        metric_details = {"question":question,"contexts":graph_response.get("context", ""),"answer":ai_response_content}
-        result = {
-            "session_id": "", 
-            "message": ai_response_content,
-            "info": {
-                "model": model_version,
-                "cypher_query": graph_response.get("cypher_query", ""),
-                "context": graph_response.get("context", ""),
-                "mode": "graph",
-                "response_time": 0,
-                "metric_details": metric_details,
-            },
-            "user": "chatbot"
-        }
-        
-        return result
-    
-    except Exception as e:
-        logging.exception(f"Error processing graph response at {datetime.now()}: {str(e)}")
-        return {
-            "session_id": "",  
-            "message": "Something went wrong",
-            "info": {
-                "model": model_version,
-                "cypher_query": "",
-                "context": "",
-                "mode": "graph",
-                "response_time": 0,
-                "error": f"{type(e).__name__}: {str(e)}"
-            },
-            "user": "chatbot"
-        }
-
-def create_neo4j_chat_message_history(graph, session_id, write_access=True):
-    """
-    Creates and returns a Neo4jChatMessageHistory instance.
-
-    """
-    try:
-        if write_access: 
-            history = Neo4jChatMessageHistory(
-                graph=graph,
-                session_id=session_id
-            )
-            return history
-        
-        history = get_history_by_session_id(session_id)
-        return history
-
-    except Exception as e:
-        logging.error(f"Error creating Neo4jChatMessageHistory: {e}")
-        raise 
-
-def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
-    default_settings = settings_map[CHAT_DEFAULT_MODE]
-    try:
-        chat_mode_settings = settings_map.get(mode, default_settings)
-        chat_mode_settings["mode"] = mode
-        
-        logging.info(f"Chat mode settings: {chat_mode_settings}")
-    
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}", exc_info=True)
+        logging.error(f"Error processing documents: {e}")
         raise
-
-    return chat_mode_settings
     
-def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True):
-    logging.info(f"Chat Mode: {mode}")
-
-    history = create_neo4j_chat_message_history(graph, session_id, write_access)
-    messages = history.messages
-
-    user_question = HumanMessage(content=question)
-    messages.append(user_question)
-
-    if mode == CHAT_GRAPH_MODE:
-        result = process_graph_response(model, graph, question, messages, history)
-    else:
-        chat_mode_settings = get_chat_mode_settings(mode=mode)
-        document_names= list(map(str.strip, json.loads(document_names)))
-        if document_names and not chat_mode_settings["document_filter"]:
-            result =  {
-                "session_id": "",  
-                "message": "Please deselect all documents in the table before using this chat mode",
-                "info": {
-                    "sources": [],
-                    "model": "",
-                    "nodedetails": [],
-                    "total_tokens": 0,
-                    "response_time": 0,
-                    "mode": chat_mode_settings["mode"],
-                    "entities": [],
-                    "metric_details": [],
-                },
-                "user": "chatbot"
-            }
-        else:
-            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings)
-
-    result["session_id"] = session_id
-    
-    return result
+    return content, result, total_tokens, formatted_docs
