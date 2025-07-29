@@ -775,9 +775,32 @@ async def processing_source(
     )
     uri_latency["get_status_document_node"] = f"{elapsed_status_document_node:.2f}"
 
-    select_chunks_with_retry = 0
-    node_count = 0
-    rel_count = 0
+  start_relationship = time.time()
+  merge_relationship_between_chunk_and_entites(graph, chunks_and_graphDocuments_list)
+  end_relationship = time.time()
+  elapsed_relationship = end_relationship - start_relationship
+  logging.info(f'Time taken to create relationship between chunk and entities: {elapsed_relationship:.2f} seconds')
+  latency_processing_chunk["relationship_between_chunk_entity"] = f'{elapsed_relationship:.2f}'
+  
+  # create vector-similarity based cross-chunk SIMILAR relationships
+  start_cross = time.time()
+  create_cross_chunk_relations(graph, file_name)
+  latency_processing_chunk["cross_chunk_rel"] = f'{time.time() - start_cross:.2f}'
+
+  # create LLM-based continuation relationships between chunks if allowed
+  if allowedRelationship:
+      parts = [p.strip() for p in allowedRelationship.split(',')]
+      if len(parts) >= 3:
+          allowed_rel = (parts[0], parts[1], parts[2])
+          start_llm_rel = time.time()
+          await create_llm_chunk_relations(graph, model, chunkId_chunkDoc_list, allowed_rel, additional_instructions)
+          latency_processing_chunk["llm_chunk_rel"] = f'{time.time() - start_llm_rel:.2f}'
+
+  graphDb_data_Access = graphDBdataAccess(graph)
+  count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+  node_count = count_response[file_name].get('nodeCount',"0")
+  rel_count = count_response[file_name].get('relationshipCount',"0")
+  return node_count,rel_count,latency_processing_chunk
 
     if len(result) > 0:
         if result[0]["Status"] != "Processing":
