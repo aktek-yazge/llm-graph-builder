@@ -18,6 +18,7 @@ const DropZone: FunctionComponent = () => {
   const { userCredentials } = useCredentials();
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
+    console.log('Files dropped:', f);
     setIsClicked(true);
     setSelectedFiles(f.map((f) => f as File));
     setIsLoading(false);
@@ -77,16 +78,15 @@ const DropZone: FunctionComponent = () => {
   };
   useEffect(() => {
     if (selectedFiles.length > 0) {
-      for (let index = 0; index < selectedFiles.length; index++) {
-        const file = selectedFiles[index];
-        if (filesData[index]?.status == 'None' && isClicked) {
-          uploadFileInChunks(file);
-        }
-      }
+      selectedFiles.forEach((file) => {
+        console.log('Starting upload for file:', file.name);
+        uploadFileInChunks(file);
+      });
     }
   }, [selectedFiles]);
 
   const uploadFileInChunks = (file: File) => {
+    console.log('Uploading file in chunks:', file);
     const totalChunks = Math.ceil(file.size / chunkSize);
     const chunkProgressIncrement = 100 / totalChunks;
     let chunkNumber = 1;
