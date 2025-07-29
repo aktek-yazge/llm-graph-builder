@@ -1054,9 +1054,11 @@ def get_chunkId_chunkDoc_list(
         print("pages2:", pages)
         create_chunks_obj = CreateChunksofDocument(pages, graph)
         print("create_chunks_obj:", create_chunks_obj)
-        chunks = create_chunks_obj.split_file_into_chunks(
-            token_chunk_size, chunk_overlap
-        )
+        # chunks = create_chunks_obj.split_file_into_chunks(
+        #     token_chunk_size, chunk_overlap
+        # )
+
+        chunks = pages
         print("chunks: ", chunks)
         chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks)
         return len(chunks), chunkId_chunkDoc_list
