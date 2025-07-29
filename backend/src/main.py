@@ -42,6 +42,7 @@ import markdown_to_json
 import pandas as pd
 import re
 from io import StringIO
+import time
 
 warnings.filterwarnings("ignore")
 load_dotenv()
@@ -770,37 +771,16 @@ async def processing_source(
     result = graphDb_data_Access.get_current_status_document_node(file_name)
     end_status_document_node = time.time()
     elapsed_status_document_node = end_status_document_node - start_status_document_node
-    logging.info(
-        f"Time taken to get the current status of document node: {elapsed_status_document_node:.2f} seconds"
-    )
+    logging.info(f'Time taken to get the current status of document node: {elapsed_status_document_node:.2f} seconds')
     uri_latency["get_status_document_node"] = f"{elapsed_status_document_node:.2f}"
+    # default for retry processed chunk offset
+    select_chunks_with_retry = 0
+    # initialize counts
+    node_count = 0
+    rel_count = 0
 
-  start_relationship = time.time()
-  merge_relationship_between_chunk_and_entites(graph, chunks_and_graphDocuments_list)
-  end_relationship = time.time()
-  elapsed_relationship = end_relationship - start_relationship
-  logging.info(f'Time taken to create relationship between chunk and entities: {elapsed_relationship:.2f} seconds')
-  latency_processing_chunk["relationship_between_chunk_entity"] = f'{elapsed_relationship:.2f}'
-  
-  # create vector-similarity based cross-chunk SIMILAR relationships
-  start_cross = time.time()
-  create_cross_chunk_relations(graph, file_name)
-  latency_processing_chunk["cross_chunk_rel"] = f'{time.time() - start_cross:.2f}'
-
-  # create LLM-based continuation relationships between chunks if allowed
-  if allowedRelationship:
-      parts = [p.strip() for p in allowedRelationship.split(',')]
-      if len(parts) >= 3:
-          allowed_rel = (parts[0], parts[1], parts[2])
-          start_llm_rel = time.time()
-          await create_llm_chunk_relations(graph, model, chunkId_chunkDoc_list, allowed_rel, additional_instructions)
-          latency_processing_chunk["llm_chunk_rel"] = f'{time.time() - start_llm_rel:.2f}'
-
-  graphDb_data_Access = graphDBdataAccess(graph)
-  count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-  node_count = count_response[file_name].get('nodeCount',"0")
-  rel_count = count_response[file_name].get('relationshipCount',"0")
-  return node_count,rel_count,latency_processing_chunk
+    # Batch processing of chunks handles relationships and embeddings
+    # Final counts updated in loop below
 
     if len(result) > 0:
         if result[0]["Status"] != "Processing":
@@ -974,89 +954,80 @@ async def processing_source(
 
 
 async def processing_chunks(
-    chunkId_chunkDoc_list,
-    graph,
-    uri,
-    userName,
-    password,
-    database,
-    file_name,
+  chunkId_chunkDoc_list,
+  graph,
+  uri,
+  userName,
+  password,
+  database,
+  file_name,
+  model,
+  allowedNodes,
+  allowedRelationship,
+  chunks_to_combine,
+  node_count,
+  rel_count,
+  additional_instructions=None,
+):
+  latency = {}
+
+  # (re)open driver if closed
+  if graph is None or graph._driver._closed:
+    graph = create_graph_database_connection(uri, userName, password, database)
+
+  # 1. update embeddings on chunks
+  t0 = time.time()
+  create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
+  latency["update_embedding"] = f"{time.time() - t0:.2f}"
+
+  # 2. ask LLM for sub-graph per chunk
+  t1 = time.time()
+  graph_documents = await get_graph_from_llm(
     model,
+    chunkId_chunkDoc_list,
     allowedNodes,
     allowedRelationship,
     chunks_to_combine,
-    node_count,
-    rel_count,
-    additional_instructions=None,
-):
-    # create vector index and update chunk node with embedding
-    latency_processing_chunk = {}
-    if graph is not None:
-        if graph._driver._closed:
-            graph = create_graph_database_connection(uri, userName, password, database)
-    else:
-        graph = create_graph_database_connection(uri, userName, password, database)
+    additional_instructions,
+  )
+  latency["entity_extraction"] = f"{time.time() - t1:.2f}"
 
-    start_update_embedding = time.time()
-    create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
-    end_update_embedding = time.time()
-    elapsed_update_embedding = end_update_embedding - start_update_embedding
-    logging.info(
-        f"Time taken to update embedding in chunk node: {elapsed_update_embedding:.2f} seconds"
-    )
-    latency_processing_chunk["update_embedding"] = f"{elapsed_update_embedding:.2f}"
-    logging.info("Get graph document list from models")
+  # 3. normalize IDs / backticks / types
+  cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
 
-    start_entity_extraction = time.time()
-    graph_documents = await get_graph_from_llm(
-        model,
-        chunkId_chunkDoc_list,
-        allowedNodes,
-        allowedRelationship,
-        chunks_to_combine,
-        additional_instructions,
-    )
-    end_entity_extraction = time.time()
-    elapsed_entity_extraction = end_entity_extraction - start_entity_extraction
-    logging.info(
-        f"Time taken to extract enitities from LLM Graph Builder: {elapsed_entity_extraction:.2f} seconds"
-    )
-    latency_processing_chunk["entity_extraction"] = f"{elapsed_entity_extraction:.2f}"
-    cleaned_graph_documents = handle_backticks_nodes_relationship_id_type(
-        graph_documents
-    )
+  # 4. save nodes & rels into Neo4j
+  t2 = time.time()
+  save_graphDocuments_in_neo4j(graph, cleaned)
+  latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
 
-    start_save_graphDocuments = time.time()
-    save_graphDocuments_in_neo4j(graph, cleaned_graph_documents)
-    end_save_graphDocuments = time.time()
-    elapsed_save_graphDocuments = end_save_graphDocuments - start_save_graphDocuments
-    logging.info(
-        f"Time taken to save graph document in neo4j: {elapsed_save_graphDocuments:.2f} seconds"
-    )
-    latency_processing_chunk["save_graphDocuments"] = (
-        f"{elapsed_save_graphDocuments:.2f}"
-    )
+  # 5. relate each chunk to its extracted entities
+  pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
+  t3 = time.time()
+  merge_relationship_between_chunk_and_entites(graph, pairs)
+  latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
 
-    chunks_and_graphDocuments_list = get_chunk_and_graphDocument(
-        cleaned_graph_documents, chunkId_chunkDoc_list
-    )
+  # 6. cross-chunk SIMILAR relationships
+  t4 = time.time()
+  create_cross_chunk_relations(graph, file_name)
+  latency["cross_chunk_rel"] = f"{time.time() - t4:.2f}"
 
-    start_relationship = time.time()
-    merge_relationship_between_chunk_and_entites(graph, chunks_and_graphDocuments_list)
-    end_relationship = time.time()
-    elapsed_relationship = end_relationship - start_relationship
-    logging.info(
-        f"Time taken to create relationship between chunk and entities: {elapsed_relationship:.2f} seconds"
-    )
-    latency_processing_chunk["relationship_between_chunk_entity"] = (
-        f"{elapsed_relationship:.2f}"
-    )
+  # 7. optional LLM-based continuation relationships
+  if allowedRelationship:
+    parts = [p.strip() for p in allowedRelationship.split(",")]
+    if len(parts) >= 3:
+      t5 = time.time()
+      await create_llm_chunk_relations(
+        graph, model, chunkId_chunkDoc_list, tuple(parts[:3]), additional_instructions
+      )
+      latency["llm_chunk_rel"] = f"{time.time() - t5:.2f}"
 
-    graphDb_data_Access = graphDBdataAccess(graph)
-    count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-    node_count = count_response[file_name].get("nodeCount", "0")
-    rel_count = count_response[file_name].get("relationshipCount", "0")
-    return node_count, rel_count, latency_processing_chunk
+  # 8. update overall node/relationship counts
+  graphDb = graphDBdataAccess(graph)
+  counts = graphDb.update_node_relationship_count(file_name)
+  node_count = counts[file_name].get("nodeCount", 0)
+  rel_count = counts[file_name].get("relationshipCount", 0)
+
+  return node_count, rel_count, latency
 
 
 def get_chunkId_chunkDoc_list(

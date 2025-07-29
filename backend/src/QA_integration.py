@@ -21,6 +21,7 @@ from langchain_text_splitters import TokenTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.chat_message_histories import ChatMessageHistory 
 from langchain_core.callbacks import StdOutCallbackHandler, BaseCallbackHandler
+from langchain.docstore.document import Document
 
 # LangChain chat models
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
@@ -185,7 +186,7 @@ def format_documents(documents, model,chat_mode_settings):
             prompt_token_cutoff = value
             break
 
-    sorted_documents = sorted(documents, key=lambda doc: doc.state.get("query_similarity_score", 0), reverse=True)
+    sorted_documents = sorted(documents, key=lambda doc: doc.metadata.get("query_similarity_score", 0), reverse=True)
     sorted_documents = sorted_documents[:prompt_token_cutoff]
 
     formatted_docs = list()
@@ -436,10 +437,36 @@ def process_chat_response(messages, history, question, model, graph, document_na
     try:
         llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         
-        docs,transformed_question = retrieve_documents(doc_retriever, messages)  
-
+        docs, transformed_question = retrieve_documents(doc_retriever, messages)
         if docs:
-            content, result, total_tokens,formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
+            # Expand with SIMILAR-related chunks for top chunk
+            try:
+                top_meta = docs[0].metadata.get('chunkdetails', [])
+                if top_meta:
+                    top_id = top_meta[0]['id']
+                    # fetch SIMILAR neighbors
+                    sim_rows = graph.query(
+                        """
+                        MATCH (c:Chunk {id:$id})-[r:SIMILAR]-(n:Chunk)
+                        RETURN n.text AS text, n.id AS id, r.score AS score
+                        ORDER BY r.score DESC LIMIT $limit
+                        """,
+                        {'id': top_id, 'limit': chat_mode_settings.get('top_k', 5)}
+                    )
+                    for row in sim_rows:
+                        docs.append(Document(
+                            page_content=row['text'],
+                            metadata={
+                                'source': row['text'],
+                                'chunkdetails': [{'id': row['id'], 'score': row['score']}]
+                            }
+                        ))
+            except Exception:
+                pass
+
+            content, result, total_tokens, formatted_docs = process_documents(
+                docs, question, messages, llm, model, chat_mode_settings
+            )
         else:
             content = "I couldn't find any relevant documents to answer your question."
             result = {"sources": list(), "nodedetails": list(), "entities": list()}

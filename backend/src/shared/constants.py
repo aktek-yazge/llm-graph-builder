@@ -18,7 +18,7 @@ GRAPH_QUERY = """
  CALL {
    WITH d
    OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
-   RETURN c, chunks LIMIT {graph_chunk_limit}
+   RETURN c, chunks LIMIT $graph_chunk_limit
  }
 
  WITH collect(distinct docs) AS docs,
@@ -31,11 +31,11 @@ GRAPH_QUERY = """
         [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other)
          WHERE other IN selectedChunks | p]] AS chunkRels
 
- // Dynamically expand context by including neighbor chunks across the document up to GRAPH_CHUNK_LIMIT depth
+ // Dynamically expand context by including neighbor chunks up to limit
  CALL {
    WITH selectedChunks
-   // Traverse NEXT_CHUNK relationships dynamically based on GRAPH_CHUNK_LIMIT
-   MATCH (c:Chunk)-[:NEXT_CHUNK*0..{graph_chunk_limit}]-(n:Chunk)
+   // Traverse NEXT_CHUNK relationships dynamically based on graph parameter
+   MATCH (c:Chunk)-[:NEXT_CHUNK*0..$graph_chunk_limit]-(n:Chunk)
    WHERE c IN selectedChunks
    RETURN collect(DISTINCT n) AS expandedChunks
  }
@@ -51,43 +51,43 @@ GRAPH_QUERY = """
      (e2)<-[:HAS_ENTITY]-(other) WHERE other IN chunks
    }
    RETURN entities, entityRels, collect(DISTINCT e) AS entity
- }}
+}
 
 WITH docs, chunks, chunkRels, 
      collect(entities) AS entities, 
      collect(entityRels) AS entityRels, 
      entity
 
-WITH *
-
-CALL {{
+ // Community contexts
+ CALL {
   WITH entity
-  UNWIND entity AS n
-  OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
-  OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__) 
+   UNWIND entity AS n
+   OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
+   OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__)
   RETURN collect(community) AS communities, 
          collect(parentcommunity) AS parentCommunities
-}}
+}
 
-WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
+ WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
 
-// Distinct nodes and relationships
-CALL {{
+ // Distinct nodes
+ CALL {
   WITH paths 
-  UNWIND paths AS path 
-  UNWIND nodes(path) AS node 
+   UNWIND paths AS path 
+   UNWIND nodes(path) AS node 
   WITH distinct node 
-  RETURN collect(node /* {{.*, labels:labels(node), elementId:elementId(node), embedding:null, text:null}} */) AS nodes 
-}}
+  RETURN collect(node) AS nodes 
+}
 
-CALL {{
+ // Distinct rels
+ CALL {
   WITH paths 
-  UNWIND paths AS path 
-  UNWIND relationships(path) AS rel 
+   UNWIND paths AS path 
+   UNWIND relationships(path) AS rel 
   RETURN collect(distinct rel) AS rels 
-}}  
+}
 
-RETURN nodes, rels
+ RETURN nodes, rels
 
 """
 
@@ -286,7 +286,7 @@ Siz yapay zeka destekli bir soru-cevap ajanısınız. Göreviniz, verilen bağla
 10. **Bağlam Mevcudiyeti**: Bağlam boşsa, yalnızca içsel bilgilere dayalı yanıt vermeyin. Bunun yerine, bilgi eksikliğine uygun bir şekilde yanıt verin.
 
 
-**ÖNEMLİ** : KENDİ BİLGİ TABANINIZDAN CEVAP VERMEYİN, AŞAĞIDAKİ BAĞLAMI KULLANIN
+**ÖNEMLİ** : KENDİ BİLGİ TABANIZDAN CEVAP VERMEYİN, AŞAĞIDAKİ BAĞLAMI KULLANIN
 
 ### Bağlam:
 <context>
