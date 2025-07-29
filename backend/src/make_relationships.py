@@ -8,6 +8,9 @@ import os
 import hashlib
 import time
 from langchain_neo4j import Neo4jVector
+import json
+from src.shared.constants import CHUNK_CONTINUATION_PROMPT
+from src.llm import get_llm
 
 logging.basicConfig(format='%(asctime)s - %(message)s',level='INFO')
 
@@ -177,3 +180,50 @@ def create_chunk_vector_index(graph):
             logging.info("Vector index already exists, skipping creation.")
         else:
             raise
+
+def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_threshold: float = None):
+    """
+    Create cross-chunk relationships based on vector similarity using Neo4j vector index.
+    """
+    # fallback to environment threshold if not provided
+    if similarity_threshold is None:
+        similarity_threshold = float(os.getenv('KNN_MIN_SCORE', '0.7'))
+    query = """
+    MATCH (c:Chunk {fileName: $fileName})
+    CALL db.index.vector.queryNodes('vector', 5, c.embedding) YIELD node AS other, score
+    WHERE other <> c AND score >= $threshold
+    MERGE (c)-[r:SIMILAR]->(other)
+    SET r.score = score
+    """
+    execute_graph_query(graph, query, params={"fileName": file_name, "threshold": similarity_threshold})
+
+async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, additional_instructions=None):
+    """
+    Use LLM to detect continuation between consecutive chunks and create CONTINUES relationships.
+    """
+    llm, _ = get_llm(model)
+    for i in range(len(chunk_list) - 1):
+        src_id = chunk_list[i]['chunk_id']
+        tgt_id = chunk_list[i+1]['chunk_id']
+        first_text = chunk_list[i]['chunk_doc'].page_content
+        second_text = chunk_list[i+1]['chunk_doc'].page_content
+        prompt = CHUNK_CONTINUATION_PROMPT.format(first_text=first_text, second_text=second_text)
+        # call LLM
+        response = await llm.apredict_messages([{"role": "system", "content": prompt}]) if hasattr(llm, 'apredict_messages') else llm([{"role": "system", "content": prompt}])
+        # parse JSON
+        try:
+            resp_json = json.loads(response.content if hasattr(response, 'content') else response)
+            relations = resp_json.get('relations', [])
+        except Exception:
+            continue
+        # write relations in Neo4j
+        for rel in relations:
+            # expect format "<src_id>-CONTINUES-><tgt_id>"
+            parts = rel.split('-CONTINUES->')
+            if len(parts) == 2:
+                s, t = parts
+                query = (
+                    "MATCH (a:Chunk {id:$src}), (b:Chunk {id:$tgt})"
+                    " MERGE (a)-[:CONTINUES]->(b)"
+                )
+                execute_graph_query(graph, query, params={"src": s, "tgt": t})

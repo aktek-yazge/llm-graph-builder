@@ -9,39 +9,49 @@ GRAPH_CHUNK_LIMIT = 50
 
 #query 
 GRAPH_QUERY = """
-MATCH docs = (d:Document) 
-WHERE d.fileName IN $document_names
-WITH docs, d 
-ORDER BY d.createdAt DESC
+ MATCH docs = (d:Document)
+ WHERE d.fileName IN $document_names
+ WITH docs, d
+ ORDER BY d.createdAt DESC
 
-// Fetch chunks for documents, currently with limit
-CALL {{
-  WITH d
-  OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
-  RETURN c, chunks LIMIT {graph_chunk_limit}
-}}
+ // Fetch chunks for documents, currently with limit
+ CALL {
+   WITH d
+   OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+   RETURN c, chunks LIMIT {graph_chunk_limit}
+ }
 
-WITH collect(distinct docs) AS docs, 
-     collect(distinct chunks) AS chunks, 
-     collect(distinct c) AS selectedChunks
+ WITH collect(distinct docs) AS docs,
+      collect(distinct chunks) AS chunks,
+      collect(distinct c) AS selectedChunks
 
-// Select relationships between selected chunks
-WITH *, 
-     [c IN selectedChunks | 
-       [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other) 
-       WHERE other IN selectedChunks | p]] AS chunkRels
+ // Select relationships between selected chunks
+ WITH docs, chunks, selectedChunks,
+      [c IN selectedChunks |
+        [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other)
+         WHERE other IN selectedChunks | p]] AS chunkRels
 
-// Fetch entities and relationships between entities
-CALL {{
-  WITH selectedChunks
-  UNWIND selectedChunks AS c
-  OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
-  OPTIONAL MATCH entityRels = (e)--(e2:!Chunk) 
-  WHERE exists {{
-    (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
-  }}
-  RETURN entities, entityRels, collect(DISTINCT e) AS entity
-}}
+ // Dynamically expand context by including neighbor chunks across the document up to GRAPH_CHUNK_LIMIT depth
+ CALL {
+   WITH selectedChunks
+   // Traverse NEXT_CHUNK relationships dynamically based on GRAPH_CHUNK_LIMIT
+   MATCH (c:Chunk)-[:NEXT_CHUNK*0..{graph_chunk_limit}]-(n:Chunk)
+   WHERE c IN selectedChunks
+   RETURN collect(DISTINCT n) AS expandedChunks
+ }
+ WITH docs, chunks, selectedChunks + expandedChunks AS chunks, chunkRels
+
+ // Fetch entities and relationships between entities
+ CALL {
+   WITH chunks
+   UNWIND chunks AS c
+   OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
+   OPTIONAL MATCH entityRels = (e)--(e2:!Chunk)
+   WHERE exists {
+     (e2)<-[:HAS_ENTITY]-(other) WHERE other IN chunks
+   }
+   RETURN entities, entityRels, collect(DISTINCT e) AS entity
+ }}
 
 WITH docs, chunks, chunkRels, 
      collect(entities) AS entities, 
@@ -911,3 +921,20 @@ RETURN
       end_node_element_id: elementId(endNode(r))
   }] AS relationships;
 """
+
+# Prompt for LLM-based inter-page / chunk continuation relationships
+CHUNK_CONTINUATION_PROMPT = '''
+You are a document understanding assistant. You receive two text segments from consecutive pages (chunks) of the same document:
+
+First segment:
+{first_text}
+
+Second segment:
+{second_text}
+
+Determine if the second segment logically continues or references content from the first segment. If it does, return a JSON object with a key "relations" containing a list of relationship triplets in the following format:
+["<source_chunk_id>-CONTINUES-><target_chunk_id>"]
+Use only the literal chunk IDs and the relationship type 'CONTINUES'.
+If no continuation exists, return:
+{"relations": []}
+'''
