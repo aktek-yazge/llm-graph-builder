@@ -399,7 +399,9 @@ def create_retriever(neo_db, document_names, chat_mode_settings,search_k, score_
 
 def get_neo4j_retriever(graph, document_names,chat_mode_settings, score_threshold=CHAT_SEARCH_KWARG_SCORE_THRESHOLD):
     try:
-
+        # Ensure retrieval_query is provided to avoid null query errors in Neo4jVector
+        if not chat_mode_settings.get("retrieval_query"):
+            raise ValueError(f"Missing 'retrieval_query' for chat mode '{chat_mode_settings.get('mode')}'")
         neo_db = initialize_neo4j_vector(graph, chat_mode_settings)
         # document_names= list(map(str.strip, json.loads(document_names)))
         search_k = chat_mode_settings["top_k"]
