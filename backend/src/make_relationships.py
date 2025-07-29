@@ -190,6 +190,7 @@ def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_t
         similarity_threshold = float(os.getenv('KNN_MIN_SCORE', '0.7'))
     query = """
     MATCH (c:Chunk {fileName: $fileName})
+    WHERE c.embedding IS NOT NULL
     CALL db.index.vector.queryNodes('vector', 5, c.embedding) YIELD node AS other, score
     WHERE other <> c AND score >= $threshold
     MERGE (c)-[r:SIMILAR]->(other)
