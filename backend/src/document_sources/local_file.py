@@ -304,7 +304,7 @@ def get_documents_from_file_by_path(file_path, file_name):
                 and len(loaded_docs) == 1
                 and "[PAGE BREAK]" in txt
             ):
-                page_texts = loaded_docs[0].page_content.split("[PAGE BREAK]")
+                page_texts = txt.split("[PAGE BREAK]")
                 # Metadata'yı koru
                 metadata = loaded_docs[0].metadata
 
