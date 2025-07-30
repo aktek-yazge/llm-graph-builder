@@ -252,13 +252,25 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
     # File type from metadata
     doc_type = doc_data.get("fileType", "unknown")
     
-    # Count pages by counting chunks
+    # Get actual page count from chunks' page_number metadata
     page_count_query = """
     MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-    RETURN count(c) as pageCount
+    WHERE c.page_number IS NOT NULL
+    RETURN max(c.page_number) as maxPageNumber, count(DISTINCT c.page_number) as distinctPages, count(c) as totalChunks
     """
     page_count_result = execute_graph_query(graph, page_count_query, params={"fileName": file_name})
-    page_count = str(page_count_result[0]["pageCount"]) if page_count_result else "0"
+    
+    if page_count_result and page_count_result[0]:
+        result_data = page_count_result[0]
+        # Önce maksimum sayfa numarasını kullan, yoksa farklı sayfa sayısını, son çare chunk sayısı
+        if result_data["maxPageNumber"] is not None:
+            page_count = str(result_data["maxPageNumber"])
+        elif result_data["distinctPages"] is not None and result_data["distinctPages"] > 0:
+            page_count = str(result_data["distinctPages"])
+        else:
+            page_count = str(result_data["totalChunks"])
+    else:
+        page_count = "0"
     
     # Create entity nodes and relationships to document
     entities = []
