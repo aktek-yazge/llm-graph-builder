@@ -298,6 +298,14 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
         """
         execute_graph_query(graph, entity_query, params={"fileName": file_name, "entities": entities})
         
+        # Document metadata entities'leri tüm chunk'lara da bağla
+        chunk_entity_query = """
+        MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
+        MATCH (d)-[:HAS_METADATA]->(meta:__Entity__)
+        MERGE (c)-[:HAS_ENTITY]->(meta)
+        """
+        execute_graph_query(graph, chunk_entity_query, params={"fileName": file_name})
+        
         # Create embeddings for the new entity nodes
         for entity in entities:
             embedding = EMBEDDING_FUNCTION.embed_query(entity["id"])

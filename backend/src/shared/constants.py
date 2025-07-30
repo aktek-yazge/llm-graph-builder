@@ -9,85 +9,75 @@ GRAPH_CHUNK_LIMIT = 50
 
 #query 
 GRAPH_QUERY = """
- MATCH docs = (d:Document)
- WHERE d.fileName IN $document_names
- WITH docs, d
- ORDER BY d.createdAt DESC
+MATCH docs = (d:Document) 
+WHERE d.fileName IN $document_names
+WITH docs, d 
+ORDER BY d.createdAt DESC
 
- // Fetch chunks for documents, currently with limit
- CALL {
-   WITH d
-   OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
-   RETURN c, chunks LIMIT $graph_chunk_limit
- }
+// Fetch chunks for documents, currently with limit
+CALL {{
+  WITH d
+  OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+  RETURN c, chunks LIMIT {graph_chunk_limit}
+}}
 
- WITH collect(distinct docs) AS docs,
-      collect(distinct chunks) AS chunks,
-      collect(distinct c) AS selectedChunks
+WITH collect(distinct docs) AS docs, 
+     collect(distinct chunks) AS chunks, 
+     collect(distinct c) AS selectedChunks
 
- // Select relationships between selected chunks
- WITH docs, chunks, selectedChunks,
-      [c IN selectedChunks |
-        [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other)
-         WHERE other IN selectedChunks | p]] AS chunkRels
+// Select relationships between selected chunks
+WITH *, 
+     [c IN selectedChunks | 
+       [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other) 
+       WHERE other IN selectedChunks | p]] AS chunkRels
 
- // Dynamically expand context by including neighbor chunks up to limit
- CALL {
-   WITH selectedChunks
-   // Traverse NEXT_CHUNK relationships dynamically based on graph parameter
-   MATCH (c:Chunk)-[:NEXT_CHUNK*0..$graph_chunk_limit]-(n:Chunk)
-   WHERE c IN selectedChunks
-   RETURN collect(DISTINCT n) AS expandedChunks
- }
- WITH docs, chunks, selectedChunks + expandedChunks AS chunks, chunkRels
-
- // Fetch entities and relationships between entities
- CALL {
-   WITH chunks
-   UNWIND chunks AS c
-   OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
-   OPTIONAL MATCH entityRels = (e)--(e2:!Chunk)
-   WHERE exists {
-     (e2)<-[:HAS_ENTITY]-(other) WHERE other IN chunks
-   }
-   RETURN entities, entityRels, collect(DISTINCT e) AS entity
-}
+// Fetch entities and relationships between entities
+CALL {{
+  WITH selectedChunks
+  UNWIND selectedChunks AS c
+  OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
+  OPTIONAL MATCH entityRels = (e)--(e2:!Chunk) 
+  WHERE exists {{
+    (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
+  }}
+  RETURN entities, entityRels, collect(DISTINCT e) AS entity
+}}
 
 WITH docs, chunks, chunkRels, 
      collect(entities) AS entities, 
      collect(entityRels) AS entityRels, 
      entity
 
- // Community contexts
- CALL {
+WITH *
+
+CALL {{
   WITH entity
-   UNWIND entity AS n
-   OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
-   OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__)
+  UNWIND entity AS n
+  OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
+  OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__) 
   RETURN collect(community) AS communities, 
          collect(parentcommunity) AS parentCommunities
-}
+}}
 
- WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
+WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
 
- // Distinct nodes
- CALL {
+// Distinct nodes and relationships
+CALL {{
   WITH paths 
-   UNWIND paths AS path 
-   UNWIND nodes(path) AS node 
+  UNWIND paths AS path 
+  UNWIND nodes(path) AS node 
   WITH distinct node 
   RETURN collect(node) AS nodes 
-}
+}}
 
- // Distinct rels
- CALL {
+CALL {{
   WITH paths 
-   UNWIND paths AS path 
-   UNWIND relationships(path) AS rel 
+  UNWIND paths AS path 
+  UNWIND relationships(path) AS rel 
   RETURN collect(distinct rel) AS rels 
-}
+}}  
 
- RETURN nodes, rels
+RETURN nodes, rels
 
 """
 
@@ -928,7 +918,16 @@ Use these rules to group and name categories accurately without introducing erro
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities that are relevant to the subject and coverage of the insurance policy. Do not extract dates, numbers, revenues, or other non-entity information as separate nodes. Instead, treat such data as properties associated with the relevant entities."""
+ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities that are relevant to the subject and coverage of the insurance policy. 
+
+Do not extract numbers, revenues, or other non-entity information as separate nodes. Instead, treat such data as properties associated with the relevant entities.
+
+However, if the policy contains creation dates or start dates, you must extract two additional entities:
+1. **Year** – representing only the year part of the date.
+2. **Date** – representing the full date.
+
+These Year and Date entities should be connected to the **Document node** and its **Chunk nodes** to capture temporal information.
+"""
 
 
 SCHEMA_VISUALIZATION_QUERY = """
