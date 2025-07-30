@@ -324,12 +324,24 @@ WITH d,
      collect(distinct {chunk: chunk, score: score}) AS chunks, 
      avg(score) AS avg_score
 
+// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+OPTIONAL MATCH (d)-[:HAS_METADATA]->(meta:__Entity__)
+WITH d, avg_score, chunks,
+     collect(DISTINCT meta.id) AS documentMetadata
+
 WITH d, avg_score, 
      [c IN chunks | c.chunk.text] AS texts, 
-     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails
+     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
+     documentMetadata
 
+// Document metadata'yı metine dahil et
 WITH d, avg_score, chunkdetails, 
-     apoc.text.join(texts, "\n----\n") AS text
+     apoc.text.join(texts, "\n----\n") + 
+     CASE WHEN size(documentMetadata) > 0 
+          THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+          ELSE "" 
+     END AS text,
+     documentMetadata
 
 RETURN text, 
        avg_score AS score, 
@@ -338,7 +350,8 @@ RETURN text,
                              ELSE d.url 
                        END, 
                        d.fileName), 
-        chunkdetails: chunkdetails} AS metadata
+        chunkdetails: chunkdetails,
+        documentMetadata: documentMetadata} AS metadata
 """ 
 
 ### Vector graph search 
@@ -462,14 +475,20 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
        } AS nodes,
        entities
 }
+
+// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
+WITH d, avg_score, chunks, nodes, rels, entities,
+     collect(DISTINCT docMeta) AS documentMetadataNodes
+
 // Generate metadata and text components for chunks, nodes, and relationships
 WITH d, avg_score,
     [c IN chunks | c.chunk.text] AS texts,
     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
-    [n IN nodes | elementId(n)] AS entityIds,
+    [n IN nodes + documentMetadataNodes | elementId(n)] AS entityIds,
     [r IN rels | elementId(r)] AS relIds,
     apoc.coll.sort([
-        n IN nodes |
+        n IN nodes + documentMetadataNodes |
         coalesce(apoc.coll.removeAll(labels(n), ['__Entity__'])[0], "") + ":" +
         coalesce(
             n.id,
@@ -493,12 +512,18 @@ WITH d, avg_score,
             ""
         )
     ]) AS relTexts,
-    entities
+    entities,
+    [docMeta IN documentMetadataNodes | docMeta.id] AS documentMetadata
+
 // Combine texts into response text
-WITH d, avg_score, chunkdetails, entityIds, relIds,
+WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata,
     "Text Content:\n" + apoc.text.join(texts, "\n----\n") +
     "\n----\nEntities:\n" + apoc.text.join(nodeTexts, "\n") +
-    "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") AS text,
+    "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") +
+    CASE WHEN size(documentMetadata) > 0 
+         THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+         ELSE "" 
+    END AS text,
     entities
 RETURN
    text,
@@ -510,7 +535,8 @@ RETURN
        entities : {
            entityids: entityIds,
            relationshipids: relIds
-       }
+       },
+       documentMetadata: documentMetadata
    } AS metadata
 """
 
