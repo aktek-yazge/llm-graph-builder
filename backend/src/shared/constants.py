@@ -918,15 +918,63 @@ Use these rules to group and name categories accurately without introducing erro
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities that are relevant to the subject and coverage of the insurance policy. 
+ADDITIONAL_INSTRUCTIONS = """You are extracting entities from insurance policy documents. Focus ONLY on the most critical identifying information from policy forms.
 
-Do not extract numbers, revenues, or other non-entity information as separate nodes. Instead, treat such data as properties associated with the relevant entities.
+**ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
+- NEVER extract "Document" as any entity type or node
+- NEVER create any Document nodes - they are pre-created by the system
+- NEVER extract document titles, form names, or report names as entities
+- DO NOT extract any monetary amounts, prices, premiums, or financial values
+- DO NOT extract area measurements (m², square meters, room counts)
+- DO NOT extract volume measurements or capacity information
+- DO NOT extract percentages, rates, or numerical coefficients
+- DO NOT extract coverage limits or deductible amounts
+- DO NOT extract building specifications, construction details, or material information
+- DO NOT extract general insurance terms, legal clauses, or conditions
+- DO NOT extract standalone numbers without clear identification purpose
+- DO NOT extract document names, form titles, or report names
 
-However, if the policy contains creation dates or start dates, you must extract two additional entities:
-1. **Year** – representing only the year part of the date.
-2. **Date** – representing the full date.
+**Extract ONLY these essential form identifiers:**
 
-These Year and Date entities should be connected to the **Document node** and its **Chunk nodes** to capture temporal information.
+**1. Policy Information:**
+- Policy number (exact policy number only)
+- Policy type (specific insurance type: Konut, Trafik, DASK, Kasko, etc.)
+- Insurance company name
+
+**2. Personal Information:**
+- Policyholder full name (exact name as written)
+- Identity number (TC Kimlik No, Passport number only)
+- Main address (street address only, no area measurements)
+
+**3. Asset Identification (NO measurements):**
+- Property address (street address only)
+- Vehicle plate number (for auto insurance)
+- Building name/apartment number (identifier only)
+
+**4. Document-Level Temporal Information:**
+- Year (ONLY from document creation/issuance date - connect to existing Document node)
+- Policy start date (connect to existing Document node)
+- Policy end date (connect to existing Document node)
+- Document issue date (connect to existing Document node)
+
+**IMPORTANT: When extracting temporal entities, connect them to the EXISTING Document node that this text belongs to. DO NOT create new Document nodes.**
+
+**EXTRACT ONLY IF IT HELPS IDENTIFY:**
+- Who is insured (name, ID)
+- What policy it is (number, type)
+- Which company issued it
+- Where the insured asset is located (address only)
+
+**CRITICAL SYSTEM RULES:**
+- Document nodes already exist in the system - NEVER create new Document nodes
+- DO NOT extract "Document" as an entity type under any circumstances
+- Extract Year entity ONLY from document creation/issuance dates found in the text
+- Connect temporal entities (Year, dates) DIRECTLY to the EXISTING Document node that already contains this text
+- The Document node is pre-created by the system - your job is to connect entities TO it, not create it
+- ALL entities you extract must connect to existing nodes in the system
+- When you see document dates, extract Year/Date entities and connect them to the existing Document
+- NEVER create relationships between temporal entities and new Document nodes
+- Use the existing Document node that this text chunk belongs to
 """
 
 
