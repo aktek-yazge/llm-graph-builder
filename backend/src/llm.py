@@ -13,10 +13,11 @@ from langchain_aws import ChatBedrock
 from langchain_community.chat_models import ChatOllama
 import boto3
 import google.auth
-from src.shared.constants import ADDITIONAL_INSTRUCTIONS
+from src.shared.constants import ADDITIONAL_INSTRUCTIONS, POST_PROCESSING_PROMPT
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import re
 from typing import List
+import json
 
 def get_llm(model: str):
     """Retrieve the specified language model based on the model name."""
@@ -210,7 +211,7 @@ async def get_graph_document_list(
         graph_document_list = await llm_transformer.aconvert_to_graph_documents(combined_chunk_document_list)
     return graph_document_list
 
-async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, additional_instructions=None):
+async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
    try:
        llm, model_name = get_llm(model)
        logging.info(f"Using model: {model_name}")
@@ -238,14 +239,24 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        else:
            logging.info("No allowed relationships provided")
 
-       graph_document_list = await get_graph_document_list(
+       # LLM'den ham graph document'ları al
+       raw_graph_document_list = await get_graph_document_list(
            llm,
            combined_chunk_document_list,
            allowed_nodes,
            allowed_relationships,
            additional_instructions
        )
-       logging.info(f"Generated {len(graph_document_list)} graph documents")
+       logging.info(f"Generated {len(raw_graph_document_list)} raw graph documents")
+       
+       # Kod tabanlı post-processing uygula (sadece Year node'ları için)
+       graph_document_list = apply_code_post_processing(
+           raw_graph_document_list, 
+           file_name if file_name else "unknown_file",
+           graph
+       )
+       logging.info(f"Code post-processing completed: {len(graph_document_list)} cleaned documents")
+       
        return graph_document_list
    except Exception as e:
        logging.error(f"Error in get_graph_from_llm: {e}", exc_info=True)
@@ -272,3 +283,433 @@ def sanitize_additional_instruction(instruction: str) -> str:
    # Step 4: Normalize spaces
    instruction = re.sub(r'\s+', ' ', instruction).strip()
    return instruction
+
+
+def extract_json_from_response(response_text):
+    """
+    LLM response'undan JSON kısmını çıkarır.
+    LLM bazen JSON'dan önce/sonra açıklama ekler, bunları temizler.
+    """
+    try:
+        # Response'u temizle
+        response_text = response_text.strip()
+        
+        logging.info(f"JSON extraction başlıyor. Response uzunluğu: {len(response_text)}")
+        logging.info(f"Response başlangıcı: {response_text[:200]}...")
+        
+        # Eğer direkt JSON ise (hiç açıklama yoksa)
+        if response_text.startswith('{') and response_text.endswith('}'):
+            json.loads(response_text)  # Validate
+            logging.info("✅ Response zaten temiz JSON formatında")
+            return response_text
+        
+        # JSON başlangıcını bul
+        json_start = -1
+        for i, char in enumerate(response_text):
+            if char == '{':
+                json_start = i
+                break
+        
+        if json_start == -1:
+            # Eğer { bulunamazsa, belki array formatında dönmüştür
+            json_start = response_text.find('[')
+            if json_start == -1:
+                logging.error("JSON başlangıcı bulunamadı")
+                raise ValueError("JSON başlangıcı bulunamadı")
+        
+        # JSON sonunu bul
+        brace_count = 0
+        json_end = -1
+        start_char = response_text[json_start]
+        end_char = '}' if start_char == '{' else ']'
+        
+        for i in range(json_start, len(response_text)):
+            char = response_text[i]
+            if char == start_char:
+                brace_count += 1
+            elif char == end_char:
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end == -1:
+            logging.error("JSON sonu bulunamadı")
+            raise ValueError("JSON sonu bulunamadı")
+        
+        # JSON kısmını çıkar
+        json_text = response_text[json_start:json_end]
+        
+        logging.info(f"Çıkarılan JSON uzunluğu: {len(json_text)}")
+        logging.info(f"Çıkarılan JSON başlangıcı: {json_text[:200]}...")
+        
+        # JSON'u validate et
+        parsed = json.loads(json_text)
+        logging.info("✅ JSON başarıyla parse edildi")
+        
+        return json_text
+        
+    except Exception as e:
+        logging.error(f"JSON extraction hatası: {e}")
+        logging.error(f"Response text (ilk 1000 karakter): {response_text[:1000]}...")
+        # Son çare olarak orijinal text'i döndür
+        return response_text
+
+
+def apply_code_post_processing(graph_documents, file_name, graph=None):
+    """
+    Kod tabanlı post-processing: Year node'larını Document node'una bağlar
+    
+    Args:
+        graph_documents: LLMGraphTransformer'dan gelen GraphDocument listesi 
+        file_name: İşlenen dosya adı
+        graph: Neo4j graph objesi (Document ID'sini almak için)
+        
+    Returns:
+        Düzeltilmiş GraphDocument listesi
+    """
+    try:
+        logging.info(f"Kod tabanlı post-processing başlıyor: {file_name}")
+        
+        if not graph_documents:
+            logging.warning("Boş graph_documents listesi")
+            return graph_documents
+        
+        # Document ID'yi graph'dan al veya file name'den oluştur
+        document_id = get_document_node_id_from_graph(graph, file_name)
+        if document_id == file_name:
+            # File name'den Document ID oluştur - Neo4j için güvenli format
+            document_id = file_name.replace(" ", "_").replace(".", "_").replace("/", "_").replace("\\", "_")
+        
+        logging.info(f"Document node ID: {document_id}")
+        
+        # Her GraphDocument için post-processing uygula
+        corrected_documents = []
+        
+        for doc in graph_documents:
+            # Orijinal entity ve relationship sayısını logla
+            original_entities_count = len(doc.nodes)
+            original_relationships_count = len(doc.relationships)
+            
+            logging.info(f"Orijinal GraphDocument: {original_entities_count} entity, {original_relationships_count} relationship")
+            
+            # Year node'larını bul ve Document'a bağla
+            corrected_nodes = []
+            corrected_relationships = []
+            year_nodes = []
+            
+            # Mevcut node'ları kopyala ve Year node'larını tanımla
+            for node in doc.nodes:
+                corrected_nodes.append(node)
+                if node.type.lower() == 'year':
+                    year_nodes.append(node)
+                    logging.info(f"Year node bulundu: {node.id}")
+            
+            # Mevcut relationship'leri kopyala
+            for rel in doc.relationships:
+                corrected_relationships.append(rel)
+            
+            # Year node'ları için Document node'una bağlantı ekle
+            if year_nodes:
+                from langchain_community.graphs.graph_document import Node, Relationship
+                
+                # Document node'u ekle (eğer yoksa)
+                document_node = Node(
+                    id=document_id,
+                    type="Document",
+                    properties={"fileName": file_name}
+                )
+                
+                # Document node'unun zaten var olup olmadığını kontrol et
+                doc_exists = any(node.id == document_id and node.type == "Document" for node in corrected_nodes)
+                if not doc_exists:
+                    corrected_nodes.append(document_node)
+                    logging.info(f"Document node eklendi: {document_id}")
+                
+                # Year node'larını Document'a bağla
+                for year_node in year_nodes:
+                    # OCCURS_IN relationship'i ekle
+                    occurs_in_rel = Relationship(
+                        source=year_node,
+                        target=document_node,
+                        type="OCCURS_IN",
+                        properties={}
+                    )
+                    corrected_relationships.append(occurs_in_rel)
+                    
+                    # HAS_YEAR relationship'i ekle (ters yön)
+                    has_year_rel = Relationship(
+                        source=document_node,
+                        target=year_node,
+                        type="HAS_YEAR",
+                        properties={}
+                    )
+                    corrected_relationships.append(has_year_rel)
+                    
+                    logging.info(f"Year node {year_node.id} Document {document_id}'ye bağlandı")
+            
+            # Düzeltilmiş GraphDocument oluştur
+            from langchain_experimental.graph_transformers.llm import GraphDocument
+            
+            corrected_doc = GraphDocument(
+                nodes=corrected_nodes,
+                relationships=corrected_relationships,
+                source=doc.source
+            )
+            
+            corrected_documents.append(corrected_doc)
+            
+            # Sonuç istatistiklerini logla
+            final_entities_count = len(corrected_nodes)
+            final_relationships_count = len(corrected_relationships)
+            
+            logging.info(f"Düzeltilmiş GraphDocument: {final_entities_count} entity (+{final_entities_count - original_entities_count}), {final_relationships_count} relationship (+{final_relationships_count - original_relationships_count})")
+            logging.info(f"Year node'ları için {len(year_nodes) * 2} relationship eklendi")
+        
+        logging.info(f"✅ Kod post-processing tamamlandı: {len(corrected_documents)} document işlendi")
+        return corrected_documents
+        
+    except Exception as e:
+        logging.error(f"❌ Kod post-processing hatası: {e}")
+        import traceback
+        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
+        # Hata durumunda orijinal document'ları döndür
+        return graph_documents
+
+
+def get_document_node_id_from_graph(graph, file_name):
+    """
+    Neo4j graph'dan Document node'unun ID'sini alır
+    """
+    logging.info(f"Document node aranıyor - fileName: {file_name}")
+    logging.info(f"Graph object: {graph is not None}")
+    
+    try:
+        if graph:
+            # Önce tüm Document node'larını listele
+            list_query = "MATCH (d:Document) RETURN d.fileName as fileName, d.id as id, elementId(d) as element_id LIMIT 10"
+            all_docs = graph.query(list_query)
+            logging.info(f"Graph'daki tüm Document node'ları: {all_docs}")
+            
+            query = """
+            MATCH (d:Document {fileName: $fileName})
+            RETURN d.id as id, elementId(d) as element_id, d.fileName as fileName
+            LIMIT 1
+            """
+            logging.info(f"Document sorgusu çalıştırılıyor: {query}")
+            logging.info(f"Sorgu parametreleri: fileName = '{file_name}'")
+            
+            result = graph.query(query, params={"fileName": file_name})
+            
+            logging.info(f"Sorgu sonucu: {result}")
+            logging.info(f"Sonuç uzunluğu: {len(result) if result else 0}")
+            
+            if result and len(result) > 0:
+                # Önce id property'sini kontrol et, yoksa element_id kullan
+                row = result[0]
+                doc_id = row.get('id') or row.get('element_id') or file_name
+                logging.info(f"✅ Graph'dan Document node ID bulundu!")
+                logging.info(f"Document row: {row}")
+                logging.info(f"Seçilen ID: {doc_id}")
+                return doc_id
+            else:
+                logging.warning(f"❌ Document node bulunamadı: fileName='{file_name}'")
+        else:
+            logging.warning("❌ Graph objesi None")
+    except Exception as e:
+        logging.error(f"❌ Graph'dan Document node ID alınamadı: {e}")
+        import traceback
+        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
+    
+    # Fallback: file name'i kullan
+    logging.info(f"🔄 Fallback: file name kullanılıyor: {file_name}")
+    return file_name
+
+
+async def apply_llm_post_processing(model, graph_documents, file_name, graph=None):
+    """
+    LLM tabanlı post-processing ile entity'leri düzeltir.
+    
+    Args:
+        model: LLM model string
+        graph_documents: LLMGraphTransformer'dan gelen GraphDocument listesi 
+        file_name: İşlenen dosya adı
+        
+    Returns:
+        Düzeltilmiş GraphDocument listesi
+    """
+    try:
+        logging.info(f"LLM post-processing başlıyor: {file_name}")
+        
+        # LLM modelini al
+        llm, _ = get_llm(model)
+        
+        # Her GraphDocument için post-processing uygula
+        corrected_documents = []
+        
+        for doc in graph_documents:
+            # Orijinal entity'leri say
+            original_entities_count = len(doc.nodes)
+            original_relationships_count = len(doc.relationships)
+            
+            logging.info(f"Orijinal GraphDocument: {original_entities_count} entity, {original_relationships_count} relationship")
+            
+            # Document ID'yi graph'dan al veya file name'den oluştur
+            document_node_id = get_document_node_id_from_graph(graph, file_name)
+            if document_node_id == file_name:
+                # File name'den Document ID oluştur - Neo4j için güvenli format
+                document_node_id = file_name.replace(" ", "_").replace(".", "_").replace("/", "_").replace("\\", "_")
+            
+            logging.info(f"Document node ID: {document_node_id}")
+            
+            # Mevcut entity'leri JSON formatına çevir
+            entities_data = []
+            relationships_data = []
+            
+            # Node'ları ekle
+            for node in doc.nodes:
+                entities_data.append({
+                    "id": node.id,
+                    "type": node.type,
+                    "properties": dict(node.properties) if node.properties else {}
+                })
+            
+            # Relationship'leri ekle  
+            for rel in doc.relationships:
+                relationships_data.append({
+                    "source": rel.source.id,
+                    "target": rel.target.id,
+                    "type": rel.type,
+                    "properties": dict(rel.properties) if rel.properties else {}
+                })
+            
+            # Orijinal entity'lerin detaylarını logla
+            logging.info(f"Orijinal entities: {[{'id': e['id'], 'type': e['type']} for e in entities_data[:5]]}")
+            logging.info(f"Orijinal relationships: {[{'source': r['source'], 'type': r['type'], 'target': r['target']} for r in relationships_data[:5]]}")
+            
+            # JSON formatında hazırla
+            entities_json = json.dumps({
+                "entities": entities_data,
+                "relationships": relationships_data,
+                "document_name": file_name
+            }, ensure_ascii=False, indent=2)
+            
+            # Post-processing prompt'u ile LLM'ye gönder
+            full_prompt = POST_PROCESSING_PROMPT.format(document_id=document_node_id) + "\n\n" + entities_json
+            
+            logging.info(f"LLM'ye gönderilen prompt uzunluğu: {len(full_prompt)} karakter")
+            logging.info(f"Document ID: {document_node_id}")
+            logging.info(f"=== LLM'YE GÖNDERİLEN TAM PROMPT ===")
+            logging.info(f"POST_PROCESSING_PROMPT:\n{POST_PROCESSING_PROMPT.format(document_id=document_node_id)}")
+            logging.info(f"=== DATA KISMI ===")
+            logging.info(f"Gönderilen JSON (ilk 500 karakter): {entities_json[:500]}...")
+            if len(entities_json) > 500:
+                logging.info(f"JSON'un sonu (son 200 karakter): ...{entities_json[-200:]}")
+            logging.info(f"=== PROMPT BİTTİ ===")
+            
+            # LLM'den düzeltilmiş entity'leri al
+            try:
+                response = await llm.ainvoke(full_prompt)
+                corrected_json = response.content
+                
+                logging.info(f"=== LLM TAM CEVABI ===")
+                logging.info(f"LLM Response uzunluğu: {len(corrected_json)} karakter")
+                logging.info(f"LLM Response:\n{corrected_json}")
+                logging.info(f"=== LLM CEVABI BİTTİ ===")
+                
+                # JSON'u temizle ve extract et
+                corrected_json = extract_json_from_response(corrected_json)
+                logging.info(f"Temizlenmiş JSON: {corrected_json[:300]}..." if len(corrected_json) > 300 else f"Temizlenmiş JSON: {corrected_json}")
+                
+                # JSON parse et
+                corrected_data = json.loads(corrected_json)
+                
+                logging.info(f"Post-processing başarılı: {len(corrected_data.get('entities', []))} entity, {len(corrected_data.get('relationships', []))} relationship")
+                
+                # Düzeltilmiş entity'lerin detaylarını logla
+                corrected_entities = corrected_data.get('entities', [])
+                corrected_relationships = corrected_data.get('relationships', [])
+                
+                logging.info(f"Düzeltilmiş entities: {[{'id': e['id'], 'type': e['type']} for e in corrected_entities[:5]]}")
+                logging.info(f"Düzeltilmiş relationships: {[{'source': r['source'], 'type': r['type'], 'target': r['target']} for r in corrected_relationships[:5]]}")
+                
+                # Değişiklikleri analiz et
+                original_entity_types = [e['type'] for e in entities_data]
+                corrected_entity_types = [e['type'] for e in corrected_entities]
+                
+                added_entities = len(corrected_entities) - len(entities_data)
+                removed_entities = len(entities_data) - len(corrected_entities)
+                
+                logging.info(f"Entity değişiklikleri: +{added_entities}, -{removed_entities}")
+                logging.info(f"Orijinal entity tipleri: {set(original_entity_types)}")
+                logging.info(f"Düzeltilmiş entity tipleri: {set(corrected_entity_types)}")
+                
+                # LLM'nin gerçekten düzeltme yapıp yapmadığını kontrol et
+                if corrected_entities != entities_data:
+                    logging.info("✅ LLM entity'lerde değişiklik yaptı!")
+                else:
+                    logging.info("❌ LLM entity'lerde herhangi bir değişiklik yapmadı")
+                
+                # Düzeltilmiş GraphDocument oluştur
+                from langchain_experimental.graph_transformers.llm import GraphDocument
+                from langchain_community.graphs.graph_document import Node, Relationship
+                
+                corrected_nodes = []
+                corrected_relationships = []
+                
+                # Düzeltilmiş node'ları ekle
+                for entity in corrected_data.get("entities", []):
+                    node = Node(
+                        id=entity["id"],
+                        type=entity["type"],
+                        properties=entity.get("properties", {})
+                    )
+                    corrected_nodes.append(node)
+                
+                # Düzeltilmiş relationship'leri ekle
+                for rel in corrected_data.get("relationships", []):
+                    # Source ve target node'ları bul
+                    source_node = next((n for n in corrected_nodes if n.id == rel["source"]), None)
+                    target_node = next((n for n in corrected_nodes if n.id == rel["target"]), None)
+                    
+                    if source_node and target_node:
+                        relationship = Relationship(
+                            source=source_node,
+                            target=target_node,
+                            type=rel["type"],
+                            properties=rel.get("properties", {})
+                        )
+                        corrected_relationships.append(relationship)
+                
+                # Eğer LLM hiçbir entity döndürmediyse orijinalini kullan
+                if not corrected_nodes and doc.nodes:
+                    logging.warning("LLM hiç entity döndürmedi, orijinal document kullanılıyor")
+                    corrected_documents.append(doc)
+                else:
+                    # Düzeltilmiş GraphDocument oluştur
+                    corrected_doc = GraphDocument(
+                        nodes=corrected_nodes,
+                        relationships=corrected_relationships,
+                        source=doc.source
+                    )
+                    corrected_documents.append(corrected_doc)
+                
+            except json.JSONDecodeError as e:
+                logging.error(f"❌ LLM post-processing JSON parse hatası: {e}")
+                logging.error(f"Problematic JSON (ilk 500 karakter): {corrected_json[:500]}...")
+                logging.error(f"Orijinal entity'ler korunuyor: {original_entities_count} entity, {original_relationships_count} relationship")
+                # Hata durumunda orijinal document'ı kullan
+                corrected_documents.append(doc)
+            except Exception as e:
+                logging.error(f"❌ LLM post-processing genel hatası: {e}")
+                logging.error(f"Response content (ilk 500 karakter): {response.content[:500] if 'response' in locals() else 'No response'}")
+                logging.error(f"Orijinal entity'ler korunuyor: {original_entities_count} entity, {original_relationships_count} relationship")
+                # Hata durumunda orijinal document'ı kullan  
+                corrected_documents.append(doc)
+        
+        logging.info(f"LLM post-processing tamamlandı: {file_name}")
+        return corrected_documents
+        
+    except Exception as e:
+        logging.error(f"LLM post-processing genel hatası: {e}")
+        return graph_documents  # Hata durumunda orijinal döndür

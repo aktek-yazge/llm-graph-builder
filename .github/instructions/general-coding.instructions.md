@@ -32,15 +32,11 @@ applyTo: '**'
 - Her modül ve ana fonksiyon için docstring bulunur.
 - API endpointleri ve ana işlevler için örnek input/output açıklanır.
 
-### 6. Test ve Doğrulama
-- Test dosyaları test_ prefix’i ile başlar (ör: test_integrationqa.py).
-- Testler, ana fonksiyonların ve iş akışlarının doğru çalıştığını doğrular.
-- Kod değişikliklerinden sonra testler çalıştırılır.
-
 ### 7. Bağımlılıklar ve Ortam
 - requirements.txt ve constraints.txt dosyaları ile bağımlılıklar yönetilir.
 - Ortam değişkenleri .env dosyası veya os.environ ile okunur.
 - Docker ve docker-compose ile container ortamı desteklenir.
+- Fonksiyon bağımlılıkları mutlaka import edilmelidir, global değişkenlerden kaçınılmalıdır.
 
 ### 8. Kodda Temizlik ve Düzen
 - Kullanılmayan importlar ve değişkenler silinir.
