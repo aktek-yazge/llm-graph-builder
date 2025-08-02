@@ -918,8 +918,7 @@ Use these rules to group and name categories accurately without introducing erro
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """You are extracting entities from insurance policy documents. Focus ONLY on the most critical identifying information from policy forms.
-
+ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
 - NEVER extract "Document" as any entity type or node
 - NEVER create any Document nodes - they are pre-created by the system
@@ -975,6 +974,7 @@ ADDITIONAL_INSTRUCTIONS = """You are extracting entities from insurance policy d
 - When you see document dates, extract Year/Date entities and connect them to the existing Document
 - NEVER create relationships between temporal entities and new Document nodes
 - Use the existing Document node that this text chunk belongs to
+
 """
 
 
@@ -1010,4 +1010,21 @@ Determine if the second segment logically continues or references content from t
 Use only the literal chunk IDs and the relationship type 'CONTINUES'.
 If no continuation exists, return:
 {"relations": []}
+'''
+
+POST_PROCESSING_PROMPT = '''
+
+
+KURALLAR:
+- Chunk'a bağlı Year entity'lerini Document nodeuna taşı
+
+DOCUMENT NODE ID: {document_id}
+
+SADECE JSON döndür:
+{{
+  "entities": [...],
+  "relationships": [...]
+}}
+
+Data:
 '''

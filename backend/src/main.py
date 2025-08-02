@@ -988,7 +988,9 @@ async def processing_chunks(
     allowedNodes,
     allowedRelationship,
     chunks_to_combine,
+    file_name,
     additional_instructions,
+    graph
   )
   latency["entity_extraction"] = f"{time.time() - t1:.2f}"
 
