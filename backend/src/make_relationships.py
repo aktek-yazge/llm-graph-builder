@@ -126,7 +126,12 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
     query_to_create_chunk_and_PART_OF_relation = """
         UNWIND $batch_data AS data
         MERGE (c:Chunk {id: data.id})
-        SET c.text = data.pg_content, c.position = data.position, c.length = data.length, c.fileName=data.f_name, c.content_offset=data.content_offset
+        SET c.text = data.pg_content, 
+            c.chunkId = data.id,
+            c.position = data.position, 
+            c.length = data.length, 
+            c.fileName = data.f_name, 
+            c.content_offset = data.content_offset
         WITH data, c
         SET c.page_number = CASE WHEN data.page_number IS NOT NULL THEN data.page_number END,
             c.start_time = CASE WHEN data.start_time IS NOT NULL THEN data.start_time END,
