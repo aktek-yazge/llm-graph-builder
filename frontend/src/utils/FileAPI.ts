@@ -37,7 +37,9 @@ export const extractAPI = async (
   gcs_project_id?: string,
   language?: string,
   access_token?: string,
-  additional_instructions?: string
+  additional_instructions?: string,
+  enable_post_processing?: boolean,
+  post_processing_rules?: string
 ): Promise<any> => {
   const urlExtract = `${url()}/extract`;
   const method: Method = 'post';
@@ -57,6 +59,8 @@ export const extractAPI = async (
       chunks_to_combine,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   } else if (source_type === 'Wikipedia') {
     additionalParams = {
@@ -72,6 +76,8 @@ export const extractAPI = async (
       language,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   } else if (source_type === 'gcs bucket') {
     additionalParams = {
@@ -90,6 +96,8 @@ export const extractAPI = async (
       access_token,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   } else if (source_type === 'youtube') {
     additionalParams = {
@@ -104,6 +112,8 @@ export const extractAPI = async (
       chunks_to_combine,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   } else if (source_type === 'web-url') {
     additionalParams = {
@@ -118,6 +128,8 @@ export const extractAPI = async (
       chunks_to_combine,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   } else {
     additionalParams = {
@@ -131,6 +143,8 @@ export const extractAPI = async (
       chunks_to_combine,
       retry_condition,
       additional_instructions,
+      enable_post_processing,
+      post_processing_rules,
     };
   }
   const response = await apiCall(urlExtract, method, additionalParams);

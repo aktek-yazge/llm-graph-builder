@@ -86,6 +86,8 @@ export type ExtractParams = Pick<CustomFile, 'wikiQuery' | 'model' | 'sourceUrl'
   gcs_project_id?: string;
   retry_condition: string;
   additional_instructions?: string;
+  enable_post_processing?: boolean;
+  post_processing_rules?: string;
 } & { [key: string]: any };
 
 export type UploadParams = {

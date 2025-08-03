@@ -346,38 +346,59 @@ def extract_json_from_response(response_text):
         return response_text
 
 
-def apply_dynamic_entity_post_processing(graph, rules_list):
+def apply_dynamic_entity_post_processing(graph, rules_list, target_file_names=None):
     """
     Dinamik entity relationship post-processing fonksiyonu.
     Kullanıcının belirlediği kurallara göre entity'leri target node'lara bağlar.
-    Post-processing işlemleri gibi tüm graf üzerinde çalışır.
     
     Args:
         graph: Neo4j graph objesi
         rules_list: Post-processing kurallarının listesi
+        target_file_names: İşlenecek dosya isimlerinin listesi (None ise tüm dosyalar)
         
     Returns:
         İşlem sonucu raporu
     """
     try:
-        logging.info(f"Dinamik entity post-processing başlıyor - Global işlem")
+        logging.info(f"Dinamik entity post-processing başlıyor")
+        if target_file_names:
+            logging.info(f"Hedef dosyalar: {target_file_names}")
+        else:
+            logging.info("Tüm dosyalar üzerinde global işlem")
         
-        # Tüm Document node'larını al (status'a bakmadan)
+        # Document node'larını al - hedef dosyalara göre filtrele
         try:
-            all_docs_query = """
-            MATCH (d:Document) 
-            RETURN d.fileName as fileName, 
-                   d.id as documentId, 
-                   elementId(d) as elementId,
-                   d.fileSource as fileSource,
-                   d.status as status,
-                   d.url as url,
-                   properties(d) as allProperties
-            ORDER BY d.fileName
-            """
-            processing_docs_result = graph.query(all_docs_query)
-            
-            logging.info(f"Graph'daki toplam Document sayısı: {len(processing_docs_result)}")
+            if target_file_names:
+                # Sadece belirtilen dosyalar için Document node'ları al
+                all_docs_query = """
+                MATCH (d:Document) 
+                WHERE d.fileName IN $target_files
+                RETURN d.fileName as fileName, 
+                       d.id as documentId, 
+                       elementId(d) as elementId,
+                       d.fileSource as fileSource,
+                       d.status as status,
+                       d.url as url,
+                       properties(d) as allProperties
+                ORDER BY d.fileName
+                """
+                processing_docs_result = graph.query(all_docs_query, params={"target_files": target_file_names})
+                logging.info(f"Hedef dosyalar için Document sayısı: {len(processing_docs_result)}")
+            else:
+                # Tüm Document node'larını al (eski davranış)
+                all_docs_query = """
+                MATCH (d:Document) 
+                RETURN d.fileName as fileName, 
+                       d.id as documentId, 
+                       elementId(d) as elementId,
+                       d.fileSource as fileSource,
+                       d.status as status,
+                       d.url as url,
+                       properties(d) as allProperties
+                ORDER BY d.fileName
+                """
+                processing_docs_result = graph.query(all_docs_query)
+                logging.info(f"Graph'daki toplam Document sayısı: {len(processing_docs_result)}")
             
             # Status dağılımını göster
             status_distribution = {}
