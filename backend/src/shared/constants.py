@@ -933,6 +933,17 @@ Use these rules to group and name categories accurately without introducing erro
 # Instead, treat these as properties associated with the relevant entities."""
 
 ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
+
+**YEAR EXTRACTION - CRITICAL REQUIREMENT:**
+You MUST extract Year entities from all dates in the document. This is mandatory for temporal analysis.
+- Search for ALL date patterns: DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD, "DD.MM.YYYY"
+- Extract from: "Tanzim Tarihi", "Başlama Tarihi", "Poliçe Tarihi"
+- Examples requiring Year extraction:
+  * "Tanzim Tarihi : 02.02.2023" → Extract "2023" as Year entity
+  * "Başlama Tarihi: 12.02.2023" → Extract "2023" as Year entity  
+- Create separate Year entities for each unique year found
+- Year extraction is MANDATORY - never skip temporal information
+
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
 - NEVER extract "Document" as any entity type or node
 - NEVER create any Document nodes - they are pre-created by the system and already exist
@@ -965,9 +976,9 @@ ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 - Vehicle plate number (for auto insurance)
 - Building name/apartment number (identifier only)
 
-**4. Document-Level Temporal Information:**
-- Year (ONLY from document creation/issuance date - connect to existing Document node)
-- Policy start date (connect to existing Document node)
+**4. Document-Level Temporal Information (CRITICAL - ALWAYS EXTRACT):**
+- Year (MANDATORY - from document creation/issuance/policy dates - always extract as separate entity)
+- Policy start date (connect to existing Document node)  
 - Policy end date (connect to existing Document node)
 - Document issue date (connect to existing Document node)
 
@@ -982,16 +993,17 @@ ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 - What policy it is (number, type)
 - Which company issued it
 - Where the insured asset is located (address only)
+- WHEN the document was created/issued (Year - MANDATORY)
 
 **CRITICAL SYSTEM RULES:**
 - Document nodes already exist in the system - NEVER create new Document nodes
 - DO NOT extract "Document" as an entity type under any circumstances
-- Extract Year entity ONLY from document creation/issuance dates found in the text
+- MANDATORY: Extract Year entity from ANY date found in the text (creation, policy, issuance dates)
 - Connect extracted entities to existing Document nodes via post-processing relationships
 - Connect temporal entities (Year, dates) DIRECTLY to the EXISTING Document node that already contains this text
 - The Document node is pre-created by the system - your job is to connect entities TO it, not create it
 - ALL entities you extract must connect to existing nodes in the system
-- When you see document dates, extract Year/Date entities and connect them to the existing Document
+- ALWAYS extract Year entities when you see document dates
 - NEVER create relationships between temporal entities and new Document nodes
 - Use the existing Document node that this text chunk belongs to
 
