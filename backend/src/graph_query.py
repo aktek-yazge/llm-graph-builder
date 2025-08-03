@@ -33,7 +33,7 @@ def get_graphDB_driver(uri, username, password,database="neo4j"):
         logging.error(error_message, exc_info=True)
 
 
-def execute_query(driver, query,document_names,doc_limit=None):
+def execute_query(driver, query, document_names, doc_limit=None):
     """
     Executes a specified query using the Neo4j driver, with parameters based on the presence of a document name.
 
@@ -76,7 +76,10 @@ def process_node(node):
         # logging.info(f"Processing node with element ID: {node.element_id}")
 
         for key in node:
-            if key in ["embedding", "text", "summary"]:
+            # Skip embedding for all nodes, skip text only for non-Chunk nodes
+            if key == "embedding" or key == "summary":
+                continue
+            if key == "text" and "Chunk" not in node.labels:
                 continue
             value = node.get(key)
             if isinstance(value, time.DateTime):

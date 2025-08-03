@@ -9,85 +9,75 @@ GRAPH_CHUNK_LIMIT = 50
 
 #query 
 GRAPH_QUERY = """
- MATCH docs = (d:Document)
- WHERE d.fileName IN $document_names
- WITH docs, d
- ORDER BY d.createdAt DESC
+MATCH docs = (d:Document) 
+WHERE d.fileName IN $document_names
+WITH docs, d 
+ORDER BY d.createdAt DESC
 
- // Fetch chunks for documents, currently with limit
- CALL {
-   WITH d
-   OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
-   RETURN c, chunks LIMIT $graph_chunk_limit
- }
+// Fetch chunks for documents, currently with limit
+CALL {{
+  WITH d
+  OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+  RETURN c, chunks LIMIT {graph_chunk_limit}
+}}
 
- WITH collect(distinct docs) AS docs,
-      collect(distinct chunks) AS chunks,
-      collect(distinct c) AS selectedChunks
+WITH collect(distinct docs) AS docs, 
+     collect(distinct chunks) AS chunks, 
+     collect(distinct c) AS selectedChunks
 
- // Select relationships between selected chunks
- WITH docs, chunks, selectedChunks,
-      [c IN selectedChunks |
-        [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other)
-         WHERE other IN selectedChunks | p]] AS chunkRels
+// Select relationships between selected chunks
+WITH *, 
+     [c IN selectedChunks | 
+       [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other) 
+       WHERE other IN selectedChunks | p]] AS chunkRels
 
- // Dynamically expand context by including neighbor chunks up to limit
- CALL {
-   WITH selectedChunks
-   // Traverse NEXT_CHUNK relationships dynamically based on graph parameter
-   MATCH (c:Chunk)-[:NEXT_CHUNK*0..$graph_chunk_limit]-(n:Chunk)
-   WHERE c IN selectedChunks
-   RETURN collect(DISTINCT n) AS expandedChunks
- }
- WITH docs, chunks, selectedChunks + expandedChunks AS chunks, chunkRels
-
- // Fetch entities and relationships between entities
- CALL {
-   WITH chunks
-   UNWIND chunks AS c
-   OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
-   OPTIONAL MATCH entityRels = (e)--(e2:!Chunk)
-   WHERE exists {
-     (e2)<-[:HAS_ENTITY]-(other) WHERE other IN chunks
-   }
-   RETURN entities, entityRels, collect(DISTINCT e) AS entity
-}
+// Fetch entities and relationships between entities
+CALL {{
+  WITH selectedChunks
+  UNWIND selectedChunks AS c
+  OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
+  OPTIONAL MATCH entityRels = (e)--(e2:!Chunk) 
+  WHERE exists {{
+    (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
+  }}
+  RETURN entities, entityRels, collect(DISTINCT e) AS entity
+}}
 
 WITH docs, chunks, chunkRels, 
      collect(entities) AS entities, 
      collect(entityRels) AS entityRels, 
      entity
 
- // Community contexts
- CALL {
+WITH *
+
+CALL {{
   WITH entity
-   UNWIND entity AS n
-   OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
-   OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__)
+  UNWIND entity AS n
+  OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
+  OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__) 
   RETURN collect(community) AS communities, 
          collect(parentcommunity) AS parentCommunities
-}
+}}
 
- WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
+WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
 
- // Distinct nodes
- CALL {
+// Distinct nodes and relationships
+CALL {{
   WITH paths 
-   UNWIND paths AS path 
-   UNWIND nodes(path) AS node 
+  UNWIND paths AS path 
+  UNWIND nodes(path) AS node 
   WITH distinct node 
   RETURN collect(node) AS nodes 
-}
+}}
 
- // Distinct rels
- CALL {
+CALL {{
   WITH paths 
-   UNWIND paths AS path 
-   UNWIND relationships(path) AS rel 
+  UNWIND paths AS path 
+  UNWIND relationships(path) AS rel 
   RETURN collect(distinct rel) AS rels 
-}
+}}  
 
- RETURN nodes, rels
+RETURN nodes, rels
 
 """
 
@@ -324,12 +314,24 @@ WITH d,
      collect(distinct {chunk: chunk, score: score}) AS chunks, 
      avg(score) AS avg_score
 
+// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+OPTIONAL MATCH (d)-[:HAS_METADATA]->(meta:__Entity__)
+WITH d, avg_score, chunks,
+     collect(DISTINCT meta.id) AS documentMetadata
+
 WITH d, avg_score, 
      [c IN chunks | c.chunk.text] AS texts, 
-     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails
+     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
+     documentMetadata
 
+// Document metadata'yı metine dahil et
 WITH d, avg_score, chunkdetails, 
-     apoc.text.join(texts, "\n----\n") AS text
+     apoc.text.join(texts, "\n----\n") + 
+     CASE WHEN size(documentMetadata) > 0 
+          THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+          ELSE "" 
+     END AS text,
+     documentMetadata
 
 RETURN text, 
        avg_score AS score, 
@@ -338,7 +340,8 @@ RETURN text,
                              ELSE d.url 
                        END, 
                        d.fileName), 
-        chunkdetails: chunkdetails} AS metadata
+        chunkdetails: chunkdetails,
+        documentMetadata: documentMetadata} AS metadata
 """ 
 
 ### Vector graph search 
@@ -462,14 +465,20 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
        } AS nodes,
        entities
 }
+
+// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
+WITH d, avg_score, chunks, nodes, rels, entities,
+     collect(DISTINCT docMeta) AS documentMetadataNodes
+
 // Generate metadata and text components for chunks, nodes, and relationships
 WITH d, avg_score,
     [c IN chunks | c.chunk.text] AS texts,
     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
-    [n IN nodes | elementId(n)] AS entityIds,
+    [n IN nodes + documentMetadataNodes | elementId(n)] AS entityIds,
     [r IN rels | elementId(r)] AS relIds,
     apoc.coll.sort([
-        n IN nodes |
+        n IN nodes + documentMetadataNodes |
         coalesce(apoc.coll.removeAll(labels(n), ['__Entity__'])[0], "") + ":" +
         coalesce(
             n.id,
@@ -493,12 +502,18 @@ WITH d, avg_score,
             ""
         )
     ]) AS relTexts,
-    entities
+    entities,
+    [docMeta IN documentMetadataNodes | docMeta.id] AS documentMetadata
+
 // Combine texts into response text
-WITH d, avg_score, chunkdetails, entityIds, relIds,
+WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata,
     "Text Content:\n" + apoc.text.join(texts, "\n----\n") +
     "\n----\nEntities:\n" + apoc.text.join(nodeTexts, "\n") +
-    "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") AS text,
+    "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") +
+    CASE WHEN size(documentMetadata) > 0 
+         THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+         ELSE "" 
+    END AS text,
     entities
 RETURN
    text,
@@ -510,7 +525,8 @@ RETURN
        entities : {
            entityids: entityIds,
            relationshipids: relIds
-       }
+       },
+       documentMetadata: documentMetadata
    } AS metadata
 """
 
@@ -902,7 +918,70 @@ Use these rules to group and name categories accurately without introducing erro
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities that are relevant to the subject and coverage of the insurance policy. Do not extract dates, numbers, revenues, or other non-entity information as separate nodes. Instead, treat such data as properties associated with the relevant entities."""
+ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
+**ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
+- NEVER extract "Document" as any entity type or node
+- NEVER create any Document nodes - they are pre-created by the system and already exist
+- NEVER extract document titles, form names, or report names as entities
+- NEVER create new Document nodes under any circumstances - use existing ones only
+- DO NOT extract any monetary amounts, prices, premiums, or financial values
+- DO NOT extract area measurements (m², square meters, room counts)
+- DO NOT extract volume measurements or capacity information
+- DO NOT extract percentages, rates, or numerical coefficients
+- DO NOT extract coverage limits or deductible amounts
+- DO NOT extract building specifications, construction details, or material information
+- DO NOT extract general insurance terms, legal clauses, or conditions
+- DO NOT extract standalone numbers without clear identification purpose
+- DO NOT extract document names, form titles, or report names
+
+**Extract ONLY these essential form identifiers:**
+
+**1. Policy Information:**
+- Policy number (exact policy number only)
+- Policy type (specific insurance type: Konut, Trafik, DASK, Kasko, etc.)
+- Insurance company name
+
+**2. Personal Information:**
+- Policyholder full name (exact name as written)
+- Identity number (TC Kimlik No, Passport number only)
+- Main address (street address only, no area measurements)
+
+**3. Asset Identification (NO measurements):**
+- Property address (street address only)
+- Vehicle plate number (for auto insurance)
+- Building name/apartment number (identifier only)
+
+**4. Document-Level Temporal Information:**
+- Year (ONLY from document creation/issuance date - connect to existing Document node)
+- Policy start date (connect to existing Document node)
+- Policy end date (connect to existing Document node)
+- Document issue date (connect to existing Document node)
+
+**IMPORTANT SYSTEM INTEGRATION RULES:**
+- Document nodes ALREADY EXIST in the system - connect temporal entities to existing Document nodes
+- NEVER create new Document nodes - they are pre-created and managed by the system
+- When extracting temporal entities, connect them to the EXISTING Document node that this text belongs to
+- Use filename-based Document identification - Document nodes are created from filenames
+
+**EXTRACT ONLY IF IT HELPS IDENTIFY:**
+- Who is insured (name, ID)
+- What policy it is (number, type)
+- Which company issued it
+- Where the insured asset is located (address only)
+
+**CRITICAL SYSTEM RULES:**
+- Document nodes already exist in the system - NEVER create new Document nodes
+- DO NOT extract "Document" as an entity type under any circumstances
+- Extract Year entity ONLY from document creation/issuance dates found in the text
+- Connect extracted entities to existing Document nodes via post-processing relationships
+- Connect temporal entities (Year, dates) DIRECTLY to the EXISTING Document node that already contains this text
+- The Document node is pre-created by the system - your job is to connect entities TO it, not create it
+- ALL entities you extract must connect to existing nodes in the system
+- When you see document dates, extract Year/Date entities and connect them to the existing Document
+- NEVER create relationships between temporal entities and new Document nodes
+- Use the existing Document node that this text chunk belongs to
+
+"""
 
 
 SCHEMA_VISUALIZATION_QUERY = """
@@ -937,4 +1016,21 @@ Determine if the second segment logically continues or references content from t
 Use only the literal chunk IDs and the relationship type 'CONTINUES'.
 If no continuation exists, return:
 {"relations": []}
+'''
+
+POST_PROCESSING_PROMPT = '''
+
+
+KURALLAR:
+- Chunk'a bağlı Year entity'lerini Document nodeuna taşı
+
+DOCUMENT NODE ID: {document_id}
+
+SADECE JSON döndür:
+{{
+  "entities": [...],
+  "relationships": [...]
+}}
+
+Data:
 '''

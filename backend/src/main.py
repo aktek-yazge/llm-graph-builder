@@ -988,7 +988,9 @@ async def processing_chunks(
     allowedNodes,
     allowedRelationship,
     chunks_to_combine,
+    file_name,
     additional_instructions,
+    graph
   )
   latency["entity_extraction"] = f"{time.time() - t1:.2f}"
 
@@ -1010,6 +1012,11 @@ async def processing_chunks(
   t4 = time.time()
   create_cross_chunk_relations(graph, file_name)
   latency["cross_chunk_rel"] = f"{time.time() - t4:.2f}"
+  
+  # 7. Create document metadata entities
+  t6 = time.time()
+  create_document_metadata_entities(graph, file_name)
+  latency["doc_metadata_entities"] = f"{time.time() - t6:.2f}"
 
   # 7. optional LLM-based continuation relationships
   if allowedRelationship:
