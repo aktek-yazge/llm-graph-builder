@@ -13,6 +13,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Neo4j notification loglarını kapat
+def filter_neo4j_notifications(record):
+    message = record.getMessage().lower()
+    filtered_keywords = [
+        "deprecation", "deprecated", "unknown label", "call subquery", 
+        "variable scope clause", "notification", "severity", "category",
+        "received notification from dbms server"
+    ]
+    return not any(keyword in message for keyword in filtered_keywords)
+
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+logging.getLogger("neo4j").setLevel(logging.WARNING)
+logging.getLogger("neo4j").addFilter(filter_neo4j_notifications)
+
 class graphDBdataAccess:
 
     def __init__(self, graph: Neo4jGraph):
