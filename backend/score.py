@@ -413,6 +413,82 @@ async def post_processing(uri=Form(None), userName=Form(None), password=Form(Non
     
     finally:
         gc.collect()
+
+@app.post("/entity_relationship_post_processing")
+async def entity_relationship_post_processing(
+    uri=Form(None), 
+    userName=Form(None), 
+    password=Form(None), 
+    database=Form(None), 
+    file_names=Form(None), 
+    post_processing_rules=Form(None),
+    email=Form(None)
+):
+    """
+    Dinamik entity relationship post-processing endpoint'i.
+    Kullanıcının belirlediği kurallara göre entity'leri target node'lara bağlar.
+    
+    Args:
+        file_names: İşlenecek dosya isimlerinin JSON listesi
+        post_processing_rules: Post-processing kurallarının JSON formatı:
+        [
+            {
+                "source_node_type": "Year",
+                "target_node_type": "Document", 
+                "relationship_types": ["OCCURS_IN", "HAS_YEAR"],
+                "target_selection": "document" // "document" veya "specific_target"
+            },
+            {
+                "source_node_type": "Person",
+                "target_node_type": "Company",
+                "relationship_types": ["WORKS_FOR"],
+                "target_selection": "specific_target"
+            }
+        ]
+    """
+    try:
+        start = time.time()
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        # Parametreleri parse et
+        if post_processing_rules:
+            rules_list = json.loads(post_processing_rules) if isinstance(post_processing_rules, str) else post_processing_rules
+        else:
+            rules_list = []
+        
+        # Post-processing işlemini çalıştır (tüm graf üzerinde)
+        from src.llm import apply_dynamic_entity_post_processing
+        result = await asyncio.to_thread(apply_dynamic_entity_post_processing, graph, rules_list)
+        
+        end = time.time()
+        elapsed_time = end - start
+        
+        json_obj = {
+            'api_name': 'entity_relationship_post_processing', 
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database, 
+            'post_processing_rules': post_processing_rules,
+            'processed_files': result.get('processed_files', 0),
+            'applied_rules': len(rules_list),
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        processed_files = result.get('processed_files', 0)
+        return create_api_response('Success', data=result, message=f'Entity relationship post-processing completed across {processed_files} documents with {len(rules_list)} rules in {elapsed_time:.2f} seconds')
+    
+    except Exception as e:
+        job_status = "Failed"
+        error_message = str(e)
+        message = f"Unable to complete entity relationship post-processing"
+        logging.exception(f'Exception in entity_relationship_post_processing: {error_message}')
+        return create_api_response(job_status, message=message, error=error_message)
+    
+    finally:
+        gc.collect()
                 
 @app.post("/chat_bot")
 async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password=Form(None), database=Form(None),question=Form(None), document_names=Form(None),session_id=Form(None),mode=Form(None),email=Form(None)):
