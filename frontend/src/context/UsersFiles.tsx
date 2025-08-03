@@ -8,6 +8,7 @@ import {
   schemaLoadDialogType,
   predefinedSchemaDialogType,
   dataImporterSchemaDialogType,
+  EntityRelationshipRule,
 } from '../types';
 import {
   chatModeLables,
@@ -80,6 +81,24 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
   const [processedCount, setProcessedCount] = useState<number>(0);
   const [postProcessingVal, setPostProcessingVal] = useState<boolean>(false);
   const [additionalInstructions, setAdditionalInstructions] = useState<string>('');
+
+  // Entity Relationship Post-Processing States
+  const [entitySourceNodeType, setEntitySourceNodeType] = useState<string>('Year');
+  const [entityTargetNodeType, setEntityTargetNodeType] = useState<string>('Document');
+  const [entityRelationshipType, setEntityRelationshipType] = useState<string>('OCCURS_IN');
+  const [removeExistingRelationships, setRemoveExistingRelationships] = useState<boolean>(false);
+
+  // Multiple Entity Relationship Rules
+  const [entityRelationshipRules, setEntityRelationshipRules] = useState<EntityRelationshipRule[]>([
+    {
+      id: '1',
+      sourceNodeType: 'Year',
+      targetNodeType: 'Document',
+      relationshipType: 'OCCURS_IN',
+      removeExistingRelationships: false,
+    },
+  ]);
+
   const [schemaTextPattern, setSchemaTextPattern] = useState<string[]>([]);
   const [allPatterns, setAllPatterns] = useState<string[]>([]);
   const [userDefinedPattern, setUserDefinedPattern] = useState<string[]>([]);
@@ -185,6 +204,16 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
     setPostProcessingVal,
     additionalInstructions,
     setAdditionalInstructions,
+    entitySourceNodeType,
+    setEntitySourceNodeType,
+    entityTargetNodeType,
+    setEntityTargetNodeType,
+    entityRelationshipType,
+    setEntityRelationshipType,
+    removeExistingRelationships,
+    setRemoveExistingRelationships,
+    entityRelationshipRules,
+    setEntityRelationshipRules,
     schemaTextPattern,
     setSchemaTextPattern,
     allPatterns,

@@ -4,13 +4,15 @@ import { capitalize } from '../../../../utils/Utils';
 import { useFileContext } from '../../../../context/UsersFiles';
 import { tokens } from '@neo4j-ndl/base';
 import { useCredentials } from '../../../../context/UserCredentials';
+import EntityRelationshipPostProcessing from '../../EntityRelationshipPostProcessing';
 export default function PostProcessingCheckList() {
   const { breakpoints } = tokens;
   const tablet = useMediaQuery(`(min-width:${breakpoints.xs}) and (max-width: ${breakpoints.lg})`);
   const { postProcessingTasks, setPostProcessingTasks, selectedNodes, selectedRels } = useFileContext();
   const { isGdsActive } = useCredentials();
+
   return (
-    <Flex gap={tablet ? '6' : '8'}>
+    <Flex gap={tablet ? '6' : '8'} flexDirection='column'>
       <div>
         <Flex flexDirection='column'>
           <Flex justifyContent='space-between' flexDirection='row'>
@@ -37,29 +39,36 @@ export default function PostProcessingCheckList() {
                     ? isGdsActive && postProcessingTasks.includes(job.title)
                     : postProcessingTasks.includes(job.title);
               return (
-                <Flex key={`${job.title}${idx}`}>
-                  <Checkbox
-                    label={
-                      <Typography variant='label'>
-                        {job.title
-                          .split('_')
-                          .map((s) => capitalize(s))
-                          .join(' ')}
-                      </Typography>
-                    }
-                    isChecked={isChecked}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setPostProcessingTasks((prev) => [...prev, job.title]);
-                      } else {
-                        setPostProcessingTasks((prev) => prev.filter((s) => s !== job.title));
+                <div key={`${job.title}${idx}`} className='flex flex-col'>
+                  <Flex>
+                    <Checkbox
+                      label={
+                        <Typography variant='label'>
+                          {job.title
+                            .split('_')
+                            .map((s) => capitalize(s))
+                            .join(' ')}
+                        </Typography>
                       }
-                    }}
-                    isDisabled={isDisabled}
-                    ariaLabel={`checkbox-${job.title}`}
+                      isChecked={isChecked}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setPostProcessingTasks((prev) => [...prev, job.title]);
+                        } else {
+                          setPostProcessingTasks((prev) => prev.filter((s) => s !== job.title));
+                        }
+                      }}
+                      isDisabled={isDisabled}
+                      ariaLabel={`checkbox-${job.title}`}
+                    />
+                    <Typography variant={tablet ? 'body-small' : 'body-medium'}>{job.description}</Typography>
+                  </Flex>
+
+                  {/* Entity Relationship Post Processing Configuration */}
+                  <EntityRelationshipPostProcessing
+                    isEnabled={job.title === 'entity_relationship_post_processing' && isChecked}
                   />
-                  <Typography variant={tablet ? 'body-small' : 'body-medium'}>{job.description}</Typography>
-                </Flex>
+                </div>
               );
             })}
           </Flex>
