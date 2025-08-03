@@ -117,6 +117,7 @@ const Content: React.FC<ContentProps> = ({
     setSelectedChunk_overlap,
     setSelectedChunks_to_combine,
     postProcessingTasks,
+    entityRelationshipRules,
     queue,
     processedCount,
     setProcessedCount,
@@ -180,7 +181,7 @@ const Content: React.FC<ContentProps> = ({
                 )
               : postProcessingTasks.filter((task) => task !== 'enable_communities');
           if (payload.length) {
-            const response = await postProcessing(payload);
+            const response = await postProcessing(payload, entityRelationshipRules);
             if (response.data.status === 'Success') {
               const communityfiles = response.data?.data;
               if (Array.isArray(communityfiles) && communityfiles.length) {
@@ -420,7 +421,7 @@ const Content: React.FC<ContentProps> = ({
         />
       );
       try {
-        const response = await postProcessing(postProcessingTasks);
+        const response = await postProcessing(postProcessingTasks, entityRelationshipRules);
         if (response.data.status === 'Success') {
           const communityfiles = response.data?.data;
           if (Array.isArray(communityfiles) && communityfiles.length) {

@@ -921,8 +921,9 @@ Use these rules to group and name categories accurately without introducing erro
 ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
 - NEVER extract "Document" as any entity type or node
-- NEVER create any Document nodes - they are pre-created by the system
+- NEVER create any Document nodes - they are pre-created by the system and already exist
 - NEVER extract document titles, form names, or report names as entities
+- NEVER create new Document nodes under any circumstances - use existing ones only
 - DO NOT extract any monetary amounts, prices, premiums, or financial values
 - DO NOT extract area measurements (m², square meters, room counts)
 - DO NOT extract volume measurements or capacity information
@@ -956,7 +957,11 @@ ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 - Policy end date (connect to existing Document node)
 - Document issue date (connect to existing Document node)
 
-**IMPORTANT: When extracting temporal entities, connect them to the EXISTING Document node that this text belongs to. DO NOT create new Document nodes.**
+**IMPORTANT SYSTEM INTEGRATION RULES:**
+- Document nodes ALREADY EXIST in the system - connect temporal entities to existing Document nodes
+- NEVER create new Document nodes - they are pre-created and managed by the system
+- When extracting temporal entities, connect them to the EXISTING Document node that this text belongs to
+- Use filename-based Document identification - Document nodes are created from filenames
 
 **EXTRACT ONLY IF IT HELPS IDENTIFY:**
 - Who is insured (name, ID)
@@ -968,6 +973,7 @@ ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 - Document nodes already exist in the system - NEVER create new Document nodes
 - DO NOT extract "Document" as an entity type under any circumstances
 - Extract Year entity ONLY from document creation/issuance dates found in the text
+- Connect extracted entities to existing Document nodes via post-processing relationships
 - Connect temporal entities (Year, dates) DIRECTLY to the EXISTING Document node that already contains this text
 - The Document node is pre-created by the system - your job is to connect entities TO it, not create it
 - ALL entities you extract must connect to existing nodes in the system

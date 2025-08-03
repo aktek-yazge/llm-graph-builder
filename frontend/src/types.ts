@@ -908,6 +908,18 @@ export interface FileContextType {
   setPostProcessingVal: Dispatch<SetStateAction<boolean>>;
   additionalInstructions: string;
   setAdditionalInstructions: Dispatch<SetStateAction<string>>;
+  // Entity Relationship Post-Processing
+  entitySourceNodeType: string;
+  setEntitySourceNodeType: Dispatch<SetStateAction<string>>;
+  entityTargetNodeType: string;
+  setEntityTargetNodeType: Dispatch<SetStateAction<string>>;
+  entityRelationshipType: string;
+  setEntityRelationshipType: Dispatch<SetStateAction<string>>;
+  removeExistingRelationships: boolean;
+  setRemoveExistingRelationships: Dispatch<SetStateAction<boolean>>;
+  // Multiple Entity Relationship Rules
+  entityRelationshipRules: EntityRelationshipRule[];
+  setEntityRelationshipRules: Dispatch<SetStateAction<EntityRelationshipRule[]>>;
   // all nodes and all patterns
   allPatterns: string[];
   setAllPatterns: Dispatch<SetStateAction<string[]>>;
@@ -975,6 +987,14 @@ export interface FileContextType {
 export declare type Side = 'top' | 'right' | 'bottom' | 'left';
 
 export type EntityType = 'node' | 'relationship';
+
+export interface EntityRelationshipRule {
+  id: string;
+  sourceNodeType: string;
+  targetNodeType: string;
+  relationshipType: string;
+  removeExistingRelationships: boolean;
+}
 
 export type BasicRelationship = {
   id: string;
