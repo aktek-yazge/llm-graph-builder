@@ -6,6 +6,20 @@ import json
 
 from src.shared.constants import GRAPH_CHUNK_LIMIT,GRAPH_QUERY,CHUNK_TEXT_QUERY,COUNT_CHUNKS_QUERY,SCHEMA_VISUALIZATION_QUERY
 
+# Neo4j notification loglarını kapat
+def filter_neo4j_notifications(record):
+    message = record.getMessage().lower()
+    filtered_keywords = [
+        "deprecation", "deprecated", "unknown label", "call subquery", 
+        "variable scope clause", "notification", "severity", "category",
+        "received notification from dbms server"
+    ]
+    return not any(keyword in message for keyword in filtered_keywords)
+
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+logging.getLogger("neo4j").setLevel(logging.WARNING)
+logging.getLogger("neo4j").addFilter(filter_neo4j_notifications)
+
 def get_graphDB_driver(uri, username, password,database="neo4j"):
     """
     Creates and returns a Neo4j database driver instance configured with the provided credentials.
@@ -22,10 +36,17 @@ def get_graphDB_driver(uri, username, password,database="neo4j"):
             password= os.getenv('NEO4J_PASSWORD')
 
         enable_user_agent = os.environ.get("ENABLE_USER_AGENT", "False").lower() in ("true", "1", "yes")
+        
+        # Neo4j driver config with disabled notifications - simplified approach
+        driver_config = {
+            "database": database
+        }
+        
         if enable_user_agent:
-            driver = GraphDatabase.driver(uri, auth=(username, password),database=database, user_agent=os.environ.get('NEO4J_USER_AGENT'))
+            driver_config["user_agent"] = os.environ.get('NEO4J_USER_AGENT')
+            driver = GraphDatabase.driver(uri, auth=(username, password), **driver_config)
         else:
-            driver = GraphDatabase.driver(uri, auth=(username, password),database=database)
+            driver = GraphDatabase.driver(uri, auth=(username, password), **driver_config)
         logging.info("Connection successful")
         return driver
     except Exception as e:
@@ -42,10 +63,10 @@ def execute_query(driver, query, document_names, doc_limit=None):
     """
     try:
         if document_names:
-            logging.info(f"Executing query for documents: {document_names}")
+            logging.debug(f"Executing query for documents: {document_names}")
             records, summary, keys = driver.execute_query(query, document_names=document_names)
         else:
-            logging.info(f"Executing query with a document limit of {doc_limit}")
+            logging.debug(f"Executing query with a document limit of {doc_limit}")
             records, summary, keys = driver.execute_query(query, doc_limit=doc_limit)
         return records, summary, keys
     except Exception as e:
@@ -175,11 +196,11 @@ def get_completed_documents(driver):
     docs_query = "MATCH(node:Document {status:'Completed'}) RETURN node"
     
     try:
-        logging.info("Executing query to retrieve completed documents.")
+        logging.debug("Executing query to retrieve completed documents.")
         records, summary, keys = driver.execute_query(docs_query)
-        logging.info(f"Query executed successfully, retrieved {len(records)} records.")
+        logging.debug(f"Query executed successfully, retrieved {len(records)} records.")
         documents = [record["node"]["fileName"] for record in records]
-        logging.info("Document names extracted successfully.")
+        logging.debug("Document names extracted successfully.")
         
     except Exception as e:
         logging.error(f"An error occurred: {e}")
@@ -204,7 +225,7 @@ def get_graph_results(uri, username, password,database,document_names):
     dict: Contains the session ID, user-defined messages with nodes and relationships, and the user module identifier.
     """
     try:
-        logging.info(f"Starting graph query process")
+        logging.debug(f"Starting graph query process")
         driver = get_graphDB_driver(uri, username, password,database)  
         document_names= list(map(str, json.loads(document_names)))
         query = GRAPH_QUERY.format(graph_chunk_limit=GRAPH_CHUNK_LIMIT)
@@ -212,20 +233,20 @@ def get_graph_results(uri, username, password,database,document_names):
         document_nodes = extract_node_elements(records)
         document_relationships = extract_relationships(records)
 
-        logging.info(f"no of nodes : {len(document_nodes)}")
-        logging.info(f"no of relations : {len(document_relationships)}")
+        logging.debug(f"no of nodes : {len(document_nodes)}")
+        logging.debug(f"no of relations : {len(document_relationships)}")
         result = {
             "nodes": document_nodes,
             "relationships": document_relationships
         }
 
-        logging.info(f"Query process completed successfully")
+        logging.debug(f"Query process completed successfully")
         return result
     except Exception as e:
         logging.error(f"graph_query module: An error occurred in get_graph_results. Error: {str(e)}")
         raise Exception(f"graph_query module: An error occurred in get_graph_results. Please check the logs for more details.") from e
     finally:
-        logging.info("Closing connection for graph_query api")
+        logging.debug("Closing connection for graph_query api")
         driver.close()
 
 
@@ -233,7 +254,7 @@ def get_chunktext_results(uri, username, password, database, document_name, page
    """Retrieves chunk text, position, and page number from graph data with pagination."""
    driver = None
    try:
-       logging.info("Starting chunk text query process")
+       logging.debug("Starting chunk text query process")
        offset = 10
        skip = (page_no - 1) * offset
        limit = offset
@@ -251,7 +272,7 @@ def get_chunktext_results(uri, username, password, database, document_name, page
                }
                for record in records
            ]
-           logging.info(f"Query process completed with {len(pageitems)} chunks retrieved")
+           logging.debug(f"Query process completed with {len(pageitems)} chunks retrieved")
            return {
                "pageitems": pageitems,
                "total_pages": total_pages
@@ -268,7 +289,7 @@ def visualize_schema(uri, userName, password, database):
    """Retrieves graph schema"""
    driver = None
    try:
-       logging.info("Starting visualizing graph schema")
+       logging.debug("Starting visualizing graph schema")
        driver = get_graphDB_driver(uri, userName, password,database)  
        records, summary, keys = driver.execute_query(SCHEMA_VISUALIZATION_QUERY)
        nodes = records[0].get("nodes", [])

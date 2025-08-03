@@ -538,12 +538,15 @@ def apply_dynamic_entity_post_processing(graph, rules_list):
                             logging.info(f"Hedef Document node: {target_file_name} (ID: {target_doc_element_id})")
                             
                             # SADECE bu Document node'unu hedefle ve mevcut Document node'unu güncelleme
+                            # Entity'ler SADECE kendi chunk'larından geldikleri Document'a bağlanmalı
                             create_relationships_query = f"""
                             MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
                             WHERE elementId(target_doc) = $target_doc_id
                               AND $source_type IN labels(e)
-                            WITH e, target_doc
-                            // Sadece relationship oluştur, Document node'unu güncelleme
+                              AND NOT EXISTS((e)-[:{rel_type}]->(target_doc))
+                            WITH e, target_doc, c
+                            // Sadece bu entity'nin chunk'ının ait olduğu Document'a bağla
+                            WHERE (c)-[:PART_OF]->(target_doc)
                             MERGE (e)-[r:{rel_type}]->(target_doc)
                             SET r.created_by = 'post_processing'
                             SET r.created_at = datetime()
@@ -598,8 +601,8 @@ def apply_dynamic_entity_post_processing(graph, rules_list):
                                 "target_type": target_node_type
                             })
                         
-                        logging.info(f"Relationship oluşturma sorgusu ({target_node_type} target): {create_relationships_query}")
-                        logging.info(f"Parametreler: source_type={source_node_type}, target_type={target_node_type}")
+                        logging.debug(f"Relationship oluşturma sorgusu ({target_node_type} target): {create_relationships_query}")
+                        logging.debug(f"Parametreler: source_type={source_node_type}, target_type={target_node_type}")
                         
                         if result:
                             created_rels = result[0]['created_relationships']
@@ -742,8 +745,8 @@ def get_document_node_id_from_graph(graph, file_name):
                    properties(d) as allProperties
             LIMIT 1
             """
-            logging.info(f"Document sorgusu çalıştırılıyor: {query}")
-            logging.info(f"Sorgu parametreleri: fileName = '{file_name}'")
+            logging.debug(f"Document sorgusu çalıştırılıyor: {query}")
+            logging.debug(f"Sorgu parametreleri: fileName = '{file_name}'")
             
             result = graph.query(query, params={"fileName": file_name})
             

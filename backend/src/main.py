@@ -48,6 +48,27 @@ warnings.filterwarnings("ignore")
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(message)s", level="INFO")
 
+# Neo4j notification ve deprecation warning'lerini kapat
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+logging.getLogger("neo4j").setLevel(logging.WARNING)
+
+# Daha agresif filtreleme
+neo4j_logger = logging.getLogger("neo4j")
+def filter_neo4j_notifications(record):
+    message = record.getMessage().lower()
+    # Bu mesajları filtrele
+    filtered_keywords = [
+        "deprecation", "deprecated", "unknown label", "call subquery", 
+        "variable scope clause", "notification", "severity", "category"
+    ]
+    return not any(keyword in message for keyword in filtered_keywords)
+
+neo4j_logger.addFilter(filter_neo4j_notifications)
+
+# Root logger'a da aynı filtreyi ekle
+root_logger = logging.getLogger()
+root_logger.addFilter(filter_neo4j_notifications)
+
 
 def create_source_node_graph_url_s3(
     graph, model, source_url, aws_access_key_id, aws_secret_access_key, source_type

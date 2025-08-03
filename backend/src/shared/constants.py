@@ -9,20 +9,22 @@ GRAPH_CHUNK_LIMIT = 50
 
 #query 
 GRAPH_QUERY = """
-MATCH docs = (d:Document) 
+MATCH (d:Document) 
 WHERE d.fileName IN $document_names
-WITH docs, d 
+WITH d 
 ORDER BY d.createdAt DESC
 
 // Fetch chunks for documents, currently with limit
 CALL {{
   WITH d
   OPTIONAL MATCH chunks = (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
-  RETURN c, chunks LIMIT {graph_chunk_limit}
+  OPTIONAL MATCH partOfRels = (d)<-[:PART_OF]-(c)
+  RETURN c, chunks, partOfRels LIMIT {graph_chunk_limit}
 }}
 
-WITH collect(distinct docs) AS docs, 
+WITH collect(distinct d) AS docs, 
      collect(distinct chunks) AS chunks, 
+     collect(distinct partOfRels) AS partOfRels,
      collect(distinct c) AS selectedChunks
 
 // Select relationships between selected chunks
@@ -36,48 +38,60 @@ CALL {{
   WITH selectedChunks
   UNWIND selectedChunks AS c
   OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
+  OPTIONAL MATCH hasEntityRels = (c)-[:HAS_ENTITY]->(e)
   OPTIONAL MATCH entityRels = (e)--(e2:!Chunk) 
   WHERE exists {{
     (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
   }}
-  RETURN entities, entityRels, collect(DISTINCT e) AS entity
+  RETURN entities, hasEntityRels, entityRels, collect(DISTINCT e) AS allEntities
 }}
 
-WITH docs, chunks, chunkRels, 
+// Fetch Document-Entity relationships (all types)
+CALL {{
+  WITH docs, allEntities
+  UNWIND docs AS d
+  UNWIND allEntities AS e
+  OPTIONAL MATCH docEntityRels = (d)-[r]-(e)
+  RETURN collect(docEntityRels) AS docEntityRels
+}}
+
+WITH docs, chunks, partOfRels, chunkRels, 
      collect(entities) AS entities, 
+     collect(hasEntityRels) AS hasEntityRels,
      collect(entityRels) AS entityRels, 
-     entity
+     docEntityRels,
+     allEntities
 
 WITH *
 
 CALL {{
-  WITH entity
-  UNWIND entity AS n
+  WITH allEntities
+  UNWIND allEntities AS n
   OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
   OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__) 
   RETURN collect(community) AS communities, 
          collect(parentcommunity) AS parentCommunities
 }}
 
-WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels + communities + parentCommunities, true) AS paths
+// Collect all nodes and relationships 
+WITH docs,
+     chunks + entities + communities + parentCommunities AS allPaths,
+     partOfRels + chunkRels + hasEntityRels + entityRels + docEntityRels AS allRelPaths
 
-// Distinct nodes and relationships
-CALL {{
-  WITH paths 
-  UNWIND paths AS path 
-  UNWIND nodes(path) AS node 
-  WITH distinct node 
-  RETURN collect(node) AS nodes 
-}}
+// Extract distinct nodes
+WITH docs AS documentNodes,
+     apoc.coll.flatten([
+       p IN apoc.coll.flatten(allPaths, true) 
+       WHERE p IS NOT NULL | nodes(p)
+     ], true) AS pathNodes,
+     apoc.coll.flatten([
+       p IN apoc.coll.flatten(allRelPaths, true) 
+       WHERE p IS NOT NULL | relationships(p)
+     ], true) AS allRelationships
 
-CALL {{
-  WITH paths 
-  UNWIND paths AS path 
-  UNWIND relationships(path) AS rel 
-  RETURN collect(distinct rel) AS rels 
-}}  
-
-RETURN nodes, rels
+// Return final result
+RETURN apoc.coll.toSet(documentNodes + pathNodes) AS nodes,
+       apoc.coll.toSet(allRelationships) AS rels
 
 """
 
@@ -314,7 +328,7 @@ WITH d,
      collect(distinct {chunk: chunk, score: score}) AS chunks, 
      avg(score) AS avg_score
 
-// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+// Document metadata entities al (sayfa sayisi, belge adi, vb.)
 OPTIONAL MATCH (d)-[:HAS_METADATA]->(meta:__Entity__)
 WITH d, avg_score, chunks,
      collect(DISTINCT meta.id) AS documentMetadata
@@ -466,7 +480,7 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
        entities
 }
 
-// Document metadata entities'leri al (sayfa sayısı, belge adı, vb.)
+// Document metadata entities al (sayfa sayisi, belge adi, vb.)
 OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
 WITH d, avg_score, chunks, nodes, rels, entities,
      collect(DISTINCT docMeta) AS documentMetadataNodes
