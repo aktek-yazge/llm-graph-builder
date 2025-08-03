@@ -218,6 +218,9 @@ async def extract_knowledge_graph_from_file(
     access_token=Form(None),
     retry_condition=Form(None),
     additional_instructions=Form(None),
+    # Post-processing parametreleri
+    enable_post_processing=Form(False),
+    post_processing_rules=Form(None),  # JSON array: [{"sourceNodeType":"Year","targetNodeType":"Document","relationshipType":"HAS_YEAR","removeExistingRelationships":false}]
     email=Form(None)
 ):
     """
@@ -277,6 +280,61 @@ async def extract_knowledge_graph_from_file(
                 result['nodeCount'] = count_response[file_name].get('nodeCount',"0")
                 result['relationshipCount']  = count_response[file_name].get('relationshipCount',"0")
                 logging.info(f"counting completed in {(time.time()-count_node_time):.2f}")
+            
+            # Otomatik post-processing (eğer istenirse)
+            if enable_post_processing and post_processing_rules:
+                try:
+                    logging.info(f"Otomatik post-processing başlıyor: {file_name}")
+                    
+                    # JSON string'i parse et
+                    if isinstance(post_processing_rules, str):
+                        rules_list = json.loads(post_processing_rules)
+                    else:
+                        rules_list = post_processing_rules
+                    
+                    logging.info(f"Post-processing kuralları: {rules_list}")
+                    
+                    # Post-processing'i çalıştır - sadece bu dosya için
+                    from src.llm import apply_dynamic_entity_post_processing
+                    post_processing_start_time = time.time()
+                    post_processing_result = await asyncio.to_thread(
+                        apply_dynamic_entity_post_processing, 
+                        graph, 
+                        rules_list,
+                        target_file_names=[file_name]
+                    )
+                    post_processing_end_time = time.time()
+                    
+                    logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
+                    
+                    # Post-processing sonuçlarını result'a ekle
+                    result['post_processing'] = {
+                        'enabled': True,
+                        'rules_applied': len(rules_list),
+                        'processed_entities': post_processing_result.get('total_processed_entities', 0),
+                        'created_relationships': post_processing_result.get('total_created_relationships', 0),
+                        'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
+                        'rules': rules_list
+                    }
+                    
+                    # Node count'ları güncelle
+                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                    if final_count_response:
+                        result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+                        result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+                        
+                    logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
+                    
+                except Exception as post_processing_error:
+                    logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
+                    result['post_processing'] = {
+                        'enabled': True,
+                        'error': str(post_processing_error),
+                        'rules_applied': 0
+                    }
+            else:
+                result['post_processing'] = {'enabled': False}
+            
             result['db_url'] = uri
             result['api_name'] = 'extract'
             result['source_url'] = source_url
@@ -456,9 +514,19 @@ async def entity_relationship_post_processing(
         else:
             rules_list = []
         
-        # Post-processing işlemini çalıştır (tüm graf üzerinde)
+        # file_names parametresini parse et
+        target_files = None
+        if file_names:
+            try:
+                target_files = json.loads(file_names) if isinstance(file_names, str) else file_names
+                if target_files:
+                    logging.info(f"Hedef dosyalar: {target_files}")
+            except json.JSONDecodeError:
+                logging.warning(f"file_names parse edilemedi: {file_names}")
+        
+        # Post-processing işlemini çalıştır
         from src.llm import apply_dynamic_entity_post_processing
-        result = await asyncio.to_thread(apply_dynamic_entity_post_processing, graph, rules_list)
+        result = await asyncio.to_thread(apply_dynamic_entity_post_processing, graph, rules_list, target_files)
         
         end = time.time()
         elapsed_time = end - start

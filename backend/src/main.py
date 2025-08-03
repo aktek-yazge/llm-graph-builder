@@ -367,6 +367,9 @@ async def extract_graph_from_file_local_file(
     chunks_to_combine,
     retry_condition,
     additional_instructions,
+    # Post-processing parametreleri
+    enable_post_processing=False,
+    post_processing_rules=None,
 ):
 
     logging.info(f"Process file name :{fileName}")
@@ -402,6 +405,9 @@ async def extract_graph_from_file_local_file(
             True,
             merged_file_path,
             additional_instructions=additional_instructions,
+            # Post-processing parametreleri
+            enable_post_processing=enable_post_processing,
+            post_processing_rules=post_processing_rules,
         )
     else:
         return await processing_source(
@@ -421,6 +427,9 @@ async def extract_graph_from_file_local_file(
             merged_file_path,
             retry_condition,
             additional_instructions=additional_instructions,
+            # Post-processing parametreleri
+            enable_post_processing=enable_post_processing,
+            post_processing_rules=post_processing_rules,
         )
 
 
@@ -742,6 +751,9 @@ async def processing_source(
     merged_file_path=None,
     retry_condition=None,
     additional_instructions=None,
+    # Post-processing parametreleri
+    enable_post_processing=False,
+    post_processing_rules=None,
 ):
     """
     Extracts a Neo4jGraph from a PDF file based on the model.
@@ -953,6 +965,59 @@ async def processing_source(
                 uri_latency["Per_entity_latency"] = (
                     f"{int(processing_source_func)/node_count}/s"
                 )
+
+            # Otomatik post-processing (eğer extract başarılı ve kurallar verilmiş ise)
+            if (job_status == "Completed" and enable_post_processing and post_processing_rules):
+                try:
+                    logging.info(f"Extract sonrası otomatik post-processing başlıyor: {file_name}")
+                    
+                    # Post-processing kurallarını parse et
+                    if isinstance(post_processing_rules, str):
+                        import json
+                        rules_list = json.loads(post_processing_rules)
+                    else:
+                        rules_list = post_processing_rules
+                    
+                    logging.info(f"Post-processing kuralları: {rules_list}")
+                    
+                    # Post-processing'i çalıştır - sadece bu dosya için
+                    from src.llm import apply_dynamic_entity_post_processing
+                    post_processing_start_time = time.time()
+                    post_processing_result = apply_dynamic_entity_post_processing(
+                        graph, 
+                        rules_list, 
+                        target_file_names=[file_name]
+                    )
+                    post_processing_end_time = time.time()
+                    
+                    logging.info(f"Extract sonrası post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
+                    logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
+                    
+                    # Node count'ları tekrar say (post-processing sonrasında)
+                    graphDb_data_Access = graphDBdataAccess(graph)
+                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                    if final_count_response:
+                        final_node_count = int(final_count_response[file_name].get('nodeCount', node_count))
+                        final_rel_count = int(final_count_response[file_name].get('relationshipCount', rel_count))
+                        
+                        # Response'u güncelle
+                        response["nodeCount"] = final_node_count
+                        response["relationshipCount"] = final_rel_count
+                        
+                        logging.info(f"Post-processing sonrası güncel sayılar - Nodes: {final_node_count}, Relationships: {final_rel_count}")
+                    
+                    # Post-processing bilgilerini uri_latency'ye ekle
+                    uri_latency["post_processing_enabled"] = "true"
+                    uri_latency["post_processing_time"] = f"{post_processing_end_time - post_processing_start_time:.2f}"
+                    uri_latency["post_processing_created_rels"] = str(post_processing_result.get('total_created_relationships', 0))
+                    uri_latency["post_processing_rules_count"] = str(len(rules_list))
+                    
+                except Exception as post_processing_error:
+                    logging.error(f"Extract sonrası post-processing hatası: {post_processing_error}")
+                    uri_latency["post_processing_enabled"] = "true"
+                    uri_latency["post_processing_error"] = str(post_processing_error)
+            else:
+                uri_latency["post_processing_enabled"] = "false"
 
             response["fileName"] = file_name
             response["nodeCount"] = node_count
