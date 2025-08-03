@@ -13,10 +13,11 @@ from langchain_aws import ChatBedrock
 from langchain_community.chat_models import ChatOllama
 import boto3
 import google.auth
-from src.shared.constants import ADDITIONAL_INSTRUCTIONS
+from src.shared.constants import ADDITIONAL_INSTRUCTIONS, POST_PROCESSING_PROMPT
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import re
 from typing import List
+import json
 
 def get_llm(model: str):
     """Retrieve the specified language model based on the model name."""
@@ -210,7 +211,7 @@ async def get_graph_document_list(
         graph_document_list = await llm_transformer.aconvert_to_graph_documents(combined_chunk_document_list)
     return graph_document_list
 
-async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, additional_instructions=None):
+async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
    try:
        llm, model_name = get_llm(model)
        logging.info(f"Using model: {model_name}")
@@ -272,3 +273,714 @@ def sanitize_additional_instruction(instruction: str) -> str:
    # Step 4: Normalize spaces
    instruction = re.sub(r'\s+', ' ', instruction).strip()
    return instruction
+
+
+def extract_json_from_response(response_text):
+    """
+    LLM response'undan JSON kısmını çıkarır.
+    LLM bazen JSON'dan önce/sonra açıklama ekler, bunları temizler.
+    """
+    try:
+        # Response'u temizle
+        response_text = response_text.strip()
+        
+        logging.info(f"JSON extraction başlıyor. Response uzunluğu: {len(response_text)}")
+        logging.info(f"Response başlangıcı: {response_text[:200]}...")
+        
+        # Eğer direkt JSON ise (hiç açıklama yoksa)
+        if response_text.startswith('{') and response_text.endswith('}'):
+            json.loads(response_text)  # Validate
+            logging.info("✅ Response zaten temiz JSON formatında")
+            return response_text
+        
+        # JSON başlangıcını bul
+        json_start = -1
+        for i, char in enumerate(response_text):
+            if char == '{':
+                json_start = i
+                break
+        
+        if json_start == -1:
+            # Eğer { bulunamazsa, belki array formatında dönmüştür
+            json_start = response_text.find('[')
+            if json_start == -1:
+                logging.error("JSON başlangıcı bulunamadı")
+                raise ValueError("JSON başlangıcı bulunamadı")
+        
+        # JSON sonunu bul
+        brace_count = 0
+        json_end = -1
+        start_char = response_text[json_start]
+        end_char = '}' if start_char == '{' else ']'
+        
+        for i in range(json_start, len(response_text)):
+            char = response_text[i]
+            if char == start_char:
+                brace_count += 1
+            elif char == end_char:
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end == -1:
+            logging.error("JSON sonu bulunamadı")
+            raise ValueError("JSON sonu bulunamadı")
+        
+        # JSON kısmını çıkar
+        json_text = response_text[json_start:json_end]
+        
+        logging.info(f"Çıkarılan JSON uzunluğu: {len(json_text)}")
+        logging.info(f"Çıkarılan JSON başlangıcı: {json_text[:200]}...")
+        
+        # JSON'u validate et
+        parsed = json.loads(json_text)
+        logging.info("✅ JSON başarıyla parse edildi")
+        
+        return json_text
+        
+    except Exception as e:
+        logging.error(f"JSON extraction hatası: {e}")
+        logging.error(f"Response text (ilk 1000 karakter): {response_text[:1000]}...")
+        # Son çare olarak orijinal text'i döndür
+        return response_text
+
+
+def apply_dynamic_entity_post_processing(graph, rules_list):
+    """
+    Dinamik entity relationship post-processing fonksiyonu.
+    Kullanıcının belirlediği kurallara göre entity'leri target node'lara bağlar.
+    Post-processing işlemleri gibi tüm graf üzerinde çalışır.
+    
+    Args:
+        graph: Neo4j graph objesi
+        rules_list: Post-processing kurallarının listesi
+        
+    Returns:
+        İşlem sonucu raporu
+    """
+    try:
+        logging.info(f"Dinamik entity post-processing başlıyor - Global işlem")
+        
+        # Tüm Document node'larını al (status'a bakmadan)
+        try:
+            all_docs_query = """
+            MATCH (d:Document) 
+            RETURN d.fileName as fileName, 
+                   d.id as documentId, 
+                   elementId(d) as elementId,
+                   d.fileSource as fileSource,
+                   d.status as status,
+                   d.url as url,
+                   properties(d) as allProperties
+            ORDER BY d.fileName
+            """
+            processing_docs_result = graph.query(all_docs_query)
+            
+            logging.info(f"Graph'daki toplam Document sayısı: {len(processing_docs_result)}")
+            
+            # Status dağılımını göster
+            status_distribution = {}
+            for doc in processing_docs_result:
+                status = doc.get('status', 'NULL')
+                status_distribution[status] = status_distribution.get(status, 0) + 1
+            
+            logging.info(f"Document status dağılımı: {status_distribution}")
+            
+            logging.info(f"İşlenecek Document node'ları:")
+            for doc in processing_docs_result:  # TÜM dosyaları logla
+                logging.info(f"  - fileName: {doc.get('fileName')}")
+                logging.info(f"    status: {doc.get('status')}")
+                logging.info(f"    documentId: {doc.get('documentId')}")
+                logging.info(f"    elementId: {doc.get('elementId')}")
+                logging.info(f"    fileSource: {doc.get('fileSource')}")
+                logging.info("  ---")
+            
+            processing_files = [row['fileName'] for row in processing_docs_result if row['fileName']]
+            document_id_map = {
+                row['fileName']: {
+                    'documentId': row.get('documentId'),
+                    'elementId': row.get('elementId'),
+                    'fileSource': row.get('fileSource'),
+                    'status': row.get('status'),
+                    'url': row.get('url'),
+                    'properties': row.get('allProperties', {})
+                }
+                for row in processing_docs_result if row['fileName']
+            }
+            
+            logging.info(f"İşlenecek dosya sayısı: {len(processing_files)}")
+            logging.info(f"İşlenecek dosya isimleri:")
+            for i, file_name in enumerate(processing_files, 1):
+                logging.info(f"  {i}. {file_name}")
+            logging.info(f"Document ID mapping hazırlandı: {len(document_id_map)} dosya")
+            
+        except Exception as e:
+            logging.error(f"Document node'ları alma hatası: {e}")
+            processing_files = []
+            document_id_map = {}
+        
+        logging.info(f"Kural sayısı: {len(rules_list)}")
+        
+        if not rules_list:
+            logging.warning("Post-processing kuralları boş")
+            return {"status": "warning", "message": "No rules provided", "processed_files": 0, "applied_rules": 0}
+        
+        if not processing_files:
+            logging.warning("Hiç Document node'u bulunamadı")
+            return {"status": "warning", "message": "No documents found in the graph", "processed_files": 0, "applied_rules": 0}
+        
+        total_processed = 0
+        total_relationships_created = 0
+        rule_results = []
+        
+        # Her kural için tüm graf üzerinde işlem yap (dosya bazında değil, global)
+        for rule_index, rule in enumerate(rules_list):
+            try:
+                # Frontend formatını destekle
+                if 'sourceNodeType' in rule:
+                    # Yeni frontend format
+                    source_node_type = rule.get('sourceNodeType')
+                    target_node_type = rule.get('targetNodeType')
+                    relationship_type = rule.get('relationshipType')
+                    relationship_types = [relationship_type] if relationship_type else []
+                    remove_existing = rule.get('removeExistingRelationships', False)
+                    target_selection = 'document'  # Frontend sadece document target destekliyor
+                else:
+                    # Eski backend format (backward compatibility)
+                    source_node_type = rule.get('source_node_type')
+                    target_node_type = rule.get('target_node_type') 
+                    relationship_types = rule.get('relationship_types', [])
+                    target_selection = rule.get('target_selection', 'document')
+                    remove_existing = rule.get('remove_existing_relationships', False)
+                    
+                logging.info(f"Kural {rule_index + 1} uygulanıyor: {source_node_type} -> {target_node_type}")
+                logging.info(f"İlişki tipi: {relationship_types}")
+                logging.info(f"Mevcut ilişkileri sil: {remove_existing}")
+                logging.info(f"Target selection: {target_selection} (Document mı: {target_node_type == 'Document'})")
+                
+                # Validation
+                if not source_node_type or not target_node_type or not relationship_types:
+                    logging.warning(f"Eksik kural parametreleri: source={source_node_type}, target={target_node_type}, rels={relationship_types}")
+                    continue
+                
+                rule_processed = 0
+                rule_relationships = 0
+                
+                # Mevcut ilişkileri sil (eğer istenirse) - Sadece işlenen dosyaların Document node'ları için
+                if remove_existing:
+                    for rel_type in relationship_types:
+                        if target_node_type == 'Document':
+                            # İşlenen dosyaların Document node'larını hedefle
+                            file_names = list(document_id_map.keys())
+                            remove_query = f"""
+                            MATCH (s)-[r:{rel_type}]->(t:Document)
+                            WHERE $source_type IN labels(s) 
+                              AND t.fileName IN $file_names
+                            DELETE r
+                            RETURN COUNT(r) as deleted
+                            """
+                            
+                            remove_result = graph.query(remove_query, params={
+                                "source_type": source_node_type,
+                                "file_names": file_names
+                            })
+                        else:
+                            # Entity-to-entity relationships için genel temizlik
+                            remove_query = f"""
+                            MATCH (s)-[r:{rel_type}]->(t)
+                            WHERE $source_type IN labels(s) 
+                              AND $target_type IN labels(t)
+                            DELETE r
+                            RETURN COUNT(r) as deleted
+                            """
+                            
+                            remove_result = graph.query(remove_query, params={
+                                "source_type": source_node_type,
+                                "target_type": target_node_type
+                            })
+                        
+                        try:
+                            deleted_count = remove_result[0]['deleted'] if remove_result else 0
+                            logging.info(f"Silinen mevcut {rel_type} ilişkileri: {deleted_count}")
+                            
+                        except Exception as remove_error:
+                            logging.error(f"Mevcut ilişkileri silme hatası: {remove_error}")
+                
+                # Tüm graf üzerinde source ve target node'ları eşleştir ve relationship oluştur
+                for rel_type in relationship_types:
+                    try:
+                        # Dinamik sorgu oluştur - target_node_type'a göre
+                        if target_node_type == 'Document':
+                            # Document target ise, SADECE işlenen dosyanın Document node'unu hedefle
+                            # Önce işlenen dosyanın Document ID'sini al
+                            target_doc_query = """
+                            MATCH (target_doc:Document)
+                            WHERE target_doc.fileName IN $file_names
+                            RETURN target_doc.fileName as fileName, 
+                                   elementId(target_doc) as documentElementId,
+                                   target_doc.id as documentId
+                            """
+                            
+                            # İşlenen dosya isimlerini al
+                            file_names = list(document_id_map.keys())
+                            target_docs_result = graph.query(target_doc_query, params={"file_names": file_names})
+                            
+                            if not target_docs_result:
+                                logging.warning(f"İşlenen dosyalar için Document node bulunamadı: {file_names}")
+                                continue
+                            
+                            # Birden fazla dosya işleniyorsa ilkini seç (genellikle tek dosya olur)
+                            target_doc_info = target_docs_result[0]
+                            target_doc_element_id = target_doc_info['documentElementId']
+                            target_file_name = target_doc_info['fileName']
+                            
+                            logging.info(f"Hedef Document node: {target_file_name} (ID: {target_doc_element_id})")
+                            
+                            # SADECE bu Document node'unu hedefle ve mevcut Document node'unu güncelleme
+                            create_relationships_query = f"""
+                            MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                            WHERE elementId(target_doc) = $target_doc_id
+                              AND $source_type IN labels(e)
+                            WITH e, target_doc
+                            // Sadece relationship oluştur, Document node'unu güncelleme
+                            MERGE (e)-[r:{rel_type}]->(target_doc)
+                            SET r.created_by = 'post_processing'
+                            SET r.created_at = datetime()
+                            // Diğer Document node'larına olan aynı tipte ilişkileri sil
+                            WITH e, target_doc, r
+                            OPTIONAL MATCH (e)-[old_r:{rel_type}]->(other_doc:Document)
+                            WHERE elementId(other_doc) <> elementId(target_doc)
+                            DELETE old_r
+                            RETURN COUNT(r) as created_relationships, 
+                                   COUNT(DISTINCT e) as processed_entities,
+                                   COUNT(DISTINCT target_doc) as target_documents,
+                                   COLLECT(DISTINCT {{ 
+                                     fileName: target_doc.fileName, 
+                                     documentId: target_doc.id, 
+                                     elementId: elementId(target_doc),
+                                     fileSource: target_doc.fileSource,
+                                     status: target_doc.status
+                                   }})[0..1] as sample_documents
+                            """
+                            
+                            # Sorguyu çalıştır
+                            result = graph.query(create_relationships_query, params={
+                                "source_type": source_node_type,
+                                "target_doc_id": target_doc_element_id
+                            })
+                            
+                        else:
+                            # Diğer entity tiplerine bağlanma - aynı Document'tan gelen entity'ler arası
+                            create_relationships_query = f"""
+                            MATCH (d:Document)<-[:PART_OF]-(c1:Chunk)-[:HAS_ENTITY]->(e1)
+                            MATCH (d)<-[:PART_OF]-(c2:Chunk)-[:HAS_ENTITY]->(e2)
+                            WHERE $source_type IN labels(e1) 
+                              AND $target_type IN labels(e2)
+                              AND e1 <> e2
+                            WITH e1, e2, d
+                            MERGE (e1)-[r:{rel_type}]->(e2)
+                            RETURN COUNT(r) as created_relationships, 
+                                   COUNT(DISTINCT e1) as processed_entities,
+                                   COUNT(DISTINCT d) as target_documents,
+                                   COLLECT(DISTINCT {{ 
+                                     fileName: d.fileName, 
+                                     documentId: d.id, 
+                                     elementId: elementId(d),
+                                     fileSource: d.fileSource,
+                                     status: d.status
+                                   }})[0..5] as sample_documents
+                            """
+                            
+                            # Sorguyu çalıştır
+                            result = graph.query(create_relationships_query, params={
+                                "source_type": source_node_type,
+                                "target_type": target_node_type
+                            })
+                        
+                        logging.info(f"Relationship oluşturma sorgusu ({target_node_type} target): {create_relationships_query}")
+                        logging.info(f"Parametreler: source_type={source_node_type}, target_type={target_node_type}")
+                        
+                        if result:
+                            created_rels = result[0]['created_relationships']
+                            processed_entities = result[0]['processed_entities'] 
+                            target_docs = result[0]['target_documents']
+                            sample_docs = result[0]['sample_documents']
+                            
+                            rule_processed += processed_entities
+                            rule_relationships += created_rels
+                            
+                            if target_node_type == 'Document':
+                                logging.info(f"Kural {rule_index + 1} - {rel_type}: {processed_entities} source entity işlendi, {created_rels} relationship oluşturuldu, {target_docs} Document hedeflendi")
+                            else:
+                                logging.info(f"Kural {rule_index + 1} - {rel_type}: {processed_entities} source entity işlendi, {created_rels} relationship oluşturuldu ({source_node_type} -> {target_node_type})")
+                            
+                            logging.info(f"İşlenen Document örnekleri: {sample_docs}")
+                            
+                            # Document ID mapping'den detay bilgi al
+                            for sample_doc in sample_docs:
+                                file_name = sample_doc.get('fileName')
+                                if file_name in document_id_map:
+                                    doc_info = document_id_map[file_name]
+                                    logging.info(f"  Document: {file_name}")
+                                    logging.info(f"    Status: {sample_doc.get('status')}")
+                                    logging.info(f"    ID: {doc_info.get('documentId')}")
+                                    logging.info(f"    ElementID: {doc_info.get('elementId')}")
+                                    logging.info(f"    Source: {doc_info.get('fileSource')}")
+                        
+                    except Exception as rel_error:
+                        logging.error(f"Relationship oluşturma hatası: {rel_error}")
+                
+                rule_results.append({
+                    "rule_index": rule_index + 1,
+                    "source_node_type": source_node_type,
+                    "target_node_type": target_node_type,
+                    "relationship_types": relationship_types,
+                    "processed_entities": rule_processed,
+                    "created_relationships": rule_relationships
+                })
+                
+                total_processed += rule_processed
+                total_relationships_created += rule_relationships
+                
+                logging.info(f"Kural {rule_index + 1} tamamlandı: {rule_processed} entity, {rule_relationships} relationship")
+                        
+            except Exception as rule_error:
+                logging.error(f"Kural {rule_index + 1} uygulama hatası: {rule_error}")
+                continue
+        
+        # Post-processing sonrası orphan Document node'larını temizle
+        try:
+            logging.info("Orphan Document node'larını temizleme başlıyor...")
+            
+            # Hiçbir chunk'a bağlı olmayan Document node'larını bul ve sil
+            cleanup_query = """
+            MATCH (d:Document)
+            WHERE NOT EXISTS((d)<-[:PART_OF]-(:Chunk))
+            WITH d, count{(d)<-[:PART_OF]-(:Chunk)} as chunk_count
+            WHERE chunk_count = 0
+            DETACH DELETE d
+            RETURN count(d) as deleted_orphan_documents
+            """
+            
+            cleanup_result = graph.query(cleanup_query)
+            deleted_orphans = cleanup_result[0]['deleted_orphan_documents'] if cleanup_result else 0
+            
+            logging.info(f"Silinen orphan Document node sayısı: {deleted_orphans}")
+            
+        except Exception as cleanup_error:
+            logging.error(f"Orphan Document temizleme hatası: {cleanup_error}")
+        
+        
+        result = {
+            "status": "success",
+            "message": f"Post-processing completed successfully",
+            "total_processed_entities": total_processed,
+            "total_created_relationships": total_relationships_created,
+            "processed_files": len(processing_files),  # Tüm dosya sayısı
+            "applied_rules": len(rules_list),
+            "rule_details": rule_results,
+            "document_details": {
+                "total_documents": len(document_id_map),
+                "document_mapping": document_id_map
+            }
+        }
+        
+        logging.info(f"✅ Dinamik post-processing tamamlandı: {total_processed} entity, {total_relationships_created} relationship, {len(processing_files)} dosya üzerinde {len(rules_list)} kural uygulandı")
+        return result
+        
+    except Exception as e:
+        logging.error(f"❌ Dinamik post-processing hatası: {e}")
+        import traceback
+        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
+        return {
+            "status": "error",
+            "message": f"Post-processing failed: {str(e)}",
+            "total_processed_entities": 0,
+            "total_created_relationships": 0,
+            "processed_files": 0,
+            "applied_rules": 0
+        }
+
+
+def get_document_node_id_from_graph(graph, file_name):
+    """
+    Neo4j graph'dan Document node'unun ID'sini alır
+    Document yapısını detaylı analiz eder
+    """
+    logging.info(f"Document node aranıyor - fileName: {file_name}")
+    logging.info(f"Graph object: {graph is not None}")
+    
+    try:
+        if graph:
+            # Önce tüm Document node'larının yapısını analiz et
+            analysis_query = """
+            MATCH (d:Document) 
+            RETURN d.fileName as fileName, 
+                   d.id as id, 
+                   elementId(d) as element_id, 
+                   d.fileSource as fileSource,
+                   d.url as url,
+                   labels(d) as labels,
+                   keys(d) as properties,
+                   properties(d) as allProps
+            LIMIT 10
+            """
+            all_docs = graph.query(analysis_query)
+            logging.info(f"Graph'daki Document node yapısı analizi:")
+            for doc in all_docs:
+                logging.info(f"  Document: {doc}")
+            
+            # Belirli dosyayı ara
+            query = """
+            MATCH (d:Document {fileName: $fileName})
+            RETURN d.id as id, 
+                   elementId(d) as element_id, 
+                   d.fileName as fileName,
+                   d.fileSource as fileSource,
+                   d.url as url,
+                   properties(d) as allProperties
+            LIMIT 1
+            """
+            logging.info(f"Document sorgusu çalıştırılıyor: {query}")
+            logging.info(f"Sorgu parametreleri: fileName = '{file_name}'")
+            
+            result = graph.query(query, params={"fileName": file_name})
+            
+            logging.info(f"Sorgu sonucu: {result}")
+            logging.info(f"Sonuç uzunluğu: {len(result) if result else 0}")
+            
+            if result and len(result) > 0:
+                row = result[0]
+                
+                # Öncelik sırası: id property > element_id > fileName
+                doc_id = row.get('id') or row.get('element_id') or file_name
+                
+                logging.info(f"✅ Graph'dan Document node detayları:")
+                logging.info(f"  fileName: {row.get('fileName')}")
+                logging.info(f"  id property: {row.get('id')}")
+                logging.info(f"  elementId: {row.get('element_id')}")
+                logging.info(f"  fileSource: {row.get('fileSource')}")
+                logging.info(f"  url: {row.get('url')}")
+                logging.info(f"  allProperties: {row.get('allProperties')}")
+                logging.info(f"  Seçilen ID: {doc_id}")
+                
+                return doc_id
+            else:
+                logging.warning(f"❌ Document node bulunamadı: fileName='{file_name}'")
+                
+                # Dosya ismini farklı şekillerde arayalım
+                fuzzy_search_query = """
+                MATCH (d:Document) 
+                WHERE d.fileName CONTAINS $partial_name 
+                   OR $partial_name CONTAINS d.fileName
+                RETURN d.fileName as fileName, 
+                       d.id as id, 
+                       elementId(d) as element_id
+                LIMIT 5
+                """
+                fuzzy_result = graph.query(fuzzy_search_query, params={"partial_name": file_name})
+                if fuzzy_result:
+                    logging.info(f"Benzer dosya isimleri bulundu:")
+                    for doc in fuzzy_result:
+                        logging.info(f"  - {doc}")
+                
+        else:
+            logging.warning("❌ Graph objesi None")
+    except Exception as e:
+        logging.error(f"❌ Graph'dan Document node ID alınamadı: {e}")
+        import traceback
+        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
+    
+    # Fallback: file name'i kullan
+    logging.info(f"🔄 Fallback: file name kullanılıyor: {file_name}")
+    return file_name
+
+
+async def apply_llm_post_processing(model, graph_documents, file_name, graph=None):
+    """
+    LLM tabanlı post-processing ile entity'leri düzeltir.
+    
+    Args:
+        model: LLM model string
+        graph_documents: LLMGraphTransformer'dan gelen GraphDocument listesi 
+        file_name: İşlenen dosya adı
+        
+    Returns:
+        Düzeltilmiş GraphDocument listesi
+    """
+    try:
+        logging.info(f"LLM post-processing başlıyor: {file_name}")
+        
+        # LLM modelini al
+        llm, _ = get_llm(model)
+        
+        # Her GraphDocument için post-processing uygula
+        corrected_documents = []
+        
+        for doc in graph_documents:
+            # Orijinal entity'leri say
+            original_entities_count = len(doc.nodes)
+            original_relationships_count = len(doc.relationships)
+            
+            logging.info(f"Orijinal GraphDocument: {original_entities_count} entity, {original_relationships_count} relationship")
+            
+            # Document ID'yi graph'dan al veya file name'den oluştur
+            document_node_id = get_document_node_id_from_graph(graph, file_name)
+            if document_node_id == file_name:
+                # File name'den Document ID oluştur - Neo4j için güvenli format
+                document_node_id = file_name.replace(" ", "_").replace(".", "_").replace("/", "_").replace("\\", "_")
+            
+            logging.info(f"Document node ID: {document_node_id}")
+            
+            # Mevcut entity'leri JSON formatına çevir
+            entities_data = []
+            relationships_data = []
+            
+            # Node'ları ekle
+            for node in doc.nodes:
+                entities_data.append({
+                    "id": node.id,
+                    "type": node.type,
+                    "properties": dict(node.properties) if node.properties else {}
+                })
+            
+            # Relationship'leri ekle  
+            for rel in doc.relationships:
+                relationships_data.append({
+                    "source": rel.source.id,
+                    "target": rel.target.id,
+                    "type": rel.type,
+                    "properties": dict(rel.properties) if rel.properties else {}
+                })
+            
+            # Orijinal entity'lerin detaylarını logla
+            logging.info(f"Orijinal entities: {[{'id': e['id'], 'type': e['type']} for e in entities_data[:5]]}")
+            logging.info(f"Orijinal relationships: {[{'source': r['source'], 'type': r['type'], 'target': r['target']} for r in relationships_data[:5]]}")
+            
+            # JSON formatında hazırla
+            entities_json = json.dumps({
+                "entities": entities_data,
+                "relationships": relationships_data,
+                "document_name": file_name
+            }, ensure_ascii=False, indent=2)
+            
+            # Post-processing prompt'u ile LLM'ye gönder
+            full_prompt = POST_PROCESSING_PROMPT.format(document_id=document_node_id) + "\n\n" + entities_json
+            
+            logging.info(f"LLM'ye gönderilen prompt uzunluğu: {len(full_prompt)} karakter")
+            logging.info(f"Document ID: {document_node_id}")
+            logging.info(f"=== LLM'YE GÖNDERİLEN TAM PROMPT ===")
+            logging.info(f"POST_PROCESSING_PROMPT:\n{POST_PROCESSING_PROMPT.format(document_id=document_node_id)}")
+            logging.info(f"=== DATA KISMI ===")
+            logging.info(f"Gönderilen JSON (ilk 500 karakter): {entities_json[:500]}...")
+            if len(entities_json) > 500:
+                logging.info(f"JSON'un sonu (son 200 karakter): ...{entities_json[-200:]}")
+            logging.info(f"=== PROMPT BİTTİ ===")
+            
+            # LLM'den düzeltilmiş entity'leri al
+            try:
+                response = await llm.ainvoke(full_prompt)
+                corrected_json = response.content
+                
+                logging.info(f"=== LLM TAM CEVABI ===")
+                logging.info(f"LLM Response uzunluğu: {len(corrected_json)} karakter")
+                logging.info(f"LLM Response:\n{corrected_json}")
+                logging.info(f"=== LLM CEVABI BİTTİ ===")
+                
+                # JSON'u temizle ve extract et
+                corrected_json = extract_json_from_response(corrected_json)
+                logging.info(f"Temizlenmiş JSON: {corrected_json[:300]}..." if len(corrected_json) > 300 else f"Temizlenmiş JSON: {corrected_json}")
+                
+                # JSON parse et
+                corrected_data = json.loads(corrected_json)
+                
+                logging.info(f"Post-processing başarılı: {len(corrected_data.get('entities', []))} entity, {len(corrected_data.get('relationships', []))} relationship")
+                
+                # Düzeltilmiş entity'lerin detaylarını logla
+                corrected_entities = corrected_data.get('entities', [])
+                corrected_relationships = corrected_data.get('relationships', [])
+                
+                logging.info(f"Düzeltilmiş entities: {[{'id': e['id'], 'type': e['type']} for e in corrected_entities[:5]]}")
+                logging.info(f"Düzeltilmiş relationships: {[{'source': r['source'], 'type': r['type'], 'target': r['target']} for r in corrected_relationships[:5]]}")
+                
+                # Değişiklikleri analiz et
+                original_entity_types = [e['type'] for e in entities_data]
+                corrected_entity_types = [e['type'] for e in corrected_entities]
+                
+                added_entities = len(corrected_entities) - len(entities_data)
+                removed_entities = len(entities_data) - len(corrected_entities)
+                
+                logging.info(f"Entity değişiklikleri: +{added_entities}, -{removed_entities}")
+                logging.info(f"Orijinal entity tipleri: {set(original_entity_types)}")
+                logging.info(f"Düzeltilmiş entity tipleri: {set(corrected_entity_types)}")
+                
+                # LLM'nin gerçekten düzeltme yapıp yapmadığını kontrol et
+                if corrected_entities != entities_data:
+                    logging.info("✅ LLM entity'lerde değişiklik yaptı!")
+                else:
+                    logging.info("❌ LLM entity'lerde herhangi bir değişiklik yapmadı")
+                
+                # Düzeltilmiş GraphDocument oluştur
+                from langchain_experimental.graph_transformers.llm import GraphDocument
+                from langchain_community.graphs.graph_document import Node, Relationship
+                
+                corrected_nodes = []
+                corrected_relationships = []
+                
+                # Düzeltilmiş node'ları ekle
+                for entity in corrected_data.get("entities", []):
+                    node = Node(
+                        id=entity["id"],
+                        type=entity["type"],
+                        properties=entity.get("properties", {})
+                    )
+                    corrected_nodes.append(node)
+                
+                # Düzeltilmiş relationship'leri ekle
+                for rel in corrected_data.get("relationships", []):
+                    # Source ve target node'ları bul
+                    source_node = next((n for n in corrected_nodes if n.id == rel["source"]), None)
+                    target_node = next((n for n in corrected_nodes if n.id == rel["target"]), None)
+                    
+                    if source_node and target_node:
+                        relationship = Relationship(
+                            source=source_node,
+                            target=target_node,
+                            type=rel["type"],
+                            properties=rel.get("properties", {})
+                        )
+                        corrected_relationships.append(relationship)
+                
+                # Eğer LLM hiçbir entity döndürmediyse orijinalini kullan
+                if not corrected_nodes and doc.nodes:
+                    logging.warning("LLM hiç entity döndürmedi, orijinal document kullanılıyor")
+                    corrected_documents.append(doc)
+                else:
+                    # Düzeltilmiş GraphDocument oluştur
+                    corrected_doc = GraphDocument(
+                        nodes=corrected_nodes,
+                        relationships=corrected_relationships,
+                        source=doc.source
+                    )
+                    corrected_documents.append(corrected_doc)
+                
+            except json.JSONDecodeError as e:
+                logging.error(f"❌ LLM post-processing JSON parse hatası: {e}")
+                logging.error(f"Problematic JSON (ilk 500 karakter): {corrected_json[:500]}...")
+                logging.error(f"Orijinal entity'ler korunuyor: {original_entities_count} entity, {original_relationships_count} relationship")
+                # Hata durumunda orijinal document'ı kullan
+                corrected_documents.append(doc)
+            except Exception as e:
+                logging.error(f"❌ LLM post-processing genel hatası: {e}")
+                logging.error(f"Response content (ilk 500 karakter): {response.content[:500] if 'response' in locals() else 'No response'}")
+                logging.error(f"Orijinal entity'ler korunuyor: {original_entities_count} entity, {original_relationships_count} relationship")
+                # Hata durumunda orijinal document'ı kullan  
+                corrected_documents.append(doc)
+        
+        logging.info(f"LLM post-processing tamamlandı: {file_name}")
+        return corrected_documents
+        
+    except Exception as e:
+        logging.error(f"LLM post-processing genel hatası: {e}")
+        return graph_documents  # Hata durumunda orijinal döndür
