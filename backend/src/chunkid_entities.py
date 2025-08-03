@@ -87,15 +87,15 @@ def process_chunkids(driver, chunk_ids, entities):
     Processes chunk IDs to retrieve chunk data.
     """
     try:
-        logging.info(f"Starting graph query process for chunk ids: {chunk_ids}")
+        logging.debug(f"Starting graph query process for chunk ids: {chunk_ids}")
         records, summary, keys = driver.execute_query(CHUNK_QUERY, chunksIds=chunk_ids,entityIds=entities["entityids"], relationshipIds=entities["relationshipids"])
         result = process_records(records)
         result["nodes"].extend(records[0]["nodes"])
         result["nodes"] = remove_duplicate_nodes(result["nodes"])
-        logging.info(f"Nodes and relationships are processed")
+        logging.debug(f"Nodes and relationships are processed")
 
         result["chunk_data"] = process_chunk_data(records)
-        logging.info(f"Query process completed successfully for chunk ids: {chunk_ids}")
+        logging.debug(f"Query process completed successfully for chunk ids: {chunk_ids}")
         return result
     except Exception as e:
         logging.error(f"chunkid_entities module: Error processing chunk ids: {chunk_ids}. Error: {e}")
@@ -124,7 +124,7 @@ def process_entityids(driver, entity_ids):
     Processes entity IDs to retrieve local community data.
     """
     try:
-        logging.info(f"Starting graph query process for entity ids: {entity_ids}")
+        logging.debug(f"Starting graph query process for entity ids: {entity_ids}")
         query_body = LOCAL_COMMUNITY_SEARCH_QUERY.format(
             topChunks=LOCAL_COMMUNITY_TOP_CHUNKS,
             topCommunities=LOCAL_COMMUNITY_TOP_COMMUNITIES,
@@ -139,14 +139,14 @@ def process_entityids(driver, entity_ids):
             result["nodes"].extend(records[0]["nodes"])
             result["nodes"] = remove_duplicate_nodes(result["nodes"])
 
-            logging.info(f"Nodes and relationships are processed")
+            logging.debug(f"Nodes and relationships are processed")
 
             result["chunk_data"] = records[0]["chunks"]
             result["community_data"] = records[0]["communities"]
         else:
             result["chunk_data"] = list()
             result["community_data"] = list()
-        logging.info(f"Query process completed successfully for chunk ids: {entity_ids}")
+        logging.debug(f"Query process completed successfully for chunk ids: {entity_ids}")
         return result
     except Exception as e:
         logging.error(f"chunkid_entities module: Error processing entity ids: {entity_ids}. Error: {e}")
@@ -155,14 +155,14 @@ def process_entityids(driver, entity_ids):
 def process_communityids(driver, community_ids):
     """Processes community IDs to retrieve community data."""
     try:
-        logging.info(f"Starting graph query process for community ids: {community_ids}")
+        logging.debug(f"Starting graph query process for community ids: {community_ids}")
         query = GLOBAL_COMMUNITY_DETAILS_QUERY
         records, summary, keys = driver.execute_query(query, communityids=community_ids)
 
         result = {"nodes": [], "relationships": [], "chunk_data": []}
         result["community_data"] = records[0]["communities"] if records else []
 
-        logging.info(f"Query process completed successfully for community ids: {community_ids}")
+        logging.debug(f"Query process completed successfully for community ids: {community_ids}")
         return result
     except Exception as e:
         logging.error(f"chunkid_entities module: Error processing community ids: {community_ids}. Error: {e}")
