@@ -1167,7 +1167,7 @@ def get_chunkId_chunkDoc_list(
         # )
 
         chunks = pages
-        print("chunks: ", chunks)
+        # print("chunks: ", chunks)
         chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks)
         return len(chunks), chunkId_chunkDoc_list
 
