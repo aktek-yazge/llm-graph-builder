@@ -13,12 +13,32 @@ interface EntityRelationshipRule {
 
 // Common node and relationship types
 const commonNodeTypes = [
-  { label: 'Year', value: 'Year' },
+  { label: 'DocumentYear', value: 'DocumentYear' },
+  { label: 'PublishYear', value: 'PublishYear' },
+  { label: 'PolicyStartYear', value: 'PolicyStartYear' },
+  { label: 'PolicyEndYear', value: 'PolicyEndYear' },
+  { label: 'BirthYear', value: 'BirthYear' },
+  { label: 'RegistrationYear', value: 'RegistrationYear' },
+  { label: 'VehicleModelYear', value: 'VehicleModelYear' },
+  { label: 'FirstRegistrationYear', value: 'FirstRegistrationYear' },
   { label: 'Date', value: 'Date' },
   { label: 'Person', value: 'Person' },
   { label: 'Company', value: 'Company' },
   { label: 'Location', value: 'Location' },
-  { label: 'Address', value: 'Address' },
+  { label: 'HomeAddress', value: 'HomeAddress' },
+  { label: 'MailingAddress', value: 'MailingAddress' },
+  { label: 'WorkAddress', value: 'WorkAddress' },
+  { label: 'BillingAddress', value: 'BillingAddress' },
+  { label: 'PropertyAddress', value: 'PropertyAddress' },
+  { label: 'BuildingAddress', value: 'BuildingAddress' },
+  { label: 'BusinessAddress', value: 'BusinessAddress' },
+  { label: 'WarehouseAddress', value: 'WarehouseAddress' },
+  { label: 'VehicleRegistrationAddress', value: 'VehicleRegistrationAddress' },
+  { label: 'GarageAddress', value: 'GarageAddress' },
+  { label: 'AccidentAddress', value: 'AccidentAddress' },
+  { label: 'CompanyAddress', value: 'CompanyAddress' },
+  { label: 'BranchAddress', value: 'BranchAddress' },
+  { label: 'ClaimAddress', value: 'ClaimAddress' },
   { label: 'PolicyNumber', value: 'PolicyNumber' },
   { label: 'IdentityNumber', value: 'IdentityNumber' },
   { label: 'PlateNumber', value: 'PlateNumber' },
@@ -34,8 +54,15 @@ const commonNodeTypes = [
 ];
 
 const commonRelationshipTypes = [
+  { label: 'DOCUMENT_YEAR', value: 'DOCUMENT_YEAR' },
+  { label: 'PUBLISHED_IN', value: 'PUBLISHED_IN' },
+  { label: 'POLICY_STARTS_IN', value: 'POLICY_STARTS_IN' },
+  { label: 'POLICY_ENDS_IN', value: 'POLICY_ENDS_IN' },
+  { label: 'BORN_IN', value: 'BORN_IN' },
+  { label: 'REGISTERED_IN', value: 'REGISTERED_IN' },
+  { label: 'MODEL_YEAR', value: 'MODEL_YEAR' },
+  { label: 'FIRST_REGISTERED_IN', value: 'FIRST_REGISTERED_IN' },
   { label: 'OCCURS_IN', value: 'OCCURS_IN' },
-  { label: 'HAS_YEAR', value: 'HAS_YEAR' },
   { label: 'HAS_DATE', value: 'HAS_DATE' },
   { label: 'BELONGS_TO', value: 'BELONGS_TO' },
   { label: 'LOCATED_IN', value: 'LOCATED_IN' },
@@ -59,9 +86,9 @@ export default function EntityRelationshipPostProcessing({ isEnabled }: EntityRe
   const addRule = () => {
     const newRule: EntityRelationshipRule = {
       id: Date.now().toString(),
-      sourceNodeType: 'Year',
+      sourceNodeType: 'DocumentYear',
       targetNodeType: 'Document',
-      relationshipType: 'OCCURS_IN',
+      relationshipType: 'DOCUMENT_YEAR',
       removeExistingRelationships: false,
     };
     setEntityRelationshipRules([...entityRelationshipRules, newRule]);
@@ -75,9 +102,9 @@ export default function EntityRelationshipPostProcessing({ isEnabled }: EntityRe
   // Update rule
   const updateRule = (ruleId: string, updates: Partial<EntityRelationshipRule>) => {
     setEntityRelationshipRules(
-      entityRelationshipRules.map((rule: EntityRelationshipRule) =>
-        (rule.id === ruleId ? { ...rule, ...updates } : rule)
-      )
+      entityRelationshipRules.map((rule: EntityRelationshipRule) => {
+        return rule.id === ruleId ? { ...rule, ...updates } : rule;
+      })
     );
   };
 

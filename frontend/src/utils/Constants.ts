@@ -250,7 +250,7 @@ export const POST_PROCESSING_JOBS: { title: string; description: string }[] = [
   {
     title: 'entity_relationship_post_processing',
     description:
-      'Connect specific entity types to target nodes with defined relationships. Useful for linking temporal entities like Year nodes to Document nodes.',
+      'Connect specific entity types to target nodes with defined relationships. Useful for linking temporal entities like DocumentYear, PolicyStartYear nodes to Document nodes.',
   },
 ];
 export const RETRY_OPIONS = [

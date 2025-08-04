@@ -369,8 +369,19 @@ VECTOR_GRAPH_SEARCH_QUERY_PREFIX = """
 WITH node as chunk, score
 // find the document of the chunk
 MATCH (chunk)-[:PART_OF]->(d:Document)
-// aggregate chunk-details
-WITH d, collect(DISTINCT {chunk: chunk, score: score}) AS chunks, avg(score) as avg_score
+
+// En yüksek skoru alan chunk'ların SIMILAR chunk'larını da dahil et (maksimum 2 similar chunk per ana chunk)
+OPTIONAL MATCH (chunk)-[sim:SIMILAR]-(similarChunk:Chunk)
+WHERE similarChunk.embedding IS NOT NULL
+WITH d, chunk, score, similarChunk, sim
+ORDER BY sim.score DESC
+WITH d, chunk, score, collect(similarChunk)[0..2] AS limitedSimilarChunks
+
+// aggregate chunk-details (ana chunk + limited similar chunks)
+WITH d, 
+     collect(DISTINCT {chunk: chunk, score: score}) + 
+     [sc IN limitedSimilarChunks | {chunk: sc, score: coalesce(score * 0.8, 0.5)}] AS chunks, 
+     avg(score) as avg_score
 // fetch entities
 CALL { WITH chunks
 UNWIND chunks as chunkScore
@@ -934,12 +945,93 @@ Use these rules to group and name categories accurately without introducing erro
 
 ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 
-**YEAR EXTRACTION - CRITICAL REQUIREMENT:**
-You MUST extract Year entities from all dates in the document. This is mandatory for temporal analysis.
-- Extract from: "Tanzim Tarihi", "Başlama Tarihi", "Poliçe Tarihi"
-- Examples requiring Year extraction:
-  * "Tanzim Tarihi : 02.02.2023" → Extract "2023" as Year entity
-  * "Başlama Tarihi: 12.02.2023" → Extract "2023" as Year entity  
+**YEAR EXTRACTION - CRITICAL REQUIREMENT (DALLANDIRILMIŞ YAKLIŞIM):**
+YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşımı takip etmelidir:
+
+**1. YIL TESPİTİ (MANDATORY DETECTION):**
+   a) TARİH ALANLARINDAN YIL ÇIKARIMI:
+      - "Tanzim Tarihi" / "Issue Date" → Belge tanzim yılı
+      - "Başlama Tarihi" / "Start Date" → Poliçe başlama yılı
+      - "Bitiş Tarihi" / "End Date" → Poliçe bitiş yılı
+      - "Doğum Tarihi" / "Birth Date" → Doğum yılı
+      - "Kayıt Tarihi" / "Registration Date" → Kayıt yılı
+   
+   b) TARİH FORMATLARINDAN YIL ÇIKARIMI:
+      - DD.MM.YYYY formatı: "02.02.2023" → "2023"
+      - DD/MM/YYYY formatı: "02/02/2023" → "2023"
+      - YYYY-MM-DD formatı: "2023-02-02" → "2023"
+      - Tam tarih ifadeleri: "2 Şubat 2023" → "2023"
+
+**2. YIL NODE KATEGORİLERİ (MANDATORY CATEGORIZATION):**
+   a) BELGE YILLARI:
+      - DocumentYear: Sadece Belgenin tanzim/yayın/oluşturulma yılı
+      - PublishYear: Belgenin yayımlanma/düzenlenme yılı
+   
+   b) POLİÇE YILLARI:
+      - PolicyStartYear: Poliçenin başlama yılı
+      - PolicyEndYear: Poliçenin bitiş yılı
+   
+   c) KİŞİSEL YILLAR:
+      - BirthYear: Doğum yılı
+      - RegistrationYear: Kayıt yılı
+   
+   d) ARAÇ YILLARI (eğer varsa):
+      - VehicleModelYear: Araç model yılı
+      - FirstRegistrationYear: İlk tescil yılı
+
+**3. YIL NODE ÖRNEKLERİ (DALLANDIRILMIŞ):**
+   - Tanzim Tarihi: 02.02.2023 → DocumentYear node "2023"
+   - Başlama Tarihi: 12.02.2023 → PolicyStartYear node "2023", DocumentYear node "2023"
+   - Bitiş Tarihi: 12.02.2024 → PolicyEndYear node "2024"
+   - Doğum Tarihi: 15.05.1985 → BirthYear node "1985"
+   - Model Yılı: 2020 → VehicleModelYear node "2020"
+   - Yayın Tarihi: 10.01.2023 → PublishYear node "2023"
+
+**4. YIL NODE İLİŞKİLERİ (MANDATORY RELATIONSHIPS):**
+   - DocumentYear entities Document node'una DOCUMENT_YEAR relationshipi ile bağlanmalı
+   - PolicyStartYear entities Policy node'una POLICY_STARTS_IN relationshipi ile bağlanmalı
+   - PolicyEndYear entities Policy node'una POLICY_ENDS_IN relationshipi ile bağlanmalı
+   - BirthYear entities Person node'una BORN_IN relationshipi ile bağlanmalı
+   - VehicleModelYear entities Vehicle node'una MODEL_YEAR relationshipi ile bağlanmalı
+   - PublishYear entities Document node'una PUBLISHED_IN relationshipi ile bağlanmalı
+
+**5. ADRES NODE KATEGORİLERİ (MANDATORY ADDRESS CATEGORIZATION):**
+   a) KİŞİSEL ADRESLER:
+      - HomeAddress: Ev adresi / İkamet adresi
+      - MailingAddress: Posta adresi / Yazışma adresi
+      - WorkAddress: İş adresi / Çalışma yeri adresi
+      - BillingAddress: Fatura adresi
+   
+   b) SİGORTA VARLİK ADRESLERİ:
+      - PropertyAddress: Sigortalı gayrimenkul adresi
+      - BuildingAddress: Bina adresi / Yapı adresi
+      - BusinessAddress: İşyeri adresi / Ticari adres
+      - WarehouseAddress: Depo adresi
+   
+   c) ARAÇ VE ULAŞIM ADRESLERİ:
+      - VehicleRegistrationAddress: Araç tescil adresi
+      - GarageAddress: Garaj adresi / Park yeri
+      - AccidentAddress: Kaza yeri adresi
+   
+   d) SİGORTA ŞİRKETİ ADRESLERİ:
+      - CompanyAddress: Sigorta şirketi merkez adresi
+      - BranchAddress: Şube adresi / Acente adresi
+      - ClaimAddress: Hasar bildirim adresi
+
+**6. ADRES NODE ÖRNEKLERİ (DALLANDIRILMIŞ):**
+   - "Ev Adresi: Atatürk Mah. Cumhuriyet Cad. No:15 Kadıköy/İstanbul" → HomeAddress node
+   - "İş Adresi: Levent Mah. Büyükdere Cad. No:100 Şişli/İstanbul" → WorkAddress node
+   - "Sigortalı Gayrimenkul: Nişantaşı Mah. Vali Konağı Cad. No:25 Şişli/İstanbul" → PropertyAddress node
+   - "Araç Tescil Adresi: Güneşli Mah. E-5 Karayolu Cad. No:45 Bağcılar/İstanbul" → VehicleRegistrationAddress node
+   - "Şirket Adresi: Maslak Mah. Büyükdere Cad. No:255 Sarıyer/İstanbul" → CompanyAddress node
+
+**7. ADRES NODE İLİŞKİLERİ (MANDATORY ADDRESS RELATIONSHIPS):**
+   - HomeAddress entities Person node'una LIVES_AT relationshipi ile bağlanmalı
+   - WorkAddress entities Person node'una WORKS_AT relationshipi ile bağlanmalı
+   - PropertyAddress entities Property node'una LOCATED_AT relationshipi ile bağlanmalı
+   - VehicleRegistrationAddress entities Vehicle node'una REGISTERED_AT relationshipi ile bağlanmalı
+   - CompanyAddress entities Company node'una HEADQUARTERED_AT relationshipi ile bağlanmalı
+   - BranchAddress entities Company node'una HAS_BRANCH_AT relationshipi ile bağlanmalı
 
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
 - NEVER extract "Document" as any entity type or node
