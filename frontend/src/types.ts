@@ -86,8 +86,6 @@ export type ExtractParams = Pick<CustomFile, 'wikiQuery' | 'model' | 'sourceUrl'
   gcs_project_id?: string;
   retry_condition: string;
   additional_instructions?: string;
-  enable_post_processing?: boolean;
-  post_processing_rules?: string;
 } & { [key: string]: any };
 
 export type UploadParams = {
@@ -910,18 +908,6 @@ export interface FileContextType {
   setPostProcessingVal: Dispatch<SetStateAction<boolean>>;
   additionalInstructions: string;
   setAdditionalInstructions: Dispatch<SetStateAction<string>>;
-  // Entity Relationship Post-Processing
-  entitySourceNodeType: string;
-  setEntitySourceNodeType: Dispatch<SetStateAction<string>>;
-  entityTargetNodeType: string;
-  setEntityTargetNodeType: Dispatch<SetStateAction<string>>;
-  entityRelationshipType: string;
-  setEntityRelationshipType: Dispatch<SetStateAction<string>>;
-  removeExistingRelationships: boolean;
-  setRemoveExistingRelationships: Dispatch<SetStateAction<boolean>>;
-  // Multiple Entity Relationship Rules
-  entityRelationshipRules: EntityRelationshipRule[];
-  setEntityRelationshipRules: Dispatch<SetStateAction<EntityRelationshipRule[]>>;
   // all nodes and all patterns
   allPatterns: string[];
   setAllPatterns: Dispatch<SetStateAction<string[]>>;
@@ -985,18 +971,23 @@ export interface FileContextType {
   setImporterRels: Dispatch<SetStateAction<OptionType[]>>;
   importerPattern: string[];
   setImporterPattern: Dispatch<SetStateAction<string[]>>;
+
+  // Entity Relationship Post-Processing
+  entityRelationshipRules: EntityRelationshipRule[];
+  setEntityRelationshipRules: Dispatch<SetStateAction<EntityRelationshipRule[]>>;
 }
-export declare type Side = 'top' | 'right' | 'bottom' | 'left';
 
-export type EntityType = 'node' | 'relationship';
-
-export interface EntityRelationshipRule {
+export type EntityRelationshipRule = {
   id: string;
   sourceNodeType: string;
   targetNodeType: string;
   relationshipType: string;
   removeExistingRelationships: boolean;
-}
+};
+
+export declare type Side = 'top' | 'right' | 'bottom' | 'left';
+
+export type EntityType = 'node' | 'relationship';
 
 export type BasicRelationship = {
   id: string;

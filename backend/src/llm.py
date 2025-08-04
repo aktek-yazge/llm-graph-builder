@@ -551,31 +551,200 @@ def apply_dynamic_entity_post_processing(graph, rules_list, target_file_names=No
                                 logging.warning(f"İşlenen dosyalar için Document node bulunamadı: {file_names}")
                                 continue
                             
-                            # Birden fazla dosya işleniyorsa ilkini seç (genellikle tek dosya olur)
-                            target_doc_info = target_docs_result[0]
+                            # GÜVENL İ DOCUMENT SEÇİM İ: Sadece işlenen dosyayla eşleşeni seç
+                            target_doc_info = None
+                            for doc_result in target_docs_result:
+                                doc_file_name = doc_result['fileName']
+                                if any(target_file in doc_file_name or doc_file_name in target_file for target_file in file_names):
+                                    target_doc_info = doc_result
+                                    break
+                            
+                            if not target_doc_info:
+                                logging.error(f"Hedef dosya için Document node bulunamadı! Aranan: {file_names}, Bulunan: {[r['fileName'] for r in target_docs_result]}")
+                                continue
+                            
                             target_doc_element_id = target_doc_info['documentElementId']
                             target_file_name = target_doc_info['fileName']
                             
                             logging.info(f"Hedef Document node: {target_file_name} (ID: {target_doc_element_id})")
+                            logging.info(f"Aranan dosya isimleri: {file_names}")
+                            logging.info(f"Seçilen Document eşleşmesi: {target_file_name}")
+                            
+                            # Önce yapıyı analiz edelim - Graph'daki entity'leri incele
+                            structure_analysis_query = f"""
+                            MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                            WHERE elementId(target_doc) = $target_doc_id
+                            RETURN COUNT(DISTINCT e) as total_entities,
+                                   COUNT(DISTINCT c) as total_chunks,
+                                   COLLECT(DISTINCT labels(e)) as all_entity_labels,
+                                   COLLECT(DISTINCT e.id)[0..5] as sample_entity_ids,
+                                   COLLECT(DISTINCT e.name)[0..5] as sample_entity_names,
+                                   COLLECT(DISTINCT {{
+                                     entityId: e.id,
+                                     entityName: e.name,
+                                     entityLabels: labels(e),
+                                     chunkId: c.id
+                                   }})[0..10] as entity_chunk_mapping
+                            """
+                            
+                            analysis_result = graph.query(structure_analysis_query, params={"target_doc_id": target_doc_element_id})
+                            
+                            if analysis_result:
+                                analysis = analysis_result[0]
+                                logging.info(f"🔍 Graph yapısı analizi:")
+                                logging.info(f"  - Toplam entity sayısı: {analysis['total_entities']}")
+                                logging.info(f"  - Toplam chunk sayısı: {analysis['total_chunks']}")
+                                logging.info(f"  - Tüm entity label'ları: {analysis['all_entity_labels']}")
+                                logging.info(f"  - Örnek entity ID'leri: {analysis['sample_entity_ids']}")
+                                logging.info(f"  - Örnek entity isimleri: {analysis['sample_entity_names']}")
+                                logging.info(f"  - Entity-Chunk mapping örnekleri:")
+                                for mapping in analysis['entity_chunk_mapping']:
+                                    logging.info(f"    * Entity: {mapping['entityId']} ({mapping['entityName']}) - Labels: {mapping['entityLabels']} - Chunk: {mapping['chunkId']}")
+                            
+                            # Spesifik source_type entity'lerini kontrol et
+                            source_type_analysis_query = f"""
+                            MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                            WHERE elementId(target_doc) = $target_doc_id
+                              AND $source_type IN labels(e)
+                            RETURN COUNT(e) as matching_entities,
+                                   COLLECT(DISTINCT {{
+                                     entityId: e.id,
+                                     entityName: e.name,
+                                     entityLabels: labels(e),
+                                     chunkId: c.id,
+                                     chunkText: substring(c.text, 0, 100) + "..."
+                                   }})[0..5] as matching_entity_details
+                            """
+                            
+                            source_analysis_result = graph.query(source_type_analysis_query, params={
+                                "target_doc_id": target_doc_element_id,
+                                "source_type": source_node_type
+                            })
+                            
+                            if source_analysis_result:
+                                source_analysis = source_analysis_result[0]
+                                logging.info(f"🎯 {source_node_type} entity analizi:")
+                                logging.info(f"  - Eşleşen {source_node_type} entity sayısı: {source_analysis['matching_entities']}")
+                                logging.info(f"  - {source_node_type} entity detayları:")
+                                for entity_detail in source_analysis['matching_entity_details']:
+                                    logging.info(f"    * ID: {entity_detail['entityId']}")
+                                    logging.info(f"      Name: {entity_detail['entityName']}")
+                                    logging.info(f"      Labels: {entity_detail['entityLabels']}")
+                                    logging.info(f"      Chunk ID: {entity_detail['chunkId']}")
+                                    logging.info(f"      Chunk Text: {entity_detail['chunkText']}")
+                                    logging.info(f"      ---")
+                            
+                            # Mevcut relationship'leri kontrol et
+                            existing_rel_check_query = f"""
+                            MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                            WHERE elementId(target_doc) = $target_doc_id
+                              AND $source_type IN labels(e)
+                            OPTIONAL MATCH (e)-[existing_rel:{rel_type}]->(target_doc)
+                            RETURN COUNT(e) as total_source_entities,
+                                   COUNT(existing_rel) as existing_relationships,
+                                   COLLECT(CASE WHEN existing_rel IS NOT NULL THEN {{
+                                     entityId: e.id,
+                                     entityName: e.name,
+                                     relationshipType: type(existing_rel),
+                                     targetFileName: target_doc.fileName
+                                   }} END) as entities_with_existing_rel,
+                                   COLLECT(CASE WHEN existing_rel IS NULL THEN {{
+                                     entityId: e.id,
+                                     entityName: e.name,
+                                     entityLabels: labels(e)
+                                   }} END) as entities_without_rel
+                            """
+                            
+                            existing_rel_result = graph.query(existing_rel_check_query, params={
+                                "target_doc_id": target_doc_element_id,
+                                "source_type": source_node_type
+                            })
+                            
+                            if existing_rel_result:
+                                rel_check = existing_rel_result[0]
+                                logging.info(f"🔗 Mevcut {rel_type} relationship durumu:")
+                                logging.info(f"  - Toplam {source_node_type} entity: {rel_check['total_source_entities']}")
+                                logging.info(f"  - Mevcut {rel_type} relationship: {rel_check['existing_relationships']}")
+                                
+                                entities_with_rel = [x for x in rel_check['entities_with_existing_rel'] if x]
+                                entities_without_rel = [x for x in rel_check['entities_without_rel'] if x]
+                                
+                                if entities_with_rel:
+                                    logging.info(f"  - Zaten {rel_type} relationship'i olan entity'ler:")
+                                    for entity in entities_with_rel[:3]:
+                                        logging.info(f"    * {entity['entityId']} ({entity['entityName']}) -> {entity['targetFileName']}")
+                                
+                                if entities_without_rel:
+                                    logging.info(f"  - {rel_type} relationship'i olmayan entity'ler:")
+                                    for entity in entities_without_rel[:3]:
+                                        logging.info(f"    * {entity['entityId']} ({entity['entityName']}) - Labels: {entity['entityLabels']}")
+                                else:
+                                    logging.warning(f"  ⚠️ Hiç relationship olmayan {source_node_type} entity bulunamadı!")
+                            
+                            # DETAYLI DUPLICATE ENTITY KONTROLÜ VE ANALİZİ
+                            duplicate_entity_analysis_query = f"""
+                            MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                            WHERE elementId(target_doc) = $target_doc_id
+                              AND $source_type IN labels(e)
+                            WITH e, target_doc, 
+                                 COLLECT(DISTINCT c.id) as chunk_ids,
+                                 COUNT(DISTINCT c) as chunk_count
+                            RETURN e.id as entityId,
+                                   e.name as entityName,
+                                   elementId(e) as entityElementId,
+                                   labels(e) as entityLabels,
+                                   chunk_ids,
+                                   chunk_count,
+                                   properties(e) as entityProperties,
+                                   EXISTS((e)-[:{rel_type}]->(target_doc)) as has_existing_relationship
+                            ORDER BY e.name, e.id
+                            """
+                            
+                            duplicate_analysis_result = graph.query(duplicate_entity_analysis_query, params={
+                                "target_doc_id": target_doc_element_id,
+                                "source_type": source_node_type
+                            })
+                            
+                            if duplicate_analysis_result:
+                                logging.info(f"🔍 DETAYLI {source_node_type} ENTITY ANALİZİ:")
+                                entity_id_groups = {}
+                                for entity in duplicate_analysis_result:
+                                    # Entity ID'sine göre grupla (name null olabilir)
+                                    entity_id = entity['entityId'] 
+                                    entity_name = entity['entityName'] or f"ID_{entity_id}"  # null ise ID kullan
+                                    
+                                    if entity_id not in entity_id_groups:
+                                        entity_id_groups[entity_id] = entity
+                                
+                                # Her entity için ayrı log
+                                for entity_id, entity in entity_id_groups.items():
+                                    entity_name = entity['entityName'] or f"ID_{entity_id}"
+                                    logging.info(f"  ✅ ENTITY - Name: '{entity_name}' (ID: {entity_id})")
+                                    logging.info(f"    ElementID: {entity['entityElementId']}")
+                                    logging.info(f"    Labels: {entity['entityLabels']}")
+                                    logging.info(f"    Chunk IDs: {entity['chunk_ids']}")
+                                    logging.info(f"    Has Relationship: {entity['has_existing_relationship']}")
+                                    logging.info(f"    Properties: {entity['entityProperties']}")
+                                
+                                # Gerçek duplicate kontrolü (aynı ID'ye sahip birden fazla entity)
+                                duplicate_count = len(duplicate_analysis_result) - len(entity_id_groups)
+                                if duplicate_count > 0:
+                                    logging.warning(f"  ⚠️ GERÇEK DUPLICATE VAR: {duplicate_count} adet tekrar eden entity ID'si")
+                                else:
+                                    logging.info(f"  ✅ DUPLICATE YOK: {len(entity_id_groups)} unique entity bulundu")
                             
                             # SADECE bu Document node'unu hedefle ve mevcut Document node'unu güncelleme
                             # Entity'ler SADECE kendi chunk'larından geldikleri Document'a bağlanmalı
+                            # HER UNIQUE ENTITY ID İÇİN relationship oluştur (name'e değil ID'ye bak)
                             create_relationships_query = f"""
                             MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
                             WHERE elementId(target_doc) = $target_doc_id
                               AND $source_type IN labels(e)
                               AND NOT EXISTS((e)-[:{rel_type}]->(target_doc))
-                            WITH e, target_doc, c
-                            // Sadece bu entity'nin chunk'ının ait olduğu Document'a bağla
-                            WHERE (c)-[:PART_OF]->(target_doc)
+                            // Her unique entity ID için relationship oluştur (name değil ID önemli)
                             MERGE (e)-[r:{rel_type}]->(target_doc)
                             SET r.created_by = 'post_processing'
                             SET r.created_at = datetime()
-                            // Diğer Document node'larına olan aynı tipte ilişkileri sil
-                            WITH e, target_doc, r
-                            OPTIONAL MATCH (e)-[old_r:{rel_type}]->(other_doc:Document)
-                            WHERE elementId(other_doc) <> elementId(target_doc)
-                            DELETE old_r
                             RETURN COUNT(r) as created_relationships, 
                                    COUNT(DISTINCT e) as processed_entities,
                                    COUNT(DISTINCT target_doc) as target_documents,
@@ -585,7 +754,13 @@ def apply_dynamic_entity_post_processing(graph, rules_list, target_file_names=No
                                      elementId: elementId(target_doc),
                                      fileSource: target_doc.fileSource,
                                      status: target_doc.status
-                                   }})[0..1] as sample_documents
+                                   }})[0..1] as sample_documents,
+                                   COLLECT(DISTINCT {{
+                                     entityId: e.id,
+                                     entityName: COALESCE(e.name, 'ID_' + e.id),
+                                     entityElementId: elementId(e),
+                                     relationshipType: '{rel_type}'
+                                   }}) as processed_entity_details
                             """
                             
                             # Sorguyu çalıştır
@@ -630,11 +805,52 @@ def apply_dynamic_entity_post_processing(graph, rules_list, target_file_names=No
                             processed_entities = result[0]['processed_entities'] 
                             target_docs = result[0]['target_documents']
                             sample_docs = result[0]['sample_documents']
+                            processed_entity_details = result[0].get('processed_entity_details', [])
                             
                             rule_processed += processed_entities
                             rule_relationships += created_rels
                             
+                            logging.info(f"📊 Relationship oluşturma sonuçları:")
+                            logging.info(f"  - İşlenen entity sayısı: {processed_entities}")
+                            logging.info(f"  - Oluşturulan relationship sayısı: {created_rels}")
+                            logging.info(f"  - Hedeflenen Document sayısı: {target_docs}")
+                            
+                            # İşlenen entity'lerin detaylarını logla
+                            if processed_entity_details:
+                                logging.info(f"  - İşlenen entity detayları:")
+                                for detail in processed_entity_details:
+                                    logging.info(f"    * {detail['entityName']} (ID: {detail['entityId']}, ElementID: {detail['entityElementId']}) -> {detail['relationshipType']}")
+                            
                             if target_node_type == 'Document':
+                                if created_rels == 0 and processed_entities > 0:
+                                    logging.error(f"❌ SORUN: {processed_entities} {source_node_type} entity bulundu ama hiç {rel_type} relationship oluşturulamadı!")
+                                    
+                                    # Kısa debug - sadece kritik bilgiler
+                                    debug_query = f"""
+                                    MATCH (target_doc:Document)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+                                    WHERE elementId(target_doc) = $target_doc_id
+                                      AND $source_type IN labels(e)
+                                    RETURN COUNT(e) as total_entities,
+                                           COUNT(CASE WHEN EXISTS((e)-[:{rel_type}]->(target_doc)) THEN 1 END) as entities_with_existing_rel,
+                                           COUNT(CASE WHEN NOT EXISTS((e)-[:{rel_type}]->(target_doc)) THEN 1 END) as entities_without_rel
+                                    """
+                                    debug_result = graph.query(debug_query, params={
+                                        "target_doc_id": target_doc_element_id,
+                                        "source_type": source_node_type
+                                    })
+                                    if debug_result:
+                                        debug = debug_result[0]
+                                        logging.error(f"  🔍 Kısa Debug:")
+                                        logging.error(f"    - Toplam {source_node_type}: {debug['total_entities']}")
+                                        logging.error(f"    - Mevcut rel. olan: {debug['entities_with_existing_rel']}")
+                                        logging.error(f"    - Rel. olmayan: {debug['entities_without_rel']}")
+                                    
+                                elif created_rels != processed_entities:
+                                    logging.warning(f"⚠️ UYARI: {processed_entities} entity bulundu ama sadece {created_rels} relationship oluşturuldu!")
+                                    logging.warning(f"  Bu genellikle duplicate entity'ler veya mevcut relationship'ler nedeniyle olur.")
+                                elif created_rels > 0:
+                                    logging.info(f"✅ Başarılı: {created_rels} {rel_type} relationship oluşturuldu!")
+                                
                                 logging.info(f"Kural {rule_index + 1} - {rel_type}: {processed_entities} source entity işlendi, {created_rels} relationship oluşturuldu, {target_docs} Document hedeflendi")
                             else:
                                 logging.info(f"Kural {rule_index + 1} - {rel_type}: {processed_entities} source entity işlendi, {created_rels} relationship oluşturuldu ({source_node_type} -> {target_node_type})")
@@ -651,9 +867,17 @@ def apply_dynamic_entity_post_processing(graph, rules_list, target_file_names=No
                                     logging.info(f"    ID: {doc_info.get('documentId')}")
                                     logging.info(f"    ElementID: {doc_info.get('elementId')}")
                                     logging.info(f"    Source: {doc_info.get('fileSource')}")
+                        else:
+                            logging.error(f"❌ Relationship sorgusu hiç sonuç döndürmedi!")
+                            logging.error(f"  - Source type: {source_node_type}")
+                            logging.error(f"  - Relationship type: {rel_type}")
+                            logging.error(f"  - Target doc ID: {target_doc_element_id}")
+                            logging.error(f"  - Query: {create_relationships_query}")
                         
                     except Exception as rel_error:
                         logging.error(f"Relationship oluşturma hatası: {rel_error}")
+                        import traceback
+                        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
                 
                 rule_results.append({
                     "rule_index": rule_index + 1,
