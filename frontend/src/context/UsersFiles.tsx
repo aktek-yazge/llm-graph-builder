@@ -83,18 +83,18 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
   const [additionalInstructions, setAdditionalInstructions] = useState<string>('');
 
   // Entity Relationship Post-Processing States
-  const [entitySourceNodeType, setEntitySourceNodeType] = useState<string>('Year');
+  const [entitySourceNodeType, setEntitySourceNodeType] = useState<string>('DocumentYear');
   const [entityTargetNodeType, setEntityTargetNodeType] = useState<string>('Document');
-  const [entityRelationshipType, setEntityRelationshipType] = useState<string>('OCCURS_IN');
+  const [entityRelationshipType, setEntityRelationshipType] = useState<string>('DOCUMENT_YEAR');
   const [removeExistingRelationships, setRemoveExistingRelationships] = useState<boolean>(false);
 
   // Multiple Entity Relationship Rules
   const [entityRelationshipRules, setEntityRelationshipRules] = useState<EntityRelationshipRule[]>([
     {
       id: '1',
-      sourceNodeType: 'Year',
+      sourceNodeType: 'DocumentYear',
       targetNodeType: 'Document',
-      relationshipType: 'OCCURS_IN',
+      relationshipType: 'DOCUMENT_YEAR',
       removeExistingRelationships: false,
     },
   ]);

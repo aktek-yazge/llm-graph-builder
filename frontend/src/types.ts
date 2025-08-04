@@ -973,6 +973,14 @@ export interface FileContextType {
   setImporterPattern: Dispatch<SetStateAction<string[]>>;
 
   // Entity Relationship Post-Processing
+  entitySourceNodeType: string;
+  setEntitySourceNodeType: Dispatch<SetStateAction<string>>;
+  entityTargetNodeType: string;
+  setEntityTargetNodeType: Dispatch<SetStateAction<string>>;
+  entityRelationshipType: string;
+  setEntityRelationshipType: Dispatch<SetStateAction<string>>;
+  removeExistingRelationships: boolean;
+  setRemoveExistingRelationships: Dispatch<SetStateAction<boolean>>;
   entityRelationshipRules: EntityRelationshipRule[];
   setEntityRelationshipRules: Dispatch<SetStateAction<EntityRelationshipRule[]>>;
 }
