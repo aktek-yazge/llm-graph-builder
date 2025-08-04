@@ -161,63 +161,8 @@ const Content: React.FC<ContentProps> = ({
     if (processedCount == batchSize && !isReadOnlyUser) {
       handleGenerateGraph([], true);
     }
-    if (processedCount === 1 && queue.isEmpty()) {
-      (async () => {
-        showNormalToast(
-          <PostProcessingToast
-            isGdsActive={isGdsActive}
-            postProcessingTasks={postProcessingTasks}
-            isSchema={hasSelections}
-          />
-        );
-        try {
-          const payload = isGdsActive
-            ? hasSelections
-              ? postProcessingTasks.filter((task) => task !== 'graph_schema_consolidation')
-              : postProcessingTasks
-            : hasSelections
-              ? postProcessingTasks.filter(
-                  (task) => task !== 'graph_schema_consolidation' && task !== 'enable_communities'
-                )
-              : postProcessingTasks.filter((task) => task !== 'enable_communities');
-          if (payload.length) {
-            const response = await postProcessing(payload);
-            if (response.data.status === 'Success') {
-              const communityfiles = response.data?.data;
-              if (Array.isArray(communityfiles) && communityfiles.length) {
-                communityfiles?.forEach((c: any) => {
-                  setFilesData((prev) => {
-                    return prev.map((f) => {
-                      if (f.name === c.filename) {
-                        return {
-                          ...f,
-                          chunkNodeCount: c.chunkNodeCount ?? 0,
-                          entityNodeCount: c.entityNodeCount ?? 0,
-                          communityNodeCount: c.communityNodeCount ?? 0,
-                          chunkRelCount: c.chunkRelCount ?? 0,
-                          entityEntityRelCount: c.entityEntityRelCount ?? 0,
-                          communityRelCount: c.communityRelCount ?? 0,
-                          nodesCount: c.nodeCount,
-                          relationshipsCount: c.relationshipCount,
-                        };
-                      }
-                      return f;
-                    });
-                  });
-                });
-              }
-              showSuccessToast('All Q&A functionality is available now.');
-            } else {
-              throw new Error(response.data.error);
-            }
-          }
-        } catch (error) {
-          if (error instanceof Error) {
-            showSuccessToast(error.message);
-          }
-        }
-      })();
-    }
+    // Post-processing artık sadece tüm dosyalar bittiğinde addFilesToQueue fonksiyonunda yapılıyor
+    // İlk dosya bittiğinde post-processing yapmıyoruz çünkü duplicate çağrı oluyor
   }, [processedCount, userCredentials, queue, isReadOnlyUser, isGdsActive]);
 
   useEffect(() => {

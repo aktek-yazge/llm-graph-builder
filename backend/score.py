@@ -363,9 +363,22 @@ async def extract_knowledge_graph_from_file(
         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
         if source_type == 'local file':
             failed_file_process(uri,file_name, merged_file_path)
-        node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
+        
+        # Document node durumunu güvenli bir şekilde al
+        try:
+            node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
+        except Exception as node_error:
+            logging.warning(f"Document node status alınamadı: {node_error}")
+            node_detail = None
+        
         # Set the status "Completed" in logging becuase we are treating these error already handled by application as like custom errors.
-        json_obj = {'api_name':'extract','message':error_message,'file_created_at':formatted_time(node_detail[0]['created_time']),'error_message':error_message, 'file_name': file_name,'status':'Completed',
+        file_created_at = None
+        if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
+            file_created_at = formatted_time(node_detail[0]['created_time'])
+        else:
+            file_created_at = formatted_time(datetime.now(timezone.utc))
+        
+        json_obj = {'api_name':'extract','message':error_message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Completed',
                     'db_url':uri, 'userName':userName, 'database':database,'success_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
         logger.log_struct(json_obj, "INFO")
@@ -379,9 +392,21 @@ async def extract_knowledge_graph_from_file(
         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
         if source_type == 'local file':
             failed_file_process(uri,file_name, merged_file_path)
-        node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
         
-        json_obj = {'api_name':'extract','message':message,'file_created_at':formatted_time(node_detail[0]['created_time']),'error_message':error_message, 'file_name': file_name,'status':'Failed',
+        # Document node durumunu güvenli bir şekilde al
+        try:
+            node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
+        except Exception as node_error:
+            logging.warning(f"Document node status alınamadı: {node_error}")
+            node_detail = None
+        
+        file_created_at = None
+        if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
+            file_created_at = formatted_time(node_detail[0]['created_time'])
+        else:
+            file_created_at = formatted_time(datetime.now(timezone.utc))
+        
+        json_obj = {'api_name':'extract','message':message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Failed',
                     'db_url':uri, 'userName':userName, 'database':database,'failed_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
         logger.log_struct(json_obj, "ERROR")

@@ -783,6 +783,15 @@ async def processing_source(
     )
     uri_latency["create_connection"] = f"{elapsed_create_connection:.2f}"
     graphDb_data_Access = graphDBdataAccess(graph)
+    
+    # Document node'ın mutlaka oluşturulduğundan emin ol
+    try:
+        logging.info(f"Document node kontrolü ve oluşturması: {file_name}")
+        graphDb_data_Access.create_source_node(file_name)
+        logging.info(f"Document node garantilendi: {file_name}")
+    except Exception as e:
+        logging.warning(f"Document node oluşturma sırasında uyarı: {e}")
+    
     create_chunk_vector_index(graph)
     start_get_chunkId_chunkDoc_list = time.time()
     total_chunks, chunkId_chunkDoc_list = get_chunkId_chunkDoc_list(
