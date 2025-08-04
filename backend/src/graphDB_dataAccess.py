@@ -52,10 +52,59 @@ class graphDBdataAccess:
             logging.error(f"Error in updating document node status as failed: {error_message}")
             raise Exception(error_message)
         
-    def create_source_node(self, obj_source_node:sourceNode):
+    def create_source_node(self, obj_source_node_or_filename):
+        """
+        Document node oluşturur. sourceNode objesi veya sadece file_name string'i alabilir.
+        """
         try:
+            # Eğer string ise, minimal Document node oluştur
+            if isinstance(obj_source_node_or_filename, str):
+                file_name = obj_source_node_or_filename
+                logging.info(f"Minimal Document node oluşturuluyor: {file_name}")
+                
+                # Önce node'ın var olup olmadığını kontrol et
+                check_query = "MATCH (d:Document {fileName: $file_name}) RETURN count(d) as count"
+                result = self.execute_query(check_query, {"file_name": file_name})
+                
+                if result and result[0]['count'] > 0:
+                    logging.info(f"Document node zaten mevcut: {file_name}")
+                    return
+                
+                # Minimal Document node oluştur
+                create_query = """
+                    MERGE(d:Document {fileName: $file_name}) 
+                    ON CREATE SET 
+                        d.status = 'New',
+                        d.fileSource = 'unknown',
+                        d.createdAt = datetime(),
+                        d.updatedAt = datetime(),
+                        d.processingTime = 0,
+                        d.nodeCount = 0,
+                        d.relationshipCount = 0,
+                        d.total_chunks = 0,
+                        d.processed_chunk = 0,
+                        d.chunkNodeCount = 0,
+                        d.chunkRelCount = 0,
+                        d.entityNodeCount = 0,
+                        d.entityEntityRelCount = 0,
+                        d.communityNodeCount = 0,
+                        d.communityRelCount = 0,
+                        d.is_cancelled = false,
+                        d.fileSize = 0,
+                        d.fileType = 'unknown',
+                        d.errorMessage = '',
+                        d.model = 'unknown'
+                    ON MATCH SET 
+                        d.updatedAt = datetime()
+                """
+                self.graph.query(create_query, {"file_name": file_name}, session_params={"database": self.graph._database})
+                logging.info(f"Minimal Document node oluşturuldu: {file_name}")
+                return
+            
+            # sourceNode objesi ise, orijinal işlemi yap
+            obj_source_node = obj_source_node_or_filename
             job_status = "New"
-            logging.info(f"creating source node if does not exist in database {self.graph._database}")
+            logging.info(f"Tam Document node oluşturuluyor: {obj_source_node.file_name}")
             self.graph.query("""MERGE(d:Document {fileName :$fn}) SET d.fileSize = $fs, d.fileType = $ft ,
                             d.status = $st, d.url = $url, d.awsAccessKeyId = $awsacc_key_id, 
                             d.fileSource = $f_source, d.createdAt = $c_at, d.updatedAt = $u_at, 
@@ -81,12 +130,13 @@ class graphDBdataAccess:
                             "communityNodeCount":obj_source_node.communityNodeCount,
                             "communityRelCount":obj_source_node.communityRelCount
                             },session_params={"database":self.graph._database})
+            
         except Exception as e:
             error_message = str(e)
-            logging.info(f"error_message = {error_message}")
-            self.update_exception_db(self, obj_source_node.file_name, error_message)
+            logging.error(f"Document node oluşturma hatası: {error_message}")
+            if not isinstance(obj_source_node_or_filename, str):
+                self.update_exception_db(self, obj_source_node_or_filename.file_name, error_message)
             raise Exception(error_message)
-        
     def update_source_node(self, obj_source_node:sourceNode):
         try:
 
@@ -300,7 +350,46 @@ class graphDBdataAccess:
                 d.createdAt AS created_time
                 """
         param = {"file_name" : file_name}
-        return self.execute_query(query, param)
+        result = self.execute_query(query, param)
+        
+        # Eğer Document node bulunamazsa, otomatik olarak oluştur
+        if not result or len(result) == 0:
+            logging.warning(f"Document node bulunamadı: {file_name}. Otomatik olarak oluşturuluyor...")
+            try:
+                # Basit bir Document node oluştur
+                create_query = """
+                    MERGE(d:Document {fileName: $file_name}) 
+                    ON CREATE SET 
+                        d.status = 'New',
+                        d.fileSource = 'unknown',
+                        d.createdAt = datetime(),
+                        d.updatedAt = datetime(),
+                        d.processingTime = 0,
+                        d.nodeCount = 0,
+                        d.relationshipCount = 0,
+                        d.total_chunks = 0,
+                        d.processed_chunk = 0,
+                        d.chunkNodeCount = 0,
+                        d.chunkRelCount = 0,
+                        d.entityNodeCount = 0,
+                        d.entityEntityRelCount = 0,
+                        d.communityNodeCount = 0,
+                        d.communityRelCount = 0,
+                        d.is_cancelled = false
+                    ON MATCH SET 
+                        d.updatedAt = datetime()
+                """
+                self.graph.query(create_query, {"file_name": file_name}, session_params={"database": self.graph._database})
+                logging.info(f"Document node otomatik oluşturuldu: {file_name}")
+                
+                # Tekrar sorgula
+                result = self.execute_query(query, param)
+                
+            except Exception as e:
+                logging.error(f"Document node oluştururken hata: {e}")
+                return []
+        
+        return result
     
     def delete_file_from_graph(self, filenames, source_types, deleteEntities:str, merged_dir:str, uri):
         
