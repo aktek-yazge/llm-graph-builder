@@ -15,6 +15,7 @@ import { useFileContext } from '../context/UsersFiles';
 import { extractAPI } from '../utils/FileAPI';
 import { BannerAlertProps, ContentProps, CustomFile, OptionType, chunkdata, FileTableHandle } from '../types';
 import deleteAPI from '../services/DeleteFiles';
+import { postProcessing } from '../services/PostProcessing';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
 import useServerSideEvent from '../hooks/useSse';
 import {
@@ -43,6 +44,7 @@ import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
 import retry from '../services/Retry';
 import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
 import { useMessageContext } from '../context/UserMessages';
+import PostProcessingToast from './Popups/GraphEnhancementDialog/PostProcessingCheckList/PostProcessingToast';
 import { getChunkText } from '../services/getChunkText';
 import ChunkPopUp from './Popups/ChunkPopUp';
 import { isExpired, isFileReadyToProcess } from '../utils/Utils';
@@ -115,6 +117,7 @@ const Content: React.FC<ContentProps> = ({
     setSelectedChunk_overlap,
     setSelectedChunks_to_combine,
     entityRelationshipRules,
+    postProcessingTasks,
     queue,
     processedCount,
     setProcessedCount,
@@ -159,7 +162,61 @@ const Content: React.FC<ContentProps> = ({
       handleGenerateGraph([], true);
     }
     if (processedCount === 1 && queue.isEmpty()) {
-      showSuccessToast('All files processed and post-processing completed automatically.');
+      (async () => {
+        showNormalToast(
+          <PostProcessingToast
+            isGdsActive={isGdsActive}
+            postProcessingTasks={postProcessingTasks}
+            isSchema={hasSelections}
+          />
+        );
+        try {
+          const payload = isGdsActive
+            ? hasSelections
+              ? postProcessingTasks.filter((task) => task !== 'graph_schema_consolidation')
+              : postProcessingTasks
+            : hasSelections
+              ? postProcessingTasks.filter(
+                  (task) => task !== 'graph_schema_consolidation' && task !== 'enable_communities'
+                )
+              : postProcessingTasks.filter((task) => task !== 'enable_communities');
+          if (payload.length) {
+            const response = await postProcessing(payload);
+            if (response.data.status === 'Success') {
+              const communityfiles = response.data?.data;
+              if (Array.isArray(communityfiles) && communityfiles.length) {
+                communityfiles?.forEach((c: any) => {
+                  setFilesData((prev) => {
+                    return prev.map((f) => {
+                      if (f.name === c.filename) {
+                        return {
+                          ...f,
+                          chunkNodeCount: c.chunkNodeCount ?? 0,
+                          entityNodeCount: c.entityNodeCount ?? 0,
+                          communityNodeCount: c.communityNodeCount ?? 0,
+                          chunkRelCount: c.chunkRelCount ?? 0,
+                          entityEntityRelCount: c.entityEntityRelCount ?? 0,
+                          communityRelCount: c.communityRelCount ?? 0,
+                          nodesCount: c.nodeCount,
+                          relationshipsCount: c.relationshipCount,
+                        };
+                      }
+                      return f;
+                    });
+                  });
+                });
+              }
+              showSuccessToast('All Q&A functionality is available now.');
+            } else {
+              throw new Error(response.data.error);
+            }
+          }
+        } catch (error) {
+          if (error instanceof Error) {
+            showSuccessToast(error.message);
+          }
+        }
+      })();
     }
   }, [processedCount, userCredentials, queue, isReadOnlyUser, isGdsActive]);
 
@@ -320,18 +377,18 @@ const Content: React.FC<ContentProps> = ({
               })
             );
           } else {
-            console.error('Unexpected error format:', error);
+            // Hata formatı beklenmeyen, logging kullan
           }
         } catch (parseError) {
           if (axios.isAxiosError(err)) {
             const axiosErrorMessage = err.response?.data?.message || err.message;
-            console.error('Axios error occurred:', axiosErrorMessage);
+            showErrorToast(axiosErrorMessage);
           } else {
-            console.error('An unexpected error occurred:', err.message);
+            showErrorToast(err.message || 'An unexpected error occurred');
           }
         }
       } else {
-        console.error('An unknown error occurred:', err);
+        showErrorToast('An unknown error occurred');
       }
     }
   };
@@ -356,10 +413,50 @@ const Content: React.FC<ContentProps> = ({
     return data;
   };
 
-  const addFilesToQueue = (remainingFiles: CustomFile[]) => {
-    if (!remainingFiles.length) {
-      showSuccessToast('All files processed and post-processing completed automatically.');
-      return;
+  const addFilesToQueue = async (remainingFiles: CustomFile[]) => {
+    if (!remainingFiles.length && postProcessingTasks.length) {
+      showNormalToast(
+        <PostProcessingToast
+          isGdsActive={isGdsActive}
+          postProcessingTasks={postProcessingTasks}
+          isSchema={hasSelections}
+        />
+      );
+      try {
+        const response = await postProcessing(postProcessingTasks);
+        if (response.data.status === 'Success') {
+          const communityfiles = response.data?.data;
+          if (Array.isArray(communityfiles) && communityfiles.length) {
+            communityfiles?.forEach((c: any) => {
+              setFilesData((prev) => {
+                return prev.map((f) => {
+                  if (f.name === c.filename) {
+                    return {
+                      ...f,
+                      chunkNodeCount: c.chunkNodeCount ?? 0,
+                      entityNodeCount: c.entityNodeCount ?? 0,
+                      communityNodeCount: c.communityNodeCount ?? 0,
+                      chunkRelCount: c.chunkRelCount ?? 0,
+                      entityEntityRelCount: c.entityEntityRelCount ?? 0,
+                      communityRelCount: c.communityRelCount ?? 0,
+                      nodesCount: c.nodeCount,
+                      relationshipsCount: c.relationshipCount,
+                    };
+                  }
+                  return f;
+                });
+              });
+            });
+          }
+          showSuccessToast('All Q&A functionality is available now.');
+        } else {
+          throw new Error(response.data.error);
+        }
+      } catch (error) {
+        if (error instanceof Error) {
+          showSuccessToast(error.message);
+        }
+      }
     }
     for (let index = 0; index < remainingFiles.length; index++) {
       const f = remainingFiles[index];
@@ -648,7 +745,6 @@ const Content: React.FC<ContentProps> = ({
         const error = JSON.parse(err.message);
         const { message } = error;
         showErrorToast(message);
-        console.log(err);
       }
     }
     setShowDeletePopUp(false);
