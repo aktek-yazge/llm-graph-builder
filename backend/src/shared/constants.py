@@ -373,15 +373,20 @@ MATCH (chunk)-[:PART_OF]->(d:Document)
 // En yüksek skoru alan chunk'ların SIMILAR chunk'larını da dahil et (maksimum 2 similar chunk per ana chunk)
 OPTIONAL MATCH (chunk)-[sim:SIMILAR]-(similarChunk:Chunk)
 WHERE similarChunk.embedding IS NOT NULL
-WITH d, chunk, score, similarChunk, sim
-ORDER BY sim.score DESC
-WITH d, chunk, score, collect(similarChunk)[0..2] AS limitedSimilarChunks
 
-// aggregate chunk-details (ana chunk + limited similar chunks)
-WITH d, 
-     collect(DISTINCT {chunk: chunk, score: score}) + 
-     [sc IN limitedSimilarChunks | {chunk: sc, score: coalesce(score * 0.8, 0.5)}] AS chunks, 
-     avg(score) as avg_score
+// Similar chunks'ı UNWIND ile aç, ORDER BY ile sırala, ilk 2'yi al
+WITH d, chunk, score, collect({chunk: similarChunk, simScore: coalesce(sim.score, 0)}) AS allSimilarChunks
+UNWIND CASE WHEN size(allSimilarChunks) > 0 THEN allSimilarChunks ELSE [NULL] END AS sc
+WITH d, chunk, score, sc
+ORDER BY sc.simScore DESC
+WITH d, chunk, score, collect(sc)[0..2] AS topSimilarChunks
+
+// Önce flatSimilarChunks'u oluştur
+
+WITH d, chunk, score, apoc.coll.flatten([sc IN topSimilarChunks WHERE sc IS NOT NULL | [{chunk: sc.chunk, score: score * 0.8}]]) AS flatSimilarChunks
+WITH d, collect({chunk: chunk, score: score}) AS mainChunks, collect(flatSimilarChunks) AS allFlatSimilarChunks, avg(score) as avg_score
+WITH d, apoc.coll.flatten(mainChunks + apoc.coll.flatten(allFlatSimilarChunks)) AS chunks, avg_score
+
 // fetch entities
 CALL { WITH chunks
 UNWIND chunks as chunkScore
@@ -987,6 +992,23 @@ YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşı
    - Model Yılı: 2020 → VehicleModelYear node "2020"
    - Yayın Tarihi: 10.01.2023 → PublishYear node "2023"
 
+**3.1. DOCUMENT YEAR CONSTRAINT (CRITICAL RULE):**
+   - HER DOCUMENT İÇİN MUTLAKA SADECE 1 TANE DocumentYear OLABILIR
+   - Birden fazla tarih varsa, SADECE document tanzim/oluşturulma tarihinden DocumentYear çıkarın
+   - Diğer tarihleri PolicyStartYear, PolicyEndYear gibi spesifik kategorilere ayırın
+   - ASLA aynı document için birden fazla DocumentYear entity oluşturmayın
+   - DocumentYear, document'ın ana/asıl tarihini temsil eder
+
+**3.2. YEAR ENTITY UNIQUENESS RULE (CRITICAL CONSTRAINT):**
+   - YEAR VALUE UNIQUE OLMALIDIR: Aynı yıl değeri (örn. "2023") için sadece 1 entity olmalı
+   - BIRDEN FAZLA KATEGORI İÇİN AYNI YIL: DocumentYear "2023" ve PolicyStartYear "2023" oluşturmayın
+   - TEK YEAR ENTITY, ÇOK İLİŞKİ: "2023" için tek bir entity oluşturun, farklı relationship'lerle bağlayın
+   - ÖRNEKSAYıL KULLANIMI:
+     * "2023" year entity oluşturun
+     * Document node'una DOCUMENT_YEAR relationship ile bağlayın  
+     * Policy node'una POLICY_STARTS_IN relationship ile bağlayın
+     * ASLA iki ayrı "2023" entity oluşturmayın
+
 **4. YIL NODE İLİŞKİLERİ (MANDATORY RELATIONSHIPS):**
    - DocumentYear entities Document node'una DOCUMENT_YEAR relationshipi ile bağlanmalı
    - PolicyStartYear entities Policy node'una POLICY_STARTS_IN relationshipi ile bağlanmalı
@@ -1066,7 +1088,6 @@ YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşı
 - Building name/apartment number (identifier only)
 
 **4. Document-Level Temporal Information (CRITICAL - ALWAYS EXTRACT):**
-- Year (MANDATORY - from document creation/issuance/policy dates - always extract as separate entity)
 - Policy start date (connect to existing Document node)  
 - Document issue date (connect to existing Document node)
 
@@ -1081,17 +1102,14 @@ YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşı
 - What policy it is (number, type)
 - Which company issued it
 - Where the insured asset is located (address only)
-- WHEN the document was created/issued (Year - MANDATORY)
 
 **CRITICAL SYSTEM RULES:**
 - Document nodes already exist in the system - NEVER create new Document nodes
 - DO NOT extract "Document" as an entity type under any circumstances
-- MANDATORY: Extract Year entity from ANY date found in the text (creation, policy, issuance dates)
+- **Birden fazla tarih varsa: DocumentYear sadece ana/tanzim tarihinden, diğerleri spesifik kategorilerden (PolicyStartYear, PolicyEndYear, vb.)**
 - Connect extracted entities to existing Document nodes via post-processing relationships
-- Connect temporal entities (Year, dates) DIRECTLY to the EXISTING Document node that already contains this text
 - The Document node is pre-created by the system - your job is to connect entities TO it, not create it
 - ALL entities you extract must connect to existing nodes in the system
-- ALWAYS extract Year entities when you see document dates
 - NEVER create relationships between temporal entities and new Document nodes
 - Use the existing Document node that this text chunk belongs to
 
