@@ -936,13 +936,10 @@ ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
 
 **YEAR EXTRACTION - CRITICAL REQUIREMENT:**
 You MUST extract Year entities from all dates in the document. This is mandatory for temporal analysis.
-- Search for ALL date patterns: DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD, "DD.MM.YYYY"
 - Extract from: "Tanzim Tarihi", "Başlama Tarihi", "Poliçe Tarihi"
 - Examples requiring Year extraction:
   * "Tanzim Tarihi : 02.02.2023" → Extract "2023" as Year entity
   * "Başlama Tarihi: 12.02.2023" → Extract "2023" as Year entity  
-- Create separate Year entities for each unique year found
-- Year extraction is MANDATORY - never skip temporal information
 
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
 - NEVER extract "Document" as any entity type or node
@@ -979,7 +976,6 @@ You MUST extract Year entities from all dates in the document. This is mandatory
 **4. Document-Level Temporal Information (CRITICAL - ALWAYS EXTRACT):**
 - Year (MANDATORY - from document creation/issuance/policy dates - always extract as separate entity)
 - Policy start date (connect to existing Document node)  
-- Policy end date (connect to existing Document node)
 - Document issue date (connect to existing Document node)
 
 **IMPORTANT SYSTEM INTEGRATION RULES:**

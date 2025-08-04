@@ -384,7 +384,7 @@ async def extract_graph_from_file_local_file(
             file_name, pages, file_extension = get_documents_from_file_by_path(
                 merged_file_path, fileName
             )
-            print("pages", pages[:3])
+            # print("pages", pages[:3])
         if pages == None or len(pages) == 0:
             raise LLMGraphBuilderException(
                 f"File content is not available for file : {file_name}"
@@ -982,11 +982,32 @@ async def processing_source(
                     
                     # Post-processing'i çalıştır - sadece bu dosya için
                     from src.llm import apply_dynamic_entity_post_processing
+                    
+                    # Neo4j'deki gerçek dosya adını al (Unicode escape karakterleri ile)
+                    real_file_name_query = """
+                    MATCH (d:Document) 
+                    WHERE d.fileName = $fileName OR d.fileName CONTAINS $fileNamePart
+                    RETURN d.fileName as realFileName
+                    LIMIT 1
+                    """
+                    # Dosya adının bir kısmını al (ilk 20 karakter gibi)
+                    file_name_part = file_name[:20] if len(file_name) > 20 else file_name
+                    real_file_result = execute_graph_query(graph, real_file_name_query, 
+                                                         params={"fileName": file_name, "fileNamePart": file_name_part})
+                    
+                    if real_file_result and real_file_result[0].get('realFileName'):
+                        real_file_name = real_file_result[0]['realFileName']
+                        logging.info(f"Post-processing için gerçek dosya adı: {real_file_name}")
+                        target_files = [real_file_name]
+                    else:
+                        logging.warning(f"Gerçek dosya adı bulunamadı, orijinal kullanılıyor: {file_name}")
+                        target_files = [file_name]
+                    
                     post_processing_start_time = time.time()
                     post_processing_result = apply_dynamic_entity_post_processing(
                         graph, 
                         rules_list, 
-                        target_file_names=[file_name]
+                        target_file_names=target_files
                     )
                     post_processing_end_time = time.time()
                     
@@ -1138,9 +1159,9 @@ def get_chunkId_chunkDoc_list(
                     text = text.replace(j, "")
             pages[i] = Document(page_content=str(text), metadata=pages[i].metadata)
 
-        print("pages2:", pages)
+        # print("pages2:", pages)
         create_chunks_obj = CreateChunksofDocument(pages, graph)
-        print("create_chunks_obj:", create_chunks_obj)
+        # print("create_chunks_obj:", create_chunks_obj)
         # chunks = create_chunks_obj.split_file_into_chunks(
         #     token_chunk_size, chunk_overlap
         # )
