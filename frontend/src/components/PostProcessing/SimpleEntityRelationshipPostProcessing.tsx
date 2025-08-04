@@ -17,21 +17,41 @@ export default function SimpleEntityRelationshipPostProcessing({
 }: SimpleEntityRelationshipPostProcessingProps) {
   const { userCredentials } = useCredentials();
   const [loading, setLoading] = useState(false);
-  const [sourceNodeType, setSourceNodeType] = useState('Year');
+  const [sourceNodeType, setSourceNodeType] = useState('DocumentYear');
   const [targetNodeType, setTargetNodeType] = useState('Document');
-  const [relationshipType, setRelationshipType] = useState('OCCURS_IN');
+  const [relationshipType, setRelationshipType] = useState('DOCUMENT_YEAR');
   const [removeExistingRelationships, setRemoveExistingRelationships] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [results, setResults] = useState<any>(null);
 
   // Yaygın node tipleri
   const commonNodeTypes = [
-    { label: 'Year', value: 'Year' },
+    { label: 'DocumentYear', value: 'DocumentYear' },
+    { label: 'PublishYear', value: 'PublishYear' },
+    { label: 'PolicyStartYear', value: 'PolicyStartYear' },
+    { label: 'PolicyEndYear', value: 'PolicyEndYear' },
+    { label: 'BirthYear', value: 'BirthYear' },
+    { label: 'RegistrationYear', value: 'RegistrationYear' },
+    { label: 'VehicleModelYear', value: 'VehicleModelYear' },
+    { label: 'FirstRegistrationYear', value: 'FirstRegistrationYear' },
     { label: 'Date', value: 'Date' },
     { label: 'Person', value: 'Person' },
     { label: 'Company', value: 'Company' },
     { label: 'Location', value: 'Location' },
-    { label: 'Address', value: 'Address' },
+    { label: 'HomeAddress', value: 'HomeAddress' },
+    { label: 'MailingAddress', value: 'MailingAddress' },
+    { label: 'WorkAddress', value: 'WorkAddress' },
+    { label: 'BillingAddress', value: 'BillingAddress' },
+    { label: 'PropertyAddress', value: 'PropertyAddress' },
+    { label: 'BuildingAddress', value: 'BuildingAddress' },
+    { label: 'BusinessAddress', value: 'BusinessAddress' },
+    { label: 'WarehouseAddress', value: 'WarehouseAddress' },
+    { label: 'VehicleRegistrationAddress', value: 'VehicleRegistrationAddress' },
+    { label: 'GarageAddress', value: 'GarageAddress' },
+    { label: 'AccidentAddress', value: 'AccidentAddress' },
+    { label: 'CompanyAddress', value: 'CompanyAddress' },
+    { label: 'BranchAddress', value: 'BranchAddress' },
+    { label: 'ClaimAddress', value: 'ClaimAddress' },
     { label: 'PolicyNumber', value: 'PolicyNumber' },
     { label: 'IdentityNumber', value: 'IdentityNumber' },
     { label: 'PlateNumber', value: 'PlateNumber' },
@@ -48,8 +68,21 @@ export default function SimpleEntityRelationshipPostProcessing({
 
   // Yaygın relationship tipleri
   const commonRelationshipTypes = [
+    { label: 'DOCUMENT_YEAR', value: 'DOCUMENT_YEAR' },
+    { label: 'PUBLISHED_IN', value: 'PUBLISHED_IN' },
+    { label: 'POLICY_STARTS_IN', value: 'POLICY_STARTS_IN' },
+    { label: 'POLICY_ENDS_IN', value: 'POLICY_ENDS_IN' },
+    { label: 'BORN_IN', value: 'BORN_IN' },
+    { label: 'REGISTERED_IN', value: 'REGISTERED_IN' },
+    { label: 'MODEL_YEAR', value: 'MODEL_YEAR' },
+    { label: 'FIRST_REGISTERED_IN', value: 'FIRST_REGISTERED_IN' },
+    { label: 'LIVES_AT', value: 'LIVES_AT' },
+    { label: 'WORKS_AT', value: 'WORKS_AT' },
+    { label: 'LOCATED_AT', value: 'LOCATED_AT' },
+    { label: 'REGISTERED_AT', value: 'REGISTERED_AT' },
+    { label: 'HEADQUARTERED_AT', value: 'HEADQUARTERED_AT' },
+    { label: 'HAS_BRANCH_AT', value: 'HAS_BRANCH_AT' },
     { label: 'OCCURS_IN', value: 'OCCURS_IN' },
-    { label: 'HAS_YEAR', value: 'HAS_YEAR' },
     { label: 'HAS_DATE', value: 'HAS_DATE' },
     { label: 'BELONGS_TO', value: 'BELONGS_TO' },
     { label: 'LOCATED_IN', value: 'LOCATED_IN' },
@@ -113,8 +146,8 @@ export default function SimpleEntityRelationshipPostProcessing({
         onError?.(errorMessage);
       }
     } catch (error) {
-      console.error('Post-processing error:', error);
-      const errorMessage = 'Post-processing işlemi sırasında hata oluştu';
+      // Log error silently without console
+      const errorMessage = error instanceof Error ? error.message : 'Post-processing işlemi sırasında hata oluştu';
       onError?.(errorMessage);
     } finally {
       setLoading(false);
@@ -163,7 +196,7 @@ export default function SimpleEntityRelationshipPostProcessing({
               selectProps={{
                 options: commonNodeTypes,
                 value: commonNodeTypes.find((opt) => opt.value === sourceNodeType),
-                onChange: (option: any) => setSourceNodeType(option?.value || 'Year'),
+                onChange: (option: any) => setSourceNodeType(option?.value || 'DocumentYear'),
                 placeholder: 'Kaynak node tipini seçin',
                 isSearchable: true,
               }}
