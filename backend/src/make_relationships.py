@@ -372,12 +372,17 @@ async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, addi
                 )
                 execute_graph_query(graph, query, params={"src": s, "tgt": t})
 
-def create_document_relationships(graph: Neo4jGraph) -> dict:
+def create_document_relationships(graph: Neo4jGraph, target_document: str = None) -> dict:
     """
     Document'lar arasında semantic relationships kurar
+    Args:
+        target_document: Eğer belirtilirse, sadece bu document için ilişkiler kurar
     Returns: {'person_connections': int, 'policy_connections': int, 'company_connections': int}
     """
-    logging.info("Creating document-to-document relationships based on shared entities")
+    if target_document:
+        logging.info(f"Creating document relationships for specific document: {target_document}")
+    else:
+        logging.info("Creating document-to-document relationships based on shared entities")
     
     results = {}
     
@@ -387,6 +392,7 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     MATCH (person:Person)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
     MATCH (person)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
     WHERE d1 <> d2
+    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
     
     // Document'lar arasında ilişki kur
     WITH d1, d2, person, count(*) AS shared_chunks
@@ -410,7 +416,8 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     """
     
     try:
-        result = execute_graph_query(graph, person_query)
+        params = {"target_document": target_document} if target_document else {}
+        result = execute_graph_query(graph, person_query, params=params)
         results['person_connections'] = result[0]['connections_created'] if result else 0
         logging.info(f"Created {results['person_connections']} person-based document connections")
     except Exception as e:
@@ -424,6 +431,7 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     MATCH (policy_entity)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
     WHERE d1 <> d2 
     AND (policy_entity:PolicyType OR policy_entity.id =~ '(?i).*(poliçe|policy|sigorta).*')
+    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
     
     WITH d1, d2, policy_entity, count(*) AS shared_chunks
     WHERE shared_chunks >= 1
@@ -441,7 +449,8 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     """
     
     try:
-        result = execute_graph_query(graph, policy_query)
+        params = {"target_document": target_document} if target_document else {}
+        result = execute_graph_query(graph, policy_query, params=params)
         results['policy_connections'] = result[0]['connections_created'] if result else 0
         logging.info(f"Created {results['policy_connections']} policy-type-based document connections")
     except Exception as e:
@@ -455,6 +464,7 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     MATCH (company)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
     WHERE d1 <> d2 
     AND (company:Company OR company.id =~ '(?i).*(sigorta|insurance|axa|allianz|mapfre).*')
+    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
     
     WITH d1, d2, company, count(*) AS shared_chunks
     WHERE shared_chunks >= 1
@@ -472,7 +482,8 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     """
     
     try:
-        result = execute_graph_query(graph, company_query)
+        params = {"target_document": target_document} if target_document else {}
+        result = execute_graph_query(graph, company_query, params=params)
         results['company_connections'] = result[0]['connections_created'] if result else 0
         logging.info(f"Created {results['company_connections']} company-based document connections")
     except Exception as e:
@@ -486,6 +497,7 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     WHERE d1 <> d2 
     AND d1.owner IS NOT NULL 
     AND d1.owner = d2.owner
+    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
     
     MERGE (d1)-[r:SAME_OWNER]->(d2)
     ON CREATE SET 
@@ -498,7 +510,8 @@ def create_document_relationships(graph: Neo4jGraph) -> dict:
     """
     
     try:
-        result = execute_graph_query(graph, metadata_query)
+        params = {"target_document": target_document} if target_document else {}
+        result = execute_graph_query(graph, metadata_query, params=params)
         results['metadata_connections'] = result[0]['connections_created'] if result else 0
         logging.info(f"Created {results['metadata_connections']} metadata-based document connections")
     except Exception as e:

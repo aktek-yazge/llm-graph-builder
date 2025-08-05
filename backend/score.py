@@ -271,6 +271,19 @@ async def extract_knowledge_graph_from_file(
             graphDb_data_Access = graphDBdataAccess(graph)
             count_response = graphDb_data_Access.update_node_relationship_count(file_name)
             logging.info("Nodes and Relationship Counts updated")
+            
+            # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
+            try:
+                from src.make_relationships import create_document_relationships
+                doc_relationships_start = time.time()
+                doc_connections = await asyncio.to_thread(create_document_relationships, graph, file_name)
+                doc_relationships_end = time.time()
+                logging.info(f"Document relationships created for {file_name}: {doc_connections} in {doc_relationships_end - doc_relationships_start:.2f} seconds")
+                result['document_relationships'] = doc_connections
+            except Exception as doc_rel_error:
+                logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
+                result['document_relationships'] = {'error': str(doc_rel_error)}
+            
             if count_response :
                 result['chunkNodeCount'] = count_response[file_name].get('chunkNodeCount',"0")
                 result['chunkRelCount'] =  count_response[file_name].get('chunkRelCount',"0")

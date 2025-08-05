@@ -195,7 +195,7 @@ def format_documents(documents, model,chat_mode_settings):
 
     for doc in sorted_documents:
         try:
-            source = doc.metadata.get('source', "unknown")
+            source = doc.metadata.get('source', "local file")
             sources.add(source)
             if 'entities' in doc.metadata:
                 if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:

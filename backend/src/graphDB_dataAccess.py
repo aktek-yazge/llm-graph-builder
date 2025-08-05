@@ -62,6 +62,36 @@ class graphDBdataAccess:
                 file_name = obj_source_node_or_filename
                 logging.info(f"Minimal Document node oluşturuluyor: {file_name}")
                 
+                # Dosya bilgilerini file_name'den çıkar
+                import os
+                file_extension = os.path.splitext(file_name)[1].lower()
+                
+                # Dosya tipini uzantıdan belirle
+                if file_extension in ['.pdf']:
+                    file_type = 'PDF'
+                elif file_extension in ['.txt']:
+                    file_type = 'Text'
+                elif file_extension in ['.docx', '.doc']:
+                    file_type = 'Word Document'
+                elif file_extension in ['.html', '.htm']:
+                    file_type = 'HTML'
+                elif file_extension in ['.json']:
+                    file_type = 'JSON'
+                elif file_extension in ['.csv']:
+                    file_type = 'CSV'
+                elif file_extension in ['.xml']:
+                    file_type = 'XML'
+                else:
+                    file_type = f'Document{file_extension.upper()}'
+                
+                # Dosya boyutunu almaya çalış (eğer dosya mevcutsa)
+                file_size = 0
+                try:
+                    if os.path.exists(file_name):
+                        file_size = os.path.getsize(file_name)
+                except:
+                    file_size = 0
+                
                 # Önce node'ın var olup olmadığını kontrol et
                 check_query = "MATCH (d:Document {fileName: $file_name}) RETURN count(d) as count"
                 result = self.execute_query(check_query, {"file_name": file_name})
@@ -75,7 +105,9 @@ class graphDBdataAccess:
                     MERGE(d:Document {fileName: $file_name}) 
                     ON CREATE SET 
                         d.status = 'New',
-                        d.fileSource = 'unknown',
+                        d.fileSource = 'local file',
+                        d.fileType = $file_type,
+                        d.fileSize = $file_size,
                         d.createdAt = datetime(),
                         d.updatedAt = datetime(),
                         d.processingTime = 0,
@@ -90,14 +122,18 @@ class graphDBdataAccess:
                         d.communityNodeCount = 0,
                         d.communityRelCount = 0,
                         d.is_cancelled = false,
-                        d.fileSize = 0,
-                        d.fileType = 'unknown',
                         d.errorMessage = '',
                         d.model = 'unknown'
                     ON MATCH SET 
-                        d.updatedAt = datetime()
+                        d.updatedAt = datetime(),
+                        d.fileType = $file_type,
+                        d.fileSize = $file_size
                 """
-                self.graph.query(create_query, {"file_name": file_name}, session_params={"database": self.graph._database})
+                self.graph.query(create_query, {
+                    "file_name": file_name, 
+                    "file_type": file_type,
+                    "file_size": file_size
+                }, session_params={"database": self.graph._database})
                 logging.info(f"Minimal Document node oluşturuldu: {file_name}")
                 return
             
@@ -356,12 +392,44 @@ class graphDBdataAccess:
         if not result or len(result) == 0:
             logging.warning(f"Document node bulunamadı: {file_name}. Otomatik olarak oluşturuluyor...")
             try:
+                # Dosya bilgilerini file_name'den çıkar
+                import os
+                file_extension = os.path.splitext(file_name)[1].lower()
+                
+                # Dosya tipini uzantıdan belirle
+                if file_extension in ['.pdf']:
+                    file_type = 'PDF'
+                elif file_extension in ['.txt']:
+                    file_type = 'Text'
+                elif file_extension in ['.docx', '.doc']:
+                    file_type = 'Word Document'
+                elif file_extension in ['.html', '.htm']:
+                    file_type = 'HTML'
+                elif file_extension in ['.json']:
+                    file_type = 'JSON'
+                elif file_extension in ['.csv']:
+                    file_type = 'CSV'
+                elif file_extension in ['.xml']:
+                    file_type = 'XML'
+                else:
+                    file_type = f'Document{file_extension.upper()}'
+                
+                # Dosya boyutunu almaya çalış
+                file_size = 0
+                try:
+                    if os.path.exists(file_name):
+                        file_size = os.path.getsize(file_name)
+                except:
+                    file_size = 0
+                
                 # Basit bir Document node oluştur
                 create_query = """
                     MERGE(d:Document {fileName: $file_name}) 
                     ON CREATE SET 
                         d.status = 'New',
-                        d.fileSource = 'unknown',
+                        d.fileSource = 'local file',
+                        d.fileType = $file_type,
+                        d.fileSize = $file_size,
                         d.createdAt = datetime(),
                         d.updatedAt = datetime(),
                         d.processingTime = 0,
@@ -377,9 +445,15 @@ class graphDBdataAccess:
                         d.communityRelCount = 0,
                         d.is_cancelled = false
                     ON MATCH SET 
-                        d.updatedAt = datetime()
+                        d.updatedAt = datetime(),
+                        d.fileType = $file_type,
+                        d.fileSize = $file_size
                 """
-                self.graph.query(create_query, {"file_name": file_name}, session_params={"database": self.graph._database})
+                self.graph.query(create_query, {
+                    "file_name": file_name,
+                    "file_type": file_type,
+                    "file_size": file_size
+                }, session_params={"database": self.graph._database})
                 logging.info(f"Document node otomatik oluşturuldu: {file_name}")
                 
                 # Tekrar sorgula
