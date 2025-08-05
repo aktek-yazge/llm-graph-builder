@@ -371,3 +371,141 @@ async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, addi
                     " MERGE (a)-[:CONTINUES]->(b)"
                 )
                 execute_graph_query(graph, query, params={"src": s, "tgt": t})
+
+def create_document_relationships(graph: Neo4jGraph) -> dict:
+    """
+    Document'lar arasında semantic relationships kurar
+    Returns: {'person_connections': int, 'policy_connections': int, 'company_connections': int}
+    """
+    logging.info("Creating document-to-document relationships based on shared entities")
+    
+    results = {}
+    
+    # 1. Aynı kişiye ait document'ları birbirine bağla
+    person_query = """
+    // Aynı Person entity'sine bağlı document'ları bul
+    MATCH (person:Person)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
+    MATCH (person)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+    WHERE d1 <> d2
+    
+    // Document'lar arasında ilişki kur
+    WITH d1, d2, person, count(*) AS shared_chunks
+    WHERE shared_chunks >= 1
+    
+    MERGE (d1)-[r:BELONGS_TO_SAME_PERSON]->(d2)
+    ON CREATE SET 
+        r.person_name = person.id,
+        r.shared_chunks = shared_chunks,
+        r.created_at = datetime(),
+        r.relationship_strength = CASE 
+            WHEN shared_chunks >= 5 THEN 'HIGH'
+            WHEN shared_chunks >= 2 THEN 'MEDIUM'
+            ELSE 'LOW'
+        END
+    ON MATCH SET 
+        r.shared_chunks = shared_chunks,
+        r.updated_at = datetime()
+    
+    RETURN count(DISTINCT r) AS connections_created
+    """
+    
+    try:
+        result = execute_graph_query(graph, person_query)
+        results['person_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['person_connections']} person-based document connections")
+    except Exception as e:
+        logging.error(f"Error creating person-based document connections: {e}")
+        results['person_connections'] = 0
+    
+    # 2. Aynı poliçe türüne ait document'ları birbirine bağla
+    policy_query = """
+    // PolicyType veya benzer insurance entity'lere göre bağla
+    MATCH (policy_entity)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
+    MATCH (policy_entity)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+    WHERE d1 <> d2 
+    AND (policy_entity:PolicyType OR policy_entity.id =~ '(?i).*(poliçe|policy|sigorta).*')
+    
+    WITH d1, d2, policy_entity, count(*) AS shared_chunks
+    WHERE shared_chunks >= 1
+    
+    MERGE (d1)-[r:SAME_POLICY_TYPE]->(d2)
+    ON CREATE SET 
+        r.policy_type = policy_entity.id,
+        r.shared_chunks = shared_chunks,
+        r.created_at = datetime()
+    ON MATCH SET 
+        r.shared_chunks = shared_chunks,
+        r.updated_at = datetime()
+    
+    RETURN count(DISTINCT r) AS connections_created
+    """
+    
+    try:
+        result = execute_graph_query(graph, policy_query)
+        results['policy_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['policy_connections']} policy-type-based document connections")
+    except Exception as e:
+        logging.error(f"Error creating policy-type-based document connections: {e}")
+        results['policy_connections'] = 0
+    
+    # 3. Aynı şirkete ait document'ları birbirine bağla
+    company_query = """
+    // Company entity'lere göre bağla
+    MATCH (company)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
+    MATCH (company)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+    WHERE d1 <> d2 
+    AND (company:Company OR company.id =~ '(?i).*(sigorta|insurance|axa|allianz|mapfre).*')
+    
+    WITH d1, d2, company, count(*) AS shared_chunks
+    WHERE shared_chunks >= 1
+    
+    MERGE (d1)-[r:SAME_INSURANCE_COMPANY]->(d2)
+    ON CREATE SET 
+        r.company_name = company.id,
+        r.shared_chunks = shared_chunks,
+        r.created_at = datetime()
+    ON MATCH SET 
+        r.shared_chunks = shared_chunks,
+        r.updated_at = datetime()
+    
+    RETURN count(DISTINCT r) AS connections_created
+    """
+    
+    try:
+        result = execute_graph_query(graph, company_query)
+        results['company_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['company_connections']} company-based document connections")
+    except Exception as e:
+        logging.error(f"Error creating company-based document connections: {e}")
+        results['company_connections'] = 0
+    
+    # 4. Document metadata'ya göre de bağlayalım (aynı yıl, aynı owner)
+    metadata_query = """
+    // Aynı owner'a ait document'ları bağla
+    MATCH (d1:Document), (d2:Document)
+    WHERE d1 <> d2 
+    AND d1.owner IS NOT NULL 
+    AND d1.owner = d2.owner
+    
+    MERGE (d1)-[r:SAME_OWNER]->(d2)
+    ON CREATE SET 
+        r.owner_name = d1.owner,
+        r.created_at = datetime()
+    ON MATCH SET 
+        r.updated_at = datetime()
+    
+    RETURN count(DISTINCT r) AS connections_created
+    """
+    
+    try:
+        result = execute_graph_query(graph, metadata_query)
+        results['metadata_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['metadata_connections']} metadata-based document connections")
+    except Exception as e:
+        logging.error(f"Error creating metadata-based document connections: {e}")
+        results['metadata_connections'] = 0
+    
+    total_connections = sum(results.values())
+    logging.info(f"Total document connections created: {total_connections}")
+    
+    return results

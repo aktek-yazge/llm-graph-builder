@@ -15,6 +15,7 @@ from src.graphDB_dataAccess import graphDBdataAccess
 from src.graph_query import get_graph_results,get_chunktext_results,visualize_schema
 from src.chunkid_entities import get_entities_from_chunkids
 from src.post_processing import create_vector_fulltext_indexes, create_entity_embedding, graph_schema_consolidation
+from src.document_analytics import get_person_policy_analytics, get_company_analytics, get_document_relationship_stats, search_person_documents
 from sse_starlette.sse import EventSourceResponse
 from src.communities import create_communities
 from src.neighbours import get_neighbour_nodes
@@ -448,6 +449,14 @@ async def post_processing(uri=Form(None), userName=Form(None), password=Form(Non
         api_name = 'post_processing'
         count_response = []
         start = time.time()
+        
+        # Document relationships oluştur (yeni özellik)
+        if "connect_documents_by_entities" in tasks:
+            from src.make_relationships import create_document_relationships
+            doc_connections = await asyncio.to_thread(create_document_relationships, graph)
+            api_name = 'post_processing/connect_documents_by_entities'
+            logging.info(f'Document connections created: {doc_connections}')
+        
         if "materialize_text_chunk_similarities" in tasks:
             await asyncio.to_thread(update_graph, graph)
             api_name = 'post_processing/update_similarity_graph'
@@ -1254,6 +1263,94 @@ async def get_schema_visualization(uri=Form(None), userName=Form(None), password
         return create_api_response('Success', data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
     except Exception as e:
         message="Unable to get schema visualization from neo4j database"
+        error_message = str(e)
+        logging.exception(f'Exception:{error_message}')
+        return create_api_response('Failed', message=message, error=error_message)
+
+@app.get("/document_analytics")
+async def document_analytics(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), analysis_type=Form("overview")):
+    """
+    Document relationship analytics endpoint
+    
+    analysis_type options:
+    - overview: Genel document relationship istatistikleri
+    - person_policies: Kişi bazlı poliçe analizi  
+    - company_analysis: Şirket bazlı analiz
+    - person_search: Belirli kişi arama (person_name parametresi gerekli)
+    """
+    try:
+        start_time = time.time()
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        if analysis_type == "overview":
+            result = get_document_relationship_stats(graph)
+            api_name = 'document_analytics/overview'
+            
+        elif analysis_type == "person_policies":
+            result = get_person_policy_analytics(graph)
+            api_name = 'document_analytics/person_policies'
+            
+        elif analysis_type == "company_analysis":
+            result = get_company_analytics(graph)
+            api_name = 'document_analytics/company_analysis'
+            
+        else:
+            result = {"error": f"Unknown analysis_type: {analysis_type}"}
+            api_name = 'document_analytics/error'
+        
+        elapsed_time = time.time() - start_time
+        json_obj = {
+            'api_name': api_name, 
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database, 
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'analysis_type': analysis_type
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        return create_api_response('Success', data=result, message=f"Analysis completed in {elapsed_time:.2f} seconds")
+        
+    except Exception as e:
+        message = f"Unable to complete document analytics: {analysis_type}"
+        error_message = str(e)
+        logging.exception(f'Exception in document_analytics: {error_message}')
+        return create_api_response('Failed', message=message, error=error_message)
+
+@app.post("/search_person_documents")
+async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), person_name=Form(None)):
+    """
+    Belirli bir kişinin tüm document'larını arar
+    """
+    try:
+        if not person_name:
+            return create_api_response('Failed', message="person_name parameter is required")
+            
+        start_time = time.time()
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        result = search_person_documents(graph, person_name)
+        
+        elapsed_time = time.time() - start_time
+        json_obj = {
+            'api_name': 'search_person_documents', 
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database, 
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'person_name': person_name
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        return create_api_response('Success', data=result, message=f"Search completed in {elapsed_time:.2f} seconds")
+        
+    except Exception as e:
+        message = f"Unable to search documents for person: {person_name}"
+        error_message = str(e)
+        logging.exception(f'Exception in search_person_documents: {error_message}')
+        return create_api_response('Failed', message=message, error=error_message)
         error_message = str(e)
         logging.info(message)
         logging.exception(f'Exception:{error_message}')
