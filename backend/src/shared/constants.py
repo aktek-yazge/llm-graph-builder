@@ -1166,3 +1166,33 @@ SADECE JSON döndür:
 
 Data:
 '''
+
+# Document-to-Document Relationship Tasks
+DOCUMENT_RELATIONSHIP_TASKS = [
+    "connect_documents_by_entities",
+    "materialize_text_chunk_similarities", 
+    "enable_hybrid_search_and_fulltext_search_in_bloom",
+    "materialize_entity_similarities",
+    "enable_communities"
+]
+
+# Document Analysis Queries
+PERSON_POLICY_COUNT_QUERY = """
+MATCH (person:Person)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
+WITH person, collect(DISTINCT d) AS person_documents
+OPTIONAL MATCH (d1:Document)-[r:BELONGS_TO_SAME_PERSON]-(d2:Document)
+WHERE d1 IN person_documents AND d2 IN person_documents
+RETURN 
+    person.id AS person_name,
+    size(person_documents) AS total_policies,
+    count(DISTINCT r) AS document_connections,
+    [d.fileName FOR d IN person_documents] AS policy_files
+ORDER BY total_policies DESC
+"""
+
+COMPANY_ANALYSIS_QUERY = """
+MATCH (company:Company)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
+WITH company, count(DISTINCT d) AS total_policies
+RETURN company.id AS company_name, total_policies
+ORDER BY total_policies DESC
+"""

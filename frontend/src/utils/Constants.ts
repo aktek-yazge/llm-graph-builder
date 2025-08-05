@@ -218,6 +218,12 @@ export const buttonCaptions = {
 
 export const POST_PROCESSING_JOBS: { title: string; description: string }[] = [
   {
+    title: 'connect_documents_by_entities',
+    description: `Creates semantic relationships between documents that share common entities. This enables discovering 
+                connections like "all policies belonging to the same person" or "documents from the same insurance company". 
+                Enhances document analysis and enables policy portfolio analysis for customers.`,
+  },
+  {
     title: 'materialize_text_chunk_similarities',
     description: `This option refines the connections between different pieces of information (chunks) within your
                 knowledge graph. By leveraging a k-nearest neighbor algorithm with a similarity threshold (KNN_MIN_SCORE
