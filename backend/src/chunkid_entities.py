@@ -88,7 +88,23 @@ def process_chunkids(driver, chunk_ids, entities):
     """
     try:
         logging.debug(f"Starting graph query process for chunk ids: {chunk_ids}")
-        records, summary, keys = driver.execute_query(CHUNK_QUERY, chunksIds=chunk_ids,entityIds=entities["entityids"], relationshipIds=entities["relationshipids"])
+        
+        # entities parametresini kontrol et ve gerekirse düzelt
+        if isinstance(entities, list):
+            # Eğer entities bir liste ise, dictionary formatına dönüştür
+            entity_dict = {
+                "entityids": entities,
+                "relationshipids": []
+            }
+            logging.debug(f"Converted entities list to dict: {entity_dict}")
+        elif isinstance(entities, dict):
+            entity_dict = entities
+        else:
+            # Fallback: boş dictionary
+            entity_dict = {"entityids": [], "relationshipids": []}
+            logging.warning(f"Unexpected entities type: {type(entities)}, using empty dict")
+        
+        records, summary, keys = driver.execute_query(CHUNK_QUERY, chunksIds=chunk_ids,entityIds=entity_dict["entityids"], relationshipIds=entity_dict["relationshipids"])
         result = process_records(records)
         result["nodes"].extend(records[0]["nodes"])
         result["nodes"] = remove_duplicate_nodes(result["nodes"])
