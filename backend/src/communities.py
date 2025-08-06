@@ -112,32 +112,32 @@ SET c.summary = row.summary,
 """ 
 
 
-COMMUNITY_SYSTEM_TEMPLATE = "Given input triples, generate the information summary. No pre-amble."
+COMMUNITY_SYSTEM_TEMPLATE = "Verilen üçlü bilgiler temelinde bilgi özetini oluşturun. Giriş yapmayın, doğrudan sonuca geçin."
 
 
 COMMUNITY_TEMPLATE = """
-Based on the provided nodes and relationships that belong to the same graph community,
-generate following output in exact format
-title: A concise title, no more than 4 words,
-summary: A natural language summary of the information
+Aynı grafik topluluğuna ait olan sağlanan node'lar ve ilişkiler temelinde,
+aşağıdaki formatı tam olarak kullanarak çıktı üretin
+başlık: En fazla 4 kelimeli kısa bir başlık,
+özet: Bilginin doğal dil özeti
 {community_info}
-Example output:
-title: Example Title,
-summary: This is an example summary that describes the key information of this community.
+Örnek çıktı:
+başlık: Örnek Başlık,
+özet: Bu, bu topluluğun temel bilgilerini açıklayan örnek bir özettir.
 """
 
-PARENT_COMMUNITY_SYSTEM_TEMPLATE = "Given an input list of community summaries, generate a summary of the information"
+PARENT_COMMUNITY_SYSTEM_TEMPLATE = "Verilen topluluk özetleri listesi temelinde bilgilerin özetini oluşturun"
 
-PARENT_COMMUNITY_TEMPLATE = """Based on the provided list of community summaries that belong to the same graph community, 
-generate following output in exact format
-title: A concise title, no more than 4 words,
-summary: A natural language summary of the information. Include all the necessary information as much as possible.
+PARENT_COMMUNITY_TEMPLATE = """Aynı grafik topluluğuna ait olan sağlanan topluluk özetleri listesi temelinde, 
+aşağıdaki formatı tam olarak kullanarak çıktı üretin
+başlık: En fazla 4 kelimeli kısa bir başlık,
+özet: Bilginin doğal dil özeti. Mümkün olduğunca tüm gerekli bilgileri dahil edin.
 
 {community_info}
 
-Example output:
-title: Example Title,
-summary: This is an example summary that describes the key information of this community.
+Örnek çıktı:
+başlık: Örnek Başlık,
+özet: Bu, bu topluluğun temel bilgilerini açıklayan örnek bir özettir.
 """ 
 
 
@@ -271,19 +271,19 @@ def get_community_chain(model, is_parent=False,community_template=COMMUNITY_TEMP
 
 def prepare_string(community_data):
     try:
-        nodes_description = "Nodes are:\n"
+        nodes_description = "Node'lar:\n"
         for node in community_data['nodes']:
             node_id = node['id']
             node_type = node['type']
-            node_description = f", description: {node['description']}" if 'description' in node and node['description'] else ""
-            nodes_description += f"id: {node_id}, type: {node_type}{node_description}\n"
+            node_description = f", açıklama: {node['description']}" if 'description' in node and node['description'] else ""
+            nodes_description += f"id: {node_id}, tip: {node_type}{node_description}\n"
 
-        relationships_description = "Relationships are:\n"
+        relationships_description = "İlişkiler:\n"
         for rel in community_data['rels']:
             start_node = rel['start']
             end_node = rel['end']
             relationship_type = rel['type']
-            relationship_description = f", description: {rel['description']}" if 'description' in rel and rel['description'] else ""
+            relationship_description = f", açıklama: {rel['description']}" if 'description' in rel and rel['description'] else ""
             relationships_description += f"({start_node})-[:{relationship_type}]->({end_node}){relationship_description}\n"
         return nodes_description + "\n" + relationships_description
     except Exception as e:
@@ -293,17 +293,18 @@ def prepare_string(community_data):
 def process_community_info(community, chain, is_parent=False):
     try:
         if is_parent:
-            combined_text = " ".join(f"Summary {i+1}: {summary}" for i, summary in enumerate(community.get("texts", [])))
+            combined_text = " ".join(f"Özet {i+1}: {summary}" for i, summary in enumerate(community.get("texts", [])))
         else:
             combined_text = prepare_string(community)
         summary_response = chain.invoke({'community_info': combined_text})
         lines = summary_response.splitlines()
-        title = "Untitled Community"
+        title = "İsimsiz Topluluk"
         summary = ""
         for line in lines:
-            if line.lower().startswith("title"):
+            # Hem Türkçe hem İngilizce anahtar kelimeleri destekle
+            if line.lower().startswith("title") or line.lower().startswith("başlık"):
                 title = line.split(":", 1)[-1].strip()
-            elif line.lower().startswith("summary"):
+            elif line.lower().startswith("summary") or line.lower().startswith("özet"):
                 summary = line.split(":", 1)[-1].strip()     
         logging.info(f"Community Title : {title}")
         return {"community": community['communityId'], "title":title, "summary": summary}
