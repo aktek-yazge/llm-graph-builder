@@ -316,13 +316,7 @@ Yapay Zeka Yanıtı: "Bu bilgi şu anda elimde yok. Başka bir konuda yardımcı
 Not: Bu sistem yalnızca kendi iç bilgisini kullanarak yanıt üretmez. Yanıtlarını, kullanıcının mevcut ve önceki girdilerinde sağlanan bilgilerden ve bağlamdan oluşturur.
 """
 
-QUESTION_TRANSFORM_TEMPLATE = """Bu mesajı analiz et:
-
-Eğer mesaj selamlama, nezaket ifadesi veya günlük sohbet ise (merhaba, nasılsın, teşekkürler gibi) sadece "CASUAL" yaz.
-
-Eğer mesaj dokümanlarda bilgi araştırması gerektiren bir soru ise, arama için optimize edilmiş sorgu üret.
-
-Sadece "CASUAL" kelimesini ya da arama sorgusunu yaz.""" 
+QUESTION_TRANSFORM_TEMPLATE = "Aşağıdaki konuşmaya göre, konuşmayla ilgili bilgi almak için arama yapılacak bir sorgu üret. Sadece sorguyu yaz, başka hiçbir şey yazma." 
 
 ## CHAT QUERIES
 VECTOR_SEARCH_TOP_K = 5

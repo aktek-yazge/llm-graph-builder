@@ -29,7 +29,6 @@ import {
   nodeDetailsProps,
 } from '../../types';
 import { chatBotAPI } from '../../services/QnaAPI';
-import { chatStreamAPI, ChatStreamMessage } from '../../services/ChatStreamAPI';
 import { v4 as uuidv4 } from 'uuid';
 import { useFileContext } from '../../context/UsersFiles';
 import clsx from 'clsx';
@@ -92,7 +91,6 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const downloadLinkRef = useRef<HTMLAnchorElement>(null);
   const [activeChat, setActiveChat] = useState<Messages | null>(null);
   const [multiModelMetrics, setMultiModelMetrics] = useState<multimodelmetric[]>([]);
-  const [isStreamingEnabled, setIsStreamingEnabled] = useState<boolean>(false);
 
   const [_, copy] = useCopyToClipboard();
   const { speak, cancel, speaking } = useSpeechSynthesis({
@@ -188,7 +186,11 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     requestAnimationFrame(animate);
   };
 
-  const handleStreamingSubmit = async (inputMessage: string) => {
+  const handleSubmit = async (e: { preventDefault: () => void }) => {
+    e.preventDefault();
+    if (!inputMessage.trim()) {
+      return;
+    }
     const datetime = getDateTime();
     const userMessage: Messages = {
       id: Date.now(),
@@ -198,222 +200,6 @@ const Chatbot: FC<ChatbotProps> = (props) => {
       modes: {},
     };
     userMessage.modes[chatModes[0]] = { message: inputMessage };
-    setListMessages([...listMessages, userMessage]);
-
-    const chatbotMessageId = Date.now() + 1;
-    const chatbotMessage: Messages = {
-      id: chatbotMessageId,
-      user: 'chatbot',
-      datetime: new Date().toLocaleString(),
-      isTyping: true,
-      isLoading: true,
-      modes: {},
-      currentMode: chatModes[0],
-    };
-    setListMessages((prev) => [...prev, chatbotMessage]);
-
-    try {
-      await chatStreamAPI.startChatStream(
-        {
-          question: inputMessage,
-          session_id: sessionId,
-          model,
-          mode: chatModes[0],
-          document_names: selectedFileNames?.map((f) => f.name),
-        },
-        (message: ChatStreamMessage) => {
-          // eslint-disable-next-line no-console
-          console.log('Frontend received message:', message);
-
-          if (message.type === 'status') {
-            // Status mesajlarını handle et (başlangıç durumları vs.)
-            // eslint-disable-next-line no-console
-            console.log('Status:', message.message);
-          } else if (message.type === 'message_chunk' && (message.content || message.full_message)) {
-            // Kelime kelime streaming - full_message varsa onu kullan, yoksa content'i ekle
-            setListMessages((prev) =>
-              prev.map((msg) => {
-                if (msg.id === chatbotMessageId) {
-                  const currentResponse = msg.modes[chatModes[0]] || { message: '' };
-
-                  // full_message varsa bunu kullan (daha güvenilir)
-                  // Yoksa mevcut mesaja content'i ekle
-                  const newMessage = message.full_message || currentResponse.message + (message.content || '');
-
-                  return {
-                    ...msg,
-                    modes: {
-                      ...msg.modes,
-                      [chatModes[0]]: {
-                        ...currentResponse,
-                        message: newMessage,
-                      },
-                    },
-                    isTyping: true,
-                    isLoading: !message.is_complete,
-                  };
-                }
-                return msg;
-              })
-            );
-
-            // Eğer bu son chunk ise, typing'i durdur
-            if (message.is_complete) {
-              setTimeout(() => {
-                setListMessages((prev) =>
-                  prev.map((msg) => {
-                    if (msg.id === chatbotMessageId) {
-                      return {
-                        ...msg,
-                        isTyping: false,
-                        isLoading: false,
-                      };
-                    }
-                    return msg;
-                  })
-                );
-              }, 100);
-            }
-          } else if (message.type === 'complete' && message.data) {
-            // Final response ile tüm bilgileri güncelle
-            const response = message.data;
-            const responseMode: ResponseMode = {
-              message: response.message,
-              sources: response.info?.sources || [],
-              model: response.info?.model || '',
-              total_tokens: response.info?.total_tokens || 0,
-              response_time: response.info?.response_time || 0,
-              cypher_query: response.info?.cypher_query || '',
-              graphonly_entities: response.info?.context || [],
-              entities: response.info?.entities?.entityids || [],
-              nodeDetails: response.info?.nodedetails || {},
-              error: response.info?.error || '',
-              metric_question: response.info?.metric_details?.question || '',
-              metric_answer: response.info?.metric_details?.answer || '',
-              metric_contexts: response.info?.metric_details?.contexts || '',
-            };
-
-            setListMessages((prev) =>
-              prev.map((msg) => {
-                if (msg.id === chatbotMessageId) {
-                  return {
-                    ...msg,
-                    modes: { ...msg.modes, [chatModes[0]]: responseMode },
-                    isTyping: false,
-                    isLoading: false,
-                  };
-                }
-                return msg;
-              })
-            );
-          } else if (message.type === 'error') {
-            setListMessages((prev) =>
-              prev.map((msg) => {
-                if (msg.id === chatbotMessageId) {
-                  return {
-                    ...msg,
-                    modes: {
-                      ...msg.modes,
-                      [chatModes[0]]: {
-                        message: message.message || 'Bir hata oluştu',
-                        error: message.error || 'Unknown error',
-                      },
-                    },
-                    isTyping: false,
-                    isLoading: false,
-                  };
-                }
-                return msg;
-              })
-            );
-          }
-        },
-        (error: Error) => {
-          // eslint-disable-next-line no-console
-          console.error('Streaming error:', error);
-          setListMessages((prev) =>
-            prev.map((msg) => {
-              if (msg.id === chatbotMessageId) {
-                return {
-                  ...msg,
-                  modes: {
-                    ...msg.modes,
-                    [chatModes[0]]: {
-                      message: 'Bağlantı hatası oluştu',
-                      error: error.message,
-                    },
-                  },
-                  isTyping: false,
-                  isLoading: false,
-                };
-              }
-              return msg;
-            })
-          );
-        },
-        () => {
-          // Stream tamamlandı
-          setListMessages((prev) =>
-            prev.map((msg) => {
-              if (msg.id === chatbotMessageId) {
-                return { ...msg, isTyping: false, isLoading: false };
-              }
-              return msg;
-            })
-          );
-        }
-      );
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('Error in streaming chat:', error);
-      setListMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id === chatbotMessageId) {
-            return {
-              ...msg,
-              modes: {
-                ...msg.modes,
-                [chatModes[0]]: {
-                  message: 'Bir hata oluştu',
-                  error: error instanceof Error ? error.message : 'Unknown error',
-                },
-              },
-              isTyping: false,
-              isLoading: false,
-            };
-          }
-          return msg;
-        })
-      );
-    }
-  };
-
-  const handleSubmit = async (e: { preventDefault: () => void }) => {
-    e.preventDefault();
-    if (!inputMessage.trim()) {
-      return;
-    }
-
-    // Input mesajını sakla ve hemen temizle
-    const currentInput = inputMessage.trim();
-    setInputMessage('');
-
-    // Stream modu aktifse streaming kullan
-    if (isStreamingEnabled) {
-      await handleStreamingSubmit(currentInput);
-      return;
-    }
-
-    // Normal mode (mevcut kod)
-    const datetime = getDateTime();
-    const userMessage: Messages = {
-      id: Date.now(),
-      user: 'user',
-      datetime: datetime,
-      currentMode: chatModes[0],
-      modes: {},
-    };
-    userMessage.modes[chatModes[0]] = { message: currentInput };
     setListMessages([...listMessages, userMessage]);
     const chatbotMessageId = Date.now() + 1;
     const chatbotMessage: Messages = {
@@ -429,13 +215,14 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     try {
       const apiCalls = chatModes.map((mode) =>
         chatBotAPI(
-          currentInput,
+          inputMessage,
           sessionId,
           model,
           mode,
           selectedFileNames?.map((f) => f.name)
         )
       );
+      setInputMessage('');
       const results = await Promise.allSettled(apiCalls);
       results.forEach((result, index) => {
         const mode = chatModes[index];
@@ -462,9 +249,9 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               simulateTypingEffect(chatbotMessageId, responseMode, mode, responseMode.message);
             } else {
               setListMessages((prev) =>
-                prev.map((msg) => {
-                  return msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg;
-                })
+                prev.map((msg) =>
+                  (msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg)
+                )
               );
             }
           } else {
@@ -477,18 +264,17 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               simulateTypingEffect(chatbotMessageId, responseMode, response.data, responseMode.message);
             } else {
               setListMessages((prev) =>
-                prev.map((msg) => {
-                  return msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg;
-                })
+                prev.map((msg) =>
+                  (msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg)
+                )
               );
             }
           }
         } else {
-          // eslint-disable-next-line no-console
           console.error(`API call failed for mode ${mode}:`, result.reason);
           setListMessages((prev) =>
-            prev.map((msg) => {
-              return msg.id === chatbotMessageId
+            prev.map((msg) =>
+              (msg.id === chatbotMessageId
                 ? {
                     ...msg,
                     modes: {
@@ -496,8 +282,8 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                       [mode]: { message: 'Failed to fetch response for this mode.', error: result.reason },
                     },
                   }
-                : msg;
-            })
+                : msg)
+            )
           );
         }
       });
@@ -505,12 +291,11 @@ const Chatbot: FC<ChatbotProps> = (props) => {
         prev.map((msg) => (msg.id === chatbotMessageId ? { ...msg, isLoading: false, isTyping: false } : msg))
       );
     } catch (error) {
-      // eslint-disable-next-line no-console
       console.error('Error in handling chat:', error);
       if (error instanceof Error) {
         setListMessages((prev) =>
-          prev.map((msg) => {
-            return msg.id === chatbotMessageId
+          prev.map((msg) =>
+            (msg.id === chatbotMessageId
               ? {
                   ...msg,
                   isLoading: false,
@@ -522,8 +307,8 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                     },
                   },
                 }
-              : msg;
-          })
+              : msg)
+          )
         );
       }
     }
@@ -771,21 +556,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
           </div>
         </Widget>
       </div>
-      <div className='n-bg-palette-neutral-bg-weak flex! flex-col gap-2 bottom-0 p-2.5 w-full'>
-        {/* Streaming Toggle */}
-        <div className='flex! justify-center items-center gap-2'>
-          <Typography variant='body-small'>Normal Chat</Typography>
-          <label className='switch'>
-            <input
-              type='checkbox'
-              checked={isStreamingEnabled}
-              onChange={(e) => setIsStreamingEnabled(e.target.checked)}
-            />
-            <span className='slider round'></span>
-          </label>
-          <Typography variant='body-small'>Streaming Chat</Typography>
-        </div>
-
+      <div className='n-bg-palette-neutral-bg-weak flex! gap-2.5 bottom-0 p-2.5 w-full'>
         <form onSubmit={handleSubmit} className={`flex! gap-2.5 w-full ${!isFullScreen ? 'justify-between' : ''}`}>
           <TextInput
             className={`n-bg-palette-neutral-bg-default flex-grow-7 ${
