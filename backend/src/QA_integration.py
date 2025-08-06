@@ -2,7 +2,6 @@ import os
 import json
 import time
 import logging
-import re
 
 import threading
 from datetime import datetime
@@ -40,31 +39,6 @@ load_dotenv()
 
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
 EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL) 
-
-def generate_greeting_response(question):
-    """Selamlamalar için basit yanıtlar generate eder."""
-    question_lower = question.lower().strip()
-    
-    if any(word in question_lower for word in ['merhaba', 'selam', 'hey', 'hello', 'hi']):
-        return "Merhaba! Size nasıl yardımcı olabilirim? Dosyalarınızla ilgili sorularınızı sorabilirsiniz."
-    
-    elif any(word in question_lower for word in ['nasılsın', 'nasıl gidiyor', 'how are you', 'what\'s up']):
-        return "Ben bir yapay zeka asistanıyım ve her zaman iyiyim! Size nasıl yardımcı olabilirim?"
-    
-    elif any(word in question_lower for word in ['teşekkürler', 'sağol', 'thanks', 'thank you']):
-        return "Rica ederim! Başka bir sorunuz varsa çekinmeden sorabilirsiniz."
-    
-    elif any(word in question_lower for word in ['günaydın', 'good morning']):
-        return "Günaydın! Bugün size nasıl yardımcı olabilirim?"
-    
-    elif any(word in question_lower for word in ['iyi akşamlar', 'good evening']):
-        return "İyi akşamlar! Size nasıl yardımcı olabilirim?"
-    
-    elif any(word in question_lower for word in ['bye', 'goodbye', 'iyi geceler', 'görüşürüz']):
-        return "Hoşça kalın! İhtiyacınız olduğunda buradayım."
-    
-    else:
-        return "Merhaba! Size nasıl yardımcı olabilirim? Dosyalarınızla ilgili sorularınızı sorabilirsiniz." 
 
 class SessionChatHistory:
     history_dict = {}
@@ -176,11 +150,8 @@ def get_sources_and_chunks(sources_used, docs):
         except Exception as e:
             logging.error(f"Error processing document: {e}")
 
-    # sources_used'ın list olduğundan emin ol (set ise list'e çevir)
-    sources_list = list(sources_used) if isinstance(sources_used, set) else sources_used
-    
     result = {
-        'sources': sources_list,
+        'sources': sources_used,
         'chunkdetails': chunkdetails_list,
     }
     return result
@@ -252,16 +223,7 @@ def format_documents(documents, model,chat_mode_settings):
         except Exception as e:
             logging.error(f"Error formatting document: {e}")
     
-    # Set tipindeki verileri list'e çevir (JSON serialization için)
-    sources_list = list(sources)
-    entities_list = {}
-    for key, value in entities.items():
-        if isinstance(value, set):
-            entities_list[key] = list(value)
-        else:
-            entities_list[key] = value
-    
-    return "\n\n".join(formatted_docs), sources_list, entities_list, global_communities
+    return "\n\n".join(formatted_docs), sources,entities,global_communities
 
 def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     start_time = time.time()
@@ -471,52 +433,7 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
 
 def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings):
     try:
-        # LLM ile intent classification yap
-        llm, _, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
-        
-        # Intent classification için özel prompt
-        intent_prompt = ChatPromptTemplate.from_messages([
-            ("system", QUESTION_TRANSFORM_TEMPLATE),
-            MessagesPlaceholder(variable_name="messages")
-        ])
-        
-        intent_chain = intent_prompt | llm | StrOutputParser()
-        intent_result = intent_chain.invoke({"messages": messages}).strip()
-        
-        logging.info(f"Intent classification result: '{intent_result}' for question: '{question}'")
-        
-        # Eğer CASUAL ise, basit yanıt döndür
-        if intent_result.upper() == "CASUAL":
-            logging.info(f"Detected casual/greeting message via LLM: {question}")
-            content = generate_greeting_response(question)
-            
-            ai_response = AIMessage(content=content)
-            messages.append(ai_response)
-            
-            # Chat history'e ekle
-            summarization_thread = threading.Thread(target=summarize_and_log, args=(history, messages, None))
-            summarization_thread.start()
-            logging.info("Summarization thread started for casual response.")
-            
-            return {
-                "session_id": "",  
-                "message": content,
-                "info": {
-                    "sources": [],
-                    "model": model_version,
-                    "nodedetails": [],
-                    "total_tokens": 0,
-                    "response_time": 0,
-                    "mode": chat_mode_settings["mode"],
-                    "entities": [],
-                    "metric_details": {"question": question, "contexts": "", "answer": content},
-                },
-                "user": "chatbot"
-            }
-        
-        # Normal soru-cevap işlemi - Document retrieval yap
-        logging.info(f"Processing document search with transformed query: '{intent_result}'")
-        _, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         
         docs,transformed_question = retrieve_documents(doc_retriever, messages)  
 

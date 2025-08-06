@@ -372,7 +372,7 @@ async def extract_graph_from_file_local_file(
     post_processing_rules=None,
 ):
 
-    logging.info(f"Process file name :{fileName}")
+    logging.info(f"Process file name: {fileName}")
     if not retry_condition:
         gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
         if gcs_file_cache == "True":
@@ -384,8 +384,10 @@ async def extract_graph_from_file_local_file(
             file_name, pages, file_extension = get_documents_from_file_by_path(
                 merged_file_path, fileName
             )
-            # print("pages", pages[:3])
+            logging.info(f"Loaded {len(pages) if pages else 0} pages for file: {fileName}")
+        
         if pages == None or len(pages) == 0:
+            logging.error(f"No pages found for file: {file_name}. File may be corrupted, empty, or unsupported format.")
             raise LLMGraphBuilderException(
                 f"File content is not available for file : {file_name}"
             )
