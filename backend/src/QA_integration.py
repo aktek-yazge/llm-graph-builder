@@ -475,7 +475,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
         logging.exception(f"Error processing chat response at {datetime.now()}: {str(e)}")
         return {
             "session_id": "",
-            "message": "Something went wrong",
+            "message": "Bir şeyler ters gitti",
             "info": {
                 "metrics" : [],
                 "sources": [],
@@ -504,7 +504,7 @@ def summarize_and_log(history, stored_messages, llm):
                 MessagesPlaceholder(variable_name="chat_history"),
                 (
                     "human",
-                    "Summarize the above chat messages into a concise message, focusing on key points and relevant details that could be useful for future conversations. Exclude all introductions and extraneous information."
+                    "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
                 ),
             ]
         )
@@ -514,7 +514,7 @@ def summarize_and_log(history, stored_messages, llm):
 
         with threading.Lock():
             history.clear()
-            history.add_user_message("Our current conversation summary till now")
+            history.add_user_message("Şu ana kadarki konuşma özetimiz")
             history.add_message(summary_message)
 
         history_summarized_time = time.time() - start_time
@@ -578,7 +578,7 @@ def process_graph_response(model, graph, question, messages, history):
         
         graph_response = get_graph_response(graph_chain, question)
         
-        ai_response_content = graph_response.get("response", "Something went wrong")
+        ai_response_content = graph_response.get("response", "Bir şeyler ters gitti")
         ai_response = AIMessage(content=ai_response_content)
         
         messages.append(ai_response)
@@ -607,7 +607,7 @@ def process_graph_response(model, graph, question, messages, history):
         logging.exception(f"Error processing graph response at {datetime.now()}: {str(e)}")
         return {
             "session_id": "",  
-            "message": "Something went wrong",
+            "message": "Bir şeyler ters gitti",
             "info": {
                 "model": model_version,
                 "cypher_query": "",
