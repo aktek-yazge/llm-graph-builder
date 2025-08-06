@@ -150,8 +150,11 @@ def get_sources_and_chunks(sources_used, docs):
         except Exception as e:
             logging.error(f"Error processing document: {e}")
 
+    # sources_used'ın list olduğundan emin ol (set ise list'e çevir)
+    sources_list = list(sources_used) if isinstance(sources_used, set) else sources_used
+    
     result = {
-        'sources': sources_used,
+        'sources': sources_list,
         'chunkdetails': chunkdetails_list,
     }
     return result
@@ -223,7 +226,16 @@ def format_documents(documents, model,chat_mode_settings):
         except Exception as e:
             logging.error(f"Error formatting document: {e}")
     
-    return "\n\n".join(formatted_docs), sources,entities,global_communities
+    # Set tipindeki verileri list'e çevir (JSON serialization için)
+    sources_list = list(sources)
+    entities_list = {}
+    for key, value in entities.items():
+        if isinstance(value, set):
+            entities_list[key] = list(value)
+        else:
+            entities_list[key] = value
+    
+    return "\n\n".join(formatted_docs), sources_list, entities_list, global_communities
 
 def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     start_time = time.time()
