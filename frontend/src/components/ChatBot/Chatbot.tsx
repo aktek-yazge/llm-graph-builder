@@ -394,10 +394,13 @@ const Chatbot: FC<ChatbotProps> = (props) => {
       return;
     }
 
+    // Input mesajını sakla ve hemen temizle
+    const currentInput = inputMessage.trim();
+    setInputMessage('');
+
     // Stream modu aktifse streaming kullan
     if (isStreamingEnabled) {
-      await handleStreamingSubmit(inputMessage);
-      setInputMessage('');
+      await handleStreamingSubmit(currentInput);
       return;
     }
 
@@ -410,7 +413,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
       currentMode: chatModes[0],
       modes: {},
     };
-    userMessage.modes[chatModes[0]] = { message: inputMessage };
+    userMessage.modes[chatModes[0]] = { message: currentInput };
     setListMessages([...listMessages, userMessage]);
     const chatbotMessageId = Date.now() + 1;
     const chatbotMessage: Messages = {
@@ -426,14 +429,13 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     try {
       const apiCalls = chatModes.map((mode) =>
         chatBotAPI(
-          inputMessage,
+          currentInput,
           sessionId,
           model,
           mode,
           selectedFileNames?.map((f) => f.name)
         )
       );
-      setInputMessage('');
       const results = await Promise.allSettled(apiCalls);
       results.forEach((result, index) => {
         const mode = chatModes[index];
