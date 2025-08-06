@@ -104,7 +104,7 @@ class CustomGZipMiddleware:
 app = FastAPI()
 app.add_middleware(XContentTypeOptions)
 app.add_middleware(XFrame, Option={'X-Frame-Options': 'DENY'})
-app.add_middleware(CustomGZipMiddleware, minimum_size=1000, compresslevel=5,paths=["/sources_list","/url/scan","/extract","/chat_bot","/chunk_entities","/get_neighbours","/graph_query","/schema","/populate_graph_schema","/get_unconnected_nodes_list","/get_duplicate_nodes","/fetch_chunktext","/schema_visualization"])
+app.add_middleware(CustomGZipMiddleware, minimum_size=1000, compresslevel=5,paths=["/sources_list","/url/scan","/extract","/chat_bot","/chat_bot_stream","/chunk_entities","/get_neighbours","/graph_query","/schema","/populate_graph_schema","/get_unconnected_nodes_list","/get_duplicate_nodes","/fetch_chunktext","/schema_visualization"])
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -636,6 +636,135 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         return create_api_response(job_status, message=message, error=error_message,data=mode)
     finally:
         gc.collect()
+
+@app.post("/chat_bot_stream")
+async def chat_bot_stream(
+    request: Request,
+    uri: str = Form(None),
+    model: str = Form(None),
+    userName: str = Form(None),
+    password: str = Form(None),
+    database: str = Form(None),
+    question: str = Form(None),
+    document_names: str = Form(None),
+    session_id: str = Form(None),
+    mode: str = Form(None),
+    email: str = Form(None)
+):
+    """
+    Stream versiyonu chat_bot endpoint'inin.
+    Server-Sent Events (SSE) kullanarak gerçek zamanlı chat cevapları gönderir.
+    """
+    
+    async def generate_chat_response():
+        try:
+            logging.info(f"QA_RAG Stream called at {datetime.now()}")
+            qa_rag_start_time = time.time()
+            
+            # İlk durum mesajı gönder
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Chat işlemi başlatılıyor...', 'status': 'starting'})}\n\n"
+            
+            # Graph bağlantısını kur
+            if mode == "graph":
+                graph = Neo4jGraph(url=uri, username=userName, password=password, database=database, sanitize=True, refresh_schema=True)
+            else:
+                graph = create_graph_database_connection(uri, userName, password, database)
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'})}\n\n"
+            
+            graph_DB_dataAccess = graphDBdataAccess(graph)
+            write_access = graph_DB_dataAccess.check_account_access(database=database)
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Soru işleniyor...', 'status': 'processing'})}\n\n"
+            
+            # QA_RAG işlemini çalıştır
+            result = await asyncio.to_thread(
+                QA_RAG,
+                graph=graph,
+                model=model,
+                question=question,
+                document_names=document_names,
+                session_id=session_id,
+                mode=mode,
+                write_access=write_access
+            )
+            
+            total_call_time = time.time() - qa_rag_start_time
+            logging.info(f"Total Response time is {total_call_time:.2f} seconds")
+            result["info"]["response_time"] = round(total_call_time, 2)
+            
+            # Cevap parçalayarak gönder (simüle streaming effect)
+            message = result.get("message", "")
+            if message:
+                # Mesajı kelime kelime stream et
+                words = message.split()
+                streamed_message = ""
+                
+                for i, word in enumerate(words):
+                    if await request.is_disconnected():
+                        logging.info("SSE Client disconnected during streaming")
+                        break
+                        
+                    streamed_message += word + " "
+                    
+                    # Her birkaç kelimede bir chunk gönder
+                    if (i + 1) % 3 == 0 or i == len(words) - 1:
+                        chunk_data = {
+                            'type': 'message_chunk',
+                            'content': word + " ",  # Sadece bu kelime (frontend full_message kullanacak)
+                            'full_message': streamed_message.strip(),  # Şimdiye kadarki tam mesaj
+                            'is_complete': i == len(words) - 1,
+                            'word_index': i + 1,
+                            'total_words': len(words)
+                        }
+                        yield f"data: {json.dumps(chunk_data)}\n\n"
+                        
+                        # Streaming efekti için kısa bekleme
+                        await asyncio.sleep(0.1)
+            
+            # Son olarak tam sonucu gönder
+            final_data = {
+                'type': 'complete',
+                'status': 'finished',
+                'data': result,
+                'elapsed_time': f"{total_call_time:.2f}",
+                'timestamp': formatted_time(datetime.now(timezone.utc))
+            }
+            yield f"data: {json.dumps(final_data)}\n\n"
+            
+            # Loglama
+            json_obj = {
+                'api_name': 'chat_bot_stream',
+                'db_url': uri,
+                'userName': userName,
+                'database': database,
+                'question': question,
+                'document_names': document_names,
+                'session_id': session_id,
+                'mode': mode,
+                'logging_time': formatted_time(datetime.now(timezone.utc)),
+                'elapsed_api_time': f'{total_call_time:.2f}',
+                'email': email
+            }
+            logger.log_struct(json_obj, "INFO")
+            
+        except Exception as e:
+            error_message = str(e)
+            logging.exception(f'Exception in chat bot stream: {error_message}')
+            
+            error_data = {
+                'type': 'error',
+                'status': 'failed',
+                'message': "Chat cevabı alınamadı",
+                'error': error_message,
+                'timestamp': formatted_time(datetime.now(timezone.utc))
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+        
+        finally:
+            gc.collect()
+    
+    return EventSourceResponse(generate_chat_response())
 
 @app.post("/chunk_entities")
 async def chunk_entities(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), nodedetails=Form(None),entities=Form(),mode=Form(),email=Form(None)):
