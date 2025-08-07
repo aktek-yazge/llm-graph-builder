@@ -1113,7 +1113,7 @@ async def processing_chunks(
   latency["entity_extraction"] = f"{time.time() - t1:.2f}"
 
   # 3. normalize IDs / backticks / types
-  cleaned = handle_backticks_nodes_relationship_id_type(graph_documents, file_name)
+  cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
 
   # 4. save nodes & rels into Neo4j
   t2 = time.time()
@@ -1123,7 +1123,7 @@ async def processing_chunks(
   # 5. relate each chunk to its extracted entities
   pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
   t3 = time.time()
-  merge_relationship_between_chunk_and_entites(graph, pairs, file_name)
+  merge_relationship_between_chunk_and_entites(graph, pairs)
   latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
 
   # 6. cross-chunk SIMILAR relationships
