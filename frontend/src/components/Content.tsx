@@ -561,7 +561,7 @@ const Content: React.FC<ContentProps> = ({
         modes: {
           'graph+vector+fulltext': {
             message:
-              ' Welcome to the Neo4j Knowledge Graph Chat. You can ask questions related to documents which have been completely processed.',
+              " Merhaba! Aktek Genai Workbench'e hoş geldiniz. Yüklenen belgelerle ilgili sorular sorabilir ve konuşmalar yapabilirsiniz.",
           },
         },
         user: 'chatbot',
@@ -874,7 +874,7 @@ const Content: React.FC<ContentProps> = ({
           flexWrap='wrap'
         >
           <div className='connectionstatus__container'>
-            <span className='h6 px-1'>Neo4j connection {isReadOnlyUser ? '(Read only Mode)' : ''}</span>
+            <span className='h6 px-1'>Graph connection {isReadOnlyUser ? '(Read only Mode)' : ''}</span>
             <Typography variant='body-medium'>
               <DatabaseStatusIcon
                 isConnected={connectionStatus}
@@ -1048,7 +1048,7 @@ const Content: React.FC<ContentProps> = ({
               >
                 <Menu.Item title='Graph Schema' onClick={handleSchemaView} isDisabled={!connectionStatus} />
                 <Menu.Item
-                  title='Explore Graph in Neo4j'
+                  title='Explore Graph'
                   onClick={handleOpenGraphClick}
                   isDisabled={!filesData.some((f) => f?.status === 'Completed')}
                 />

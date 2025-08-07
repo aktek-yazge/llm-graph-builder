@@ -64,6 +64,28 @@ class CustomCallback(BaseCallbackHandler):
         logging.info("question transformed")
         self.transformed_question = response.generations[0][0].text.strip()
 
+def is_casual_conversation(question, llm):
+    """
+    LLM kullanarak kullanıcının mesajının günlük konuşma mı 
+    yoksa bilgi gerektiren bir soru mu olduğunu tespit eder.
+    """
+    try:
+        casual_detection_prompt = ChatPromptTemplate.from_messages([
+            ("human", CASUAL_CONVERSATION_DETECTION_TEMPLATE.format(user_message=question))
+        ])
+        
+        chain = casual_detection_prompt | llm | StrOutputParser()
+        result = chain.invoke({}).strip().upper()
+        
+        logging.info(f"Casual conversation detection result: {result} for question: '{question[:50]}...'")
+        
+        return result == "CASUAL"
+        
+    except Exception as e:
+        logging.error(f"Error in casual conversation detection: {e}")
+        # Hata durumunda güvenli tarafta kalıp normal işlemi yapalım
+        return False
+
 def get_history_by_session_id(session_id):
     try:
         return SessionChatHistory.get_chat_history(session_id)
@@ -447,15 +469,42 @@ def process_chat_response(messages, history, question, model, graph, document_na
     try:
         llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         
-        docs,transformed_question = retrieve_documents(doc_retriever, messages)  
-
-        if docs:
-            content, result, total_tokens,formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
-        else:
-            content = "I couldn't find any relevant documents to answer your question."
-            result = {"sources": list(), "nodedetails": list(), "entities": list()}
-            total_tokens = 0
+        # Günlük konuşma tespiti yap
+        if is_casual_conversation(question, llm):
+            logging.info(f"Casual conversation detected for question: '{question}'. Skipping document retrieval.")
+            
+            # Günlük konuşma için retriever kullanmadan direkt cevap ver
+            rag_chain = get_rag_chain(llm=llm)
+            
+            # Boş bağlam ile cevap üret
+            ai_response = rag_chain.invoke({
+                "messages": messages[:-1],
+                "context": "",  # Boş bağlam
+                "input": question
+            })
+            
+            content = ai_response.content
+            total_tokens = get_total_tokens(ai_response, llm)
+            
+            # Boş result yapısı
+            result = {
+                'sources': [], 
+                'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
+                'entities': {'entityids': [], "relationshipids": []}
+            }
             formatted_docs = ""
+            
+        else:
+            # Normal işlem: document retrieval yap
+            docs, transformed_question = retrieve_documents(doc_retriever, messages)  
+
+            if docs:
+                content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
+            else:
+                content = "I couldn't find any relevant documents to answer your question."
+                result = {"sources": list(), "nodedetails": list(), "entities": list()}
+                total_tokens = 0
+                formatted_docs = ""
         
         ai_response = AIMessage(content=content)
         messages.append(ai_response)

@@ -25,7 +25,6 @@ import { useNavigate } from 'react-router';
 import { deduplicateByFullPattern, deduplicateNodeByValue } from '../../utils/Utils';
 import DataImporterSchemaDialog from '../Popups/GraphEnhancementDialog/EnitityExtraction/DataImporter';
 
-
 const GCSModal = lazy(() => import('../DataSources/GCS/GCSModal'));
 const S3Modal = lazy(() => import('../DataSources/AWS/S3Modal'));
 const GenericModal = lazy(() => import('../WebSources/GenericSourceModal'));
@@ -44,7 +43,7 @@ const spotlightsforunauthenticated = [
     target: 'connectbutton',
     children: (
       <>
-        <Spotlight.Header>Connect To Neo4j Database</Spotlight.Header>
+        <Spotlight.Header>Connect To Graph Database</Spotlight.Header>
         <Spotlight.Body>Fill out the neo4j credentials and click on connect</Spotlight.Body>
       </>
     ),
@@ -98,7 +97,7 @@ const spotlights = [
     target: 'connectbutton',
     children: (
       <>
-        <Spotlight.Header>Connect To Neo4j Database</Spotlight.Header>
+        <Spotlight.Header>Connect To Graph Database</Spotlight.Header>
         <Spotlight.Body>Fill out the neo4j credentials and click on connect</Spotlight.Body>
       </>
     ),
@@ -342,7 +341,7 @@ const PageLayout: React.FC = () => {
             modes: {
               'graph+vector+fulltext': {
                 message:
-                  ' Welcome to the Neo4j Knowledge Graph Chat. You can ask questions related to documents which have been completely processed.',
+                  " Merhaba! Aktek Genai Workbench'e hoş geldiniz. Yüklenen belgelerle ilgili sorular sorabilir ve konuşmalar yapabilirsiniz.",
               },
             },
             user: 'chatbot',
