@@ -128,55 +128,55 @@ export default function GraphEnhancementDialog({
               alt='graph-enhancement-options-logo'
             />
             <div className='flex flex-col'>
-              <Typography variant={isTablet ? 'h5' : 'h2'}>Graph Enhancements</Typography>
+              <Typography variant={isTablet ? 'h5' : 'h2'}>Graph Geliştirmeleri</Typography>
               <Typography variant={isTablet ? 'subheading-small' : 'subheading-medium'} className='mb-2'>
                 {isTablet
-                  ? `This set of tools will help you enhance the quality of your Knowledge Graph`
-                  : `This set of tools will help you enhance the quality of your Knowledge Graph by removing possible
-                duplicated entities, disconnected nodes and set a Graph Schema for improving the quality of the entity
-                extraction process`}
+                  ? `Bu araç seti Bilgi Graph'ınızın kalitesini artırmanıza yardımcı olacak`
+                  : `Bu araç seti, olası tekrarlanan entity'leri ve bağlantısız nodeları kaldırarak ve entity 
+                çıkarma sürecinin kalitesini artırmak için Graph Şeması belirleyerek Bilgi Graph'ınızın kalitesini 
+                artırmanıza yardımcı olacak`}
               </Typography>
               <Flex className='pt-2'>
                 <Tabs fill='underline' onChange={setactiveTab} size={isTablet ? 'small' : 'large'} value={activeTab}>
                   <Tabs.Tab
                     tabId={0}
                     htmlAttributes={{
-                      'aria-label': 'Entity Extraction Settings',
+                      'aria-label': 'Entity Çıkarma Ayarları',
                     }}
                   >
-                    Entity Extraction Settings
+                    Entity Çıkarma Ayarları
                   </Tabs.Tab>
                   <Tabs.Tab
                     tabId={1}
                     htmlAttributes={{
-                      'aria-label': 'Additional Instructions',
+                      'aria-label': 'Ek Talimatlar',
                     }}
                   >
-                    Additional Instructions
+                    Ek Talimatlar
                   </Tabs.Tab>
                   <Tabs.Tab
                     tabId={2}
                     htmlAttributes={{
-                      'aria-label': 'Disconnected Nodes',
+                      'aria-label': 'Bağlantısız Nodelar',
                     }}
                   >
-                    Disconnected Nodes
+                    Bağlantısız Nodelar
                   </Tabs.Tab>
                   <Tabs.Tab
                     tabId={3}
                     htmlAttributes={{
-                      'aria-label': 'Duplication Nodes',
+                      'aria-label': 'Tekrarlanan Nodelar',
                     }}
                   >
-                    De-Duplication Of Nodes
+                    Nodelarin Tekrarını Giderme
                   </Tabs.Tab>
                   <Tabs.Tab
                     tabId={4}
                     htmlAttributes={{
-                      'aria-label': 'Post Processing Jobs',
+                      'aria-label': 'İşlem Sonrası Görevler',
                     }}
                   >
-                    Post Processing Jobs
+                    İşlem Sonrası Görevler
                   </Tabs.Tab>
                 </Tabs>
               </Flex>

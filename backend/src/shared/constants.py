@@ -318,6 +318,26 @@ Not: Bu sistem yalnızca kendi iç bilgisini kullanarak yanıt üretmez. Yanıtl
 
 QUESTION_TRANSFORM_TEMPLATE = "Aşağıdaki konuşmaya göre, konuşmayla ilgili bilgi almak için arama yapılacak bir sorgu üret. Sadece sorguyu yaz, başka hiçbir şey yazma." 
 
+# Günlük konuşmaları tespit etmek için template
+CASUAL_CONVERSATION_DETECTION_TEMPLATE = """
+Aşağıdaki kullanıcı mesajını analiz et ve bunun günlük konuşma/selamlaşma mı yoksa bilgi gerektiren bir soru mu olduğunu belirle.
+
+Günlük konuşma örnekleri:
+- Merhaba, selam, iyi günler gibi selamlaşmalar
+- Nasılsın, nasıl gidiyor gibi genel nezaket soruları
+- Teşekkür ederim, hoşça kal gibi kibarlık ifadeleri
+- Sadece sohbet amaçlı kısa yorumlar
+
+Bilgi gerektiren soru örnekleri:
+- Dokümanlardaki belirli bilgileri soran sorular
+- Analiz, açıklama veya ayrıntı gerektiren sorular
+- Teknik veya spesifik konular hakkındaki sorular
+
+Sadece "CASUAL" veya "QUESTION" cevabını ver. Başka açıklama yapma.
+
+Kullanıcı mesajı: {user_message}
+"""
+
 ## CHAT QUERIES
 VECTOR_SEARCH_TOP_K = 5
 

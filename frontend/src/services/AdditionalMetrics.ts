@@ -24,7 +24,7 @@ const getAdditionalMetrics = async (
     });
     return response;
   } catch (error) {
-    console.log('Error in connecting to the Neo4j instance :', error);
+    console.log('Error in connecting to the Graph instance :', error);
     throw error;
   }
 };

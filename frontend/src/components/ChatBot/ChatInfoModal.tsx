@@ -303,7 +303,7 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
   };
   const MetricsCheckBoxWithCheck = withVisibility(MetricsCheckbox);
   const TextareaWithCheck = withVisibility(() => (
-    <TextArea ref={textAreaRef} isFluid={true} size='large' isOptional={true} label='Reference Answer'></TextArea>
+    <TextArea ref={textAreaRef} isFluid={true} size='large' isOptional={true} label='Referans Cevap'></TextArea>
   ));
   const isMultiModes = useMemo(
     () => activeChatmodes != null && Object.keys(activeChatmodes).length > 1,
@@ -323,17 +323,17 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
           alt='Retrieval-logo'
         />
         <div className='flex! flex-col'>
-          <Typography variant='h2'>Retrieval information</Typography>
+          <Typography variant='h2'>Retriever Bilgileri</Typography>
           <Typography variant='body-medium' className='mb-2'>
-            To generate this response, the process took <span className='font-bold'>{response_time} seconds,</span>
-            utilizing <span className='font-bold'>{total_tokens}</span> tokens with the model{' '}
-            <span className='font-bold'>{model}</span> in{' '}
+            Bu yanıtı oluşturmak için süreç <span className='font-bold'>{response_time} saniye</span> sürdü,
+            <span className='font-bold'>{total_tokens}</span> token kullanarak model{' '}
+            <span className='font-bold'>{model}</span> ile{' '}
             <span className='font-bold'>
               {chatModeReadableLables[mode] !== 'vector'
                 ? chatModeReadableLables[mode].replace(/\+/g, ' & ')
                 : chatModeReadableLables[mode]}
             </span>{' '}
-            mode.
+            modunda gerçekleştirildi.
           </Typography>
         </div>
       </div>
@@ -347,27 +347,27 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
             <Tabs.Tab tabId={7}>Communities</Tabs.Tab>
           ) : (
             <>
-              {mode != chatModeLables.graph ? <Tabs.Tab tabId={3}>Sources used</Tabs.Tab> : <></>}
-              {mode != chatModeLables.graph ? <Tabs.Tab tabId={5}>Chunks</Tabs.Tab> : <></>}
+              {mode != chatModeLables.graph ? <Tabs.Tab tabId={3}>Kullanılan Kaynaklar</Tabs.Tab> : <></>}
+              {mode != chatModeLables.graph ? <Tabs.Tab tabId={5}>Chunk'lar</Tabs.Tab> : <></>}
               {mode === chatModeLables['graph+vector'] ||
               mode === chatModeLables.graph ||
               mode === chatModeLables['graph+vector+fulltext'] ||
               mode === chatModeLables['entity search+vector'] ? (
-                <Tabs.Tab tabId={4}>Top Entities used</Tabs.Tab>
+                <Tabs.Tab tabId={4}>Kullanılan En İyi Entity'ler</Tabs.Tab>
               ) : (
                 <></>
               )}
               {mode === chatModeLables.graph && cypher_query?.trim()?.length ? (
-                <Tabs.Tab tabId={6}>Generated Cypher Query</Tabs.Tab>
+                <Tabs.Tab tabId={6}>Oluşturulan Cypher Sorgusu</Tabs.Tab>
               ) : (
                 <></>
               )}
               {mode === chatModeLables['entity search+vector'] && communities.length ? (
-                <Tabs.Tab tabId={7}>Communities</Tabs.Tab>
+                <Tabs.Tab tabId={7}>Community'ler</Tabs.Tab>
               ) : (
                 <></>
               )}
-              <Tabs.Tab tabId={8}>Evaluation Metrics</Tabs.Tab>
+              <Tabs.Tab tabId={8}>Değerlendirme Metrikleri</Tabs.Tab>
             </>
           )}
         </Tabs>
@@ -382,10 +382,10 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
               {!supportedLLmsForRagas.includes(metricmodel) && (
                 <Banner
                   type='warning'
-                  title='LLM Model Not Supported ,Please Choose Different Model'
+                  title='LLM Modeli Desteklenmiyor, Lütfen Farklı Model Seçin'
                   description={
                     <Typography variant='body-medium'>
-                      Currently ragas evaluation works on{' '}
+                      Şu anda ragas değerlendirmesi şu modellerde çalışmaktadır:{' '}
                       {supportedLLmsForRagas.map((s, idx) => (
                         <span className='font-bold' key={s}>
                           {capitalizeWithUnderscore(s) + (idx != supportedLLmsForRagas.length - 1 ? ',' : '')}
@@ -399,10 +399,11 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
               )}
               <Box>
                 <Typography variant='body-large'>
-                  We use several key metrics to assess the quality of our chat responses. Click the button below to view
-                  detailed scores for this interaction using <span className='font-bold'>ragas framework</span>. These
-                  scores help us continuously improve the accuracy and helpfulness of our chatbots.This usually takes
-                  about <span className='font-bold'>20 seconds</span> . You'll see detailed scores shortly.
+                  Sohbet yanıtlarımızın kalitesini değerlendirmek için birkaç temel metrik kullanırız. Bu etkileşim için
+                  <span className='font-bold'> ragas framework</span> kullanarak detaylı puanları görüntülemek için
+                  aşağıdaki butona tıklayın. Bu puanlar chatbot'larımızın doğruluğunu ve yararlılığını sürekli
+                  iyileştirmemize yardımcı olur. Bu işlem genellikle yaklaşık{' '}
+                  <span className='font-bold'>20 saniye</span> sürer. Kısa süre içinde detaylı puanları göreceksiniz.
                 </Typography>
               </Box>
             </Stack>
@@ -456,7 +457,7 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
                   className='w-max self-center mt-4'
                   onClick={loadMetrics}
                 >
-                  View Detailed Metrics
+                  Detaylı Metrikleri Görüntüle
                 </Button>
               )}
             {isMultiModes && (isAdditionalMetricsEnabled === false || isAdditionalMetricsEnabled === null) && (
@@ -465,7 +466,7 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
                 className='w-max self-center mt-4'
                 onClick={loadMetrics}
               >
-                View Detailed Metrics For All Modes
+                Tüm Modlar İçin Detaylı Metrikleri Görüntüle
               </Button>
             )}
           </Stack>
@@ -504,7 +505,7 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
           <GraphViewButton
             nodeValues={nodes}
             relationshipValues={relationships}
-            label='Graph Entities used for Answer Generation'
+            label='Cevap Üretimi İçin Kullanılan Graph Entityleri'
             viewType='chatInfoView'
           />
         </div>

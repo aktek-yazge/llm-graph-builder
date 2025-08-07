@@ -90,8 +90,8 @@ export const chatModeLables = {
   fulltext: 'fulltext',
   'graph+vector+fulltext': 'graph_vector_fulltext',
   'entity search+vector': 'entity_vector',
-  unavailableChatMode: 'Chat mode is unavailable when files are selected',
-  selected: 'Selected',
+  unavailableChatMode: 'Dosyalar seçildiğinde sohbet modu kullanılamaz',
+  selected: 'Seçili',
   'global search+vector+fulltext': 'global_vector',
 };
 export const chatModeReadableLables: Record<string, string> = {
@@ -101,8 +101,8 @@ export const chatModeReadableLables: Record<string, string> = {
   fulltext: 'fulltext',
   graph_vector_fulltext: 'graph+vector+fulltext',
   entity_vector: 'entity search+vector',
-  unavailableChatMode: 'Chat mode is unavailable when files are selected',
-  selected: 'Selected',
+  unavailableChatMode: 'Dosyalar seçildiğinde sohbet modu kullanılamaz',
+  selected: 'Seçili',
   global_vector: 'global search+vector+fulltext',
 };
 export const chatModes =
@@ -114,35 +114,36 @@ export const chatModes =
     : [
         {
           mode: chatModeLables.vector,
-          description: 'Performs semantic similarity search on text chunks using vector indexing.',
+          description: 'Vektör indekslemesi kullanarak metin parçaları üzerinde anlamsal benzerlik araması yapar.',
         },
         {
           mode: chatModeLables.graph,
-          description: 'Translates text to Cypher queries for precise data retrieval from a graph database.',
+          description: 'Graph veritabanından kesin veri alımı için metni Cypher sorgularına çevirir.',
         },
         {
           mode: chatModeLables['graph+vector'],
-          description: 'Combines vector indexing and graph connections for contextually enhanced semantic search.',
+          description:
+            'Bağlamsal olarak geliştirilmiş anlamsal arama için vektör indeksleme ve graph bağlantılarını birleştirir.',
         },
         {
           mode: chatModeLables.fulltext,
-          description: 'Conducts fast, keyword-based search using full-text indexing on text chunks.',
+          description:
+            'Metin parçaları üzerinde tam metin indeksleme kullanarak hızlı, anahtar kelime tabanlı arama yapar.',
         },
         {
           mode: chatModeLables['graph+vector+fulltext'],
-          description: 'Integrates vector, graph, and full-text indexing for comprehensive search results.',
+          description: 'Kapsamlı arama sonuçları için vektör, graph ve tam metin indekslemesini entegre eder.',
         },
         {
           mode: chatModeLables['entity search+vector'],
-          description: 'Uses vector indexing on entity nodes for highly relevant entity-based search.',
+          description: 'Yüksek ilgili varlık tabanlı arama için entity nodeları üzerinde vektör indeksleme kullanır.',
         },
         {
           mode: chatModeLables['global search+vector+fulltext'],
           description:
-            'Use vector and full-text indexing on community nodes to provide accurate, context-aware answers globally.',
+            'Global olarak doğru, bağlam farkında cevaplar sağlamak için community nodeları vektör ve tam metin indeksleme kullanır.',
         },
       ];
-
 export const chunkSize = process.env.VITE_CHUNK_SIZE ? Number(process.env.VITE_CHUNK_SIZE) : 1 * 1024 * 1024;
 export const tokenchunkSize = process.env.VITE_TOKENS_PER_CHUNK ? Number(process.env.VITE_TOKENS_PER_CHUNK) : 100;
 export const chunkOverlap = process.env.VITE_CHUNK_OVERLAP ? Number(process.env.VITE_CHUNK_OVERLAP) : 20;
@@ -157,106 +158,106 @@ export const largeFileSize = process.env.VITE_LARGE_FILE_SIZE
   : 5 * 1024 * 1024;
 
 export const tooltips = {
-  generateGraph: 'Generate graph from selected files',
-  deleteFile: 'Select one or more files to delete',
-  showGraph: 'Preview generated graph.',
-  bloomGraph: 'Visualize the graph in Bloom',
-  deleteSelectedFiles: 'File/Files to be deleted',
-  documentation: 'Documentation',
-  github: 'GitHub Issues',
-  theme: 'Light / Dark mode',
-  settings: 'Entity Graph Extraction Settings',
-  chat: 'Start a chat',
-  sources: 'Upload files',
-  deleteChat: 'Delete',
-  maximise: 'Maximise',
-  copy: 'Copy to Clipboard',
-  copied: 'Copied',
-  stopSpeaking: 'Stop Speaking',
-  textTospeech: 'Text to Speech',
-  createSchema: 'Define schema from text',
-  useExistingSchema: 'Fetch schema from database',
-  clearChat: 'Clear Chat History',
-  continue: 'Continue',
-  clearGraphSettings: 'Clear configured Graph Schema',
-  applySettings: 'Apply Graph Schema',
-  openChatPopout: 'Chat',
-  downloadChat: 'Download Conversation',
-  visualizeGraph: 'Visualize Graph Schema',
-  additionalInstructions: 'Analyze instructions for schema',
-  predinedSchema: 'Predefined Schema',
+  generateGraph: 'Seçili dosyalardan graph oluştur',
+  deleteFile: 'Silmek için bir veya daha fazla dosya seç',
+  showGraph: "Oluşturulan graph'i önizle.",
+  bloomGraph: "Graph'i Bloom'da görselleştir",
+  deleteSelectedFiles: 'Silinecek dosya/dosyalar',
+  documentation: 'Dokümantasyon',
+  github: 'GitHub Sorunları',
+  theme: 'Açık / Koyu mod',
+  settings: 'Entity Graph Çıkarma Ayarları',
+  chat: 'Sohbet başlat',
+  sources: 'Dosya yükle',
+  deleteChat: 'Sil',
+  maximise: 'Büyüt',
+  copy: 'Panoya Kopyala',
+  copied: 'Kopyalandı',
+  stopSpeaking: 'Konuşmayı Durdur',
+  textTospeech: 'Metni Sese Dönüştür',
+  createSchema: 'Metinden şema tanımla',
+  useExistingSchema: 'Veritabanından şema getir',
+  clearChat: 'Sohbet Geçmişini Temizle',
+  continue: 'Devam Et',
+  clearGraphSettings: 'Yapılandırılan Graph Şemasını Temizle',
+  applySettings: 'Graph Şemasını Uygula',
+  openChatPopout: 'Sohbet',
+  downloadChat: 'Konuşmayı İndir',
+  visualizeGraph: 'Graph Şemasını Görselleştir',
+  additionalInstructions: 'Şema için talimatları analiz et',
+  predinedSchema: 'Önceden Tanımlanmış Şema',
   dataImporterJson: 'Data Importer JSON',
 };
 export const PRODMODLES = ['openai_gpt_4o', 'openai_gpt_4o_mini', 'diffbot', 'gemini_1.5_flash'];
 export const buttonCaptions = {
-  exploreGraphWithBloom: 'Explore Graph',
-  showPreviewGraph: 'Preview Graph',
-  deleteFiles: 'Delete Files',
-  generateGraph: 'Generate Graph',
-  dropzoneSpan: 'Documents, Images, Unstructured text',
+  exploreGraphWithBloom: "Graph'i Keşfet",
+  showPreviewGraph: 'Graph Önizleme',
+  deleteFiles: 'Dosyaları Sil',
+  generateGraph: 'Graph Oluştur',
+  dropzoneSpan: 'Belgeler, Görseller, Yapılandırılmamış metin',
   youtube: 'Youtube',
   gcs: 'GCS',
   amazon: 'Amazon S3',
-  noLables: 'No Labels Found in the Database',
-  dropYourCreds: 'Drop your neo4j credentials file here',
-  analyze: 'Analyze text to extract graph schema',
-  connect: 'Connect',
-  disconnect: 'Disconnect',
-  submit: 'Submit',
-  connectToNeo4j: 'Connect to Neo4j',
-  cancel: 'Cancel',
-  details: 'Details',
-  continueSettings: 'Continue',
-  clearSettings: 'Clear Schema',
-  ask: 'Ask',
-  applyGraphSchema: 'Apply',
-  provideAdditionalInstructions: 'Provide Additional Instructions for Entity Extractions',
-  analyzeInstructions: 'Analyze Instructions',
-  helpInstructions: 'Provide specific instructions for entity extraction, such as focusing on the key topics.',
-  importDropzoneSpan: 'JSON Documents',
+  noLables: 'Veritabanında Etiket Bulunamadı',
+  dropYourCreds: 'Neo4j kimlik bilgileri dosyanızı buraya bırakın',
+  analyze: 'Graph şeması çıkarmak için metni analiz et',
+  connect: 'Bağlan',
+  disconnect: 'Bağlantıyı Kes',
+  submit: 'Gönder',
+  connectToNeo4j: 'Grapha Bağlan',
+  cancel: 'İptal',
+  details: 'Detaylar',
+  continueSettings: 'Devam Et',
+  clearSettings: 'Şemayı Temizle',
+  ask: 'Sor',
+  applyGraphSchema: 'Uygula',
+  provideAdditionalInstructions: 'Entity Çıkarımı için Ek Talimatlar Sağlayın',
+  analyzeInstructions: 'Talimatları Analiz Et',
+  helpInstructions: 'Anahtar konulara odaklanmak gibi varlık çıkarımı için spesifik talimatlar sağlayın.',
+  importDropzoneSpan: 'JSON Belgeleri',
 };
 
 export const POST_PROCESSING_JOBS: { title: string; description: string }[] = [
   {
     title: 'connect_documents_by_entities',
-    description: `Creates semantic relationships between documents that share common entities. This enables discovering 
-                connections like "all policies belonging to the same person" or "documents from the same insurance company". 
-                Enhances document analysis and enables policy portfolio analysis for customers.`,
+    description: `Ortak varlıkları paylaşan belgeler arasında anlamsal ilişkiler oluşturur. Bu "aynı kişiye ait tüm poliçeler" 
+                veya "aynı sigorta şirketinden belgeler" gibi bağlantıları keşfetmeyi sağlar. 
+                Belge analizini geliştirir ve müşteriler için poliçe portföy analizini mümkün kılar.`,
   },
   {
     title: 'materialize_text_chunk_similarities',
-    description: `This option refines the connections between different pieces of information (chunks) within your
-                knowledge graph. By leveraging a k-nearest neighbor algorithm with a similarity threshold (KNN_MIN_SCORE
-                of 0.8), this process identifies and links chunks with high semantic similarity. This results in a more
-                interconnected and insightful knowledge representation, enabling more accurate and relevant search
-                results.`,
+    description: `Bu seçenek, bilgi graph'ınızdaki farklı bilgi parçaları (chunk'lar) arasındaki bağlantıları iyileştirir. 
+                Benzerlik eşiği (KNN_MIN_SCORE 0.8) ile k-en yakın komşu algoritmasını kullanarak, bu işlem yüksek anlamsal 
+                benzerliği olan chunk'ları tanımlar ve bağlar. Bu, daha bağlantılı ve ayrıntılı bir bilgi temsili oluşturur 
+                ve daha doğru, ilgili arama sonuçlarını mümkün kılar.`,
   },
   {
     title: 'enable_hybrid_search_and_fulltext_search_in_bloom',
-    description: `This option optimizes search capabilities within your knowledge graph. It rebuilds the full-text index
-                on database labels, ensuring faster and more efficient retrieval of information. This is particularly
-                beneficial for large knowledge graphs, as it significantly speeds up keyword-based searches and improves
-                overall query performance.`,
+    description: `Bu seçenek, bilgi graph'ınızdaki arama özelliklerini optimize eder. Veritabanı etiketlerinde tam metin 
+                indeksini yeniden oluşturur ve daha hızlı, verimli bilgi alımını sağlar. Bu, özellikle büyük bilgi 
+                graph'ları için faydalıdır çünkü anahtar kelime tabanlı aramaları önemli ölçüde hızlandırır ve genel 
+                sorgu performansını iyileştirir.`,
   },
   {
     title: 'materialize_entity_similarities',
-    description: `Enhances entity analysis by generating numerical representations (embeddings) that capture their
-                semantic meaning. This facilitates tasks like clustering similar entities, identifying duplicates, and
-                performing similarity-based searches.`,
+    description: `Anlamsal anlamlarını yakalayan sayısal temsiller (embedding'ler) üreterek varlık analizini geliştirir. 
+                Bu, benzer varlıkları kümeleme, kopyaları tanımlama ve benzerlik tabanlı aramalar yapma gibi görevleri 
+                kolaylaştırır.`,
   },
   {
     title: 'enable_communities',
-    description: 'Enable community creation across entities to use GraphRAG capabilities both local and global search.',
+    description:
+      'GraphRAG yetenekleri hem yerel hem de global arama için entities arası community oluşturmayı etkinleştir.',
   },
   {
     title: 'graph_schema_consolidation',
     description:
-      'This option uses the LLM for large graph schemas to consolidate many node labels and relationship types into fewer, more relevant ones and apply it to the extracted and existing graph',
+      "Bu seçenek, büyük graph şemaları için LLM'yi kullanarak çok sayıda node etiketini ve ilişki türünü daha az, daha ilgili olanlara birleştirir ve bunu çıkarılan ve mevcut graph'e uygular",
   },
   {
     title: 'entity_relationship_post_processing',
     description:
-      'Connect specific entity types to target nodes with defined relationships. Useful for linking temporal entities like DocumentYear, PolicyStartYear nodes to Document nodes.',
+      'Belirli varlık türlerini tanımlanan ilişkilerle hedef nodelara bağlar. DocumentYear, PolicyStartYear gibi zamansal varlıkları Document nodelarına bağlamak için kullanışlıdır.',
   },
 ];
 export const RETRY_OPIONS = [
@@ -326,9 +327,9 @@ export const queryMap: {
 
 // export const graphQuery: string = queryMap.DocChunkEntities;
 export const graphView: OptionType[] = [
-  { label: 'Lexical Graph', value: queryMap.DocChunks },
+  { label: 'Sözcüksel Graph', value: queryMap.DocChunks },
   { label: 'Entity Graph', value: queryMap.Entities },
-  { label: 'Knowledge Graph', value: queryMap.DocChunkEntities },
+  { label: "Bilgi Graph'i", value: queryMap.DocChunkEntities },
 ];
 
 export const intitalGraphType = (isGDSActive: boolean): GraphType[] => {
@@ -340,32 +341,32 @@ export const intitalGraphType = (isGDSActive: boolean): GraphType[] => {
 export const graphLabels = {
   showGraphView: 'showGraphView',
   chatInfoView: 'chatInfoView',
-  generateGraph: 'Generated Graph',
-  inspectGeneratedGraphFrom: 'Inspect Generated Graph from',
+  generateGraph: 'Oluşturulan Graph',
+  inspectGeneratedGraphFrom: "Şundan Oluşturulan Graph'i İncele",
   document: 'Document',
   chunk: 'Chunk',
   documentChunk: 'DocumentChunk',
   entities: 'Entities',
-  resultOverview: 'Result Overview',
-  totalNodes: 'Total Nodes',
-  noEntities: 'No Entities Found',
-  selectCheckbox: 'Select atleast one checkbox for graph view',
-  totalRelationships: 'Total Relationships',
+  resultOverview: 'Sonuç Özeti',
+  totalNodes: 'Toplam Node',
+  noEntities: 'Entity Bulunamadı',
+  selectCheckbox: 'Graph görünümü için en az bir onay kutusu seç',
+  totalRelationships: 'Toplam İlişki',
   nodeSize: 30,
   docChunk: 'Document & Chunk',
   community: 'Communities',
-  noNodesRels: 'No Nodes and No relationships',
+  noNodesRels: 'Node ve relation yok',
   neighborView: 'neighborView',
-  chunksInfo: 'We are visualizing 50 chunks at a time',
+  chunksInfo: 'Aynı anda 50 chunk görselleştiriyoruz',
   showSchemaView: 'showSchemaView',
-  renderSchemaGraph: 'Graph from Database Schema',
-  generatedGraphFromUserSchema: 'Generated Graph from User Defined Schema',
+  renderSchemaGraph: 'Veritabanı Şemasından Graph',
+  generatedGraphFromUserSchema: 'Kullanıcı Tanımlı Şemadan Oluşturulan Graph',
 };
 
 export const RESULT_STEP_SIZE = 25;
 
 export const connectionLabels = {
-  notConnected: 'Not Connected',
+  notConnected: 'Bağlı Değil',
   graphDataScience: 'Graph Data Science',
   graphDatabase: 'Graph Database',
   greenStroke: 'green',
@@ -377,17 +378,17 @@ export const getDefaultMessage = () => {
 };
 
 export const appLabels = {
-  ownSchema: 'Or Define your own Schema',
-  predefinedSchema: 'Select a Pre-defined Schema',
-  chunkingConfiguration: 'Select a Chunking Configuration',
-  graphPatternTuple: 'Graph Pattern',
-  selectedPatterns: 'Selected Patterns',
-  dataImporterSchema: 'Schema from Data Importer',
+  ownSchema: 'Veya Kendi Şemanızı Tanımlayın',
+  predefinedSchema: 'Önceden Tanımlanmış Bir Şema Seçin',
+  chunkingConfiguration: 'Bir Chunk Yapılandırması Seçin',
+  graphPatternTuple: 'Graph Deseni',
+  selectedPatterns: 'Seçili Desenler',
+  dataImporterSchema: "Data Importer'dan Şema",
 };
 
 export const LLMDropdownLabel = {
-  disabledModels: 'Disabled models are available in the development version. Access more models in our ',
-  devEnv: 'development environment',
+  disabledModels: 'Devre dışı modeller geliştirme sürümünde mevcuttur. ',
+  devEnv: 'geliştirme ortamımızda',
 };
 export const getDefaultSchemaExamples = () => {
   return schemaExamples.map((example) => ({
@@ -418,11 +419,11 @@ export function getStoredSchema() {
   return [];
 }
 export const metricsinfo: Record<string, string> = {
-  faithfulness: 'Determines How accurately the answer reflects the provided information',
-  answer_relevancy: "Determines How well the answer addresses the user's question.",
-  rouge_score: 'Determines How much the generated answer matches the reference answer, word-for-word.',
-  semantic_score: 'Determines How well the generated answer understands the meaning of the reference answer.',
-  context_entity_recall: 'Determines the recall of entities present in both generated answer and retrieved contexts',
+  faithfulness: 'Cevabın sağlanan bilgiyi ne kadar doğru yansıttığını belirler',
+  answer_relevancy: 'Cevabın kullanıcının sorusunu ne kadar iyi karşıladığını belirler.',
+  rouge_score: 'Oluşturulan cevabın referans cevapla kelime kelime ne kadar eşleştiğini belirler.',
+  semantic_score: 'Oluşturulan cevabın referans cevabın anlamını ne kadar iyi anladığını belirler.',
+  context_entity_recall: 'Oluşturulan cevap ve alınan bağlamlarda bulunan varlıkların geri çağırma oranını belirler',
 };
 export const EXPIRATION_DAYS = 3;
 export const SKIP_AUTH = (process.env.VITE_SKIP_AUTH ?? 'true') == 'true';

@@ -127,7 +127,7 @@ export default function NewEntityExtractionSetting({
     updateLocalStorage(userCredentials!, 'selectedNodeLabels', []);
     updateLocalStorage(userCredentials!, 'selectedRelationshipLabels', []);
     updateLocalStorage(userCredentials!, 'selectedPattern', []);
-    showNormalToast(`Successfully Removed the Schema settings`);
+    showNormalToast(`Şema ayarları başarıyla kaldırıldı`);
     // Importer clear
     setImporterNodes([]);
     setImporterRels([]);
@@ -135,7 +135,7 @@ export default function NewEntityExtractionSetting({
   };
 
   const handleFinalApply = (pattern: string[], nodeLables: OptionType[], relationshipLabels: OptionType[]) => {
-    showNormalToast(`Successfully applied the schema settings`);
+    showNormalToast(`Şema ayarları başarıyla uygulandı`);
     if (view === 'Tabs' && closeEnhanceGraphSchemaDialog != undefined) {
       closeEnhanceGraphSchemaDialog();
     }
@@ -200,7 +200,7 @@ export default function NewEntityExtractionSetting({
         if (tupleOptions.length === 0 && tupleOptionsValue.length > 0) {
           setTupleOptions(tupleOptionsValue);
         }
-        showNormalToast('Pattern Already Exists');
+        showNormalToast('Desen Zaten Mevcut');
       }
       setSource(null);
       setType(null);
@@ -326,13 +326,11 @@ export default function NewEntityExtractionSetting({
   return (
     <div>
       <Typography variant='body-medium'>
-        <span>
-          1.Predefine the structure of your knowledge graph by selecting specific node and relationship labels.
-        </span>
+        <span>1. Belirli node ve relation etiketleri seçerek bilgi graph'ınızın yapısını önceden tanımlayın.</span>
         <br></br>
         <span>
-          2.Focus your analysis by extracting only the relationships and entities that matter most to your use case.
-          Achieve a cleaner and more insightful graph representation tailored to your domain.
+          2. Kullanım durumunuz için en önemli olan relation'ları ve entity'leri çıkararak analizinizi odaklayın.
+          Alanınıza özel olarak tasarlanmış daha temiz ve daha ayrıntılı bir graph temsili elde edin.
         </span>
       </Typography>
       <div className='mt-4'>
@@ -366,7 +364,7 @@ export default function NewEntityExtractionSetting({
             }}
             ref={schemaBtnRef}
           >
-            Add Schema from ...
+            Şema Ekle ...
           </DropdownButton>
           <Menu isOpen={isSchemaMenuOpen} anchorRef={schemaBtnRef} onClose={() => setIsSchemaMenuOpen(false)}>
             <Menu.Items
@@ -377,7 +375,7 @@ export default function NewEntityExtractionSetting({
               <Menu.Item
                 title={
                   <TooltipWrapper hasButtonWrapper={true} placement='right' tooltip={tooltips.predinedSchema}>
-                    Predefined Schema
+                    Önceden Tanımlanmış Şema
                   </TooltipWrapper>
                 }
                 onClick={onPredefinedSchemaCLick}
@@ -385,7 +383,7 @@ export default function NewEntityExtractionSetting({
               <Menu.Item
                 title={
                   <TooltipWrapper hasButtonWrapper={true} placement='right' tooltip={tooltips.useExistingSchema}>
-                    Load Existing Schema
+                    Mevcut Şemayı Yükle
                   </TooltipWrapper>
                 }
                 onClick={onLoadExistingSchemaCLick}
@@ -393,7 +391,7 @@ export default function NewEntityExtractionSetting({
               <Menu.Item
                 title={
                   <TooltipWrapper hasButtonWrapper={true} placement='right' tooltip={tooltips.createSchema}>
-                    Get Schema From Text
+                    Metinden Şema Al
                   </TooltipWrapper>
                 }
                 onClick={onSchemaFromTextCLick}
@@ -414,7 +412,7 @@ export default function NewEntityExtractionSetting({
                 text={tooltips.continue}
                 placement='top'
                 onClick={onContinue}
-                label='Continue to extract'
+                label='Çıkarımaya devam et'
               >
                 {buttonCaptions.continueSettings}
               </ButtonWithToolTip>
@@ -423,7 +421,7 @@ export default function NewEntityExtractionSetting({
                 text={tooltips.clearGraphSettings}
                 placement='top'
                 onClick={handleFinalClear}
-                label='Clear Graph Settings'
+                label='Graph Ayarlarını Temizle'
                 disabled={!combinedPatterns.length}
               >
                 {buttonCaptions.clearSettings}
@@ -433,7 +431,7 @@ export default function NewEntityExtractionSetting({
               text={tooltips.applySettings}
               placement='top'
               onClick={() => handleFinalApply(combinedPatterns, combinedNodes, combinedRels)}
-              label='Apply Graph Settings'
+              label='Graph Ayarlarını Uygula'
               disabled={!combinedPatterns.length}
             >
               {buttonCaptions.applyGraphSchema}
