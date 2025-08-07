@@ -8,6 +8,7 @@ import os
 import hashlib
 import time
 import re
+import uuid
 from datetime import datetime
 from langchain_neo4j import Neo4jVector
 import json
@@ -19,18 +20,24 @@ logging.basicConfig(format='%(asctime)s - %(message)s',level='INFO')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
 EMBEDDING_FUNCTION , EMBEDDING_DIMENSION = load_embedding_model(EMBEDDING_MODEL)
 
-def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_documents_chunk_chunk_Id : list):
+def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_documents_chunk_chunk_Id : list, file_name: str):
     batch_data = []
     logging.info("Create HAS_ENTITY relationship between chunks and entities")
     
     for graph_doc_chunk_id in graph_documents_chunk_chunk_Id:
-        for node in graph_doc_chunk_id['graph_doc'].nodes:
-            query_data={
-                'chunk_id': graph_doc_chunk_id['chunk_id'],
-                'node_type': node.type,
-                'node_id': node.id
-            }
-            batch_data.append(query_data)
+        # graph_doc_chunk_id yapısı: {'graph_doc': GraphDocument, 'chunk_id': str}
+        graph_doc = graph_doc_chunk_id.get('graph_doc')
+        if graph_doc and hasattr(graph_doc, 'nodes'):
+            for node in graph_doc.nodes:
+                combined_str = f"{file_name}_{node.type}_{node.id}"
+                unique_id = hashlib.md5(combined_str.encode()).hexdigest()
+                
+                query_data = {
+                    'chunk_id': graph_doc_chunk_id['chunk_id'],
+                    'node_type': node.type,
+                    'node_id': unique_id
+                }
+                batch_data.append(query_data)
           
     if batch_data:
         unwind_query = """
@@ -39,7 +46,6 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
                     CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
                     MERGE (c)-[:HAS_ENTITY]->(n)
                 """
-        execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
         execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
 
     
@@ -66,7 +72,6 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
         SET c.embedding = row.embeddings
         MERGE (c)-[:PART_OF]->(d)
     """       
-    execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
     execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
     
 def create_relation_between_chunks(graph, file_name, chunks: List[Document])->list:
@@ -141,7 +146,6 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         MERGE (c)-[:PART_OF]->(d)
     """
     execute_graph_query(graph,query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
-    execute_graph_query(graph,query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
     
     query_to_create_FIRST_relation = """ 
         UNWIND $relationships AS relationship
@@ -150,7 +154,6 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         FOREACH(r IN CASE WHEN relationship.type = 'FIRST_CHUNK' THEN [1] ELSE [] END |
                 MERGE (d)-[:FIRST_CHUNK]->(c))
         """
-    execute_graph_query(graph,query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
     execute_graph_query(graph,query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
     
     query_to_create_NEXT_CHUNK_relation = """ 
@@ -268,14 +271,16 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
     if page_count_result and page_count_result[0]:
         result_data = page_count_result[0]
         # Önce maksimum sayfa numarasını kullan, yoksa farklı sayfa sayısını, son çare chunk sayısı
-        if result_data["maxPageNumber"] is not None:
+        if result_data["maxPageNumber"] is not None and result_data["maxPageNumber"] > 0:
             page_count = str(result_data["maxPageNumber"])
         elif result_data["distinctPages"] is not None and result_data["distinctPages"] > 0:
             page_count = str(result_data["distinctPages"])
-        else:
+        elif result_data["totalChunks"] is not None and result_data["totalChunks"] > 0:
             page_count = str(result_data["totalChunks"])
+        else:
+            page_count = None  # Sıfır değeri yerine None kullan
     else:
-        page_count = "0"
+        page_count = None  # Sıfır değeri yerine None kullan
     
     # Create entity nodes and relationships to document
     entities = []
@@ -286,20 +291,33 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
         entities.append({"type": "Owner", "id": owner, "property": "owner"})
     if doc_name:
         entities.append({"type": "DocumentName", "id": doc_name, "property": "documentName"})
-    if page_count:
+    if page_count:  # Sadece geçerli page_count varsa ekle
         entities.append({"type": "PageCount", "id": page_count, "property": "pageCount"})
     if doc_type:
         entities.append({"type": "DocumentType", "id": doc_type, "property": "documentType"})
     
     # Create entities and relationships in batch
     if entities:
+        # Her entity için benzersiz ID oluştur
+        for entity in entities:
+            # Dosya adı, tip ve değer kombinasyonundan hash oluştur
+            unique_string = f"{file_name}_{entity['type']}_{entity['id']}"
+            entity['unique_id'] = hashlib.md5(unique_string.encode()).hexdigest()[:16]
+        
         entity_query = """
         MATCH (d:Document {fileName: $fileName})
         UNWIND $entities as entity
-        CALL apoc.merge.node([entity.type, '__Entity__'], {id: entity.id}) YIELD node
+        MERGE (node:__Entity__ {id: entity.unique_id})
+        ON CREATE SET 
+            node.originalId = entity.id,
+            node.type = entity.type,
+            node.fileName = $fileName,
+            node.created_at = datetime()
+        WITH d, node, entity
+        CALL apoc.create.addLabels(node, [entity.type]) YIELD node as labeledNode
         SET d[entity.property] = entity.id
-        MERGE (d)-[:HAS_METADATA]->(node)
-        RETURN node
+        MERGE (d)-[:HAS_METADATA]->(labeledNode)
+        RETURN labeledNode
         """
         execute_graph_query(graph, entity_query, params={"fileName": file_name, "entities": entities})
         
