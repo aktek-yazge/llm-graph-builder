@@ -108,21 +108,40 @@ def save_graphDocuments_in_neo4j(graph: Neo4jGraph, graph_document_list: List[Gr
    logging.error("Failed to execute query after maximum retries due to persistent deadlocks.")
    raise RuntimeError("Query execution failed after multiple retries due to deadlock.")
            
-def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDocument]):
+def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDocument], file_name: str = None):
+  # First create a mapping of original IDs to new unique IDs
+  id_mapping = {}
+  
   for graph_document in graph_document_list:
-    # Clean node id and types
+    # Clean node id and types and create ID mapping
     cleaned_nodes = []
     for node in graph_document.nodes:
       if node.type.strip() and node.id.strip():
+        original_id = node.id
         node.type = node.type.replace('`', '')
+        # Create unique ID for the node
+        if file_name:
+          combined_str = f"{file_name}_{node.type}_{original_id}"
+          new_id = hashlib.md5(combined_str.encode()).hexdigest()
+          id_mapping[f"{node.type}_{original_id}"] = new_id
+          node.id = new_id
         cleaned_nodes.append(node)
-    # Clean relationship id types and source/target node id and types
+        
+    # Clean relationship id types and source/target node id and types using mapping
     cleaned_relationships = []
     for rel in graph_document.relationships:
       if rel.type.strip() and rel.source.id.strip() and rel.source.type.strip() and rel.target.id.strip() and rel.target.type.strip():
         rel.type = rel.type.replace('`', '')
         rel.source.type = rel.source.type.replace('`', '')
         rel.target.type = rel.target.type.replace('`', '')
+        # Update source and target IDs using the mapping
+        if file_name:
+          source_key = f"{rel.source.type}_{rel.source.id}"
+          target_key = f"{rel.target.type}_{rel.target.id}"
+          if source_key in id_mapping:
+            rel.source.id = id_mapping[source_key]
+          if target_key in id_mapping:
+            rel.target.id = id_mapping[target_key]
         cleaned_relationships.append(rel)
     graph_document.relationships = cleaned_relationships
     graph_document.nodes = cleaned_nodes
