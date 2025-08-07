@@ -373,13 +373,13 @@ export default function ConnectionModal({
           'aria-labelledby': 'form-dialog-title',
         }}
       >
-        <Dialog.Header htmlAttributes={{ id: 'form-dialog-title' }}>Connect to Neo4j</Dialog.Header>
+        <Dialog.Header htmlAttributes={{ id: 'form-dialog-title' }}>Connect to Graph</Dialog.Header>
         <Dialog.Content className='n-flex n-flex-col n-gap-token-4'>
-          <Typography variant='body-medium' className='mb-4'>
+          {/* <Typography variant='body-medium' className='mb-4'>
             <TextLink type='external' href='https://console.neo4j.io/'>
               Don't have a Neo4j instance? Start for free today
             </TextLink>
-          </Typography>
+          </Typography> */}
           {connectionMessage?.type !== 'unknown' &&
             (vectorIndexLoading ? (
               <Banner

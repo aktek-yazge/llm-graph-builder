@@ -102,7 +102,7 @@ export default function DeletePopUpForOrphanNodes({
               <Checkbox
                 ariaLabel='row-checkbox'
                 onChange={row.getToggleSelectedHandler()}
-                htmlAttributes={{ title: 'Select the Row for Deletion' }}
+                htmlAttributes={{ title: 'Silinecek Satırı Seç' }}
                 isChecked={row.getIsSelected()}
               />
             </div>
@@ -161,13 +161,13 @@ export default function DeletePopUpForOrphanNodes({
             </Flex>
           );
         },
-        header: () => <span>Related Documents </span>,
+        header: () => <span>İlgili Belgeler </span>,
         footer: (info) => info.column.id,
       }),
       columnHelper.accessor((row) => row.chunkConnections, {
         id: 'Connected Chunks',
         cell: (info) => <i>{info?.getValue()}</i>,
-        header: () => <span>Connected Chunks</span>,
+        header: () => <span>Bağlı Chunk'lar</span>,
         footer: (info) => info.column.id,
       }),
     ],
@@ -198,8 +198,8 @@ export default function DeletePopUpForOrphanNodes({
   });
 
   const selectedFilesCheck = table.getSelectedRowModel().rows.length
-    ? `Delete Selected Nodes (${table.getSelectedRowModel().rows.length})`
-    : 'Select Node(s) to delete';
+    ? `Seçili Node'ları Sil (${table.getSelectedRowModel().rows.length})`
+    : 'Silinecek Node(ları) seç';
 
   const onDeleteHandler = async () => {
     await deleteHandler(table.getSelectedRowModel().rows.map((r) => r.id));
@@ -232,20 +232,20 @@ export default function DeletePopUpForOrphanNodes({
           <Flex flexDirection='column'>
             <Flex justifyContent='space-between' flexDirection='row'>
               <Typography variant={isTablet ? 'subheading-medium' : 'subheading-large'}>
-                Orphan Nodes Deletion (100 nodes per batch)
+                Yetim Node Silme (Batch başına 100 node)
               </Typography>
               {totalOrphanNodes > 0 && (
                 <Typography variant={isTablet ? 'subheading-medium' : 'subheading-large'}>
-                  Total Nodes: {totalOrphanNodes}
+                  Toplam Node: {totalOrphanNodes}
                 </Typography>
               )}
             </Flex>
             <Flex justifyContent='space-between' flexDirection='row'>
               <Typography variant={isTablet ? 'body-small' : 'body-medium'}>
-                This feature helps improve the accuracy of your knowledge graph by identifying and removing entities
-                that are not connected to any other information. These "lonely" entities can be remnants of past
-                analyses or errors in data processing. By removing them, we can create a cleaner and more efficient
-                knowledge graph that leads to more relevant and informative responses.
+                Bu özellik, başka hiçbir bilgiye bağlı olmayan entity'leri tanımlayarak ve kaldırarak bilgi graph'ınızın
+                doğruluğunu artırmaya yardımcı olur. Bu "yalnız" entity'ler geçmiş analizlerin kalıntıları veya veri
+                işleme hatalarının sonucu olabilir. Bunları kaldırarak, daha ilgili ve bilgilendirici yanıtlara yol açan
+                daha temiz ve verimli bir bilgi graph'ı oluşturabiliriz.
               </Typography>
             </Flex>
           </Flex>
@@ -297,14 +297,14 @@ export default function DeletePopUpForOrphanNodes({
             loading={loading}
             text={
               isLoading
-                ? 'Fetching Orphan Nodes'
+                ? "Yetim Node'ları Getiriliyor"
                 : !isLoading && !orphanNodes.length
-                  ? 'No Nodes Found'
+                  ? 'Node Bulunamadı'
                   : !table.getSelectedRowModel().rows.length
-                    ? 'No Nodes Selected'
-                    : `Delete Selected Nodes (${table.getSelectedRowModel().rows.length})`
+                    ? 'Node Seçilmedi'
+                    : `Seçili Node'ları Sil (${table.getSelectedRowModel().rows.length})`
             }
-            label='Orphan Node deletion button'
+            label='Yetim Node silme butonu'
             disabled={!table.getSelectedRowModel().rows.length}
             placement='top'
           >

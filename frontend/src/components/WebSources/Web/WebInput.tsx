@@ -29,7 +29,7 @@ export default function WebInput({
       isValid={isValid}
       disabledCheck={Boolean(loading)}
       label='Website Link'
-      placeHolder='https://neo4j.com/'
+      placeHolder='https://example.com/'
       value={inputVal}
       onChangeHandler={onChangeHandler}
       onBlurHandler={onBlurHandler}

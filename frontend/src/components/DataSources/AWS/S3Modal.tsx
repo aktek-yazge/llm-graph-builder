@@ -162,7 +162,7 @@ const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
               onBlur: () => setValid(validation(bucketUrl) && isFocused),
               onKeyDown: handleKeyDown,
               'aria-label': 'Bucket URL',
-              placeholder: 's3://data.neo4j.com/pdf/',
+              placeholder: 's3://data.example.com/pdf/',
             }}
             value={bucketUrl}
             isDisabled={false}

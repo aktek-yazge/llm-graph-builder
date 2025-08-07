@@ -87,13 +87,7 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
           aria-label='main navigation'
         >
           <section className='flex w-1/3 shrink-0 grow-0 items-center min-w-[200px]'>
-            <Typography variant='h1'>
-              <img
-                src={colorMode === 'dark' ? Neo4jLogoBW : Neo4jLogoColor}
-                className='h-8! min-h-8 min-w-8'
-                alt='Neo4j Logo'
-              />
-            </Typography>
+            <Typography variant='h1'></Typography>
           </section>
           {!chatOnly ? (
             <section className='items-center justify-end w-1/3 grow-0 flex'>
@@ -113,7 +107,7 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
                     <InformationCircleIconOutline className='n-size-token-7' />
                   </IconButtonWithToolTip>
 
-                  <IconButtonWithToolTip
+                  {/* <IconButtonWithToolTip
                     label={tooltips.github}
                     onClick={() => handleURLClick('https://github.com/neo4j-labs/llm-graph-builder/issues')}
                     text={tooltips.github}
@@ -121,7 +115,7 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
                     clean
                   >
                     <CodeBracketSquareIconOutline />
-                  </IconButtonWithToolTip>
+                  </IconButtonWithToolTip> */}
                   <IconButtonWithToolTip
                     label={tooltips.theme}
                     text={tooltips.theme}

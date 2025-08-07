@@ -44,8 +44,8 @@ const ChunkInfo: FC<ChunkProps> = ({ loading, chunks, mode }) => {
       ) : chunks?.length > 0 ? (
         <div className='p-4 h-80 overflow-auto'>
           <ul className='list-inside list-none'>
-            {chunks.map((chunk) => (
-              <li key={chunk.id} className='mb-2'>
+            {chunks.map((chunk, index) => (
+              <li key={`${chunk.id}-${index}`} className='mb-2'>
                 {chunk?.page_number ? (
                   <>
                     <div className='flex! flex-row items-center gap-1'>
@@ -64,7 +64,7 @@ const ChunkInfo: FC<ChunkProps> = ({ loading, chunks, mode }) => {
                       mode !== chatModeLables.graph &&
                       chunk.score && (
                         <Flex alignItems='center' flexDirection='row' justifyContent='space-between'>
-                          <Typography variant='subheading-small'>Similarity Score: {chunk?.score}</Typography>
+                          <Typography variant='subheading-small'>Benzerlik Puanı: {chunk?.score}</Typography>
                           <IconButtonWithToolTip
                             placement='top'
                             text='View Graph'
@@ -263,17 +263,12 @@ const ChunkInfo: FC<ChunkProps> = ({ loading, chunks, mode }) => {
                     {chunk?.text}
                   </ReactMarkdown>
                 </div>
-                <div className='mt-2 prose prose-sm sm:prose lg:prose-lg xl:prose-xl max-w-none'>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw] as any}>
-                    {chunk?.text}
-                  </ReactMarkdown>
-                </div>
               </li>
             ))}
           </ul>
         </div>
       ) : (
-        <span className='h6 text-center'> No Chunks Found</span>
+        <span className='h6 text-center'> Chunk Bulunamadı</span>
       )}
       {openGraphView && (
         <GraphViewModal

@@ -133,7 +133,7 @@ export default function DeduplicationTab() {
               <Checkbox
                 ariaLabel='row-checkbox'
                 onChange={row.getToggleSelectedHandler()}
-                htmlAttributes={{ title: 'Select the Row for merging' }}
+                htmlAttributes={{ title: 'Birleştirme için satırı seç' }}
                 isChecked={row.getIsSelected()}
               />
             </div>
@@ -254,24 +254,26 @@ export default function DeduplicationTab() {
     },
   });
   const selectedFilesCheck = mergeAPIloading
-    ? 'Merging...'
+    ? 'Birleştiriliyor...'
     : table.getSelectedRowModel().rows.length
-      ? `Merge Duplicate Nodes (${table.getSelectedRowModel().rows.length})`
-      : 'Select Node(s) to Merge';
+      ? `Tekrarlanan Node'ları Birleştir (${table.getSelectedRowModel().rows.length})`
+      : 'Birleştirilecek Node(ları) seç';
   return (
     <>
       <div>
         <Flex justifyContent='space-between' flexDirection='row'>
           <Flex>
             <Typography variant={'subheading-medium'}>
-              Refine Your Knowledge Graph: Merge Duplicate Entities:
+              Bilgi Graph'ınızı İyileştirin: Tekrarlanan Entity'leri Birleştirin:
             </Typography>
             <Typography variant={'body-small'}>
-              Identify and merge similar entries like "Apple" and "Apple Inc." to eliminate redundancy and improve the
-              accuracy and clarity of your knowledge graph.
+              Fazlalığı ortadan kaldırmak ve bilgi graph'ınızın doğruluğunu ve netliğini artırmak için "Apple" ve "Apple
+              Inc." gibi benzer girişleri tanımlayın ve birleştirin.
             </Typography>
           </Flex>
-          {nodesCount > 0 && <Typography variant={'subheading-medium'}>Total Duplicate Nodes: {nodesCount}</Typography>}
+          {nodesCount > 0 && (
+            <Typography variant={'subheading-medium'}>Toplam Tekrarlanan Node: {nodesCount}</Typography>
+          )}
         </Flex>
         <DataGrid
           ref={tableRef}
@@ -323,16 +325,16 @@ export default function DeduplicationTab() {
             loading={mergeAPIloading}
             text={
               isLoading
-                ? 'Fetching Duplicate Nodes'
+                ? `Tekrarlanan Node'ları Getiriliyor`
                 : !isLoading && !duplicateNodes.length
-                  ? 'No Nodes Found'
+                  ? 'Node Bulunamadı'
                   : !table.getSelectedRowModel().rows.length
-                    ? 'No Nodes Selected'
+                    ? 'Node Seçilmedi'
                     : mergeAPIloading
-                      ? 'Merging'
-                      : `Merge Selected Nodes (${table.getSelectedRowModel().rows.length})`
+                      ? 'Birleştiriliyor'
+                      : `Seçili Node'ları Birleştir (${table.getSelectedRowModel().rows.length})`
             }
-            label='Merge Duplicate Node Button'
+            label='Tekrarlanan Node Birleştirme Butonu'
             disabled={!table.getSelectedRowModel().rows.length}
             placement='top'
           >
