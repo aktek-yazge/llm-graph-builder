@@ -1354,15 +1354,14 @@ DOCUMENT_RELATIONSHIP_TASKS = [
 
 # Document Analysis Queries
 PERSON_POLICY_COUNT_QUERY = """
-MATCH (person:Person)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
-WITH person, collect(DISTINCT d) AS person_documents
-OPTIONAL MATCH (d1:Document)-[r:BELONGS_TO_SAME_PERSON]-(d2:Document)
-WHERE d1 IN person_documents AND d2 IN person_documents
+MATCH (person:Person)-[r:HAS_POLICY]->(d:Document)
 RETURN 
     person.id AS person_name,
-    size(person_documents) AS total_policies,
-    count(DISTINCT r) AS document_connections,
-    [d.fileName FOR d IN person_documents] AS policy_files
+    count(DISTINCT d) AS total_policies,
+    sum(r.chunk_count) AS total_chunk_mentions,
+    avg(r.chunk_count) AS avg_mentions_per_policy,
+    [d.fileName FOR d IN collect(DISTINCT d)] AS policy_files,
+    [r.confidence FOR r IN collect(r)] AS confidence_levels
 ORDER BY total_policies DESC
 """
 

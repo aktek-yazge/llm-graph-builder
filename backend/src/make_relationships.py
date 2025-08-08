@@ -374,42 +374,39 @@ async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, addi
 
 def create_document_relationships(graph: Neo4jGraph, target_document: str = None) -> dict:
     """
-    Document'lar arasında semantic relationships kurar
+    Person node'larını HAS_POLICY ilişkisiyle document'lara bağlar
     Args:
         target_document: Eğer belirtilirse, sadece bu document için ilişkiler kurar
-    Returns: {'person_connections': int, 'policy_connections': int, 'company_connections': int}
+    Returns: {'person_policy_connections': int, 'policy_connections': int, 'company_connections': int}
     """
     if target_document:
-        logging.info(f"Creating document relationships for specific document: {target_document}")
+        logging.info(f"Creating person-document relationships for specific document: {target_document}")
     else:
-        logging.info("Creating document-to-document relationships based on shared entities")
+        logging.info("Creating PERSON-HAS_POLICY-Document relationships")
     
     results = {}
     
-    # 1. Aynı kişiye ait document'ları birbirine bağla
-    person_query = """
-    // Aynı Person entity'sine bağlı document'ları bul
-    MATCH (person:Person)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
-    MATCH (person)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
-    WHERE d1 <> d2
-    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
+    # 1. Person node'larını document'lara HAS_POLICY ile bağla
+    person_policy_query = """
+    // Her kişinin hangi dokümanlarda geçtiğini bul
+    MATCH (person:Person)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
+    """ + (f" WHERE d.fileName = $target_document" if target_document else "") + """
     
-    // Document'lar arasında ilişki kur
-    WITH d1, d2, person, count(*) AS shared_chunks
-    WHERE shared_chunks >= 1
+    // Kişi ile doküman arasında HAS_POLICY ilişkisi kur
+    WITH person, d, count(DISTINCT c) AS chunk_count
+    WHERE chunk_count >= 1
     
-    MERGE (d1)-[r:BELONGS_TO_SAME_PERSON]->(d2)
+    MERGE (person)-[r:HAS_POLICY]->(d)
     ON CREATE SET 
-        r.person_name = person.id,
-        r.shared_chunks = shared_chunks,
+        r.chunk_count = chunk_count,
         r.created_at = datetime(),
-        r.relationship_strength = CASE 
-            WHEN shared_chunks >= 5 THEN 'HIGH'
-            WHEN shared_chunks >= 2 THEN 'MEDIUM'
+        r.confidence = CASE 
+            WHEN chunk_count >= 5 THEN 'HIGH'
+            WHEN chunk_count >= 2 THEN 'MEDIUM'
             ELSE 'LOW'
         END
     ON MATCH SET 
-        r.shared_chunks = shared_chunks,
+        r.chunk_count = chunk_count,
         r.updated_at = datetime()
     
     RETURN count(DISTINCT r) AS connections_created
@@ -417,12 +414,12 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
     
     try:
         params = {"target_document": target_document} if target_document else {}
-        result = execute_graph_query(graph, person_query, params=params)
-        results['person_connections'] = result[0]['connections_created'] if result else 0
-        logging.info(f"Created {results['person_connections']} person-based document connections")
+        result = execute_graph_query(graph, person_policy_query, params=params)
+        results['person_policy_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['person_policy_connections']} PERSON-HAS_POLICY-Document connections")
     except Exception as e:
-        logging.error(f"Error creating person-based document connections: {e}")
-        results['person_connections'] = 0
+        logging.error(f"Error creating person-policy connections: {e}")
+        results['person_policy_connections'] = 0
     
     # 2. Aynı poliçe türüne ait document'ları birbirine bağla
     policy_query = """
