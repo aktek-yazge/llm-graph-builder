@@ -226,7 +226,7 @@ export interface ChunkDetail {
   id: string;
   score: number;
 }
-export type ResponseMode = {
+export interface ResponseMode {
   message: string;
   sources?: string[];
   model?: string;
@@ -235,13 +235,13 @@ export type ResponseMode = {
   cypher_query?: string;
   nodeDetails?: nodeDetailsProps;
   chunk_ids?: string[];
-  graphonly_entities?: [];
+  graphonly_entities?: any[];
   error?: string;
   entities?: string[];
   metric_question?: string;
   metric_contexts?: string;
   metric_answer?: string;
-};
+}
 export interface Messages {
   id: number;
   user: string;
@@ -492,7 +492,7 @@ export interface chatInfoMessage extends Partial<Messages> {
   total_tokens: number;
   mode: string;
   cypher_query?: string;
-  graphonly_entities: [];
+  graphonly_entities: any[];
   error: string;
   entities_ids: string[];
   nodeDetails: nodeDetailsProps;
@@ -819,7 +819,7 @@ export type ChunkProps = {
 export type EntitiesProps = {
   loading: boolean;
   mode: string;
-  graphonly_entities: [];
+  graphonly_entities: any[];
   infoEntities: Entity[];
 };
 
