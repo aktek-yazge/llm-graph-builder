@@ -907,68 +907,207 @@ DELETE_ENTITIES_AND_START_FROM_BEGINNING = "delete_entities_and_start_from_begin
 START_FROM_LAST_PROCESSED_POSITION = "start_from_last_processed_position"                                                    
 
 GRAPH_CLEANUP_PROMPT = """
-You are tasked with organizing a list of types into semantic categories based on their meanings, including synonyms or morphological similarities. The input will include two separate lists: one for **Node Labels** and one for **Relationship Types**. Follow these rules strictly:
+🚨 CRITICAL: NEVER include 'Document' in any node categorization. Document nodes are system-managed and should not appear in your output. 🚨
+
+You are an advanced system designed to organize node labels and relationship types extracted from insurance policy knowledge graphs into semantic categories. You are an expert assistant that understands insurance domain-specific information structures and groups similar meaningful types.
+
 ### 1. Input Format
 The input will include two keys:
-- `nodes`: A list of node labels.
-- `relationships`: A list of relationship types.
-### 2. Grouping Rules
-- Group similar items into **semantic categories** based on their meaning or morphological similarities.
-- The name of each category must be chosen from the types in the input list (node labels or relationship types). **Do not create or infer new names for categories**.
-- Items that cannot be grouped must remain in their own category.
-### 3. Naming Rules
-- The category name must reflect the grouped items and must be an existing type in the input list.
-- Use a widely applicable type as the category name.
-- **Do not introduce new names or types** under any circumstances.
+- `nodes`: List of node labels extracted from insurance documents.
+- `relationships`: List of relationship types extracted from insurance documents.
+
+### 2. Insurance Domain-Specific Grouping Rules
+
+#### 2.1 PERSON AND PARTY CATEGORIES:
+**Consolidate under Person category:**
+- Person, Human, People, Individual, Kişi, İnsan, Şahıs, Birey
+- Policyholder, PolicyOwner, Sigortalı, PoliçeSahibi, SigortaEttiren
+- Beneficiary, Lehtar, YararlanicI, Hak_Sahibi
+- Insured, SigortalıKişi, SigortaEdilenKişi
+
+**Consolidate under Company category:**
+- Company, Organization, Şirket, Kurum, Kuruluş, İşletme, Firma
+- InsuranceCompany, SigortaŞirketi, Sigortacı, InsuranceProvider
+- Insurer, SigortaVeren, SigortaKuruluşu
+- Agent, Acente, SigortaAcentesi, Broker, Komisyoncu
+
+#### 2.2 INSURANCE PRODUCTS AND POLICY CATEGORIES:
+**Consolidate under Policy category:**
+- Policy, Poliçe, SigortaPoliçesi, InsurancePolicy
+- Contract, Sözleşme, SigortaSözleşesi, InsuranceContract
+- Coverage, Kapsam, SigortaKapsamı, Teminat, GuarantiKapsamı
+
+**Consolidate under PolicyType category:**
+- PolicyType, PoliçeTürü, SigortaTürü, InsuranceType
+- Konut, KonutSigortası, HomePolicyType, ResidentialInsurance
+- Trafik, TrafikSigortası, MotorInsurance, AutoInsurance  
+- DASK, DASKSigortası, EarthquakeInsurance, NaturalDisasterInsurance
+- Kasko, KaskoSigortası, ComprehensiveInsurance, VehicleInsurance
+- Sağlık, SağlıkSigortası, HealthInsurance, MedicalInsurance
+- Hayat, HayatSigortası, LifeInsurance
+
+#### 2.3 ASSET AND PROPERTY CATEGORIES:
+**Consolidate under Property category:**
+- Property, Mülk, Gayrimenkul, RealEstate, Emlak
+- Building, Bina, Yapı, İnşaat, Structure
+- Residence, Konut, Ev, Home, House, Mesken
+- Apartment, Daire, ApartmentUnit, Apartman
+
+**Consolidate under Vehicle category:**
+- Vehicle, Araç, Taşıt, MotorVehicle, Otomobil
+- Car, Araba, Automobile, PersonalVehicle
+- Truck, Kamyon, CommercialVehicle, TicariAraç
+- Motorcycle, Motosiklet, Bike
+
+#### 2.4 TIME AND DATE CATEGORIES:
+**Consolidate under Year category:**
+- Year, Yıl, AnnualYear
+- DocumentYear, BelgeYılı, IssueYear, TanzimYılı
+- PolicyStartYear, PoliçeBaşlamaYılı, CoverageStartYear
+- PolicyEndYear, PoliçeBitişYılı, CoverageEndYear, ExpirationYear
+- BirthYear, DoğumYılı, BornYear
+- ModelYear, ModelYılı, VehicleModelYear, ManufactureYear
+- RegistrationYear, TescilYılı, KayıtYılı
+
+**Consolidate under Date category:**
+- Date, Tarih, DateTime, Time
+- PolicyStartDate, PoliçeBaşlamaTarihi, StartDate, EffectiveDate
+- PolicyEndDate, PoliçeBitişTarihi, EndDate, ExpirationDate
+- IssueDate, TanzimTarihi, DocumentDate, CreatedDate
+- BirthDate, DoğumTarihi, DateOfBirth
+
+#### 2.5 GEOGRAPHY AND ADDRESS CATEGORIES:
+**Consolidate under Address category:**
+- Address, Adres, Location, Lokasyon, Yer
+- HomeAddress, EvAdresi, ResidentialAddress, İkametAdresi
+- WorkAddress, İşAdresi, BusinessAddress, OfficeAddress
+- PropertyAddress, MülkAdresi, PropertyLocation, VarlıkAdresi
+- MailingAddress, PostaAdresi, CorrespondenceAddress
+- BillingAddress, FaturaAdresi, InvoiceAddress
+- InsuredPropertyAddress, SigortalıMülkAdresi
+
+**Consolidate under City category:**
+- City, Şehir, İl, Province, İlçe, District, Bölge, Region
+
+#### 2.6 FINANCIAL AND PAYMENT CATEGORIES:
+**Consolidate under Amount category:**
+- Amount, Miktar, Tutar, Value, Değer
+- Premium, Prim, InsurancePremium, SigortaPrimi
+- Deductible, Muafiyet, SelfRisk, Franchise
+- CoverageLimit, TeminatLimiti, InsuranceLimit, SigortaLimiti
+- ClaimAmount, HasarTutarı, CompensationAmount
+
+#### 2.7 RELATIONSHIP CATEGORIES:
+
+**OWNS relationships:**
+- OWNS, SAHİP, SAHIP_OLUR, BELONGS_TO, AİT_OLUR, HAS_OWNERSHIP
+
+**LOCATED relationships:**
+- LOCATED_AT, KONUMDA, YERLEŞİR, POSITIONED_AT, BULUNUR, SITS_AT
+
+**INSURES relationships:**
+- INSURES, SİGORTALAR, COVERS, KAPSAR, PROVIDES_COVERAGE, TEMİNAT_VERIR
+
+**ISSUED relationships:**
+- ISSUED_BY, TARAFINDAN_DÜZENLENEN, CREATED_BY, GENERATED_BY, PROVIDED_BY
+
+**VALID relationships:**
+- VALID_FROM, GEÇERLİ_BAŞLANGIÇ, STARTS_ON, EFFECTIVE_FROM
+- VALID_UNTIL, GEÇERLİ_BİTİŞ, EXPIRES_ON, ENDS_ON
+
+**RELATED relationships:**
+- RELATED_TO, İLGİLİ, ASSOCIATED_WITH, CONNECTED_TO, BAĞLI
+
+### 3. Advanced Grouping Rules
+- Group Turkish and English similar terms under the same category
+- Recognize synonyms in insurance terminology (e.g., Teminat=Coverage, Prim=Premium)
+- Consider connections between legal and technical terms
+- Always choose the most common/comprehensive term from the input list as category name
+
 ### 4. Output Rules
-- Return the output as a JSON object with two keys:
- - `nodes`: A dictionary where each key represents a category name for nodes, and its value is a list of original node labels in that category.
- - `relationships`: A dictionary where each key represents a category name for relationships, and its value is a list of original relationship types in that category.
-- Every key and value must come from the provided input lists.
-### 5. Examples
-#### Example 1:
+Return in JSON format:
+```json
+{
+  "nodes": {
+    "SelectedCategoryName": ["SimilarTerm1", "SimilarTerm2", "SimilarTerm3"],
+    "OtherCategory": ["RelatedTerm1", "RelatedTerm2"]
+  },
+  "relationships": {
+    "SelectedRelationshipName": ["SimilarRelation1", "SimilarRelation2", "SimilarRelation3"],
+    "OtherRelation": ["RelatedRelation1", "RelatedRelation2"]
+  }
+}
+```
+
+### 5. Insurance Domain Examples
+#### Example 1 - Person and Company Consolidation:
 Input:
-{{
- "nodes": ["Person", "Human", "People", "Company", "Organization", "Product"],
- "relationships": ["CREATED_FOR", "CREATED_TO", "CREATED", "PUBLISHED","PUBLISHED_BY", "PUBLISHED_IN", "PUBLISHED_ON"]
-}}
-Output in JSON:
-{{
- "nodes": {{
-   "Person": ["Person", "Human", "People"],
-   "Organization": ["Company", "Organization"],
-   "Product": ["Product"]
- }},
- "relationships": {{
-   "CREATED": ["CREATED_FOR", "CREATED_TO", "CREATED"],
-   "PUBLISHED": ["PUBLISHED_BY", "PUBLISHED_IN", "PUBLISHED_ON"]
- }}
-}}
-#### Example 2: Avoid redundant or incorrect grouping
-Input:
-{{
- "nodes": ["Process", "Process_Step", "Step", "Procedure", "Method", "Natural Process", "Step"],
- "relationships": ["USED_FOR", "USED_BY", "USED_WITH", "USED_IN"]
-}}
+```json
+{
+  "nodes": ["Person", "Kişi", "Policyholder", "Sigortalı", "Company", "SigortaŞirketi", "InsuranceCompany", "Organization"],
+  "relationships": ["OWNS", "SAHİP", "INSURES", "SİGORTALAR", "ISSUED_BY", "TARAFINDAN_DÜZENLENEN"]
+}
+```
 Output:
-{{
- "nodes": {{
-   "Process": ["Process", "Process_Step", "Step", "Procedure", "Method", "Natural Process"]
- }},
- "relationships": {{
-   "USED": ["USED_FOR", "USED_BY", "USED_WITH", "USED_IN"]
- }}
-}}
-### 6. Key Rule
-If any item cannot be grouped, it must remain in its own category using its original name. Do not repeat values or create incorrect mappings.
-Use these rules to group and name categories accurately without introducing errors or new types.
+```json
+{
+  "nodes": {
+    "Person": ["Person", "Kişi", "Policyholder", "Sigortalı"],
+    "Company": ["Company", "SigortaŞirketi", "InsuranceCompany", "Organization"]
+  },
+  "relationships": {
+    "OWNS": ["OWNS", "SAHİP"],
+    "INSURES": ["INSURES", "SİGORTALAR"],
+    "ISSUED_BY": ["ISSUED_BY", "TARAFINDAN_DÜZENLENEN"]
+  }
+}
+```
+
+#### Example 2 - Policy Types and Dates:
+Input:
+```json
+{
+  "nodes": ["Policy", "Poliçe", "Konut", "KonutSigortası", "Trafik", "TrafikSigortası", "Year", "DocumentYear", "PolicyStartYear"],
+  "relationships": ["VALID_FROM", "GEÇERLİ_BAŞLANGIÇ", "VALID_UNTIL", "GEÇERLİ_BİTİŞ", "COVERS", "KAPSAR"]
+}
+```
+Output:
+```json
+{
+  "nodes": {
+    "Policy": ["Policy", "Poliçe"],
+    "PolicyType": ["Konut", "KonutSigortası", "Trafik", "TrafikSigortası"],
+    "Year": ["Year", "DocumentYear", "PolicyStartYear"]
+  },
+  "relationships": {
+    "VALID_FROM": ["VALID_FROM", "GEÇERLİ_BAŞLANGIÇ"],
+    "VALID_UNTIL": ["VALID_UNTIL", "GEÇERLİ_BİTİŞ"],
+    "COVERS": ["COVERS", "KAPSAR"]
+  }
+}
+```
+
+### 6. Critical Rules
+- **NEVER create new terms** - only select from input list
+- **NEVER include** Document nodes in any categories
+- Leave ungroupable items in their own categories
+- Focus on insurance terminology and use domain knowledge
+- Properly match Turkish-English mixed terms
+
+This advanced system cleans complex knowledge graph structures extracted from insurance policies and makes them more consistent and queryable.
 """
 
 # ADDITIONAL_INSTRUCTIONS = """Your goal is to identify and categorize entities while ensuring that specific data 
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """Extract ONLY atomic entities as individual nodes.
+ADDITIONAL_INSTRUCTIONS = """**CRITICAL SYSTEM RULE - NEVER CREATE DOCUMENT NODES:**
+Document nodes ALREADY EXIST in the system and are created by the backend code during file upload.
+ABSOLUTELY NEVER create, extract, or mention Document nodes in your response.
+NEVER extract "Document" as any entity type under ANY circumstances.
+The system will automatically handle Document nodes - your job is to extract OTHER entities only.
+
+Extract ONLY atomic entities as individual nodes.
 
 **YEAR EXTRACTION - CRITICAL REQUIREMENT (DALLANDIRILMIŞ YAKLIŞIM):**
 YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşımı takip etmelidir:
@@ -1076,10 +1215,19 @@ YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşı
    - BranchAddress entities Company node'una HAS_BRANCH_AT relationshipi ile bağlanmalı
 
 **ABSOLUTE PROHIBITIONS - NEVER EXTRACT THESE:**
-- NEVER extract "Document" as any entity type or node
-- NEVER create any Document nodes - they are pre-created by the system and already exist
-- NEVER extract document titles, form names, or report names as entities
-- NEVER create new Document nodes under any circumstances - use existing ones only
+🚨 **CRITICAL DOCUMENT NODE PROHIBITION:** 🚨
+- NEVER EVER extract "Document" as any entity type, node, or label under ANY circumstances
+- NEVER EVER create any Document nodes - they are ALREADY pre-created by the backend code
+- NEVER EVER extract document titles, form names, PDF names, or report names as entities
+- NEVER EVER create new Document nodes - they exist from file upload process
+- NEVER EVER reference Document as an extractable entity - Document nodes are system-managed
+- If you see any text referring to the document itself, IGNORE it completely
+- Document nodes are created by the system code when files are uploaded - NOT by LLM extraction
+- Your response must NEVER contain Document nodes or Document labels
+- The word "Document" should NEVER appear in your entity extraction output
+🚨 **END OF DOCUMENT NODE PROHIBITION** 🚨
+
+**OTHER PROHIBITED EXTRACTIONS:**
 - DO NOT extract any monetary amounts, prices, premiums, or financial values
 - DO NOT extract area measurements (m², square meters, room counts)
 - DO NOT extract volume measurements or capacity information
@@ -1124,11 +1272,19 @@ YEAR entity çıkarımı zorunludur ve aşağıdaki dallandırılmış yaklaşı
 - Where the insured asset is located (address only)
 
 **CRITICAL SYSTEM RULES:**
-- Document nodes already exist in the system - NEVER create new Document nodes
-- DO NOT extract "Document" as an entity type under any circumstances
+🔥 **DOCUMENT NODE SYSTEM INTEGRATION - MANDATORY COMPLIANCE:** 🔥
+- Document nodes are PRE-CREATED by the backend upload process - NEVER create new ones
+- Document nodes exist BEFORE your LLM extraction process begins
+- DO NOT EVER extract "Document" as an entity type - it's a system-managed entity
+- Your role is to extract OTHER entities and connect them TO existing Document nodes
+- Document creation is handled by file upload code, NOT by LLM entity extraction
+- If your response contains any Document node creation, the system will FAIL
+- Document nodes are filename-based and managed automatically by the system
+🔥 **END OF DOCUMENT NODE SYSTEM INTEGRATION** 🔥
+
+**OTHER SYSTEM RULES:**
 - **Birden fazla tarih varsa: DocumentYear sadece ana/tanzim tarihinden, diğerleri spesifik kategorilerden (PolicyStartYear, PolicyEndYear, vb.)**
 - Connect extracted entities to existing Document nodes via post-processing relationships
-- The Document node is pre-created by the system - your job is to connect entities TO it, not create it
 - ALL entities you extract must connect to existing nodes in the system
 - NEVER create relationships between temporal entities and new Document nodes
 - Use the existing Document node that this text chunk belongs to
