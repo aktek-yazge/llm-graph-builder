@@ -18,6 +18,7 @@ class Schema(BaseModel):
 # )
 
 PROMPT_TEMPLATE_WITH_SCHEMA = (
+    "🚨 CRITICAL: NEVER extract 'Document' as any entity type or node. Document nodes are system-managed. 🚨\n"
     "You are an expert in schema extraction and knowledge graph modeling. "
     "Your task is to extract a highly detailed, fine-grained graph schema from the given text. "
     "All node and relationship names MUST be in English, even if the source text is not. "
@@ -31,6 +32,7 @@ PROMPT_TEMPLATE_WITH_SCHEMA = (
     "Format: {\"triplets\": [\"<NodeType1>-<RELATIONSHIP_TYPE>-><NodeType2>\"]} "
     "Example: {\"triplets\": [\"InsuredPerson-HAS_POLICY->InsurancePolicy\", \"InsurancePolicy-HAS_CLAUSE->Clause\", \"Clause-COVERS->Risk\"]} "
     "Ignore all extra markup, comments, or non-schema information. "
+    "🚨 REMEMBER: NEVER include Document as a node type - it's handled by the system! 🚨"
 )
 
 # PROMPT_TEMPLATE_WITHOUT_SCHEMA = ( """
@@ -46,6 +48,7 @@ PROMPT_TEMPLATE_WITH_SCHEMA = (
 
 PROMPT_TEMPLATE_WITHOUT_SCHEMA = (
     """
+🚨 CRITICAL: NEVER extract 'Document' as any entity type or node. Document nodes are system-managed. 🚨\n
 You are an expert in schema extraction and knowledge graph modeling.\n"
 "Analyze the following text (from a single page of an insurance policy document or similar).\n"
 "Extract only the types of entities (node types) and their relationship types that are explicitly and directly mentioned in the text.\n"
@@ -61,11 +64,13 @@ You are an expert in schema extraction and knowledge graph modeling.\n"
 "For example, if the text says 'John works at Microsoft', the output should be:\n"
 "{{\"triplets\": [\"Person-WORKS_AT->Company\"]}}\n"
 "The more fine-grained and detailed the schema, the better.\n"
+"🚨 REMEMBER: NEVER include Document as a node type - it's handled by the system! 🚨\n"
 """
 )
 
 
 PROMPT_TEMPLATE_FOR_LOCAL_STORAGE = ("""
+🚨 CRITICAL: NEVER extract 'Document' as any entity type or node. Document nodes are system-managed. 🚨
 You are an expert in knowledge graph modeling.
 The user will provide a JSON input with two keys:
 - "nodes": a list of objects with "label" and "value" representing node types in the schema.
@@ -77,6 +82,7 @@ Your task:
 3. Only return a JSON list of strings like:
 ["User-ANSWERED->Question", "Question-ACCEPTED->Answer"]
 Make sure each triplet is semantically meaningful.
+🚨 REMEMBER: NEVER include Document as a node type - it's handled by the system! 🚨
 """
 )
 
