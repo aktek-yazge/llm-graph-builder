@@ -8,25 +8,29 @@ from src.shared.constants import PERSON_POLICY_COUNT_QUERY, COMPANY_ANALYSIS_QUE
 
 def get_person_policy_analytics(graph) -> List[Dict[str, Any]]:
     """
-    Kişi bazlı poliçe analizi - her kişinin kaç poliçesi olduğunu ve bunların bağlantılarını döner
+    Kişi bazlı poliçe analizi - HAS_POLICY ilişkisi ile kişilerin poliçelerini analiz eder
     
     Returns:
-        List[Dict]: [{"person_name": str, "total_policies": int, "document_connections": int, "policy_files": List[str]}]
+        List[Dict]: [{"person_name": str, "total_policies": int, "total_chunk_mentions": int, 
+                     "avg_mentions_per_policy": float, "policy_files": List[str], 
+                     "confidence_levels": List[str]}]
     """
     try:
         result = execute_graph_query(graph, PERSON_POLICY_COUNT_QUERY)
         analytics = []
         
         for record in result:
-            if record['total_policies'] > 1:  # Sadece birden fazla poliçesi olanları göster
+            if record['total_policies'] >= 1:  # En az bir poliçesi olanları göster
                 analytics.append({
                     "person_name": record['person_name'],
                     "total_policies": record['total_policies'],
-                    "document_connections": record['document_connections'] or 0,
-                    "policy_files": record['policy_files'] or []
+                    "total_chunk_mentions": record['total_chunk_mentions'] or 0,
+                    "avg_mentions_per_policy": round(record['avg_mentions_per_policy'] or 0.0, 2),
+                    "policy_files": record['policy_files'] or [],
+                    "confidence_levels": record['confidence_levels'] or []
                 })
         
-        logging.info(f"Found {len(analytics)} people with multiple policies")
+        logging.info(f"Found {len(analytics)} people with policies (HAS_POLICY relationships)")
         return analytics
         
     except Exception as e:
@@ -70,19 +74,19 @@ def get_document_relationship_stats(graph) -> Dict[str, Any]:
         total_result = execute_graph_query(graph, total_docs_query)
         total_documents = total_result[0]['total'] if total_result else 0
         
-        # Bağlı document sayısı
-        connected_docs_query = """
-        MATCH (d:Document)
-        WHERE exists((d)-[:BELONGS_TO_SAME_PERSON|SAME_POLICY_TYPE|SAME_INSURANCE_COMPANY|SAME_OWNER]-())
-        RETURN count(DISTINCT d) as connected
+        # Kişiler tarafından sahip olunan document sayısı
+        person_connected_docs_query = """
+        MATCH (p:Person)-[:HAS_POLICY]->(d:Document)
+        RETURN count(DISTINCT d) as person_connected_docs, count(DISTINCT p) as persons_with_policies
         """
-        connected_result = execute_graph_query(graph, connected_docs_query)
-        connected_documents = connected_result[0]['connected'] if connected_result else 0
+        person_result = execute_graph_query(graph, person_connected_docs_query)
+        person_connected_documents = person_result[0]['person_connected_docs'] if person_result else 0
+        persons_with_policies = person_result[0]['persons_with_policies'] if person_result else 0
         
-        # Relationship türleri ve sayıları
+        # Relationship türleri ve sayıları (HAS_POLICY + diğerleri)
         rel_types_query = """
-        MATCH (d1:Document)-[r]->(d2:Document)
-        WHERE type(r) IN ['BELONGS_TO_SAME_PERSON', 'SAME_POLICY_TYPE', 'SAME_INSURANCE_COMPANY', 'SAME_OWNER']
+        MATCH (d1)-[r]->(d2:Document)
+        WHERE type(r) IN ['HAS_POLICY', 'SAME_POLICY_TYPE', 'SAME_INSURANCE_COMPANY', 'SAME_OWNER']
         RETURN type(r) as relationship_type, count(r) as count
         ORDER BY count DESC
         """
@@ -91,8 +95,9 @@ def get_document_relationship_stats(graph) -> Dict[str, Any]:
         
         stats = {
             "total_documents": total_documents,
-            "connected_documents": connected_documents,
-            "connection_rate": f"{(connected_documents/total_documents)*100:.1f}%" if total_documents > 0 else "0%",
+            "person_connected_documents": person_connected_documents,
+            "persons_with_policies": persons_with_policies,
+            "person_coverage_rate": f"{(person_connected_documents/total_documents)*100:.1f}%" if total_documents > 0 else "0%",
             "relationship_types": relationship_types
         }
         
@@ -115,25 +120,19 @@ def search_person_documents(graph, person_name: str) -> Dict[str, Any]:
     """
     try:
         query = """
-        MATCH (person:Person {id: $person_name})<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
-        WITH person, collect(DISTINCT d) AS person_docs
-        
-        // Bu kişiye ait document'lar arasındaki bağlantıları bul
-        UNWIND person_docs AS doc1
-        OPTIONAL MATCH (doc1)-[r:BELONGS_TO_SAME_PERSON]-(doc2:Document)
-        WHERE doc2 IN person_docs
-        
-        WITH person, person_docs, collect(DISTINCT {
-            from: doc1.fileName,
-            to: doc2.fileName,
-            type: type(r),
-            strength: r.relationship_strength
-        }) AS connections
+        MATCH (person:Person {id: $person_name})-[r:HAS_POLICY]->(d:Document)
+        WITH person, collect(DISTINCT {
+            document: d.fileName,
+            chunk_count: r.chunk_count,
+            confidence: r.confidence,
+            created_at: r.created_at
+        }) AS policy_details
         
         RETURN 
             person.id AS person_name,
-            [d.fileName FOR d IN person_docs] AS documents,
-            connections
+            [p.document FOR p IN policy_details] AS documents,
+            policy_details AS policy_connections,
+            size(policy_details) AS total_policies
         """
         
         result = execute_graph_query(graph, query, params={"person_name": person_name})
@@ -143,12 +142,12 @@ def search_person_documents(graph, person_name: str) -> Dict[str, Any]:
             return {
                 "person_name": data['person_name'],
                 "documents": data['documents'] or [],
-                "connections": [conn for conn in data['connections'] if conn['to'] is not None],
-                "total_documents": len(data['documents'] or [])
+                "policy_connections": data['policy_connections'] or [],
+                "total_policies": data['total_policies'] or 0
             }
         else:
-            return {"person_name": person_name, "documents": [], "connections": [], "total_documents": 0}
+            return {"person_name": person_name, "documents": [], "policy_connections": [], "total_policies": 0}
             
     except Exception as e:
         logging.error(f"Error searching person documents: {e}")
-        return {"person_name": person_name, "documents": [], "connections": [], "total_documents": 0}
+        return {"person_name": person_name, "documents": [], "policy_connections": [], "total_policies": 0}
