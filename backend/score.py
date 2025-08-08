@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
 from src.main import *
-from src.QA_integration import QA_RAG, clear_chat_history
+from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.shared.common_fn import *
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import uvicorn
@@ -652,17 +652,17 @@ async def chat_bot_stream(
     email: str = Form(None)
 ):
     """
-    Stream versiyonu chat_bot endpoint'inin.
-    Server-Sent Events (SSE) kullanarak gerçek zamanlı chat cevapları gönderir.
+    Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile 
+    token-by-token chat cevapları gönderir.
     """
     
-    async def generate_chat_response():
+    async def generate_real_streaming_response():
         try:
-            logging.info(f"QA_RAG Stream called at {datetime.now()}")
+            logging.info(f"QA_RAG Real Stream called at {datetime.now()}")
             qa_rag_start_time = time.time()
             
             # İlk durum mesajı gönder
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Chat işlemi başlatılıyor...', 'status': 'starting'})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Gerçek streaming başlatılıyor...', 'status': 'starting'})}\n\n"
             
             # Graph bağlantısını kur
             if mode == "graph":
@@ -675,11 +675,11 @@ async def chat_bot_stream(
             graph_DB_dataAccess = graphDBdataAccess(graph)
             write_access = graph_DB_dataAccess.check_account_access(database=database)
             
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Soru işleniyor...', 'status': 'processing'})}\n\n"
+            # Gerçek streaming başlat
+            final_result = None
+            total_tokens = 0
             
-            # QA_RAG işlemini çalıştır
-            result = await asyncio.to_thread(
-                QA_RAG,
+            async for chunk in QA_RAG_stream(
                 graph=graph,
                 model=model,
                 question=question,
@@ -687,54 +687,37 @@ async def chat_bot_stream(
                 session_id=session_id,
                 mode=mode,
                 write_access=write_access
-            )
-            
-            total_call_time = time.time() - qa_rag_start_time
-            logging.info(f"Total Response time is {total_call_time:.2f} seconds")
-            result["info"]["response_time"] = round(total_call_time, 2)
-            
-            # Cevap parçalayarak gönder (simüle streaming effect)
-            message = result.get("message", "")
-            if message:
-                # Mesajı kelime kelime stream et
-                words = message.split()
-                streamed_message = ""
+            ):
+                # Client disconnect kontrolü
+                if await request.is_disconnected():
+                    logging.info("SSE Client disconnected during real streaming")
+                    break
                 
-                for i, word in enumerate(words):
-                    if await request.is_disconnected():
-                        logging.info("SSE Client disconnected during streaming")
-                        break
-                        
-                    streamed_message += word + " "
-                    
-                    # Her birkaç kelimede bir chunk gönder
-                    if (i + 1) % 3 == 0 or i == len(words) - 1:
-                        chunk_data = {
-                            'type': 'message_chunk',
-                            'content': word + " ",  # Sadece bu kelime (frontend full_message kullanacak)
-                            'full_message': streamed_message.strip(),  # Şimdiye kadarki tam mesaj
-                            'is_complete': i == len(words) - 1,
-                            'word_index': i + 1,
-                            'total_words': len(words)
-                        }
-                        yield f"data: {json.dumps(chunk_data)}\n\n"
-                        
-                        # Streaming efekti için kısa bekleme
-                        await asyncio.sleep(0.1)
+                # Chunk'ı client'a gönder
+                yield f"data: {json.dumps(chunk)}\n\n"
+                
+                # Final result'ı sakla
+                if chunk.get("type") == "complete":
+                    final_result = chunk
+                    total_tokens = chunk.get("info", {}).get("total_tokens", 0)
             
-            # Son olarak tam sonucu gönder
-            final_data = {
-                'type': 'complete',
+            # Timing bilgilerini ekle
+            total_call_time = time.time() - qa_rag_start_time
+            logging.info(f"Real streaming total response time: {total_call_time:.2f} seconds")
+            
+            # Final timing chunk'ı gönder
+            timing_chunk = {
+                'type': 'timing',
                 'status': 'finished',
-                'data': result,
                 'elapsed_time': f"{total_call_time:.2f}",
+                'total_tokens': total_tokens,
                 'timestamp': formatted_time(datetime.now(timezone.utc))
             }
-            yield f"data: {json.dumps(final_data)}\n\n"
+            yield f"data: {json.dumps(timing_chunk)}\n\n"
             
             # Loglama
             json_obj = {
-                'api_name': 'chat_bot_stream',
+                'api_name': 'chat_bot_stream_real',
                 'db_url': uri,
                 'userName': userName,
                 'database': database,
@@ -744,27 +727,159 @@ async def chat_bot_stream(
                 'mode': mode,
                 'logging_time': formatted_time(datetime.now(timezone.utc)),
                 'elapsed_api_time': f'{total_call_time:.2f}',
-                'email': email
+                'total_tokens': total_tokens,
+                'email': email,
+                'streaming_type': 'real_llm_streaming'
             }
             logger.log_struct(json_obj, "INFO")
             
         except Exception as e:
             error_message = str(e)
-            logging.exception(f'Exception in chat bot stream: {error_message}')
+            logging.exception(f'Exception in real streaming chat bot: {error_message}')
             
-            error_data = {
+            error_chunk = {
                 'type': 'error',
-                'status': 'failed',
-                'message': "Chat cevabı alınamadı",
+                'status': 'error', 
+                'message': 'Streaming sırasında bir hata oluştu',
                 'error': error_message,
                 'timestamp': formatted_time(datetime.now(timezone.utc))
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
-        
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            
         finally:
             gc.collect()
     
-    return EventSourceResponse(generate_chat_response())
+    return EventSourceResponse(generate_real_streaming_response())
+
+# @app.post("/chat_bot_stream_legacy")
+# async def chat_bot_stream_legacy(
+#     request: Request,
+#     uri: str = Form(None),
+#     model: str = Form(None),
+#     userName: str = Form(None),
+#     password: str = Form(None),
+#     database: str = Form(None),
+#     question: str = Form(None),
+#     document_names: str = Form(None),
+#     session_id: str = Form(None),
+#     mode: str = Form(None),
+#     email: str = Form(None)
+# ):
+#     """
+#     Eski simüle streaming versiyonu (backward compatibility için)
+#     """
+    
+#     async def generate_simulated_streaming_response():
+#         try:
+#             logging.info(f"QA_RAG Simulated Stream called at {datetime.now()}")
+#             qa_rag_start_time = time.time()
+            
+#             # İlk durum mesajı gönder
+#             yield f"data: {json.dumps({'type': 'status', 'message': 'Simüle streaming başlatılıyor...', 'status': 'starting'})}\n\n"
+            
+#             # Graph bağlantısını kur
+#             if mode == "graph":
+#                 graph = Neo4jGraph(url=uri, username=userName, password=password, database=database, sanitize=True, refresh_schema=True)
+#             else:
+#                 graph = create_graph_database_connection(uri, userName, password, database)
+            
+#             yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'})}\n\n"
+            
+#             graph_DB_dataAccess = graphDBdataAccess(graph)
+#             write_access = graph_DB_dataAccess.check_account_access(database=database)
+            
+#             yield f"data: {json.dumps({'type': 'status', 'message': 'Soru işleniyor...', 'status': 'processing'})}\n\n"
+            
+#             # QA_RAG işlemini çalıştır (eski batch yöntem)
+#             result = await asyncio.to_thread(
+#                 QA_RAG,
+#                 graph=graph,
+#                 model=model,
+#                 question=question,
+#                 document_names=document_names,
+#                 session_id=session_id,
+#                 mode=mode,
+#                 write_access=write_access
+#             )
+            
+#             total_call_time = time.time() - qa_rag_start_time
+#             logging.info(f"Simulated streaming total response time: {total_call_time:.2f} seconds")
+#             result["info"]["response_time"] = round(total_call_time, 2)
+            
+#             # Cevap parçalayarak gönder (simüle streaming effect)
+#             message = result.get("message", "")
+#             if message:
+#                 # Mesajı kelime kelime stream et
+#                 words = message.split()
+#                 streamed_message = ""
+                
+#                 for i, word in enumerate(words):
+#                     if await request.is_disconnected():
+#                         logging.info("SSE Client disconnected during simulated streaming")
+#                         break
+                        
+#                     streamed_message += word + " "
+                    
+#                     # Her birkaç kelimede bir chunk gönder
+#                     if (i + 1) % 3 == 0 or i == len(words) - 1:
+#                         chunk_data = {
+#                             'type': 'message_chunk',
+#                             'content': word + " ",  # Sadece bu kelime
+#                             'full_message': streamed_message.strip(),  # Şimdiye kadarki tam mesaj
+#                             'is_complete': i == len(words) - 1,
+#                             'word_index': i + 1,
+#                             'total_words': len(words),
+#                             'session_id': result.get("session_id", session_id)
+#                         }
+#                         yield f"data: {json.dumps(chunk_data)}\n\n"
+                        
+#                         # Streaming efekti için kısa bekleme
+#                         await asyncio.sleep(0.1)
+            
+#             # Son olarak tam sonucu gönder
+#             final_data = {
+#                 'type': 'complete',
+#                 'status': 'finished',
+#                 'data': result,
+#                 'elapsed_time': f"{total_call_time:.2f}",
+#                 'timestamp': formatted_time(datetime.now(timezone.utc))
+#             }
+#             yield f"data: {json.dumps(final_data)}\n\n"
+            
+#             # Loglama
+#             json_obj = {
+#                 'api_name': 'chat_bot_stream_legacy',
+#                 'db_url': uri,
+#                 'userName': userName,
+#                 'database': database,
+#                 'question': question,
+#                 'document_names': document_names,
+#                 'session_id': session_id,
+#                 'mode': mode,
+#                 'logging_time': formatted_time(datetime.now(timezone.utc)),
+#                 'elapsed_api_time': f'{total_call_time:.2f}',
+#                 'email': email,
+#                 'streaming_type': 'simulated_streaming'
+#             }
+#             logger.log_struct(json_obj, "INFO")
+            
+#         except Exception as e:
+#             error_message = str(e)
+#             logging.exception(f'Exception in chat bot stream: {error_message}')
+            
+#             error_data = {
+#                 'type': 'error',
+#                 'status': 'failed',
+#                 'message': "Chat cevabı alınamadı",
+#                 'error': error_message,
+#                 'timestamp': formatted_time(datetime.now(timezone.utc))
+#             }
+#             yield f"data: {json.dumps(error_data)}\n\n"
+        
+#         finally:
+#             gc.collect()
+    
+#     return EventSourceResponse(generate_simulated_streaming_response())
 
 @app.post("/chunk_entities")
 async def chunk_entities(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), nodedetails=Form(None),entities=Form(),mode=Form(),email=Form(None)):
