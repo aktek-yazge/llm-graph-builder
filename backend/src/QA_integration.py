@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-
+import asyncio
 import threading
 from datetime import datetime
 from typing import Any
@@ -750,3 +750,319 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
     result["session_id"] = session_id
     
     return result
+
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True):
+    """
+    Asenkron streaming QA_RAG implementasyonu
+    LLM'den token-by-token cevap alır ve frontend'e streamer
+    """
+    logging.info(f"Streaming Chat Mode: {mode}")
+    
+    try:
+        history = create_neo4j_chat_message_history(graph, session_id, write_access)
+        messages = history.messages
+
+        user_question = HumanMessage(content=question)
+        messages.append(user_question)
+
+        if mode == CHAT_GRAPH_MODE:
+            async for chunk in process_graph_response_stream(model, graph, question, messages, history):
+                yield chunk
+        else:
+            chat_mode_settings = get_chat_mode_settings(mode=mode)
+            document_names = list(map(str.strip, json.loads(document_names)))
+            
+            if document_names and not chat_mode_settings["document_filter"]:
+                yield {
+                    "type": "error",
+                    "session_id": session_id,
+                    "message": "Lütfen bu sohbet modunu kullanmadan önce tablodaki tüm dokümanların seçimini kaldırın.",
+                    "info": {
+                        "sources": [],
+                        "model": "",
+                        "nodedetails": [],
+                        "total_tokens": 0,
+                        "response_time": 0,
+                        "mode": chat_mode_settings["mode"],
+                        "entities": [],
+                        "metric_details": [],
+                    },
+                    "user": "chatbot"
+                }
+                return
+                
+            async for chunk in process_chat_response_stream(
+                messages, history, question, model, graph, document_names, chat_mode_settings, session_id
+            ):
+                yield chunk
+                
+    except Exception as e:
+        logging.exception(f"Error in QA_RAG_stream: {str(e)}")
+        yield {
+            "type": "error",
+            "session_id": session_id,
+            "message": "Bir hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
+
+async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id):
+    """
+    Streaming chat response işleme fonksiyonu
+    LLM'den gelen her token'i anında frontend'e gönderir
+    """
+    try:
+        # Setup aşaması
+        yield {
+            "type": "status",
+            "session_id": session_id,
+            "message": "Bağlantı kuriliyor...",
+            "user": "chatbot"
+        }
+        
+        llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        
+        # Casual conversation kontrolü
+        yield {
+            "type": "status",
+            "session_id": session_id, 
+            "message": "Soru analiz ediliyor...",
+            "user": "chatbot"
+        }
+        
+        is_casual = await asyncio.get_event_loop().run_in_executor(
+            None, is_casual_conversation, question, llm
+        )
+        
+        formatted_docs = ""
+        sources = []
+        entities = {'entityids': [], "relationshipids": []}
+        nodedetails = {"chunkdetails": [], "entitydetails": [], "communitydetails": []}
+        
+        if not is_casual:
+            # Document retrieval
+            yield {
+                "type": "status",
+                "session_id": session_id,
+                "message": "İlgili dokümanlar aranıyor...",
+                "user": "chatbot"
+            }
+            
+            docs, transformed_question = await asyncio.get_event_loop().run_in_executor(
+                None, retrieve_documents, doc_retriever, messages
+            )
+            
+            if docs:
+                yield {
+                    "type": "status",
+                    "session_id": session_id,
+                    "message": "Bağlam hazırlanıyor...",
+                    "user": "chatbot"
+                }
+                
+                formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
+                sources = sources_list
+                entities = entities_dict
+                
+                if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
+                    nodedetails["entitydetails"] = entities_dict
+                elif chat_mode_settings["mode"] == CHAT_GLOBAL_VECTOR_FULLTEXT_MODE:
+                    nodedetails["communitydetails"] = communities
+                else:
+                    sources_and_chunks = get_sources_and_chunks(sources, docs)
+                    sources = sources_and_chunks['sources']
+                    nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
+        
+        # Streaming response başlat
+        yield {
+            "type": "status",
+            "session_id": session_id,
+            "message": "Cevap üretiliyor...",
+            "user": "chatbot"
+        }
+        
+        # RAG Chain ile streaming
+        rag_chain = get_rag_chain_stream(llm=llm)
+        
+        full_response = ""
+        total_tokens_count = 0
+        
+        async for chunk in rag_chain.astream({
+            "messages": messages[:-1],
+            "context": formatted_docs,
+            "input": question
+        }):
+            if hasattr(chunk, 'content') and chunk.content:
+                content_chunk = chunk.content
+                full_response += content_chunk
+                
+                # Token count estimation (yaklaşık)
+                total_tokens_count += len(content_chunk.split())
+                
+                yield {
+                    "type": "message_chunk",
+                    "session_id": session_id,
+                    "content": content_chunk,
+                    "full_message": full_response,
+                    "is_complete": False,
+                    "user": "chatbot"
+                }
+        
+        # Chat history'ye ekleme
+        ai_response = AIMessage(content=full_response)
+        messages.append(ai_response)
+        
+        # Background summarization başlat
+        summarization_future = asyncio.get_event_loop().run_in_executor(
+            None, summarize_and_log, history, messages, llm
+        )
+        logging.info(f"Summarization task started: {summarization_future}")
+        
+        # Final response
+        metric_details = {
+            "question": question,
+            "contexts": formatted_docs,
+            "answer": full_response
+        }
+        
+        yield {
+            "type": "complete",
+            "session_id": session_id,
+            "message": full_response,
+            "info": {
+                "sources": sources,
+                "model": model_version,
+                "nodedetails": nodedetails,
+                "total_tokens": total_tokens_count,
+                "response_time": 0,  # Bu daha sonra API seviyesinde hesaplanacak
+                "mode": chat_mode_settings["mode"],
+                "entities": entities,
+                "context": sources,  # Frontend context için sources'ı kullan
+                "cypher_query": "",  # Streaming'de cypher query yok
+                "error": "",
+                "metric_details": metric_details,
+            },
+            "is_complete": True,
+            "user": "chatbot"
+        }
+        
+    except Exception as e:
+        logging.exception(f"Error in process_chat_response_stream: {str(e)}")
+        yield {
+            "type": "error",
+            "session_id": session_id,
+            "message": "Cevap üretilirken bir hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
+
+async def process_graph_response_stream(model, graph, question, messages, history):
+    """
+    Graph mode için streaming response işleme fonksiyonu
+    """
+    try:
+        yield {
+            "type": "status",
+            "message": "Graph chain hazırlanıyor...",
+            "user": "chatbot"
+        }
+        
+        graph_chain, qa_llm, model_version = create_graph_chain(model, graph)
+        
+        yield {
+            "type": "status", 
+            "message": "Cypher sorgusu çalıştırılıyor...",
+            "user": "chatbot"
+        }
+        
+        # Graph response al (bu kısım şu an için batch, gelecekte graph streaming eklenebilir)
+        graph_response = await asyncio.get_event_loop().run_in_executor(
+            None, get_graph_response, graph_chain, question
+        )
+        
+        ai_response_content = graph_response.get("response", "Bir şeyler ters gitti")
+        
+        yield {
+            "type": "status",
+            "message": "Cevap hazırlanıyor...",
+            "user": "chatbot"
+        }
+        
+        # Graph response'u streaming olarak gönder (simüle streaming)
+        words = ai_response_content.split()
+        streamed_content = ""
+        
+        for i, word in enumerate(words):
+            streamed_content += word + " "
+            
+            yield {
+                "type": "message_chunk",
+                "content": word + " ",
+                "full_message": streamed_content.strip(),
+                "is_complete": i == len(words) - 1,
+                "user": "chatbot"
+            }
+            
+            # Gerçekçi streaming efekti
+            await asyncio.sleep(0.05)
+        
+        # Messages'a ekle
+        ai_response = AIMessage(content=ai_response_content)
+        messages.append(ai_response)
+        
+        # Background summarization
+        summarization_future = asyncio.get_event_loop().run_in_executor(
+            None, summarize_and_log, history, messages, qa_llm
+        )
+        logging.info(f"Graph summarization task started: {summarization_future}")
+        
+        # Final result
+        metric_details = {
+            "question": question,
+            "contexts": graph_response.get("context", ""),
+            "answer": ai_response_content
+        }
+        
+        yield {
+            "type": "complete",
+            "message": ai_response_content,
+            "info": {
+                "model": model_version,
+                "cypher_query": graph_response.get("cypher_query", ""),
+                "context": graph_response.get("context", ""),
+                "mode": "graph",
+                "response_time": 0,
+                "metric_details": metric_details,
+            },
+            "is_complete": True,
+            "user": "chatbot"
+        }
+        
+    except Exception as e:
+        logging.exception(f"Error in process_graph_response_stream: {str(e)}")
+        yield {
+            "type": "error",
+            "message": "Graph sorgusu sırasında bir hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
+
+def get_rag_chain_stream(llm, system_template=CHAT_SYSTEM_TEMPLATE):
+    """
+    Streaming destekli RAG chain oluşturur
+    """
+    try:
+        question_answering_prompt = ChatPromptTemplate.from_messages([
+            ("system", system_template),
+            MessagesPlaceholder(variable_name="messages"),
+            ("human", "User question: {input}")
+        ])
+
+        # Streaming chain oluştur
+        streaming_chain = question_answering_prompt | llm
+        
+        return streaming_chain
+
+    except Exception as e:
+        logging.error(f"Error creating streaming RAG chain: {e}")
+        raise

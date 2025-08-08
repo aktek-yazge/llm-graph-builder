@@ -14,6 +14,25 @@ export interface ChatStreamMessage {
   total_words?: number;
   elapsed_time?: string;
   timestamp?: string;
+  session_id?: string;
+  user?: string;
+  info?: {
+    sources?: any[];
+    model?: string;
+    nodedetails?: any;
+    total_tokens?: number;
+    response_time?: number;
+    mode?: string;
+    entities?: any;
+    cypher_query?: string;
+    context?: any[];
+    error?: string;
+    metric_details?: {
+      question?: string;
+      answer?: string;
+      contexts?: string;
+    };
+  };
 }
 
 export interface ChatStreamOptions {

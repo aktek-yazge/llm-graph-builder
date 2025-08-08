@@ -74,7 +74,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const [tokensUsed, setTokensUsed] = useState<number>(0);
   const [cypherQuery, setcypherQuery] = useState<string>('');
   const [chatsMode, setChatsMode] = useState<string>(chatModeLables['graph+vector+fulltext']);
-  const [graphEntitites, setgraphEntitites] = useState<[]>([]);
+  const [graphEntitites, setgraphEntitites] = useState<any[]>([]);
   const [messageError, setmessageError] = useState<string>('');
   const [entitiesModal, setEntitiesModal] = useState<string[]>([]);
   const [nodeDetailsModal, setNodeDetailsModal] = useState<nodeDetailsProps>({});
@@ -274,23 +274,22 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                 );
               }, 100);
             }
-          } else if (message.type === 'complete' && message.data) {
-            // Final response ile tüm bilgileri güncelle
-            const response = message.data;
+          } else if (message.type === 'complete') {
+            // Final response ile tüm bilgileri güncelle - message direkt seviyede gelir
             const responseMode: ResponseMode = {
-              message: response.message,
-              sources: response.info?.sources || [],
-              model: response.info?.model || '',
-              total_tokens: response.info?.total_tokens || 0,
-              response_time: response.info?.response_time || 0,
-              cypher_query: response.info?.cypher_query || '',
-              graphonly_entities: response.info?.context || [],
-              entities: response.info?.entities?.entityids || [],
-              nodeDetails: response.info?.nodedetails || {},
-              error: response.info?.error || '',
-              metric_question: response.info?.metric_details?.question || '',
-              metric_answer: response.info?.metric_details?.answer || '',
-              metric_contexts: response.info?.metric_details?.contexts || '',
+              message: message.message || '',
+              sources: message.info?.sources || [],
+              model: message.info?.model || '',
+              total_tokens: message.info?.total_tokens || 0,
+              response_time: message.info?.response_time || 0,
+              cypher_query: message.info?.cypher_query || '',
+              graphonly_entities: message.info?.context || [],
+              entities: message.info?.entities?.entityids || [],
+              nodeDetails: message.info?.nodedetails || {},
+              error: message.info?.error || '',
+              metric_question: message.info?.metric_details?.question || '',
+              metric_answer: message.info?.metric_details?.answer || '',
+              metric_contexts: message.info?.metric_details?.contexts || '',
             };
 
             setListMessages((prev) =>
@@ -460,9 +459,9 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               simulateTypingEffect(chatbotMessageId, responseMode, mode, responseMode.message);
             } else {
               setListMessages((prev) =>
-                prev.map((msg) =>
-                  (msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg)
-                )
+                prev.map((msg) => {
+                  return msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg;
+                })
               );
             }
           } else {
@@ -475,17 +474,17 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               simulateTypingEffect(chatbotMessageId, responseMode, response.data, responseMode.message);
             } else {
               setListMessages((prev) =>
-                prev.map((msg) =>
-                  (msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg)
-                )
+                prev.map((msg) => {
+                  return msg.id === chatbotMessageId ? { ...msg, modes: { ...msg.modes, [mode]: responseMode } } : msg;
+                })
               );
             }
           }
         } else {
-          console.error(`API call failed for mode ${mode}:`, result.reason);
+          // Log error silently without console
           setListMessages((prev) =>
-            prev.map((msg) =>
-              (msg.id === chatbotMessageId
+            prev.map((msg) => {
+              return msg.id === chatbotMessageId
                 ? {
                     ...msg,
                     modes: {
@@ -493,8 +492,8 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                       [mode]: { message: 'Failed to fetch response for this mode.', error: result.reason },
                     },
                   }
-                : msg)
-            )
+                : msg;
+            })
           );
         }
       });
@@ -502,11 +501,11 @@ const Chatbot: FC<ChatbotProps> = (props) => {
         prev.map((msg) => (msg.id === chatbotMessageId ? { ...msg, isLoading: false, isTyping: false } : msg))
       );
     } catch (error) {
-      console.error('Error in handling chat:', error);
+      // Log error silently without console
       if (error instanceof Error) {
         setListMessages((prev) =>
-          prev.map((msg) =>
-            (msg.id === chatbotMessageId
+          prev.map((msg) => {
+            return msg.id === chatbotMessageId
               ? {
                   ...msg,
                   isLoading: false,
@@ -518,8 +517,8 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                     },
                   },
                 }
-              : msg)
-          )
+              : msg;
+          })
         );
       }
     }
