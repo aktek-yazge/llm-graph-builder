@@ -730,19 +730,19 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
         document_names= list(map(str.strip, json.loads(document_names)))
         if document_names and not chat_mode_settings["document_filter"]:
             result =  {
-                "session_id": "",  
-                "message": "Please deselect all documents in the table before using this chat mode",
-                "info": {
-                    "sources": [],
-                    "model": "",
-                    "nodedetails": [],
-                    "total_tokens": 0,
-                    "response_time": 0,
-                    "mode": chat_mode_settings["mode"],
-                    "entities": [],
-                    "metric_details": [],
-                },
-                "user": "chatbot"
+              "session_id": "",  
+              "message": "Lütfen bu sohbet modunu kullanmadan önce tablodaki tüm dokümanların seçimini kaldırın.",
+              "info": {
+                "sources": [],
+                "model": "",
+                "nodedetails": [],
+                "total_tokens": 0,
+                "response_time": 0,
+                "mode": chat_mode_settings["mode"],
+                "entities": [],
+                "metric_details": [],
+              },
+              "user": "chatbot"
             }
         else:
             result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings)
