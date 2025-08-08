@@ -118,6 +118,7 @@ const Content: React.FC<ContentProps> = ({
     setSelectedChunks_to_combine,
     entityRelationshipRules,
     postProcessingTasks,
+    setPostProcessingTasks,
     queue,
     processedCount,
     setProcessedCount,
@@ -368,7 +369,7 @@ const Content: React.FC<ContentProps> = ({
         />
       );
       try {
-        const response = await postProcessing(postProcessingTasks);
+        const response = await postProcessing(postProcessingTasks, entityRelationshipRules);
         if (response.data.status === 'Success') {
           const communityfiles = response.data?.data;
           if (Array.isArray(communityfiles) && communityfiles.length) {
@@ -393,13 +394,18 @@ const Content: React.FC<ContentProps> = ({
               });
             });
           }
-          showSuccessToast('All Q&A functionality is available now.');
+          showSuccessToast('Tüm Soru & Cevap fonksiyonları artık kullanılabilir.');
+          // Post-processing tamamlandıktan sonra tasks'ları temizle
+          // Bu sayede frontend yenilendiğinde tekrar çalışmaz
+          setPostProcessingTasks([]);
         } else {
           throw new Error(response.data.error);
         }
       } catch (error) {
+        // Hata durumunda da tasks'ları temizle ki tekrar çalışmasın
+        setPostProcessingTasks([]);
         if (error instanceof Error) {
-          showSuccessToast(error.message);
+          showErrorToast(error.message);
         }
       }
     }
@@ -554,6 +560,7 @@ const Content: React.FC<ContentProps> = ({
     localStorage.removeItem('selectedRelationshipLabels');
     localStorage.removeItem('selectedPattern');
     setAdditionalInstructions('');
+    setPostProcessingTasks([]);
     setMessages([
       {
         datetime: `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`,

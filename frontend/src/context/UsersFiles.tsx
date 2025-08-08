@@ -72,14 +72,7 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
     show: false,
   });
 
-  const [postProcessingTasks, setPostProcessingTasks] = useState<string[]>([
-    'materialize_text_chunk_similarities',
-    'enable_hybrid_search_and_fulltext_search_in_bloom',
-    'materialize_entity_similarities',
-    'enable_communities',
-    'connect_documents_by_entities',
-    'entity_relationship_post_processing',
-  ]);
+  const [postProcessingTasks, setPostProcessingTasks] = useState<string[]>([]);
   const [processedCount, setProcessedCount] = useState<number>(0);
   const [postProcessingVal, setPostProcessingVal] = useState<boolean>(false);
   const [additionalInstructions, setAdditionalInstructions] = useState<string>('');
