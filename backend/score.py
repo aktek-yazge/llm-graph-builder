@@ -3,6 +3,8 @@ from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
 from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
+from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
+from src.llm import get_qa_based_graph_document_list, detect_document_domain
 from src.shared.common_fn import *
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import uvicorn
@@ -23,6 +25,7 @@ import json
 from typing import List, Optional
 from google.oauth2.credentials import Credentials
 import os
+import re
 from src.logger import CustomLogger
 from datetime import datetime, timezone
 import time
@@ -36,11 +39,22 @@ from langchain_neo4j import Neo4jGraph
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from dotenv import load_dotenv
+import tempfile
+from pathlib import Path
+try:
+    from docling.document_converter import DocumentConverter
+    DOCLING_AVAILABLE = True
+except ImportError:
+    DOCLING_AVAILABLE = False
+    
+from docling_core.types.doc import ImageRefMode, DocItemLabel
+from docling_core.types.doc.document import  DEFAULT_EXPORT_LABELS
 load_dotenv(override=True)
 
 logger = CustomLogger()
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
 MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
+MARKDOWN_CACHE_DIR = os.path.join(os.path.dirname(__file__), "markdown_cache")
 
 def sanitize_filename(filename):
    """
@@ -50,6 +64,53 @@ def sanitize_filename(filename):
    filename = os.path.basename(filename)
    filename = os.path.normpath(filename)
    return filename
+
+def create_markdown_cache_key(filename, file_size):
+    """
+    Dosya adı ve boyutundan markdown cache key oluştur
+    """
+    # Dosya adını güvenli hale getir (özel karakterleri _ ile değiştir)
+    safe_name = re.sub(r'[^\w\.-]', '_', filename)
+    # Dosya uzantısını .md yap
+    name_without_ext = os.path.splitext(safe_name)[0]
+    cache_key = f"{name_without_ext}_{file_size}.md"
+    return cache_key
+
+def get_cached_markdown(filename, file_size):
+    """
+    Cache'den markdown içeriği oku (varsa)
+    """
+    try:
+        cache_key = create_markdown_cache_key(filename, file_size)
+        cache_path = os.path.join(MARKDOWN_CACHE_DIR, cache_key)
+        
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return f.read()
+    except Exception as e:
+        logging.warning(f"Cache okuma hatası: {e}")
+    
+    return None
+
+def save_markdown_to_cache(filename, file_size, markdown_content):
+    """
+    Markdown içeriğini cache'e kaydet
+    """
+    try:
+        # Cache klasörünü oluştur
+        os.makedirs(MARKDOWN_CACHE_DIR, exist_ok=True)
+        
+        cache_key = create_markdown_cache_key(filename, file_size)
+        cache_path = os.path.join(MARKDOWN_CACHE_DIR, cache_key)
+        
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+            
+        logging.info(f"Markdown cache'e kaydedildi: {cache_key}")
+        return cache_path
+    except Exception as e:
+        logging.warning(f"Cache kaydetme hatası: {e}")
+        return None
 
 def validate_file_path(directory, filename):
    """
@@ -428,6 +489,274 @@ async def extract_knowledge_graph_from_file(
         return create_api_response('Failed', message=message + error_message[:100], error=error_message, file_name = file_name)
     finally:
         gc.collect()
+
+@app.post("/extract_qa_based")
+async def extract_qa_based_knowledge_graph(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    model=Form(),
+    document_chunks=Form(),
+    file_name=Form(),
+    domain=Form(None),
+    custom_questions=Form(None),
+    email=Form(None)
+):
+    """
+    QA tabanlı entity çıkarma endpoint'i
+    """
+    try:
+        logging.info(f"QA tabanlı extraction başlıyor: {file_name}")
+        
+        # Parameters validate
+        if not document_chunks or not file_name or not model:
+            raise HTTPException(status_code=400, detail="document_chunks, file_name ve model parametreleri gerekli")
+        
+        # Parse document chunks (JSON string olarak gönderilmiş olabilir)
+        if isinstance(document_chunks, str):
+            try:
+                chunks_list = json.loads(document_chunks)
+            except:
+                chunks_list = [document_chunks]  # Single chunk
+        else:
+            chunks_list = document_chunks
+        
+        # Custom questions parse et (eğer varsa)
+        questions_dict = None
+        if custom_questions:
+            try:
+                questions_dict = json.loads(custom_questions)
+            except:
+                logging.warning("Custom questions parse edilemedi, default sorular kullanılacak")
+        
+        # Domain tespiti (eğer belirtilmemişse)
+        if not domain and len(chunks_list) > 0:
+            domain = detect_document_domain(file_name, chunks_list[0])
+            logging.info(f"Otomatik domain tespiti: {domain}")
+        
+        # QA tabanlı extractor oluştur
+        extractor = QABasedEntityExtractor(model)
+        
+        # Domain'e özgü sorular al (eğer custom yoksa)
+        if not questions_dict:
+            if domain:
+                questions_dict = create_domain_specific_questions(domain)
+                logging.info(f"Domain '{domain}' için otomatik sorular oluşturuldu")
+            else:
+                questions_dict = extractor.default_questions
+                logging.info("Genel sorular kullanılıyor")
+        
+        # Entity'leri çıkar
+        graph_documents = await extractor.extract_entities_from_qa(
+            document_chunks=chunks_list,
+            file_name=file_name,
+            custom_questions=questions_dict
+        )
+        
+        # Neo4j'ye kaydet (opsiyonel - mevcut extract endpoint mantığını kullanarak)
+        if uri and userName and password:
+            graph_db = graphDBdataAccess(uri, userName, password, database)
+            # GraphDocument'ları Neo4j'ye kaydet
+            # Bu kısmı mevcut save işlemiyle entegre edebiliriz
+        
+        # newSchema.json formatında triplet'ler oluştur
+        triplets = []
+        unique_triplets = set()
+        
+        for doc in graph_documents:
+            for rel in doc.relationships:
+                source_type = rel.source.type if hasattr(rel.source, 'type') else 'Unknown'
+                target_type = rel.target.type if hasattr(rel.target, 'type') else 'Unknown'
+                rel_type = rel.type
+                
+                # Triplet formatı: "SourceType-RELATION_TYPE->TargetType"
+                triplet = f"{source_type}-{rel_type}->{target_type}"
+                
+                # Duplicate'ları önle
+                if triplet not in unique_triplets:
+                    triplets.append(triplet)
+                    unique_triplets.add(triplet)
+        
+        # newSchema.json formatında schema oluştur
+        new_schema_format = {
+            "schema": domain or "general",
+            "triplet": triplets
+        }
+        
+        # Şemayı kaydet
+        schema_data = {
+            'file_name': file_name,
+            'domain': domain,
+            'extraction_method': 'qa_based',
+            'model': model,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'entities_count': sum(len(doc.nodes) for doc in graph_documents),
+            'relationships_count': sum(len(doc.relationships) for doc in graph_documents),
+            'questions_used': questions_dict,
+            'new_schema_format': new_schema_format,  # newSchema.json uyumlu format
+            'schema': {
+                'entities': [{'id': node.id, 'type': node.type, 'properties': node.properties} 
+                           for doc in graph_documents for node in doc.nodes],
+                'relationships': [{'source': rel.source.id, 'target': rel.target.id, 'type': rel.type} 
+                               for doc in graph_documents for rel in doc.relationships]
+            }
+        }
+        
+        # Schema dosyasına kaydet
+        schema_file = f"qa_schemas/{file_name}_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        os.makedirs("qa_schemas", exist_ok=True)
+        with open(schema_file, 'w', encoding='utf-8') as f:
+            json.dump(schema_data, f, ensure_ascii=False, indent=2)
+        
+        logging.info(f"QA tabanlı extraction tamamlandı: {len(graph_documents)} GraphDocument oluşturuldu")
+        
+        response_data = {
+            'graph_documents_count': len(graph_documents),
+            'total_entities': sum(len(doc.nodes) for doc in graph_documents),
+            'total_relationships': sum(len(doc.relationships) for doc in graph_documents),
+            'domain': domain,
+            'schema_file': schema_file,
+            'extraction_method': 'qa_based',
+            'new_schema_format': new_schema_format,  # Frontend için newSchema.json uyumlu format
+            'triplets': triplets  # Kolay kullanım için ayrıca triplet'leri de gönder
+        }
+        
+        return create_api_response('Success', data=response_data, file_name=file_name)
+        
+    except Exception as e:
+        logging.error(f"QA tabanlı extraction hatası: {e}")
+        return create_api_response('Failed', message=str(e), file_name=file_name)
+
+@app.post("/load_qa_schema")
+async def load_qa_schema(
+    schema_file=Form(),
+    email=Form(None)
+):
+    """
+    Kaydedilmiş QA tabanlı şemayı yükle
+    """
+    try:
+        if not os.path.exists(schema_file):
+            raise HTTPException(status_code=404, detail="Schema dosyası bulunamadı")
+        
+        with open(schema_file, 'r', encoding='utf-8') as f:
+            schema_data = json.load(f)
+        
+        return create_api_response('Success', data=schema_data)
+        
+    except Exception as e:
+        logging.error(f"Schema yükleme hatası: {e}")
+        return create_api_response('Failed', message=str(e))
+
+@app.get("/list_qa_schemas")
+async def list_qa_schemas():
+    """
+    Mevcut QA tabanlı şemaları listele
+    """
+    try:
+        schema_dir = "qa_schemas"
+        if not os.path.exists(schema_dir):
+            return create_api_response('Success', data=[])
+        
+        schemas = []
+        for file in os.listdir(schema_dir):
+            if file.endswith('.json'):
+                file_path = os.path.join(schema_dir, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        schema_info = json.load(f)
+                    
+                    schemas.append({
+                        'filename': file,
+                        'file_path': file_path,
+                        'document_name': schema_info.get('file_name'),
+                        'domain': schema_info.get('domain'),
+                        'timestamp': schema_info.get('timestamp'),
+                        'entities_count': schema_info.get('entities_count'),
+                        'relationships_count': schema_info.get('relationships_count'),
+                        'model': schema_info.get('model')
+                    })
+                except:
+                    # Bozuk dosyaları atla
+                    continue
+        
+        # Timestamp'e göre sırala (en yeni önce)
+        schemas.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        return create_api_response('Success', data=schemas)
+        
+    except Exception as e:
+        logging.error(f"Schema listeleme hatası: {e}")
+        return create_api_response('Failed', message=str(e))
+
+@app.post("/convert-to-markdown")
+async def convert_to_markdown(file: UploadFile = File(...)):
+    """
+    Dosyayı Docling kullanarak markdown'a çevirme endpoint'i (cache destekli)
+    """
+    if not DOCLING_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Docling kütüphanesi yüklü değil. pip install docling komutu ile yükleyin.")
+    
+    try:
+        # Dosya içeriğini oku
+        content = await file.read()
+        file_size = len(content)
+        
+        # Önce cache'i kontrol et
+        cached_markdown = get_cached_markdown(file.filename, file_size)
+        if cached_markdown:
+            logging.info(f"Markdown cache'den alındı: {file.filename}")
+            return {
+                "status": "success",
+                "markdown": cached_markdown,
+                "filename": file.filename,
+                "original_size": file_size,
+                "markdown_size": len(cached_markdown),
+                "from_cache": True
+            }
+        
+        # Cache'de yok, Docling ile dönüştür
+        logging.info(f"Docling ile markdown'a çevriliyor: {file.filename}")
+        
+        # Geçici dosya oluştur
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            labels = [
+                label
+                for label in DEFAULT_EXPORT_LABELS
+                if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
+            ]
+            
+            # Docling ile dosyayı işle
+            converter = DocumentConverter()
+            result = converter.convert(tmp_file_path)
+            
+            # Markdown çıktısını al
+            markdown_content = result.document.export_to_markdown(labels=labels)
+            
+            # Cache'e kaydet
+            save_markdown_to_cache(file.filename, file_size, markdown_content)
+            
+            return {
+                "status": "success",
+                "markdown": markdown_content,
+                "filename": file.filename,
+                "original_size": file_size,
+                "markdown_size": len(markdown_content),
+                "from_cache": False
+            }
+            
+        finally:
+            # Geçici dosyayı sil
+            os.unlink(tmp_file_path)
+            
+    except Exception as e:
+        logging.error(f"Dosya dönüştürme hatası: {e}")
+        raise HTTPException(status_code=500, detail=f"Dosya dönüştürme hatası: {str(e)}")
             
 @app.post("/sources_list")
 async def get_source_list(
@@ -1614,6 +1943,213 @@ async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), 
         return create_api_response("Failed", message=message, error=error_message)
     finally:
         gc.collect()
+
+
+@app.post("/qa_extract")
+async def create_source_knowledge_graph_qa_based(
+    uri=Form(None),
+    userName=Form(None), 
+    password=Form(None),
+    database=Form(None),
+    file_name=Form(None),
+    model=Form(),
+    domain=Form("general"),  # Belge domain'i
+    retry_condition=Form(None),
+    allowedNodes=Form(None),
+    allowedRelationship=Form(None),
+    custom_questions=Form(None),  # JSON string olarak özel sorular
+    email=Form(None)
+):
+    """
+    Soru-cevap tabanlı entity çıkarma endpoint'i - sadece local file'lar için
+    Geleneksel yöntem yerine LLM'ye sorular sorarak daha odaklı entity'ler çıkarır
+    """
+    try:
+        start_time = time.time()
+        source_type = "local file"  # Sadece local file desteklenir
+        
+        # Parametreleri logla
+        logging.info(f"🤖 QA tabanlı entity çıkarma başlıyor: {file_name}")
+        logging.info(f"Domain: {domain}, Model: {model}")
+        
+        # Graph bağlantısı oluştur
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        # Allowed nodes/relationships'i parse et
+        if allowedNodes:
+            allowedNodes = allowedNodes.split(',') if isinstance(allowedNodes, str) else allowedNodes
+        if allowedRelationship:
+            allowedRelationship = allowedRelationship.split(',') if isinstance(allowedRelationship, str) else allowedRelationship
+            
+        # Custom questions parse et
+        custom_questions_dict = None
+        if custom_questions:
+            try:
+                custom_questions_dict = json.loads(custom_questions)
+                logging.info(f"Özel sorular parse edildi: {len(custom_questions_dict)} kategori")
+            except json.JSONDecodeError as e:
+                logging.warning(f"Custom questions parse hatası: {e}, default sorular kullanılıyor")
+        
+        # Belge içeriğini al - sadece local file desteklenir  
+        file_path = validate_file_path(MERGED_DIR, sanitize_filename(file_name))
+        
+        if os.path.exists(file_path):
+            documents = get_documents_from_file_by_path(file_path)
+            document_chunks = [doc.page_content for doc in documents]
+            logging.info(f"Local file'dan {len(document_chunks)} chunk alındı")
+        else:
+            raise LLMGraphBuilderException(f"Local file bulunamadı: {file_path}")
+        
+        if not document_chunks:
+            raise LLMGraphBuilderException("Belge chunks bulunamadı")
+        
+        # Domain'i otomatik tespit et (eğer 'general' ise)
+        if domain == "general":
+            from src.llm import detect_document_domain
+            detected_domain = detect_document_domain(file_name, document_chunks[0] if document_chunks else "")
+            domain = detected_domain
+            logging.info(f"Otomatik tespit edilen domain: {domain}")
+        
+        # QA tabanlı entity çıkarma
+        from src.llm import get_qa_based_graph_document_list
+        
+        graph_documents = await get_qa_based_graph_document_list(
+            model=model,
+            document_chunks=document_chunks,
+            file_name=file_name,
+            domain=domain,
+            custom_questions=custom_questions_dict
+        )
+        
+        if not graph_documents:
+            raise LLMGraphBuilderException("QA tabanlı çıkarma sonucu hiç entity bulunamadı")
+        
+        # Graph'e kaydet
+        from src.main import processing_source
+        
+        # Source node oluştur - local file için
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        
+        # Processing'i başlat (QA tabanlı graph documents ile)
+        result = await processing_source(
+            uri=uri,
+            userName=userName,
+            password=password,
+            database=database,
+            model=model,
+            file_name=file_name,
+            pages=graph_documents,  # QA'dan gelen documents
+            allowedNodes=allowedNodes,
+            allowedRelationship=allowedRelationship,
+            token_chunk_size=4000,  # QA için sabit
+            chunk_overlap=200,
+            chunks_to_combine=1,
+            is_uploaded_from_local=True,
+            merged_file_path=file_path,
+            retry_condition=retry_condition,
+            additional_instructions=f"QA tabanlı çıkarma - Domain: {domain}"
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # Sonuçları logla
+        total_entities = sum(len(doc.nodes) for doc in graph_documents)
+        total_relationships = sum(len(doc.relationships) for doc in graph_documents)
+        
+        result_data = {
+            'api_name': 'qa_extract',
+            'extraction_method': 'qa_based',
+            'domain': domain,
+            'db_url': uri,
+            'userName': userName,
+            'database': database,
+            'model': model,
+            'source_type': 'local file',
+            'file_name': file_name,
+            'extracted_entities': total_entities,
+            'extracted_relationships': total_relationships,
+            'graph_documents_count': len(graph_documents),
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'logging_time': formatted_time(datetime.now(timezone.utc)),
+            'email': email,
+            'status': 'Success'
+        }
+        
+        if custom_questions_dict:
+            result_data['custom_questions_used'] = True
+            result_data['question_categories'] = list(custom_questions_dict.keys())
+        
+        logger.log_struct(result_data, "INFO")
+        
+        logging.info(f"✅ QA tabanlı extraction tamamlandı: {elapsed_time:.2f}s")
+        logging.info(f"   - Entities: {total_entities}")
+        logging.info(f"   - Relationships: {total_relationships}")
+        logging.info(f"   - Graph docs: {len(graph_documents)}")
+        
+        return create_api_response(
+            'Success',
+            data=result_data,
+            message=f"QA tabanlı extraction tamamlandı: {total_entities} entity, {total_relationships} relationship",
+            file_source='local file'
+        )
+        
+    except LLMGraphBuilderException as e:
+        error_message = str(e)
+        logging.error(f"QA tabanlı extraction hatası: {error_message}")
+        
+        # Database güncelleme
+        try:
+            graph = create_graph_database_connection(uri, userName, password, database)
+            graphDb_data_Access = graphDBdataAccess(graph)
+            graphDb_data_Access.update_exception_db(file_name, error_message, retry_condition)
+        except Exception as db_error:
+            logging.error(f"Database hata güncellemesi başarısız: {db_error}")
+        
+        elapsed_time = time.time() - start_time
+        error_data = {
+            'api_name': 'qa_extract',
+            'extraction_method': 'qa_based',
+            'domain': domain,
+            'file_name': file_name,
+            'status': 'Failed',
+            'error_message': error_message,
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'logging_time': formatted_time(datetime.now(timezone.utc)),
+            'email': email
+        }
+        logger.log_struct(error_data, "ERROR")
+        
+        return create_api_response(
+            "Failed",
+            message=f"QA tabanlı extraction başarısız: {error_message}",
+            error=error_message,
+            file_name=file_name
+        )
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.exception(f"QA extract genel hatası: {error_message}")
+        
+        elapsed_time = time.time() - start_time
+        error_data = {
+            'api_name': 'qa_extract',
+            'file_name': file_name,
+            'status': 'Failed',
+            'error_message': error_message,
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'logging_time': formatted_time(datetime.now(timezone.utc))
+        }
+        logger.log_struct(error_data, "ERROR")
+        
+        return create_api_response(
+            "Failed",
+            message=f"Beklenmeyen hata: {error_message}",
+            error=error_message,
+            file_name=file_name
+        )
+    finally:
+        gc.collect()
+
 
 if __name__ == "__main__":
     uvicorn.run(app)

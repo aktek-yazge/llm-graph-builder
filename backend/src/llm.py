@@ -1232,3 +1232,139 @@ async def apply_llm_post_processing(model, graph_documents, file_name, graph=Non
     except Exception as e:
         logging.error(f"LLM post-processing genel hatası: {e}")
         return graph_documents  # Hata durumunda orijinal döndür
+
+
+async def get_qa_based_graph_document_list(
+    model: str, 
+    document_chunks: List[str], 
+    file_name: str,
+    domain: str = "insurance",
+    custom_questions: dict = None
+) -> List:
+    """
+    Soru-cevap tabanlı entity çıkarma fonksiyonu
+    
+    Args:
+        model: LLM model adı
+        document_chunks: Belge parçaları
+        file_name: Dosya adı
+        domain: Belge domain'i (insurance, legal, financial)
+        custom_questions: Özel sorular (opsiyonel)
+        
+    Returns:
+        GraphDocument listesi
+    """
+    try:
+        logging.info(f"🤖 QA tabanlı entity çıkarma başlıyor: {file_name}")
+        logging.info(f"Domain: {domain}, Chunk sayısı: {len(document_chunks)}")
+        
+        # Lazy import to avoid circular dependency
+        from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
+        
+        # QA tabanlı extractor oluştur
+        extractor = QABasedEntityExtractor(model)
+        
+        # Domain'e özgü sorular al (eğer custom yoksa)
+        if not custom_questions:
+            if domain:
+                custom_questions = create_domain_specific_questions(domain)
+                logging.info(f"Domain '{domain}' için otomatik sorular oluşturuldu")
+            else:
+                custom_questions = extractor.default_questions
+                logging.info("Genel sorular kullanılıyor")
+        
+        # Entity'leri çıkar
+        graph_documents = await extractor.extract_entities_from_qa(
+            document_chunks=document_chunks,
+            file_name=file_name,
+            custom_questions=custom_questions
+        )
+        
+        # Sonuçları logla
+        total_entities = sum(len(doc.nodes) for doc in graph_documents)
+        total_relationships = sum(len(doc.relationships) for doc in graph_documents)
+        
+        logging.info(f"✅ QA tabanlı çıkarma tamamlandı:")
+        logging.info(f"  - Graph document sayısı: {len(graph_documents)}")
+        logging.info(f"  - Toplam entity sayısı: {total_entities}")
+        logging.info(f"  - Toplam relationship sayısı: {total_relationships}")
+        
+        if graph_documents:
+            # İlk birkaç entity örneğini logla
+            sample_entities = []
+            for doc in graph_documents[:2]:  # İlk 2 döküman
+                for node in doc.nodes[:3]:  # Her dökümanın ilk 3 entity'si
+                    sample_entities.append(f"{node.type}:{node.id}")
+            logging.info(f"  - Örnek entity'ler: {sample_entities}")
+        
+        return graph_documents
+        
+    except Exception as e:
+        logging.error(f"❌ QA tabanlı entity çıkarma hatası: {e}")
+        import traceback
+        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
+        return []
+
+
+def detect_document_domain(file_name: str, first_chunk: str = "") -> str:
+    """
+    Dosya adı ve içeriğinden domain'i otomatik tespit eder
+    
+    Args:
+        file_name: Dosya adı
+        first_chunk: İlk chunk içeriği (opsiyonel)
+        
+    Returns:
+        Domain adı (insurance, legal, financial, general)
+    """
+    file_name_lower = file_name.lower()
+    content_lower = first_chunk.lower() if first_chunk else ""
+    
+    # Sigorta tespiti - geliştirilmiş keywords
+    insurance_keywords = [
+        "poliçe", "sigorta", "kasko", "trafik", "dask", "konut", "işyeri",
+        "policy", "insurance", "coverage", "premium", "claim", "teminat",
+        "prim", "sigortalı", "acente", "yangın", "deprem", "doğa sigorta",
+        "türk sigorta", "aksigorta", "anadolu sigorta", "allianz",
+        "mali sorumluluk", "ferdi kaza", "cam kırılması", "riziko"
+    ]
+    
+    # Hukuki tespiti  
+    legal_keywords = [
+        "dava", "mahkeme", "avukat", "hukuk", "sözleşme", "anlaşma",
+        "court", "legal", "lawsuit", "attorney", "contract", "agreement",
+        "icra", "iflas", "temyiz", "karar", "hüküm", "dilekçe"
+    ]
+    
+    # Finansal tespiti
+    financial_keywords = [
+        "banka", "kredi", "ödeme", "fatura", "hesap", "para", "tl", "usd", "eur",
+        "bank", "credit", "payment", "invoice", "account", "money", "financial",
+        "faiz", "kar", "zarar", "bilanço", "mali", "muhasebe"
+    ]
+    
+    # Dosya adından domain tespit et
+    if any(keyword in file_name_lower for keyword in insurance_keywords):
+        return "insurance"
+    elif any(keyword in file_name_lower for keyword in legal_keywords):
+        return "legal"  
+    elif any(keyword in file_name_lower for keyword in financial_keywords):
+        return "financial"
+    
+    # İçerikten domain tespit et
+    if content_lower:
+        insurance_score = sum(1 for keyword in insurance_keywords if keyword in content_lower)
+        legal_score = sum(1 for keyword in legal_keywords if keyword in content_lower)
+        financial_score = sum(1 for keyword in financial_keywords if keyword in content_lower)
+        
+        max_score = max(insurance_score, legal_score, financial_score)
+        
+        if max_score > 2:  # En az 3 anahtar kelime eşleşmesi gerekli
+            if insurance_score == max_score:
+                return "insurance"
+            elif legal_score == max_score:
+                return "legal"
+            elif financial_score == max_score:
+                return "financial"
+    
+    return "general"
