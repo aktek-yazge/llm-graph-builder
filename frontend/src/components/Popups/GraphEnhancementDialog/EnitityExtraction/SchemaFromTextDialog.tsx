@@ -209,6 +209,7 @@ const SchemaFromTextDialog = ({ open, onClose, onApply }: SchemaFromTextProps) =
                   handleSchemaView={handleSchemaView}
                   nodes={schemaValNodes}
                   rels={schemaValRels}
+                  tripletsCount={schemaTextPattern.length}
                 />
               </div>
               <Dialog.Actions className='mt-3'>
