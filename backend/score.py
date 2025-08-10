@@ -640,6 +640,9 @@ async def extract_qa_based_knowledge_graph(
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'entities_count': sum(len(doc.nodes) for doc in graph_documents),
             'relationships_count': sum(len(doc.relationships) for doc in graph_documents),
+            'unique_entity_types': len(unique_labels),
+            'unique_relationship_types': len(unique_relationship_types),
+            'triplets_count': len(triplets),
             'questions_used': questions_dict,
             'schema': schema,  # Frontend için schema format
             'triplets': triplets  # Triplet formatında ilişkiler
@@ -657,6 +660,9 @@ async def extract_qa_based_knowledge_graph(
             'graph_documents_count': len(graph_documents),
             'total_entities': sum(len(doc.nodes) for doc in graph_documents),
             'total_relationships': sum(len(doc.relationships) for doc in graph_documents),
+            'unique_entity_types': len(unique_labels),
+            'unique_relationship_types': len(unique_relationship_types),
+            'triplets_count': len(triplets),
             'domain': domain,
             'schema_file': schema_file,  # Ana detaylı schema dosyası
             'extraction_method': 'qa_based',
@@ -709,6 +715,9 @@ async def list_qa_schemas():
                     with open(file_path, 'r', encoding='utf-8') as f:
                         schema_info = json.load(f)
                     
+                    # Unique relationship types sayısını hesapla
+                    unique_rels_count = len(schema_info.get('schema', {}).get('relationshipTypes', []))
+                    
                     schemas.append({
                         'filename': file,
                         'file_path': file_path,
@@ -716,7 +725,9 @@ async def list_qa_schemas():
                         'domain': schema_info.get('domain'),
                         'timestamp': schema_info.get('timestamp'),
                         'entities_count': schema_info.get('entities_count'),
-                        'relationships_count': schema_info.get('relationships_count'),
+                        'relationships_count': schema_info.get('relationships_count'),  # toplam triplet sayısı
+                        'unique_relationship_types': unique_rels_count,  # unique relationship types sayısı  
+                        'triplets_count': schema_info.get('relationships_count'),  # netlik için aynı değeri tekrar
                         'model': schema_info.get('model')
                     })
                 except:

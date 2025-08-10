@@ -152,6 +152,7 @@ const DataImporterSchemaDialog = ({ open, onClose, onApply }: DataImporterDialog
             handleSchemaView={handleSchemaView}
             nodes={importerNodes}
             rels={importerRels}
+            tripletsCount={importerPattern.length}
           />
           <Dialog.Actions className='n-flex n-justify-end n-gap-token-4 pt-4'>
             <Button onClick={handleCancel} isDisabled={importerPattern.length === 0}>

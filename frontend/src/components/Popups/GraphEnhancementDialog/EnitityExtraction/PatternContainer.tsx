@@ -12,6 +12,7 @@ interface PatternContainerProps {
   highlightPattern?: string;
   nodes?: OptionType[];
   rels?: OptionType[];
+  tripletsCount?: number; // Toplam triplet/relationship sayısı
 }
 
 const PatternContainer = ({
@@ -21,9 +22,14 @@ const PatternContainer = ({
   highlightPattern,
   nodes,
   rels,
+  tripletsCount,
 }: PatternContainerProps) => {
   const nodeCount = useMemo(() => nodes?.length ?? 0, [nodes]);
-  const relCount = useMemo(() => rels?.length ?? 0, [rels]);
+  const relCount = useMemo(() => {
+    // Eğer tripletsCount prop'u varsa onu kullan (QA schema için toplam relationship sayısı)
+    // Yoksa unique relationship types sayısını kullan (default schema için)
+    return tripletsCount !== undefined ? tripletsCount : (rels?.length ?? 0);
+  }, [rels, tripletsCount]);
   return (
     <div className='h-full'>
       <div className='flex align-self-center justify-center border'>

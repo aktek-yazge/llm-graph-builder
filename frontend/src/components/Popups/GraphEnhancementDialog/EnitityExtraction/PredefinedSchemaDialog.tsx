@@ -48,6 +48,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
   const [showQAModal, setShowQAModal] = useState<boolean>(false);
   const [allSchemaOptions, setAllSchemaOptions] = useState<OptionType[]>([]);
   const [debugInfo, setDebugInfo] = useState<string>('');
+  const [selectedSchemaTripletsCount, setSelectedSchemaTripletsCount] = useState<number>(0);
 
   // QA şemalarını backend'den yükle
   const loadQASchemas = useCallback(async () => {
@@ -55,7 +56,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
       const response = await listQASchemas();
       if (response.data.status === 'Success' && response.data.data) {
         const qaSchemaOptions = response.data.data.map((schema: any) => ({
-          label: `${schema.document_name} - ${schema.domain} (QA)`,
+          label: `${schema.document_name} - ${schema.domain} (${schema.entities_count || 0} Nodes & ${schema.unique_relationship_types || schema.relationships_count || 0} Rel Types) (QA)`,
           value: `qa_${schema.filename}`,
           triplet: [], // Şu anlık boş, yüklenirken doldurulacak
           qaSchema: true,
@@ -108,6 +109,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
       setPreDefinedPattern([]);
       setPreDefinedNodes([]);
       setPreDefinedRels([]);
+      setSelectedSchemaTripletsCount(0); // Reset triplet count
       return;
     }
 
@@ -127,6 +129,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
             const triplets = qaData.triplets || [];
 
             setPreDefinedPattern(triplets);
+            setSelectedSchemaTripletsCount(triplets.length); // Triplet sayısını set et
 
             // Labels ve relationships'i direkt al
             const nodeLabelOptions = labels.map((label: string) => ({
@@ -170,6 +173,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
     // Normal (varsayılan) şemalar için eski mantık
     const selectedTriplets: TupleType[] = getSelectedTriplets([selectedOption]);
     setPreDefinedPattern(selectedTriplets.map((t) => t.label));
+    setSelectedSchemaTripletsCount(selectedTriplets.length); // Default schema için de triplet sayısını set et
     const { nodeLabelOptions, relationshipTypeOptions } = extractOptions(selectedTriplets);
     setPreDefinedNodes(nodeLabelOptions);
     setPreDefinedRels(relationshipTypeOptions);
@@ -241,7 +245,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
 
       // QA şema listesini yeniden yükle
       setDebugInfo(
-        `QA Success: ${triplets.length} triplet, ${labels.length} nodes, ${relationshipTypes.length} rels - loadQASchemas çağrılacak...`
+        `QA Success: ${triplets.length} triplets, ${labels.length} nodes, ${relationshipTypes.length} relation types - loadQASchemas çağrılacak...`
       );
       loadQASchemas();
     } else {
@@ -299,6 +303,7 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
             handleSchemaView={handleSchemaView}
             nodes={preDefinedNodes}
             rels={preDefinedRels}
+            tripletsCount={selectedSchemaTripletsCount}
           />
           <Dialog.Actions className='n-flex n-justify-end n-gap-token-4 pt-4'>
             <Button onClick={handleCancel} isDisabled={preDefinedPattern.length === 0}>
