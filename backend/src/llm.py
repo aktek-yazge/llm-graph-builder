@@ -32,6 +32,8 @@ def get_llm(model: str):
         raise Exception(err)
     
     logging.info("Model: {}".format(env_key))
+    logging.info(f"get_llm çağrısı: model={model}, env_key={env_key}, env_value={env_value}")
+    
     try:
         if "gemini" in model:
             model_name = env_value
@@ -52,11 +54,14 @@ def get_llm(model: str):
             )
         elif "openai" in model:
             model_name, api_key = env_value.split(",")
+            logging.info(f"OpenAI model kontrolü: model={model}, model_name={model_name}")
             if "o3-mini" in model:
+                logging.info("O3-mini tespit edildi, temperature parametresi olmadan LLM oluşturuluyor")
                 llm= ChatOpenAI(
                 api_key=api_key,
                 model=model_name)
             else:
+                logging.info("Normal OpenAI model, temperature=0 ile LLM oluşturuluyor")
                 llm = ChatOpenAI(
                 api_key=api_key,
                 model=model_name,
@@ -1233,77 +1238,6 @@ async def apply_llm_post_processing(model, graph_documents, file_name, graph=Non
         logging.error(f"LLM post-processing genel hatası: {e}")
         return graph_documents  # Hata durumunda orijinal döndür
 
-
-async def get_qa_based_graph_document_list(
-    model: str, 
-    document_chunks: List[str], 
-    file_name: str,
-    domain: str = "insurance",
-    custom_questions: dict = None
-) -> List:
-    """
-    Soru-cevap tabanlı entity çıkarma fonksiyonu
-    
-    Args:
-        model: LLM model adı
-        document_chunks: Belge parçaları
-        file_name: Dosya adı
-        domain: Belge domain'i (insurance, legal, financial)
-        custom_questions: Özel sorular (opsiyonel)
-        
-    Returns:
-        GraphDocument listesi
-    """
-    try:
-        logging.info(f"🤖 QA tabanlı entity çıkarma başlıyor: {file_name}")
-        logging.info(f"Domain: {domain}, Chunk sayısı: {len(document_chunks)}")
-        
-        # Lazy import to avoid circular dependency
-        from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
-        
-        # QA tabanlı extractor oluştur
-        extractor = QABasedEntityExtractor(model)
-        
-        # Domain'e özgü sorular al (eğer custom yoksa)
-        if not custom_questions:
-            if domain:
-                custom_questions = create_domain_specific_questions(domain)
-                logging.info(f"Domain '{domain}' için otomatik sorular oluşturuldu")
-            else:
-                custom_questions = extractor.default_questions
-                logging.info("Genel sorular kullanılıyor")
-        
-        # Entity'leri çıkar
-        graph_documents = await extractor.extract_entities_from_qa(
-            document_chunks=document_chunks,
-            file_name=file_name,
-            custom_questions=custom_questions
-        )
-        
-        # Sonuçları logla
-        total_entities = sum(len(doc.nodes) for doc in graph_documents)
-        total_relationships = sum(len(doc.relationships) for doc in graph_documents)
-        
-        logging.info(f"✅ QA tabanlı çıkarma tamamlandı:")
-        logging.info(f"  - Graph document sayısı: {len(graph_documents)}")
-        logging.info(f"  - Toplam entity sayısı: {total_entities}")
-        logging.info(f"  - Toplam relationship sayısı: {total_relationships}")
-        
-        if graph_documents:
-            # İlk birkaç entity örneğini logla
-            sample_entities = []
-            for doc in graph_documents[:2]:  # İlk 2 döküman
-                for node in doc.nodes[:3]:  # Her dökümanın ilk 3 entity'si
-                    sample_entities.append(f"{node.type}:{node.id}")
-            logging.info(f"  - Örnek entity'ler: {sample_entities}")
-        
-        return graph_documents
-        
-    except Exception as e:
-        logging.error(f"❌ QA tabanlı entity çıkarma hatası: {e}")
-        import traceback
-        logging.error(f"Hata detayı:\n{traceback.format_exc()}")
-        return []
 
 
 def detect_document_domain(file_name: str, first_chunk: str = "") -> str:
