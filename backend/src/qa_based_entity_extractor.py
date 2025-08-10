@@ -90,18 +90,18 @@ class QABasedEntityExtractor:
         # Soruları belirle
         questions_to_use = custom_questions if custom_questions else self.default_questions
         
-        # Her chunk için QA tabanlı çıkarma yap
+        # Her chunk için guidance-based çıkarma yap
         all_graph_documents = []
         
         for chunk_index, chunk_text in enumerate(document_chunks):
             logging.info(f"Chunk {chunk_index + 1}/{len(document_chunks)} işleniyor")
             
-            # Chunk için soru-cevap çiftleri oluştur
-            qa_pairs = await self._generate_qa_pairs(chunk_text, questions_to_use)
-            
-            # QA çiftlerinden entity'leri çıkar
-            graph_doc = await self._extract_entities_from_qa_pairs(
-                chunk_text, qa_pairs, file_name, chunk_index
+            # Soruları guidance olarak kullanarak entity çıkar
+            graph_doc = await self._extract_entities_with_guidance(
+                chunk_text=chunk_text,
+                guidance_questions=self._format_guidance_questions(questions_to_use),
+                file_name=file_name,
+                chunk_index=chunk_index
             )
             
             if graph_doc:
@@ -110,196 +110,133 @@ class QABasedEntityExtractor:
         logging.info(f"QA tabanlı çıkarma tamamlandı: {len(all_graph_documents)} GraphDocument oluşturuldu")
         return all_graph_documents
     
-    async def _generate_qa_pairs(self, chunk_text: str, questions: Dict[str, List[str]]) -> List[Dict[str, str]]:
+    def _format_guidance_questions(self, questions: Dict[str, List[str]]) -> str:
         """
-        Verilen chunk için soru-cevap çiftleri oluşturur
+        Soruları guidance formatında düzenler ve benzer soruları da düşünmesi için yönlendirme yapar
         """
-        
-        # Soru-cevap oluşturma prompt'u
-        qa_generation_prompt = ChatPromptTemplate.from_template("""
-Sen bir sigorta belgesi analiz uzmanısın. Aşağıdaki metin parçasını analiz ederek, verilen sorulara kısa ve net cevaplar ver.
-
-METIN:
-{chunk_text}
-
-SORULAR:
-{formatted_questions}
-
-ÖNEMLİ KURALLAR:
-1. Sadece metinde açıkça geçen bilgileri kullan
-2. Eğer bir sorunun cevabı metinde yoksa "Bilgi yok" yaz
-3. Her cevabı kısa ve öz tut (maksimum 2-3 cümle)
-4. Tarih, numara, isim, tutar gibi spesifik bilgileri aynen yaz
-5. Para birimi olan tutarlarda birimi de belirt (TL, USD vb.)
-6. Yüzde oranları varsa % işareti ile birlikte yaz
-7. Adres bilgilerini tam olarak yaz
-8. Telefon numaralarını tam format ile yaz
-9. Poliçe, TC kimlik, UAVT gibi özel kodları tam olarak yaz
-10. Cevapları JSON formatında ver
-
-ÖRNEK CEVAPLAR:
-- Poliçe numarası: "65789885"
-- Sigorta bedeli: "350.000,00 TL"
-- Başlangıç tarihi: "12.02.2020"
-- Adres: "Firuza Ağa Apt: Galata Residence (17-19) Apt No: 17-19 Daire No: 3"
-- Telefon: "0532****112"
-
-JSON FORMAT:
-{{
-    "qa_pairs": [
-        {{
-            "question": "soru metni",
-            "answer": "cevap metni",
-            "category": "kategori_adı"
-        }}
-    ]
-}}
-""")                # Soruları formatla
         formatted_questions = ""
         for category, question_list in questions.items():
-            formatted_questions += f"\n{category.upper().replace('_', ' ')}:\n"
+            formatted_questions += f"\n{category.upper().replace('_', ' ')} BİLGİLERİ:\n"
             for i, question in enumerate(question_list, 1):
-                formatted_questions += f"{i}. {question}\n"
+                # Soruları guidance formuna çevir
+                guidance_point = question.replace("?", " türünde bilgileri")
+                formatted_questions += f"{i}. {guidance_point} arayın ve çıkarın\n"
+            
+            # Her kategori için ek yönlendirme ekle
+            formatted_questions += f"   → Bu kategorideki sorulara benzer, ilgili diğer {category.replace('_', ' ')} bilgilerini de arayın\n"
         
-        try:
-            # LLM'den soru-cevap çiftlerini al
-            response = await self.llm.ainvoke(
-                qa_generation_prompt.format(
-                    chunk_text=chunk_text,
-                    formatted_questions=formatted_questions
-                )
-            )
-            
-            # JSON parse et
-            response_text = response.content.strip()
-            
-            # JSON'u temizle
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].strip()
-                
-            qa_data = json.loads(response_text)
-            return qa_data.get("qa_pairs", [])
-            
-        except Exception as e:
-            logging.error(f"Soru-cevap oluşturma hatası: {e}")
-            return []
+        # Genel yaratıcı yönlendirme ekle
+        formatted_questions += f"\n💡 YARATICI YAKLAŞIM:\n"
+        formatted_questions += f"- Yukarıdaki sorulara benzer, ilişkili soruları da düşünün\n"
+        formatted_questions += f"- Mümkün olduğunca çok alakalı entity ve relationship çıkarın\n"
+        formatted_questions += f"- Metindeki her önemli bilgiyi entity olarak değerlendirin\n"
+        
+        return formatted_questions
     
-    async def _extract_entities_from_qa_pairs(self, 
-                                            chunk_text: str, 
-                                            qa_pairs: List[Dict[str, str]], 
-                                            file_name: str, 
-                                            chunk_index: int) -> Optional[GraphDocument]:
+    def _format_relationship_type(self, rel_type: str) -> str:
         """
-        Soru-cevap çiftlerinden entity'leri ve ilişkileri çıkarır
+        Relationship type'ını standart formata çevirir (BÜYÜK_HARF_UNDERSCORE)
+        """
+        # Boşlukları ve tire işaretlerini underscore ile değiştir
+        formatted = rel_type.replace(" ", "_").replace("-", "_")
+        # Büyük harfe çevir
+        formatted = formatted.upper()
+        # Türkçe karakterleri İngilizce karşılıkları ile değiştir
+        tr_chars = {
+            'Ç': 'C', 'Ğ': 'G', 'İ': 'I', 'Ö': 'O', 'Ş': 'S', 'Ü': 'U',
+            'ç': 'C', 'ğ': 'G', 'ı': 'I', 'ö': 'O', 'ş': 'S', 'ü': 'U'
+        }
+        for tr_char, en_char in tr_chars.items():
+            formatted = formatted.replace(tr_char, en_char)
+        return formatted
+    
+    async def _extract_entities_with_guidance(self, 
+                                             chunk_text: str, 
+                                             guidance_questions: str,
+                                             file_name: str, 
+                                             chunk_index: int) -> Optional[GraphDocument]:
+        """
+        Guidance sorularını kullanarak doğrudan entity ve relation çıkarımı yapar.
+        Q&A üretmez, sadece soruların odaklandığı konularda entity arar.
         """
         
-        if not qa_pairs:
-            logging.warning(f"Chunk {chunk_index} için QA pair bulunamadı")
-            return None
-            
-        # Relevantlı QA çiftlerini filtrele
-        relevant_qa_pairs = [
-            qa for qa in qa_pairs 
-            if qa.get("answer", "").lower() not in ["bilgi yok", "yok", "bulunmuyor", "geçmiyor"]
-        ]
-        
-        if not relevant_qa_pairs:
-            logging.warning(f"Chunk {chunk_index} için relevant QA pair bulunamadı")
-            return None
-        
-        # Entity çıkarma prompt'u
-        entity_extraction_prompt = ChatPromptTemplate.from_template("""
-Sen bir sigorta belgesi entity çıkarma uzmanısın. Aşağıdaki soru-cevap çiftlerini kullanarak sadece önemli ve spesifik entity'leri çıkar.
+        # Guidance-based entity extraction prompt'u
+        guidance_extraction_prompt = ChatPromptTemplate.from_template("""
+Sen bir belge entity ve relationship çıkarma uzmanısın. Aşağıdaki metin parçasından entity ve relationship çıkaracaksın.
 
 METIN PARÇASI:
 {chunk_text}
 
-SORU-CEVAP ÇİFTLERİ:
-{qa_pairs_text}
+REHBER KONULAR:
+{guidance_questions}
 
 GÖREVİN:
-1. Sadece soru-cevaplarda geçen önemli ve spesifik bilgileri entity olarak çıkar
-2. Gereksiz, genel veya belirsiz bilgileri atla  
-3. Entity'ler arası mantıklı ilişkiler kur
-4. Tarih, numara, isim, tutar gibi spesifik değerleri koru
-5. Sigorta belgelerine özel entity'ler için özen göster
+1. Yukarıdaki konuları SADECE REHBER olarak kullan - sorulara cevap verme
+2. Bu konular ve benzer türdeki entity'lerin varlığını tespit et
+3. Örneğin "Poliçe numarası nedir?" sorusu varsa -> PolicyNumber entity'si oluştur buna benzer bilgileride kullan
+4. "Sigortalı kimdir?" sorusu varsa -> metinde kişi ismi geçiyorsa Person entity'si oluştur
+5. Mümkün olduğunca çok entity türü tespit et ve relationship kur. REHBER KONULAR sana yol göstericidir.
+6. Entity'ler arasında mantıklı ilişkiler kur
 
-DESTEKLENEN ENTITY TÜRLERİ:
-- Person (kişi isimleri: "Ayça Dinçkök")
-- Company (firma/kuruluş: "Doğa Sigorta A.Ş.", "Dinkal Sigorta Acenteliği")
-- PolicyNumber (poliçe no: "65789885") 
-- IdentityNumber (TC kimlik: "415*****480")
-- PhoneNumber (telefon: "0532****112", "0212 393 01 11")
-- Address (adres: "Galata Residence Daire No:3")
-- Date (tarih: "12.02.2020")
-- Amount (tutar: "350.000,00 TL", "559,08 TL")
-- Percentage (oran: "10%", "0.00%")
-- BuildingInfo (bina bilgisi: "112 m²", "Tam Kagir")
-- CoverageType (teminat türü: "Bina", "Yangın Mali Sorumluluk")
-- AgentCode (acente kodu: "302113")
-- UAVTCode (UAVT kodu: "2321812485")
-- InstallmentInfo (taksit bilgisi: "12.03.2020 - 89,00 TL")
-
-SİGORTA BELGESI ÖZEL KURALLARI:
-- Poliçe numaralarını mutlaka PolicyNumber olarak çıkar
-- Tüm tutarları Amount olarak çıkar (TL, para birimi ile)
-- Sigorta şirketi ve acente isimlerini Company olarak çıkar
-- Tarihleri Date olarak çıkar
-- Yüzde değerlerini Percentage olarak çıkar
-- Bina özelliklerini BuildingInfo olarak çıkar
-- Teminat adlarını CoverageType olarak çıkar
+RELATIONSHIP KURALLARI:
+- BÜYÜK_HARF_UNDERSCORE formatı: "HAS_POLICY_NUMBER", "ISSUED_BY", "BELONGS_TO", "COVERS", "LOCATED_AT"
+- İngilizce entity ve relationship terimleri kullan.
 
 JSON FORMAT:
 {{
     "entities": [
         {{
-            "id": "benzersiz_id",
-            "type": "entity_türü", 
-            "properties": {{
-                "name": "entity_değeri",
-                "source_qa": "hangi sorudan geldi",
-                "confidence": "high/medium/low"
-            }}
+            "id": "entity_1",
+            "type": "Person", 
+        }},
+        {{
+            "id": "entity_2",
+            "type": "PolicyNumber", 
         }}
     ],
     "relationships": [
         {{
-            "source": "kaynak_entity_id",
-            "target": "hedef_entity_id", 
-            "type": "ilişki_türü"
+            "source": "entity_1",
+            "target": "entity_2", 
+            "type": "HAS_POLICY_NUMBER"
         }}
     ]
 }}
 
-NOT: Sadece gerçekten değerli ve spesifik bilgileri çıkar. Genel açıklamalar veya belirsiz bilgileri entity yapma.
-ÖRNEK: "Ayça Dinçkök" -> Person, "65789885" -> PolicyNumber, "350.000,00 TL" -> Amount
 """)
         
-        # QA çiftlerini formatla
-        qa_pairs_text = ""
-        for qa in relevant_qa_pairs:
-            qa_pairs_text += f"S: {qa.get('question', '')}\n"
-            qa_pairs_text += f"C: {qa.get('answer', '')}\n"
-            qa_pairs_text += f"Kategori: {qa.get('category', '')}\n\n"
-        
         try:
-            # LLM'den entity'leri çıkar
-            response = await self.llm.ainvoke(
-                entity_extraction_prompt.format(
-                    chunk_text=chunk_text[:1000],  # Uzun metinleri kısalt
-                    qa_pairs_text=qa_pairs_text
-                )
+            # Prompt'u loglayalım
+            formatted_prompt = guidance_extraction_prompt.format(
+                chunk_text=chunk_text,
+                guidance_questions=guidance_questions
             )
+            
+            logging.info(f"Chunk {chunk_index} - LLM'e Gönderilen Prompt:")
+            logging.info(f"{'*'*30} PROMPT BAŞLANGICI {'*'*30}")
+            logging.info(formatted_prompt)
+            logging.info(f"{'*'*30} PROMPT BİTİŞİ {'*'*30}")
+            
+            # LLM'den entity'leri çıkar
+            response = await self.llm.ainvoke(formatted_prompt)
             
             # JSON parse et
             response_text = response.content.strip()
+            
+            # LLM çıktısını logla
+            logging.info(f"Chunk {chunk_index} - LLM Ham Çıktı:")
+            logging.info(f"{'='*50}")
+            logging.info(response_text)
+            logging.info(f"{'='*50}")
             
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
                 response_text = response_text.split("```")[1].strip()
+            
+            # Temizlenmiş JSON'u da logla
+            logging.info(f"Chunk {chunk_index} - Temizlenmiş JSON:")
+            logging.info(response_text)
             
             entity_data = json.loads(response_text)
             
@@ -322,10 +259,12 @@ NOT: Sadece gerçekten değerli ve spesifik bilgileri çıkar. Genel açıklamal
                 target_node = next((n for n in nodes if n.id == rel["target"]), None)
                 
                 if source_node and target_node:
+                    # Relationship type'ını formatla (büyük harf, underscore)
+                    formatted_rel_type = self._format_relationship_type(rel["type"])
                     relationship = Relationship(
                         source=source_node,
                         target=target_node,
-                        type=rel["type"]
+                        type=formatted_rel_type
                     )
                     relationships.append(relationship)
             
@@ -335,7 +274,7 @@ NOT: Sadece gerçekten değerli ve spesifik bilgileri çıkar. Genel açıklamal
                 metadata={
                     "file_name": file_name,
                     "chunk_index": chunk_index,
-                    "extraction_method": "qa_based"
+                    "extraction_method": "guidance_based"
                 }
             )
             
@@ -346,17 +285,15 @@ NOT: Sadece gerçekten değerli ve spesifik bilgileri çıkar. Genel açıklamal
                     source=source_doc
                 )
                 
-                logging.info(f"Chunk {chunk_index}: {len(nodes)} entity, {len(relationships)} relationship çıkarıldı")
+                logging.info(f"Chunk {chunk_index}: {len(nodes)} entity, {len(relationships)} relationship çıkarıldı (guidance-based)")
                 return graph_doc
             else:
-                logging.warning(f"Chunk {chunk_index}: Hiç entity çıkarılamadı")
+                logging.warning(f"Chunk {chunk_index} için entity çıkarılamadı")
                 return None
                 
         except Exception as e:
-            logging.error(f"Entity çıkarma hatası (chunk {chunk_index}): {e}")
+            logging.error(f"Guidance-based entity çıkarma hatası: {e}")
             return None
-
-
 def create_domain_specific_questions(domain: str) -> Dict[str, List[str]]:
     """
     Belirli bir domain için özel sorular oluşturur
@@ -457,39 +394,3 @@ def create_domain_specific_questions(domain: str) -> Dict[str, List[str]]:
     
     return domain_questions.get(domain, {})
 
-
-# Örnek kullanım fonksiyonu
-async def example_usage():
-    """
-    QA tabanlı entity çıkarmanın örnek kullanımı
-    """
-    
-    # Extractor'ı oluştur
-    extractor = QABasedEntityExtractor("gpt-4o-mini")
-    
-    # Örnek metin chunks
-    sample_chunks = [
-        """
-        Ahmet Yılmaz'ın sahip olduğu 34ABC123 plakalı aracı için 
-        2024 yılında başlayan kasko poliçesi PS123456 numaralı 
-        poliçe ile Güven Sigorta A.Ş. tarafından teminata alınmıştır.
-        Poliçe 01.01.2024 - 31.12.2024 tarihleri arasında geçerlidir.
-        """
-    ]
-    
-    # Sigorta domain'i için özel sorular
-    insurance_questions = create_domain_specific_questions("insurance")
-    
-    # Entity'leri çıkar
-    graph_documents = await extractor.extract_entities_from_qa(
-        document_chunks=sample_chunks,
-        file_name="örnek_poliçe.pdf",
-        custom_questions=insurance_questions
-    )
-    
-    # Sonuçları yazdır
-    for doc in graph_documents:
-        print(f"Entities: {len(doc.nodes)}")
-        print(f"Relationships: {len(doc.relationships)}")
-        for node in doc.nodes:
-            print(f"  - {node.type}: {node.id}")

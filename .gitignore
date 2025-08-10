@@ -177,3 +177,4 @@ startupfrontend.sh
 *.zip
 dinkal
 .vscode
+*.json

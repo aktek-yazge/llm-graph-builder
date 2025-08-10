@@ -11,7 +11,7 @@ from pathlib import Path
 
 # Test için gerekli import'lar
 from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
-from src.llm import get_qa_based_graph_document_list, detect_document_domain
+from src.llm import  detect_document_domain
 
 # Logging ayarları
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
