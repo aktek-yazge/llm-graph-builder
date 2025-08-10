@@ -355,7 +355,7 @@ export default function NewEntityExtractionSetting({
           highlightPattern={highlightPattern ?? ''}
           nodes={combinedNodes}
           rels={combinedRels}
-          tripletsCount={combinedPatterns.length}
+          tripletsCount={combinedPatterns.length} // Her zaman triplet sayısını göster, boşsa 0
         ></PatternContainer>
         <Flex className='my-8! mb-2 flex! items-center' flexDirection='row' justifyContent='flex-end'>
           <DropdownButton

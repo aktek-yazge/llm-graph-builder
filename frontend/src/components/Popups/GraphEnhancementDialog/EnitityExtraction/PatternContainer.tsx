@@ -26,8 +26,9 @@ const PatternContainer = ({
 }: PatternContainerProps) => {
   const nodeCount = useMemo(() => nodes?.length ?? 0, [nodes]);
   const relCount = useMemo(() => {
-    // Eğer tripletsCount prop'u varsa onu kullan (QA schema için toplam relationship sayısı)
-    // Yoksa unique relationship types sayısını kullan (default schema için)
+    // Eğer tripletsCount prop'u açıkça geçilmişse onu kullan (QA schema için toplam relationship sayısı)
+    // tripletsCount 0 olsa bile onu kullan (hiçbir pattern seçili değilse 0 göster)
+    // Sadece tripletsCount undefined ise unique relationship types sayısını kullan (default schema için)
     return tripletsCount !== undefined ? tripletsCount : (rels?.length ?? 0);
   }, [rels, tripletsCount]);
   return (
@@ -39,7 +40,7 @@ const PatternContainer = ({
         <div className='relative patternContainer border p-4 rounded-md shadow-sm'>
           <div className='top-0 right-0 flex justify-between z-10 pb-2 '>
             <span className='n-body-small p-1'>
-              {nodeCount > 0 || relCount > 0
+              {pattern.length > 0 && (nodeCount > 0 || relCount > 0)
                 ? `${nodeCount} Node${nodeCount > 1 ? 's' : ''} & ${relCount} Relationship${relCount > 1 ? 's' : ''}`
                 : ''}
             </span>

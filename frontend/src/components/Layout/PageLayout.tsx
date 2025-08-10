@@ -226,10 +226,13 @@ const PageLayout: React.FC = () => {
   const [combinedRelsVal, setCombinedRelsVal] = useState<OptionType[]>([]);
 
   useEffect(() => {
+    // Sayfa yüklendiğinde otomatik pattern yüklemesini engelle
+    // Sadece kullanıcı açıkça schema seçerse pattern'lar yüklensin
     if (allPatterns.length > 0 && selectedNodes.length > 0 && selectedRels.length > 0) {
-      setCombinedPatternsVal(allPatterns);
-      setCombinedNodesVal(selectedNodes as OptionType[]);
-      setCombinedRelsVal(selectedRels as OptionType[]);
+      // Bu kontrolü yoruma al - otomatik yüklemeyi engelle
+      // setCombinedPatternsVal(allPatterns);
+      // setCombinedNodesVal(selectedNodes as OptionType[]);
+      // setCombinedRelsVal(selectedRels as OptionType[]);
     }
   }, [allPatterns, selectedNodes, selectedRels]);
 
