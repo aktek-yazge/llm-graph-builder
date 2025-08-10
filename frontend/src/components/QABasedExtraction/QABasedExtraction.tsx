@@ -21,9 +21,11 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
   const [fileName, setFileName] = useState('');
   const [documentText, setDocumentText] = useState('');
   const [model, setModel] = useState('openai_gpt_4.1');
-  const [domain, setDomain] = useState('');
+  const [domain, setDomain] = useState('insurance'); // Default domain set to 'insurance'
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [useChunking, setUseChunking] = useState(false);
+  const [fileProcessMessage, setFileProcessMessage] = useState('');
+  const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleClose = () => {
@@ -35,6 +37,8 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
     setLoading(false);
     setProcessingFile(false);
     setUseChunking(false);
+    setFileProcessMessage('');
+    setMessageType('info');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -65,24 +69,21 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
         // Cache bilgisini kullanıcıya göster
         if (response.data.from_cache) {
           // Cache'den alındıysa kısa bilgi ver
-          setTimeout(() => {
-            alert(
-              `✅ Dosya cache'den hızlıca yüklendi!\n\nDosya: ${file.name}\nMarkdown boyutu: ${response.data.markdown_size} karakter`
-            );
-          }, 500);
+          setFileProcessMessage(`✅ Dosya cache'den hızlıca yüklendi! (${response.data.markdown_size} karakter)`);
+          setMessageType('success');
         } else {
           // İlk kez işlendiyse ve cache'e kaydedildiyse bilgi ver
-          setTimeout(() => {
-            alert(
-              `📝 Dosya başarıyla markdown'a çevrildi ve cache'e kaydedildi!\n\nDosya: ${file.name}\nOrijinal boyut: ${response.data.original_size} byte\nMarkdown boyutu: ${response.data.markdown_size} karakter\n\n▶️ Bir sonraki işlemde daha hızlı yüklenecek.`
-            );
-          }, 500);
+          setFileProcessMessage(
+            `📝 Dosya başarıyla markdown'a çevrildi ve cache'e kaydedildi! Orijinal boyut: ${response.data.original_size} byte, Markdown boyutu: ${response.data.markdown_size} karakter`
+          );
+          setMessageType('success');
         }
       } else {
         throw new Error('Dosya işleme hatası');
       }
     } catch (error) {
-      alert('Dosya işlenirken bir hata oluştu. Lütfen metni manuel olarak yapıştırın.');
+      setFileProcessMessage('❌ Dosya işlenirken bir hata oluştu. Lütfen metni manuel olarak yapıştırın.');
+      setMessageType('error');
 
       // Hata durumunda file input'u temizle
       setSelectedFile(null);
@@ -174,6 +175,21 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
             <Typography variant='body-small' className='text-gray-600' style={{ marginTop: '4px' }}>
               PDF, DOC, DOCX veya TXT dosyası seçin. Docling ile markdown'a çevrilecek.
             </Typography>
+
+            {/* Dosya işleme mesajı */}
+            {fileProcessMessage && (
+              <div
+                className={`mt-3 p-3 rounded-md border ${
+                  messageType === 'success'
+                    ? 'bg-green-50 border-green-200 text-green-800'
+                    : messageType === 'error'
+                      ? 'bg-red-50 border-red-200 text-red-800'
+                      : 'bg-blue-50 border-blue-200 text-blue-800'
+                }`}
+              >
+                <Typography variant='body-small'>{fileProcessMessage}</Typography>
+              </div>
+            )}
           </div>
 
           <div>
@@ -200,6 +216,7 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
                 options: [
                   { label: 'GPT-4.1', value: 'openai_gpt_4.1' },
                   { label: 'GPT-4o', value: 'openai_gpt_4o' },
+                  { label: 'GPT-o3-mini', value: 'openai_gpt_o3_mini' },
                   { label: 'GPT-4o Mini', value: 'openai_gpt_4o_mini' },
                   { label: 'Gemini 1.5 Pro', value: 'gemini_1.5_pro' },
                 ],
@@ -215,7 +232,7 @@ const QABasedExtractionModal: React.FC<QABasedExtractionModalProps> = ({
               label='Domain (Opsiyonel)'
               selectProps={{
                 value: domain ? { label: domain, value: domain } : null,
-                onChange: (option: any) => setDomain(option?.value || ''),
+                onChange: (option: any) => setDomain(option?.value || 'insurance'),
                 options: [
                   { label: 'Otomatik Tespit', value: '' },
                   { label: 'Sigorta', value: 'insurance' },
