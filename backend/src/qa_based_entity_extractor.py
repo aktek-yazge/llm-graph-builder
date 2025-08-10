@@ -177,9 +177,10 @@ GÖREVİN:
 4. "Sigortalı kimdir?" sorusu varsa -> metinde kişi ismi geçiyorsa Person entity'si oluştur
 5. Mümkün olduğunca çok entity türü tespit et ve relationship kur. REHBER KONULAR sana yol göstericidir.
 6. Entity'ler arasında mantıklı ilişkiler kur
+7. properties veya attributes bilgileri çıkarmanı istemiyorum. Sadece Entities ve Relationships çıkar.
 
 RELATIONSHIP KURALLARI:
-- BÜYÜK_HARF_UNDERSCORE formatı: "HAS_POLICY_NUMBER", "ISSUED_BY", "BELONGS_TO", "COVERS", "LOCATED_AT"
+- BÜYÜK_HARF_UNDERSCORE formatı kullan
 - İngilizce entity ve relationship terimleri kullan.
 
 JSON FORMAT:
