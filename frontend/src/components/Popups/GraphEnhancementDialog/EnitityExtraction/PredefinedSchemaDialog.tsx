@@ -120,49 +120,8 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
       try {
         // QA şemasını backend'den yükle
         const response = await loadQASchema((selectedOption as any).schemaInfo.file_path);
-        console.log(response.data);
         if (response.data.status === 'Success' && response.data.data) {
           const qaData = response.data.data;
-
-          // schema varsa onu kullan (labels ve relationshipTypes ayrı ayrı)
-          // if (qaData.schema) {
-          //   const { labels, relationshipTypes } = qaData.schema;
-          //   const triplets = qaData.triplets || [];
-
-          //   setPreDefinedPattern(triplets);
-          //   setSelectedSchemaTripletsCount(triplets.length); // Triplet sayısını set et
-
-          //   // Labels ve relationships'i direkt al
-          //   const nodeLabelOptions = labels.map((label: string) => ({
-          //     label,
-          //     value: label,
-          //   }));
-
-          //   const relationshipTypeOptions = relationshipTypes.map((relType: string) => ({
-          //     label: relType,
-          //     value: relType,
-          //   }));
-
-          //   setPreDefinedNodes(nodeLabelOptions);
-          //   setPreDefinedRels(relationshipTypeOptions);
-          //   return;
-          // }
-          // // Fallback: sadece tripletler varsa eski mantığı kullan
-          // else if (qaData.triplets) {
-          //   const { triplets } = qaData;
-          //   setPreDefinedPattern(triplets);
-
-          //   // Triplet'lerden nodes ve relationships çıkar
-          //   const selectedTriplets: TupleType[] = triplets.map((triplet: string) => ({
-          //     label: triplet,
-          //     value: triplet,
-          //   }));
-
-          //   const { nodeLabelOptions, relationshipTypeOptions } = extractOptions(selectedTriplets);
-          //   setPreDefinedNodes(nodeLabelOptions);
-          //   setPreDefinedRels(relationshipTypeOptions);
-          //   return;
-          // }
 
           if (qaData.triplets) {
             const { triplets } = qaData;
@@ -227,51 +186,39 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
     onClose();
   };
 
-  const handleQASuccess = (qaData: any) => {
-    setShowQAModal(false);
-    setDebugInfo(`QA Success çağrıldı: ${qaData ? 'Data var' : 'Data yok'}`);
+  const handleQASuccess = async (qaData: any) => {
+    try {
+      setShowQAModal(false);
+      setDebugInfo(`QA Success çağrıldı: ${qaData ? 'Data var' : 'Data yok'}`);
 
-    // QA extraction'dan dönen schema'yı predefined schema olarak ekle
-    // Yeni data yapısını kontrol et: qaData.triplets ve qaData.schema
-    if (qaData?.triplets && qaData?.schema) {
-      const { triplets, schema, domain } = qaData;
-      const schemaName = schema.schema || domain || 'qa_extracted';
-      const { labels, relationshipTypes } = schema;
+      if (qaData?.triplets) {
+        const { triplets } = qaData;
 
-      // Triplet'leri pattern container'a ekle
-      setPreDefinedPattern(triplets);
+        // QA triplets için varsayılan şema mantığını kullan
+        const selectedTriplets: TupleType[] = getSelectedTriplets([
+          {
+            label: 'QA Schema',
+            value: JSON.stringify(triplets), // getSelectedTriplets JSON.parse ile array bekliyor
+          },
+        ]);
 
-      // Schema'yı seçili option olarak ayarla
-      const qaSchemaOption = {
-        label: `${schemaName} (QA Extracted)`,
-        value: schemaName,
-        triplet: triplets,
-      };
-      setSelectedPreDefOption(qaSchemaOption);
+        setPreDefinedPattern(selectedTriplets.map((t) => t.label));
+        setSelectedSchemaTripletsCount(selectedTriplets.length); // QA schema için de triplet sayısını set et
+        const { nodeLabelOptions, relationshipTypeOptions } = extractOptions(selectedTriplets);
+        setPreDefinedNodes(nodeLabelOptions);
+        setPreDefinedRels(relationshipTypeOptions);
 
-      // Labels ve relationships'i direkt kullan (schema'dan)
-      const nodeLabelOptions = labels.map((label: string) => ({
-        label,
-        value: label,
-      }));
+        // QA şema listesini yeniden yükle
+        setDebugInfo(
+          `QA Success: ${triplets.length} triplets, ${selectedTriplets.length} selected triplets - loadQASchemas çağrılacak...`
+        );
+        await loadQASchemas();
+        return;
+      }
 
-      const relationshipTypeOptions = relationshipTypes.map((relType: string) => ({
-        label: relType,
-        value: relType,
-      }));
-
-      setPreDefinedNodes(nodeLabelOptions);
-      setPreDefinedRels(relationshipTypeOptions);
-
-      // QA şema listesini yeniden yükle
-      setDebugInfo(
-        `QA Success: ${triplets.length} triplets, ${labels.length} nodes, ${relationshipTypes.length} relation types - loadQASchemas çağrılacak...`
-      );
-      loadQASchemas();
-    } else {
-      setDebugInfo(
-        `QA Success: Beklenen data yapısı bulunamadı. Triplets: ${Boolean(qaData?.triplets)}, schema: ${Boolean(qaData?.schema)}`
-      );
+      setDebugInfo(`QA Success: Beklenen data yapısı bulunamadı. Triplets: ${Boolean(qaData?.triplets)}`);
+    } catch (error) {
+      setDebugInfo(`QA Success error: ${error}`);
     }
   };
 
