@@ -320,32 +320,32 @@ def create_domain_specific_questions(domain: str) -> Dict[str, List[str]]:
                 "Vergi numarası var mı?",
                 "Meslek bilgisi nedir?"
             ],
-            "coverage_questions": [
-                "Hangi teminatlar sağlanmaktadır?",
-                "Sigorta bedelleri nelerdir?",
-                "Teminat tutarları ne kadardır?",
-                "Muafiyet miktarları nelerdir?",
-                "Koasürans oranı nedir?",
-                "Hangi riskler kapsanmaktadır?",
-                "Hariç tutulan durumlar nelerdir?",
-                "Deprem teminatı var mı, oranı nedir?"
-            ],
+            # "coverage_questions": [
+            #     "Hangi teminatlar sağlanmaktadır?",
+            #     "Sigorta bedelleri nelerdir?",
+            #     "Teminat tutarları ne kadardır?",
+            #     "Muafiyet miktarları nelerdir?",
+            #     "Koasürans oranı nedir?",
+            #     "Hangi riskler kapsanmaktadır?",
+            #     "Hariç tutulan durumlar nelerdir?",
+            #     "Deprem teminatı var mı, oranı nedir?"
+            # ],
             "financial_questions": [
                 "Net prim tutarı nedir?",
-                "Brüt prim tutarı nedir?",
-                "Vergiler (YSV, gider vergisi) ne kadardır?",
-                "Taksit sayısı kaçtır?",
-                "Taksit tutarları ve tarihleri nelerdir?",
-                "Peşinat miktarı nedir?",
-                "İndirimler uygulanmış mı?"
+                "Poliçe Tutarı ne kadar",
+                # "Vergiler (YSV, gider vergisi) ne kadardır?",
+                # "Taksit sayısı kaçtır?",
+                # "Taksit tutarları ve tarihleri nelerdir?",
+                # "Peşinat miktarı nedir?",
+                # "İndirimler uygulanmış mı?"
             ],
             "property_questions": [
                 "Riziko adresi nerededir?",
-                "Bina özellikleri nelerdir (m², kat, daire)?",
-                "Yapı tarzı nasıldır (kagir, çelik vb.)?",
-                "UAVT kodu nedir?",
-                "Apartman adı nedir?",
-                "Emlak değeri ne kadardır?"
+                # "Bina özellikleri nelerdir (m², kat, daire)?",
+                # "Yapı tarzı nasıldır (kagir, çelik vb.)?",
+                # "UAVT kodu nedir?",
+                # "Apartman adı nedir?",
+                # "Emlak değeri ne kadardır?"
             ],
             "agent_questions": [
                 "Acente unvanı nedir?",
@@ -354,21 +354,21 @@ def create_domain_specific_questions(domain: str) -> Dict[str, List[str]]:
                 "Acente iletişim bilgileri nelerdir?",
                 "Bölge müdürlüğü hangisidir?"
             ],
-            "vehicle_questions": [
-                "Araç plakası nedir?",
-                "Araç markası ve modeli nedir?",
-                "Araç yılı nedir?",
-                "Motor numarası nedir?",
-                "Şasi numarası nedir?",
-                "Araç değeri ne kadardır?"
-            ],
-            "additional_services_questions": [
-                "Ek hizmetler nelerdir?",
-                "Asistans hizmetleri var mı?",
-                "7/24 hizmet telefonu nedir?",
-                "Hukuksal koruma var mı?",
-                "Ev yardım hizmetleri nelerdir?"
-            ]
+            # "vehicle_questions": [
+            #     "Araç plakası nedir?",
+            #     "Araç markası ve modeli nedir?",
+            #     "Araç yılı nedir?",
+            #     "Motor numarası nedir?",
+            #     "Şasi numarası nedir?",
+            #     "Araç değeri ne kadardır?"
+            # ],
+            # "additional_services_questions": [
+            #     "Ek hizmetler nelerdir?",
+            #     "Asistans hizmetleri var mı?",
+            #     "7/24 hizmet telefonu nedir?",
+            #     "Hukuksal koruma var mı?",
+            #     "Ev yardım hizmetleri nelerdir?"
+            # ]
         },
         "legal": {
             "party_questions": [
