@@ -1107,6 +1107,8 @@ ABSOLUTELY NEVER create, extract, or mention Document nodes in your response.
 NEVER extract "Document" as any entity type under ANY circumstances.
 The system will automatically handle Document nodes - your job is to extract OTHER entities only.
 
+ALL Policy entities must be directly connected to the Document node. Do NOT create or extract a separate Policy entity node. All information related to Policy should be added as a property or relationship to the Document node; do not create a Policy entity.
+
 Extract ONLY atomic entities as individual nodes.
 
 Do not extract meaningless, generic, or unnecessary entities. Only extract entities that have clear, specific, and relevant meaning in the context of the document. Ignore vague, redundant, or contextless terms.
