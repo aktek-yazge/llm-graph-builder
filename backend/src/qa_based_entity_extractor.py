@@ -304,7 +304,9 @@ def create_domain_specific_questions(domain: str) -> Dict[str, List[str]]:
         "insurance": {
             "policy_basic_questions": [
                 "Poliçe numarası nedir?",
-                "Sigorta şirketi hangisidir?", 
+                "Poliçe Yılı nedir?",
+                "Sigorta şirketi hangisidir?",
+                "Poliçe sahibi kimdir?",
                 "Poliçe sahibi/sigortalı kimdir?",
                 "Poliçe türü nedir (kasko, trafik, konut, işyeri)?",
                 "Tanzim tarihi ve yeri nedir?",
