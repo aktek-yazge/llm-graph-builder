@@ -1136,15 +1136,7 @@ async def processing_chunks(
   create_document_metadata_entities(graph, file_name)
   latency["doc_metadata_entities"] = f"{time.time() - t6:.2f}"
 
-  # 7. optional LLM-based continuation relationships
-  if allowedRelationship:
-    parts = [p.strip() for p in allowedRelationship.split(",")]
-    if len(parts) >= 3:
-      t5 = time.time()
-      await create_llm_chunk_relations(
-        graph, model, chunkId_chunkDoc_list, tuple(parts[:3]), additional_instructions
-      )
-      latency["llm_chunk_rel"] = f"{time.time() - t5:.2f}"
+
 
   # 8. update overall node/relationship counts
   graphDb = graphDBdataAccess(graph)
