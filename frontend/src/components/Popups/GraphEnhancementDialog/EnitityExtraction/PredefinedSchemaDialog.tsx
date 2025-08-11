@@ -166,17 +166,18 @@ const PredefinedSchemaDialog = ({ open, onClose, onApply }: SchemaFromTextProps)
 
           if (qaData.triplets) {
             const { triplets } = qaData;
-            setPreDefinedPattern(triplets);
 
-            // getSelectedTriplets fonksiyonunu kullan
-            const tripletsAsOption = {
-              label: 'QA Schema Triplets',
-              value: JSON.stringify(triplets), // Array'i JSON string'e çevir
-            };
+            // QA triplets için varsayılan şema mantığını kullan
+            const selectedTriplets: TupleType[] = getSelectedTriplets([
+              {
+                label: 'QA Schema',
+                value: JSON.stringify(triplets), // getSelectedTriplets JSON.parse ile array bekliyor
+              },
+            ]);
 
-            const selectedTriplets = getSelectedTriplets([tripletsAsOption]);
+            setPreDefinedPattern(selectedTriplets.map((t) => t.label));
+            setSelectedSchemaTripletsCount(selectedTriplets.length); // QA schema için de triplet sayısını set et
             const { nodeLabelOptions, relationshipTypeOptions } = extractOptions(selectedTriplets);
-            console.log(nodeLabelOptions, relationshipTypeOptions);
             setPreDefinedNodes(nodeLabelOptions);
             setPreDefinedRels(relationshipTypeOptions);
             return;
