@@ -598,8 +598,8 @@ async def extract_qa_based_knowledge_graph(
                 # İlişki tipini büyük harfe çevir ve alt çizgi ile ayır
                 formatted_rel_type = rel_type.upper().replace(' ', '_').replace('-', '_')
                 
-                # Triplet formatı: "SourceType-[:RELATION_TYPE]->TargetType" (default format'a uygun)
-                triplet = f"{source_type}-[:{formatted_rel_type}]->{target_type}"
+                # Triplet formatı: "SourceType-RELATION_TYPE->TargetType" (istenen format)
+                triplet = f"{source_type}-{formatted_rel_type}->{target_type}"
                 
                 # Duplicate'ları önle
                 if triplet not in unique_triplets:
