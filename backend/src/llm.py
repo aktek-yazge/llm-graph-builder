@@ -218,31 +218,90 @@ async def get_graph_document_list(
 
 async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
    try:
+       # Giriş parametrelerini logla
+       logging.info(f"=== get_graph_from_llm BAŞLADI ===")
+       logging.info(f"Model: {model}")
+       logging.info(f"File name: {file_name}")
+       logging.info(f"Chunks to combine: {chunks_to_combine}")
+       logging.info(f"Additional instructions var mı: {additional_instructions is not None}")
+       
+       # Raw giriş değerlerini logla
+       logging.info(f"RAW allowedNodes (tip: {type(allowedNodes)}): '{allowedNodes}'")
+       logging.info(f"RAW allowedRelationship (tip: {type(allowedRelationship)}): '{allowedRelationship}'")
+       
+       # Uzunluk kontrolü
+       if allowedNodes:
+           logging.info(f"allowedNodes uzunluğu: {len(allowedNodes)} karakter")
+           logging.info(f"allowedNodes ilk 200 karakter: '{allowedNodes[:200]}...'")
+       else:
+           logging.info("allowedNodes boş veya None")
+           
+       if allowedRelationship:
+           logging.info(f"allowedRelationship uzunluğu: {len(allowedRelationship)} karakter")
+           logging.info(f"allowedRelationship ilk 200 karakter: '{allowedRelationship[:200]}...'")
+       else:
+           logging.info("allowedRelationship boş veya None")
+       
        llm, model_name = get_llm(model)
        logging.info(f"Using model: {model_name}")
     
        combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
        logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
     
-       allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
-       logging.info(f"Allowed nodes: {allowed_nodes}")
+       # allowedNodes işleme
+       logging.info("=== allowedNodes İŞLEME BAŞLIYOR ===")
+       if allowedNodes:
+           allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
+           logging.info(f"Split edilmiş node sayısı: {len(allowed_nodes)}")
+           logging.info(f"İşlenmiş allowed_nodes (ilk 10): {allowed_nodes[:10]}")
+           logging.info(f"İşlenmiş allowed_nodes (tümü): {allowed_nodes}")
+       else:
+           allowed_nodes = []
+           logging.info("allowedNodes boş, empty list atandı")
     
+       # allowedRelationship işleme
+       logging.info("=== allowedRelationship İŞLEME BAŞLIYOR ===")
        allowed_relationships = []
        if allowedRelationship:
            items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
-           if len(items) % 3 != 0:
-               raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
-           for i in range(0, len(items), 3):
-               source, relation, target = items[i:i + 3]
-               if source not in allowed_nodes or target not in allowed_nodes:
-                   raise LLMGraphBuilderException(
-                       f"Invalid relationship ({source}, {relation}, {target}): "
-                       f"source or target not in allowedNodes"
-                   )
-               allowed_relationships.append((source, relation, target))
-           logging.info(f"Allowed relationships: {allowed_relationships}")
+           logging.info(f"Split edilmiş relationship item sayısı: {len(items)}")
+           logging.info(f"Split edilmiş items (ilk 10): {items[:10]}")
+           logging.info(f"3'e bölümde kalan: {len(items) % 3}")
+           
+           # Check if it's triplet format (multiple of 3) or just relationship names
+           if len(items) % 3 == 0:
+               logging.info("TRIPLET FORMAT OLARAK İŞLENİYOR (3'ün katı)")
+               # Try to parse as triplets first
+               try:
+                   logging.info("Attempting to parse allowedRelationship as triplets (source, relationship, target)")
+                   for i in range(0, len(items), 3):
+                       source, relation, target = items[i:i + 3]
+                       logging.info(f"Triplet {i//3 + 1}: source='{source}', relation='{relation}', target='{target}'")
+                       if source not in allowed_nodes or target not in allowed_nodes:
+                           logging.warning(f"Invalid relationship triplet ({source}, {relation}, {target}): source or target not in allowedNodes")
+                           logging.warning(f"source '{source}' in allowed_nodes: {source in allowed_nodes}")
+                           logging.warning(f"target '{target}' in allowed_nodes: {target in allowed_nodes}")
+                           # If triplet parsing fails, fall back to relationship names only
+                           raise ValueError("Invalid triplet format")
+                       allowed_relationships.append((source, relation, target))
+                   logging.info(f"Successfully parsed as triplets: {allowed_relationships}")
+               except ValueError as e:
+                   # Fall back to treating all items as relationship names
+                   logging.info(f"Triplet parsing failed ({e}), treating all items as relationship names")
+                   allowed_relationships = items
+           else:
+               # Just relationship names - create list of relationship names for filtering
+               logging.info("RELATIONSHIP NAMES OLARAK İŞLENİYOR (3'ün katı değil)")
+               allowed_relationships = items
+           
+           logging.info(f"Final allowed relationships (tip: {type(allowed_relationships)}): {allowed_relationships}")
+           logging.info(f"Final allowed relationships uzunluğu: {len(allowed_relationships)}")
        else:
-           logging.info("No allowed relationships provided")
+           logging.info("allowedRelationship boş veya None, empty list atandı")
+           
+       logging.info("=== İŞLEME TAMAMLANDI ===")
+       logging.info(f"Final allowed_nodes: {len(allowed_nodes)} adet")
+       logging.info(f"Final allowed_relationships: {len(allowed_relationships)} adet")
 
        graph_document_list = await get_graph_document_list(
            llm,
