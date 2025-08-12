@@ -270,7 +270,7 @@ const Content: React.FC<ContentProps> = ({
         fileItem.language,
         fileItem.accessToken,
         additionalInstructions,
-        entityRelationshipRules.length > 0,
+        postProcessingTasks.includes('entity_relationship_post_processing'),
         JSON.stringify(entityRelationshipRules)
       );
       if (apiResponse?.status === 'Failed') {
@@ -369,7 +369,7 @@ const Content: React.FC<ContentProps> = ({
         />
       );
       try {
-        const response = await postProcessing(postProcessingTasks, entityRelationshipRules);
+        const response = await postProcessing(postProcessingTasks);
         if (response.data.status === 'Success') {
           const communityfiles = response.data?.data;
           if (Array.isArray(communityfiles) && communityfiles.length) {
