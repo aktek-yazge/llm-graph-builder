@@ -357,58 +357,101 @@ async def extract_knowledge_graph_from_file(
                 logging.info(f"counting completed in {(time.time()-count_node_time):.2f}")
             
             # Otomatik post-processing (eğer istenirse)
-            # if enable_post_processing and post_processing_rules:
-            #     try:
-            #         logging.info(f"Otomatik post-processing başlıyor: {file_name}")
+            if enable_post_processing and post_processing_rules:
+                try:
+                    logging.info(f"Otomatik post-processing başlıyor: {file_name}")
                     
-            #         # JSON string'i parse et
-            #         if isinstance(post_processing_rules, str):
-            #             rules_list = json.loads(post_processing_rules)
-            #         else:
-            #             rules_list = post_processing_rules
+                    # JSON string'i parse et
+                    if isinstance(post_processing_rules, str):
+                        rules_list = json.loads(post_processing_rules)
+                    else:
+                        rules_list = post_processing_rules
                     
-            #         logging.info(f"Post-processing kuralları: {rules_list}")
+                    logging.info(f"Post-processing kuralları: {rules_list}")
                     
-            #         # Post-processing'i çalıştır - sadece bu dosya için
-            #         from src.llm import apply_dynamic_entity_post_processing
-            #         post_processing_start_time = time.time()
-            #         post_processing_result = await asyncio.to_thread(
-            #             apply_dynamic_entity_post_processing, 
-            #             graph, 
-            #             rules_list,
-            #             target_file_names=[file_name]
-            #         )
-            #         post_processing_end_time = time.time()
+                    # Post-processing'i çalıştır - sadece bu dosya için
+                    from src.llm import apply_dynamic_entity_post_processing
+                    post_processing_start_time = time.time()
+                    post_processing_result = await asyncio.to_thread(
+                        apply_dynamic_entity_post_processing, 
+                        graph, 
+                        rules_list,
+                        target_file_names=[file_name]
+                    )
+                    post_processing_end_time = time.time()
                     
-            #         logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
+                    logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
                     
-            #         # Post-processing sonuçlarını result'a ekle
-            #         result['post_processing'] = {
-            #             'enabled': True,
-            #             'rules_applied': len(rules_list),
-            #             'processed_entities': post_processing_result.get('total_processed_entities', 0),
-            #             'created_relationships': post_processing_result.get('total_created_relationships', 0),
-            #             'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
-            #             'rules': rules_list
-            #         }
+                    # Post-processing sonuçlarını result'a ekle
+                    result['post_processing'] = {
+                        'enabled': True,
+                        'rules_applied': len(rules_list),
+                        'processed_entities': post_processing_result.get('total_processed_entities', 0),
+                        'created_relationships': post_processing_result.get('total_created_relationships', 0),
+                        'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
+                        'rules': rules_list
+                    }
                     
-            #         # Node count'ları güncelle
-            #         final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-            #         if final_count_response:
-            #             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
-            #             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+                    # Node count'ları güncelle
+                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                    if final_count_response:
+                        result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+                        result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
                         
-            #         logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
+                    logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
                     
-            #     except Exception as post_processing_error:
-            #         logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
-            #         result['post_processing'] = {
-            #             'enabled': True,
-            #             'error': str(post_processing_error),
-            #             'rules_applied': 0
-            #         }
-            # else:
-            #     result['post_processing'] = {'enabled': False}
+                except Exception as post_processing_error:
+                    logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
+                    result['post_processing'] = {
+                        'enabled': True,
+                        'error': str(post_processing_error),
+                        'rules_applied': 0
+                    }
+            else:
+                result['post_processing'] = {'enabled': False}
+            
+            # Policy Node Cleanup - Her dosya yüklemesi sonrasında otomatik çalışır
+            try:
+                logging.info(f"Policy node cleanup başlıyor: {file_name}")
+                
+                from src.policy_cleanup import cleanup_policy_nodes_to_document
+                policy_cleanup_start_time = time.time()
+                
+                # Policy cleanup işlemi
+                policy_cleanup_result = await asyncio.to_thread(
+                    cleanup_policy_nodes_to_document,
+                    graph,
+                    file_name
+                )
+                
+                policy_cleanup_end_time = time.time()
+                
+                # Result'a Policy cleanup bilgilerini ekle
+                result['policy_cleanup'] = {
+                    'status': policy_cleanup_result['status'],
+                    'policy_nodes_found': policy_cleanup_result['policy_nodes_found'],
+                    'relationships_moved': policy_cleanup_result['relationships_moved'],
+                    'policy_nodes_deleted': policy_cleanup_result['policy_nodes_deleted'],
+                    'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
+                    'processed_policies': policy_cleanup_result.get('processed_policies', [])
+                }
+                
+                # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
+                if policy_cleanup_result['policy_nodes_deleted'] > 0:
+                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                    if final_count_response:
+                        result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+                        result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+                        
+                logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
+                
+            except Exception as policy_cleanup_error:
+                logging.error(f"Policy cleanup hatası: {policy_cleanup_error}")
+                result['policy_cleanup'] = {
+                    'status': 'error',
+                    'error': str(policy_cleanup_error),
+                    'elapsed_time': '0.00'
+                }
             
             result['db_url'] = uri
             result['api_name'] = 'extract'
