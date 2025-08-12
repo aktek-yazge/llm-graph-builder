@@ -6,7 +6,8 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_groq import ChatGroq
 from langchain_google_vertexai import HarmBlockThreshold, HarmCategory
 from langchain_experimental.graph_transformers.diffbot import DiffbotGraphTransformer
-from langchain_experimental.graph_transformers import LLMGraphTransformer
+# from langchain_experimental.graph_transformers import LLMGraphTransformer
+from src.graph_transformer.transformer import LLMGraphTransformer
 from langchain_anthropic import ChatAnthropic
 from langchain_fireworks import ChatFireworks
 from langchain_aws import ChatBedrock
@@ -202,6 +203,7 @@ async def get_graph_document_list(
         logging.info(f"Keeping ignore tool usage parameter as {ignore_tool_usage}")
         llm_transformer = LLMGraphTransformer(
             llm=llm,
+            strict_mode=True,
             node_properties=node_properties,
             relationship_properties=relationship_properties,
             allowed_nodes=allowedNodes,
