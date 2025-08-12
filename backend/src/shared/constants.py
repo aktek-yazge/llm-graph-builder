@@ -1136,6 +1136,17 @@ The system will automatically handle Document nodes - your job is to extract OTH
 
 ALL Policy entities must be directly connected to the Document node. Do NOT create or extract a separate Policy entity node. All information related to Policy should be added as a property or relationship to the Document node; do not create a Policy entity.
 
+**MANDATORY POLICYYEAR EXTRACTION RULE:**
+For ALL date-related information in insurance policies (policy start date, policy end date, issue date, birth date, etc.), you MUST ALWAYS extract the YEAR component as a separate PolicyYear entity.
+
+Examples:
+- If policy start date is "13.02.2023", extract PolicyYear entity with id="2023"
+- If policy end date is "12.02.2024", extract PolicyYear entity with id="2024"  
+- If issue date is "15.01.2023", extract PolicyYear entity with id="2023"
+- If birth date is "05.07.1985", extract PolicyYear entity with id="1985"
+
+ALWAYS create PolicyYear entities for ANY year mentioned in dates. This is CRITICAL for time-based analysis and querying.
+
 Extract ONLY atomic entities as individual nodes.
 
 Do not extract meaningless, generic, or unnecessary entities. Only extract entities that have clear, specific, and relevant meaning in the context of the document. Ignore vague, redundant, or contextless terms.
