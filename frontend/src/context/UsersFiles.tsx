@@ -89,15 +89,7 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
   const [removeExistingRelationships, setRemoveExistingRelationships] = useState<boolean>(false);
 
   // Multiple Entity Relationship Rules
-  const [entityRelationshipRules, setEntityRelationshipRules] = useState<EntityRelationshipRule[]>([
-    {
-      id: '1',
-      sourceNodeType: 'DocumentYear',
-      targetNodeType: 'Document',
-      relationshipType: 'DOCUMENT_YEAR',
-      removeExistingRelationships: false,
-    },
-  ]);
+  const [entityRelationshipRules, setEntityRelationshipRules] = useState<EntityRelationshipRule[]>([]);
 
   const [schemaTextPattern, setSchemaTextPattern] = useState<string[]>([]);
   const [allPatterns, setAllPatterns] = useState<string[]>([]);
