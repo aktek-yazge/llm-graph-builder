@@ -27,6 +27,7 @@ export interface ChatStreamMessage {
     cypher_query?: string;
     context?: any[];
     error?: string;
+    personPolicyInfo?: any[]; // YENI: Person Policy Info
     metric_details?: {
       question?: string;
       answer?: string;

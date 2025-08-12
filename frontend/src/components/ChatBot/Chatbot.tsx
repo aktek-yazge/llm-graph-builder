@@ -290,6 +290,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               metric_question: message.info?.metric_details?.question || '',
               metric_answer: message.info?.metric_details?.answer || '',
               metric_contexts: message.info?.metric_details?.contexts || '',
+              personPolicyInfo: message.info?.personPolicyInfo || [], // YENI: PersonPolicyInfo ekle
             };
 
             setListMessages((prev) =>
