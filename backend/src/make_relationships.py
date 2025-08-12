@@ -296,7 +296,12 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
         entity_query = """
         MATCH (d:Document {fileName: $fileName})
         UNWIND $entities as entity
-        CALL apoc.merge.node([entity.type, '__Entity__'], {id: entity.id}) YIELD node
+        
+        // Güvenli node oluşturma - mevcut node'u bul veya yenisini oluştur
+        MERGE (node:__Entity__ {id: entity.id})
+        ON CREATE SET node.entity_type = entity.type
+        ON MATCH SET node.entity_type = COALESCE(node.entity_type, entity.type)
+        
         SET d[entity.property] = entity.id
         MERGE (d)-[:HAS_METADATA]->(node)
         RETURN node

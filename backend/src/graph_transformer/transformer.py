@@ -1022,7 +1022,8 @@ class LLMGraphTransformer:
         print(f"🔍 Filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
 
         # Apply filtering based on allowed nodes and relationships
-        if self.allowed_nodes or self.allowed_relationships:
+        # Strict mode filtering
+        if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
             print("🚧 Filtreleme uygulanıyor...")
             
             if self.allowed_nodes:
@@ -1192,7 +1193,8 @@ class LLMGraphTransformer:
         print(f"🔍 Filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
 
         # Apply filtering based on allowed nodes and relationships
-        if self.allowed_nodes or self.allowed_relationships:
+        # Strict mode filtering
+        if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
             print("🚧 Filtreleme uygulanıyor...")
             
             if self.allowed_nodes:
