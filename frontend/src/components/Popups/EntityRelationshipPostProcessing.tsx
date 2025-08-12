@@ -1,6 +1,7 @@
 import { Flex, Typography, Button, IconButton, Select, Checkbox } from '@neo4j-ndl/react';
 import { TrashIconOutline, PlusIconOutline } from '@neo4j-ndl/react/icons';
 import { useFileContext } from '../../context/UsersFiles';
+import { useMemo } from 'react';
 
 // Entity relationship rule interface
 interface EntityRelationshipRule {
@@ -11,84 +12,40 @@ interface EntityRelationshipRule {
   removeExistingRelationships: boolean;
 }
 
-// Common node and relationship types
-const commonNodeTypes = [
-  { label: 'DocumentYear', value: 'DocumentYear' },
-  { label: 'PublishYear', value: 'PublishYear' },
-  { label: 'PolicyStartYear', value: 'PolicyStartYear' },
-  { label: 'PolicyEndYear', value: 'PolicyEndYear' },
-  { label: 'BirthYear', value: 'BirthYear' },
-  { label: 'RegistrationYear', value: 'RegistrationYear' },
-  { label: 'VehicleModelYear', value: 'VehicleModelYear' },
-  { label: 'FirstRegistrationYear', value: 'FirstRegistrationYear' },
-  { label: 'Date', value: 'Date' },
-  { label: 'Person', value: 'Person' },
-  { label: 'Company', value: 'Company' },
-  { label: 'Location', value: 'Location' },
-  { label: 'HomeAddress', value: 'HomeAddress' },
-  { label: 'MailingAddress', value: 'MailingAddress' },
-  { label: 'WorkAddress', value: 'WorkAddress' },
-  { label: 'BillingAddress', value: 'BillingAddress' },
-  { label: 'PropertyAddress', value: 'PropertyAddress' },
-  { label: 'BuildingAddress', value: 'BuildingAddress' },
-  { label: 'BusinessAddress', value: 'BusinessAddress' },
-  { label: 'WarehouseAddress', value: 'WarehouseAddress' },
-  { label: 'VehicleRegistrationAddress', value: 'VehicleRegistrationAddress' },
-  { label: 'GarageAddress', value: 'GarageAddress' },
-  { label: 'AccidentAddress', value: 'AccidentAddress' },
-  { label: 'CompanyAddress', value: 'CompanyAddress' },
-  { label: 'BranchAddress', value: 'BranchAddress' },
-  { label: 'ClaimAddress', value: 'ClaimAddress' },
-  { label: 'PolicyNumber', value: 'PolicyNumber' },
-  { label: 'IdentityNumber', value: 'IdentityNumber' },
-  { label: 'PlateNumber', value: 'PlateNumber' },
-  { label: 'Amount', value: 'Amount' },
-  { label: 'DateRange', value: 'DateRange' },
-  { label: 'Document', value: 'Document' },
-  { label: 'Policy', value: 'Policy' },
-  { label: 'Coverage', value: 'Coverage' },
-  { label: 'Vehicle', value: 'Vehicle' },
-  { label: 'Property', value: 'Property' },
-  { label: 'InsuranceCompany', value: 'InsuranceCompany' },
-  { label: 'PolicyHolder', value: 'PolicyHolder' },
-];
-
-const commonRelationshipTypes = [
-  { label: 'DOCUMENT_YEAR', value: 'DOCUMENT_YEAR' },
-  { label: 'PUBLISHED_IN', value: 'PUBLISHED_IN' },
-  { label: 'POLICY_STARTS_IN', value: 'POLICY_STARTS_IN' },
-  { label: 'POLICY_ENDS_IN', value: 'POLICY_ENDS_IN' },
-  { label: 'BORN_IN', value: 'BORN_IN' },
-  { label: 'REGISTERED_IN', value: 'REGISTERED_IN' },
-  { label: 'MODEL_YEAR', value: 'MODEL_YEAR' },
-  { label: 'FIRST_REGISTERED_IN', value: 'FIRST_REGISTERED_IN' },
-  { label: 'OCCURS_IN', value: 'OCCURS_IN' },
-  { label: 'HAS_DATE', value: 'HAS_DATE' },
-  { label: 'BELONGS_TO', value: 'BELONGS_TO' },
-  { label: 'LOCATED_IN', value: 'LOCATED_IN' },
-  { label: 'WORKS_FOR', value: 'WORKS_FOR' },
-  { label: 'OWNS', value: 'OWNS' },
-  { label: 'ISSUED_BY', value: 'ISSUED_BY' },
-  { label: 'COVERS', value: 'COVERS' },
-  { label: 'INSURED_BY', value: 'INSURED_BY' },
-  { label: 'RELATED_TO', value: 'RELATED_TO' },
-  { label: 'PART_OF', value: 'PART_OF' },
-];
-
 interface EntityRelationshipPostProcessingProps {
   isEnabled: boolean;
 }
 
 export default function EntityRelationshipPostProcessing({ isEnabled }: EntityRelationshipPostProcessingProps) {
-  const { entityRelationshipRules, setEntityRelationshipRules } = useFileContext();
+  const { entityRelationshipRules, setEntityRelationshipRules, selectedNodes, selectedRels } = useFileContext();
+
+  // localStorage'tan node ve relationship'leri al
+  const commonNodeTypes = useMemo(() => {
+    return selectedNodes.map((node) => ({
+      label: node.label,
+      value: node.value,
+    }));
+  }, [selectedNodes]);
+
+  const commonRelationshipTypes = useMemo(() => {
+    return selectedRels.map((rel) => {
+      // source,relationship,target formatından sadece relationship kısmını al
+      const parts = rel.value.split(',');
+      const relationshipType = parts.length >= 2 ? parts[1] : rel.value;
+      return {
+        label: relationshipType,
+        value: relationshipType,
+      };
+    });
+  }, [selectedRels]);
 
   // Add new rule
   const addRule = () => {
     const newRule: EntityRelationshipRule = {
       id: Date.now().toString(),
-      sourceNodeType: 'DocumentYear',
-      targetNodeType: 'Document',
-      relationshipType: 'DOCUMENT_YEAR',
+      sourceNodeType: commonNodeTypes.length > 0 ? commonNodeTypes[0].value : '',
+      targetNodeType: commonNodeTypes.length > 0 ? commonNodeTypes[0].value : '',
+      relationshipType: commonRelationshipTypes.length > 0 ? commonRelationshipTypes[0].value : '',
       removeExistingRelationships: false,
     };
     setEntityRelationshipRules([...entityRelationshipRules, newRule]);
