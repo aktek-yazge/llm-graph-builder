@@ -360,7 +360,7 @@ Kullanıcı mesajı: {user_message}
 """
 
 ## CHAT QUERIES
-VECTOR_SEARCH_TOP_K = 5
+VECTOR_SEARCH_TOP_K = 15
 
 VECTOR_SEARCH_QUERY = """
 WITH node AS chunk, score
@@ -448,19 +448,49 @@ VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
     CASE 
         WHEN entity.embedding IS NULL OR ({embedding_match_min} <= vector.similarity.cosine($query_vector, entity.embedding) AND vector.similarity.cosine($query_vector, entity.embedding) <= {embedding_match_max}) THEN 
             collect {{
-                // ENHANCED: Include document-level relationships in path exploration
-                OPTIONAL MATCH path=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,1}}(:!Chunk&!Document&!__Community__) 
+                // Normal entity relationships
+                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,1}}(:!Chunk&!Document&!__Community__)
+                
+                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                WHERE "Person" IN labels(entity)
+                
+                WITH CASE WHEN policyPath IS NOT NULL 
+                         THEN [normalPath, policyPath]
+                         ELSE [normalPath] 
+                     END as allPaths
+                UNWIND allPaths as path
                 RETURN path LIMIT {entity_limit_minmax_case}
             }}
         WHEN entity.embedding IS NOT NULL AND vector.similarity.cosine($query_vector, entity.embedding) >  {embedding_match_max} THEN
             collect {{
-                // ENHANCED: Include document-level relationships in path exploration  
-                OPTIONAL MATCH path=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,2}}(:!Chunk&!Document&!__Community__) 
+                // Normal entity relationships
+                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,2}}(:!Chunk&!Document&!__Community__)
+                
+                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                WHERE "Person" IN labels(entity)
+                
+                WITH CASE WHEN policyPath IS NOT NULL 
+                         THEN [normalPath, policyPath]
+                         ELSE [normalPath] 
+                     END as allPaths
+                UNWIND allPaths as path
                 RETURN path LIMIT {entity_limit_max_case} 
             }} 
         ELSE 
             collect {{ 
-                MATCH path=(entity) 
+                MATCH entityPath=(entity)
+                
+                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                WHERE "Person" IN labels(entity)
+                
+                WITH CASE WHEN policyPath IS NOT NULL 
+                         THEN [entityPath, policyPath]
+                         ELSE [entityPath] 
+                     END as allPaths
+                UNWIND allPaths as path
                 RETURN path 
             }}
     END AS paths, entity AS e
@@ -545,8 +575,26 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
 
 // Document metadata entities al (sayfa sayisi, belge adi, vb.)
 OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
+
+// Person entity'lerin tüm poliçe bilgilerini al
+CALL {
+    WITH entities
+    UNWIND [entity IN entities WHERE "Person" IN labels(entity)] AS person
+    OPTIONAL MATCH (person)-[:HAS_POLICY]->(policyDoc:Document)
+    WITH person, 
+         count(DISTINCT policyDoc) as totalPolicies,
+         collect(DISTINCT policyDoc.fileName) as allPolicyFiles
+    WHERE totalPolicies > 0
+    RETURN collect({
+        person_id: person.id,
+        total_policies: totalPolicies,
+        policy_files: allPolicyFiles
+    }) as personPolicyInfo
+}
+
 WITH d, avg_score, chunks, nodes, rels, entities,
-     collect(DISTINCT docMeta) AS documentMetadataNodes
+     collect(DISTINCT docMeta) AS documentMetadataNodes,
+     coalesce(personPolicyInfo, []) as personPolicyInfo
 
 // Generate metadata and text components for chunks, nodes, and relationships
 WITH d, avg_score,
@@ -580,15 +628,26 @@ WITH d, avg_score,
         )
     ]) AS relTexts,
     entities,
-    [docMeta IN documentMetadataNodes | docMeta.id] AS documentMetadata
+    [docMeta IN documentMetadataNodes | docMeta.id] AS documentMetadata,
+    personPolicyInfo
 
-// Combine texts into response text
-WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata,
+// Person poliçe bilgilerini text'e dahil et
+WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata, personPolicyInfo,
     "Text Content:\n" + apoc.text.join(texts, "\n----\n") +
     "\n----\nEntities:\n" + apoc.text.join(nodeTexts, "\n") +
     "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") +
     CASE WHEN size(documentMetadata) > 0 
          THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+         ELSE "" 
+    END +
+    CASE WHEN size(personPolicyInfo) > 0 
+         THEN "\n----\nPerson Policy Summary:\n" + 
+              apoc.text.join([
+                  pInfo IN personPolicyInfo | 
+                  pInfo.person_id + " has " + toString(pInfo.total_policies) + " policies: " + 
+                  apoc.text.join(pInfo.policy_files[0..3], ", ") + 
+                  (CASE WHEN size(pInfo.policy_files) > 3 THEN "... and " + toString(size(pInfo.policy_files) - 3) + " more" ELSE "" END)
+              ], "\n")
          ELSE "" 
     END AS text,
     entities
@@ -603,7 +662,8 @@ RETURN
            entityids: entityIds,
            relationshipids: relIds
        },
-       documentMetadata: documentMetadata
+       documentMetadata: documentMetadata,
+       personPolicyInfo: personPolicyInfo
    } AS metadata
 """
 
@@ -1140,16 +1200,11 @@ ALL Policy entities must be directly connected to the Document node. Do NOT crea
 For ALL date-related information in insurance policies (policy start date, policy end date, issue date, birth date, etc.), you MUST ALWAYS extract the YEAR component as a separate PolicyYear entity.
 
 Examples:
-- If policy start date is "13.02.2023", extract PolicyYear entity with id="2023"
-- If policy end date is "12.02.2024", extract PolicyYear entity with id="2024"  
-- If issue date is "15.01.2023", extract PolicyYear entity with id="2023"
-- If birth date is "05.07.1985", extract PolicyYear entity with id="1985"
+- If policy start date, issue date is "13.02.2023", extract PolicyYear entity with id="2023"
 
-ALWAYS create PolicyYear entities for ANY year mentioned in dates. This is CRITICAL for time-based analysis and querying.
 
 Extract ONLY atomic entities as individual nodes.
 
-Do not extract meaningless, generic, or unnecessary entities. Only extract entities that have clear, specific, and relevant meaning in the context of the document. Ignore vague, redundant, or contextless terms.
 """
 
 
