@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { Button, Typography, Select, Flex, Banner } from '@neo4j-ndl/react';
 import { PlusIconOutline, TrashIconOutline, PlayIconOutline } from '@neo4j-ndl/react/icons';
 import { useCredentials } from '../../context/UserCredentials';
+import { useFileContext } from '../../context/UsersFiles';
 import { CustomFile } from '../../types';
 
 interface PostProcessingRule {
@@ -24,6 +25,7 @@ export default function EntityRelationshipPostProcessing({
   onError,
 }: EntityRelationshipPostProcessingProps) {
   const { userCredentials } = useCredentials();
+  const { selectedNodes, selectedRels } = useFileContext();
   const [rules, setRules] = useState<PostProcessingRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [showResults, setShowResults] = useState(false);
@@ -35,76 +37,25 @@ export default function EntityRelationshipPostProcessing({
     target_selection: 'document',
   });
 
-  // Yaygın node tipleri
-  const commonNodeTypes = [
-    { label: 'DocumentYear', value: 'DocumentYear' },
-    { label: 'PublishYear', value: 'PublishYear' },
-    { label: 'PolicyStartYear', value: 'PolicyStartYear' },
-    { label: 'PolicyEndYear', value: 'PolicyEndYear' },
-    { label: 'BirthYear', value: 'BirthYear' },
-    { label: 'RegistrationYear', value: 'RegistrationYear' },
-    { label: 'VehicleModelYear', value: 'VehicleModelYear' },
-    { label: 'FirstRegistrationYear', value: 'FirstRegistrationYear' },
-    { label: 'Date', value: 'Date' },
-    { label: 'Person', value: 'Person' },
-    { label: 'Company', value: 'Company' },
-    { label: 'Location', value: 'Location' },
-    { label: 'HomeAddress', value: 'HomeAddress' },
-    { label: 'MailingAddress', value: 'MailingAddress' },
-    { label: 'WorkAddress', value: 'WorkAddress' },
-    { label: 'BillingAddress', value: 'BillingAddress' },
-    { label: 'PropertyAddress', value: 'PropertyAddress' },
-    { label: 'BuildingAddress', value: 'BuildingAddress' },
-    { label: 'BusinessAddress', value: 'BusinessAddress' },
-    { label: 'WarehouseAddress', value: 'WarehouseAddress' },
-    { label: 'VehicleRegistrationAddress', value: 'VehicleRegistrationAddress' },
-    { label: 'GarageAddress', value: 'GarageAddress' },
-    { label: 'AccidentAddress', value: 'AccidentAddress' },
-    { label: 'CompanyAddress', value: 'CompanyAddress' },
-    { label: 'BranchAddress', value: 'BranchAddress' },
-    { label: 'ClaimAddress', value: 'ClaimAddress' },
-    { label: 'PolicyNumber', value: 'PolicyNumber' },
-    { label: 'IdentityNumber', value: 'IdentityNumber' },
-    { label: 'PlateNumber', value: 'PlateNumber' },
-    { label: 'Amount', value: 'Amount' },
-    { label: 'DateRange', value: 'DateRange' },
-    { label: 'Document', value: 'Document' },
-    { label: 'Policy', value: 'Policy' },
-    { label: 'Coverage', value: 'Coverage' },
-    { label: 'Vehicle', value: 'Vehicle' },
-    { label: 'Property', value: 'Property' },
-    { label: 'InsuranceCompany', value: 'InsuranceCompany' },
-    { label: 'PolicyHolder', value: 'PolicyHolder' },
-  ];
+  // localStorage'tan node ve relationship'leri al
+  const commonNodeTypes = useMemo(() => {
+    return selectedNodes.map((node) => ({
+      label: node.label,
+      value: node.value,
+    }));
+  }, [selectedNodes]);
 
-  // Yaygın relationship tipleri
-  const commonRelationshipTypes = [
-    { label: 'DOCUMENT_YEAR', value: 'DOCUMENT_YEAR' },
-    { label: 'PUBLISHED_IN', value: 'PUBLISHED_IN' },
-    { label: 'POLICY_STARTS_IN', value: 'POLICY_STARTS_IN' },
-    { label: 'POLICY_ENDS_IN', value: 'POLICY_ENDS_IN' },
-    { label: 'BORN_IN', value: 'BORN_IN' },
-    { label: 'REGISTERED_IN', value: 'REGISTERED_IN' },
-    { label: 'MODEL_YEAR', value: 'MODEL_YEAR' },
-    { label: 'FIRST_REGISTERED_IN', value: 'FIRST_REGISTERED_IN' },
-    { label: 'LIVES_AT', value: 'LIVES_AT' },
-    { label: 'WORKS_AT', value: 'WORKS_AT' },
-    { label: 'LOCATED_AT', value: 'LOCATED_AT' },
-    { label: 'REGISTERED_AT', value: 'REGISTERED_AT' },
-    { label: 'HEADQUARTERED_AT', value: 'HEADQUARTERED_AT' },
-    { label: 'HAS_BRANCH_AT', value: 'HAS_BRANCH_AT' },
-    { label: 'OCCURS_IN', value: 'OCCURS_IN' },
-    { label: 'HAS_DATE', value: 'HAS_DATE' },
-    { label: 'BELONGS_TO', value: 'BELONGS_TO' },
-    { label: 'LOCATED_IN', value: 'LOCATED_IN' },
-    { label: 'WORKS_FOR', value: 'WORKS_FOR' },
-    { label: 'OWNS', value: 'OWNS' },
-    { label: 'ISSUED_BY', value: 'ISSUED_BY' },
-    { label: 'COVERS', value: 'COVERS' },
-    { label: 'INSURED_BY', value: 'INSURED_BY' },
-    { label: 'RELATED_TO', value: 'RELATED_TO' },
-    { label: 'PART_OF', value: 'PART_OF' },
-  ];
+  const commonRelationshipTypes = useMemo(() => {
+    return selectedRels.map((rel) => {
+      // source,relationship,target formatından sadece relationship kısmını al
+      const parts = rel.value.split(',');
+      const relationshipType = parts.length >= 2 ? parts[1] : rel.value;
+      return {
+        label: relationshipType,
+        value: relationshipType,
+      };
+    });
+  }, [selectedRels]);
 
   const targetSelectionOptions = [
     { label: "Document Node'a Bağla", value: 'document' },
