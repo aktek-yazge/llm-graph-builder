@@ -241,6 +241,7 @@ export interface ResponseMode {
   metric_question?: string;
   metric_contexts?: string;
   metric_answer?: string;
+  personPolicyInfo?: any[]; // YENI: Person Policy Info
 }
 export interface Messages {
   id: number;

@@ -216,12 +216,20 @@ def format_documents(documents, model,chat_mode_settings):
     sources = set()
     entities = dict()
     global_communities = list()
-
+    person_policy_info = []  # YENI: Person Policy Info için
 
     for doc in sorted_documents:
         try:
             source = doc.metadata.get('source', "local file")
             sources.add(source)
+            
+            # YENI: personPolicyInfo metadata'sını topla
+            if 'personPolicyInfo' in doc.metadata:
+                for ppi in doc.metadata['personPolicyInfo']:
+                    # Duplicate check
+                    if not any(existing['person_id'] == ppi['person_id'] for existing in person_policy_info):
+                        person_policy_info.append(ppi)
+            
             if 'entities' in doc.metadata:
                 if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
                     entity_ids = [entry['entityids'] for entry in doc.metadata['entities'] if 'entityids' in entry]
@@ -256,6 +264,10 @@ def format_documents(documents, model,chat_mode_settings):
             entities_list[key] = list(value)
         else:
             entities_list[key] = value
+    
+    # YENI: PersonPolicyInfo'yu entities'e ekle
+    if person_policy_info:
+        entities_list['personPolicyInfo'] = person_policy_info
     
     return "\n\n".join(formatted_docs), sources_list, entities_list, global_communities
 
@@ -527,6 +539,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 "mode": chat_mode_settings["mode"],
                 "entities": result["entities"],
                 "metric_details": metric_details,
+                "personPolicyInfo": result["entities"].get('personPolicyInfo', [])  # YENI: PersonPolicyInfo ekle
             },
             
             "user": "chatbot"
@@ -941,6 +954,7 @@ async def process_chat_response_stream(messages, history, question, model, graph
                 "cypher_query": "",  # Streaming'de cypher query yok
                 "error": "",
                 "metric_details": metric_details,
+                "personPolicyInfo": entities.get('personPolicyInfo', [])  # YENI: PersonPolicyInfo ekle
             },
             "is_complete": True,
             "user": "chatbot"
