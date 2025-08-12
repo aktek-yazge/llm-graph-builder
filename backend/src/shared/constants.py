@@ -33,40 +33,61 @@ WITH *,
        [p = (c)-[:NEXT_CHUNK|SIMILAR]-(other) 
        WHERE other IN selectedChunks | p]] AS chunkRels
 
-// Fetch entities and relationships between entities
+// Fetch entities and relationships between entities - ENHANCED
 CALL {{
-  WITH selectedChunks
+  WITH selectedChunks, docs
   UNWIND selectedChunks AS c
-  OPTIONAL MATCH entities = (c:Chunk)-[:HAS_ENTITY]->(e)
-  OPTIONAL MATCH hasEntityRels = (c)-[:HAS_ENTITY]->(e)
-  OPTIONAL MATCH entityRels = (e)--(e2:!Chunk) 
+  OPTIONAL MATCH chunkEntities = (c:Chunk)-[:HAS_ENTITY]->(e)
+  OPTIONAL MATCH chunkHasEntityRels = (c)-[:HAS_ENTITY]->(e)
+  
+  // NEW: Fetch Document-level entities (from entity promotion)
+  UNWIND docs AS d
+  OPTIONAL MATCH docEntities = (d)-[:CONTAINS_ENTITY]->(de)
+  OPTIONAL MATCH docEntityRels = (d)-[:CONTAINS_ENTITY]->(de)
+  
+  // Entity-to-entity relationships (enhanced after promotion)
+  OPTIONAL MATCH entityRels = (e)--(e2:!Chunk&!Document) 
   WHERE exists {{
     (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
+  }} OR exists {{
+    (e2)<-[:CONTAINS_ENTITY]-(docOther) WHERE docOther IN docs
   }}
-  RETURN entities, hasEntityRels, entityRels, collect(DISTINCT e) AS allEntities
+  
+  // Document-entity relationships for promoted entities  
+  OPTIONAL MATCH docPromotedEntityRels = (de)--(de2:!Chunk&!Document)
+  WHERE exists {{
+    (de2)<-[:CONTAINS_ENTITY]-(docOther) WHERE docOther IN docs
+  }}
+  
+  RETURN 
+    collect(chunkEntities) + collect(docEntities) AS allEntities,
+    collect(chunkHasEntityRels) + collect(docEntityRels) AS allHasEntityRels,
+    collect(entityRels) + collect(docPromotedEntityRels) AS allEntityRels,
+    collect(DISTINCT e) + collect(DISTINCT de) AS uniqueEntities
 }}
 
-// Fetch Document-Entity relationships (all types)
+// Fetch Document-Entity relationships (all types) - ENHANCED
 CALL {{
-  WITH docs, allEntities
+  WITH docs, uniqueEntities
   UNWIND docs AS d
-  UNWIND allEntities AS e
-  OPTIONAL MATCH docEntityRels = (d)-[r]-(e)
+  UNWIND uniqueEntities AS e
+  // Include both legacy chunk-based and new document-level relationships
+  OPTIONAL MATCH docEntityRels = (d)-[r:CONTAINS_ENTITY|DOCUMENT_CONTAINS|RELATED_TO_DOCUMENT]-(e)
   RETURN collect(docEntityRels) AS docEntityRels
 }}
 
 WITH docs, chunks, partOfRels, chunkRels, 
-     collect(entities) AS entities, 
-     collect(hasEntityRels) AS hasEntityRels,
-     collect(entityRels) AS entityRels, 
+     collect(allEntities) AS entities, 
+     collect(allHasEntityRels) AS hasEntityRels,
+     collect(allEntityRels) AS entityRels, 
      docEntityRels,
-     allEntities
+     uniqueEntities
 
 WITH *
 
 CALL {{
-  WITH allEntities
-  UNWIND allEntities AS n
+  WITH uniqueEntities
+  UNWIND uniqueEntities AS n
   OPTIONAL MATCH community = (n:__Entity__)-[:IN_COMMUNITY]->(p:__Community__)
   OPTIONAL MATCH parentcommunity = (p)-[:PARENT_COMMUNITY*]->(p2:__Community__) 
   RETURN collect(community) AS communities, 
@@ -414,29 +435,35 @@ WITH chunkScore.chunk as chunk
 """
 
 VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
+    // ENHANCED: Fetch both chunk-level and document-level entities
     OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(e)
-    WITH e, count(*) AS numChunks 
+    OPTIONAL MATCH (chunk)-[:PART_OF]->(doc:Document)-[:CONTAINS_ENTITY]->(de)
+    
+    WITH coalesce(e, de) AS entity, count(*) AS numChunks 
+    WHERE entity IS NOT NULL
     ORDER BY numChunks DESC 
     LIMIT {no_of_entites}
 
     WITH 
     CASE 
-        WHEN e.embedding IS NULL OR ({embedding_match_min} <= vector.similarity.cosine($query_vector, e.embedding) AND vector.similarity.cosine($query_vector, e.embedding) <= {embedding_match_max}) THEN 
+        WHEN entity.embedding IS NULL OR ({embedding_match_min} <= vector.similarity.cosine($query_vector, entity.embedding) AND vector.similarity.cosine($query_vector, entity.embedding) <= {embedding_match_max}) THEN 
             collect {{
-                OPTIONAL MATCH path=(e)(()-[rels:!HAS_ENTITY&!PART_OF]-()){{0,1}}(:!Chunk&!Document&!__Community__) 
+                // ENHANCED: Include document-level relationships in path exploration
+                OPTIONAL MATCH path=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,1}}(:!Chunk&!Document&!__Community__) 
                 RETURN path LIMIT {entity_limit_minmax_case}
             }}
-        WHEN e.embedding IS NOT NULL AND vector.similarity.cosine($query_vector, e.embedding) >  {embedding_match_max} THEN
+        WHEN entity.embedding IS NOT NULL AND vector.similarity.cosine($query_vector, entity.embedding) >  {embedding_match_max} THEN
             collect {{
-                OPTIONAL MATCH path=(e)(()-[rels:!HAS_ENTITY&!PART_OF]-()){{0,2}}(:!Chunk&!Document&!__Community__) 
+                // ENHANCED: Include document-level relationships in path exploration  
+                OPTIONAL MATCH path=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,2}}(:!Chunk&!Document&!__Community__) 
                 RETURN path LIMIT {entity_limit_max_case} 
             }} 
         ELSE 
             collect {{ 
-                MATCH path=(e) 
+                MATCH path=(entity) 
                 RETURN path 
             }}
-    END AS paths, e
+    END AS paths, entity AS e
 """
 
 # VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
@@ -1175,22 +1202,33 @@ DOCUMENT_RELATIONSHIP_TASKS = [
     "enable_communities"
 ]
 
-# Document Analysis Queries
+# Document Analysis Queries - ENHANCED for Entity Promotion
 PERSON_POLICY_COUNT_QUERY = """
-MATCH (person:Person)-[r:HAS_POLICY]->(d:Document)
+// ENHANCED: Both chunk-based and document-based relationships
+MATCH (person:Person)
+OPTIONAL MATCH (person)-[r:HAS_POLICY]->(d:Document)
+OPTIONAL MATCH (d:Document)-[:CONTAINS_ENTITY]->(person)
+WITH person, collect(DISTINCT d) AS policies, collect(r) AS relationships
+WHERE size(policies) > 0
 RETURN 
     person.id AS person_name,
-    count(DISTINCT d) AS total_policies,
-    sum(r.chunk_count) AS total_chunk_mentions,
-    avg(r.chunk_count) AS avg_mentions_per_policy,
-    [d.fileName FOR d IN collect(DISTINCT d)] AS policy_files,
-    [r.confidence FOR r IN collect(r)] AS confidence_levels
+    size(policies) AS total_policies,
+    reduce(total = 0, r IN relationships | total + coalesce(r.chunk_count, 1)) AS total_chunk_mentions,
+    toFloat(reduce(total = 0, r IN relationships | total + coalesce(r.chunk_count, 1))) / size(policies) AS avg_mentions_per_policy,
+    [d.fileName FOR d IN policies] AS policy_files,
+    [r.confidence FOR r IN relationships WHERE r IS NOT NULL] AS confidence_levels
 ORDER BY total_policies DESC
 """
 
 COMPANY_ANALYSIS_QUERY = """
-MATCH (company:Company)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
-WITH company, count(DISTINCT d) AS total_policies
-RETURN company.id AS company_name, total_policies
+// ENHANCED: Both chunk-based and document-based relationships
+MATCH (company:Company)
+WITH company
+OPTIONAL MATCH (company)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d1:Document)
+OPTIONAL MATCH (d2:Document)-[:CONTAINS_ENTITY]->(company)
+WITH company, collect(DISTINCT d1) + collect(DISTINCT d2) AS all_docs
+WITH company, [d IN all_docs WHERE d IS NOT NULL] AS policies
+WHERE size(policies) > 0
+RETURN company.id AS company_name, size(policies) AS total_policies
 ORDER BY total_policies DESC
 """

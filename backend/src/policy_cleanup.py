@@ -223,3 +223,135 @@ def cleanup_policy_nodes_to_document(graph, file_name: str) -> Dict[str, Any]:
             "relationships_moved": 0,
             "policy_nodes_deleted": 0
         }
+
+
+def promote_chunk_entities_to_document(graph, file_name: str, entity_promotion_rules: List[str]) -> Dict[str, Any]:
+    """
+    Belirtilen entity tiplerini Chunk'tan Document'a terfi ettirir.
+    
+    Args:
+        graph: Neo4j graph connection
+        file_name: İşlenecek dosya adı
+        entity_promotion_rules: Document'a terfi ettirilecek entity tipleri
+                               Örnek: ['Address', 'Company', 'Person', 'Phone', 'Email']
+    
+    Returns:
+        Terfi ettirme işlemi sonuç raporu
+    """
+    try:
+        logging.info(f"Entity promotion başlıyor: {file_name}")
+        logging.info(f"Terfi ettirilecek entity tipleri: {entity_promotion_rules}")
+        
+        if not entity_promotion_rules:
+            logging.info("Terfi ettirilecek entity tipi yok")
+            return {
+                "status": "no_rules",
+                "promoted_entities": 0,
+                "relationships_created": 0
+            }
+        
+        total_promoted = 0
+        total_relationships_created = 0
+        promotion_details = []
+        
+        # Her entity tipi için işlem yap
+        for entity_type in entity_promotion_rules:
+            logging.info(f"🔄 Entity tipi işleniyor: {entity_type}")
+            
+            # Bu entity tipindeki tüm entity'leri bul
+            find_entities_query = """
+            MATCH (d:Document {fileName: $filename})
+            MATCH (d)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(e)
+            WHERE $entity_type IN labels(e)
+            RETURN DISTINCT e, elementId(e) as entityId, e.id as entityName, 
+                   labels(e) as entityLabels, count(c) as chunkCount
+            """
+            
+            entity_result = graph.query(find_entities_query, params={
+                "filename": file_name,
+                "entity_type": entity_type
+            })
+            
+            entity_count = len(entity_result)
+            logging.info(f"  📊 {entity_type} tipinde {entity_count} entity bulundu")
+            
+            if entity_count == 0:
+                continue
+            
+            entities_promoted = 0
+            relationships_created = 0
+            
+            # Her entity için Document'a direkt bağlantı oluştur
+            for entity_data in entity_result:
+                entity_id = entity_data['entityId']
+                entity_name = entity_data['entityName']
+                chunk_count = entity_data['chunkCount']
+                
+                try:
+                    logging.info(f"  🔗 {entity_type} '{entity_name}' Document'a bağlanıyor ({chunk_count} chunk'tan)")
+                    
+                    # Document'a direkt bağlantı oluştur
+                    create_document_relation_query = """
+                    MATCH (d:Document {fileName: $filename})
+                    MATCH (e)
+                    WHERE elementId(e) = $entity_id
+                    MERGE (d)-[newRel:`CONTAINS_ENTITY`]->(e)
+                    SET newRel.entity_type = $entity_type
+                    SET newRel.chunk_count = $chunk_count
+                    SET newRel.promoted_from_chunks = true
+                    SET newRel.created_date = datetime()
+                    RETURN newRel
+                    """
+                    
+                    result = graph.query(create_document_relation_query, params={
+                        "filename": file_name,
+                        "entity_id": entity_id,
+                        "entity_type": entity_type,
+                        "chunk_count": chunk_count
+                    })
+                    
+                    if result:
+                        entities_promoted += 1
+                        relationships_created += 1
+                        logging.info(f"    ✅ Başarılı: Document -[CONTAINS_ENTITY]-> {entity_type}({entity_name})")
+                    
+                except Exception as entity_error:
+                    logging.error(f"    ❌ Entity promotion hatası ({entity_type}/{entity_name}): {entity_error}")
+            
+            promotion_details.append({
+                "entity_type": entity_type,
+                "entities_found": entity_count,
+                "entities_promoted": entities_promoted,
+                "relationships_created": relationships_created
+            })
+            
+            total_promoted += entities_promoted
+            total_relationships_created += relationships_created
+            
+            logging.info(f"  📋 {entity_type} özet: {entities_promoted}/{entity_count} entity Document'a bağlandı")
+        
+        # Genel özet
+        logging.info(f"📋 ENTITY PROMOTION ÖZET RAPORU:")
+        logging.info(f"  📁 Dosya: {file_name}")
+        logging.info(f"  📊 Toplam terfi ettirilen entity: {total_promoted}")
+        logging.info(f"  🔗 Oluşturulan Document-Entity ilişkisi: {total_relationships_created}")
+        
+        for detail in promotion_details:
+            success_rate = f"{detail['entities_promoted']}/{detail['entities_found']}"
+            logging.info(f"  └── {detail['entity_type']}: {success_rate} entity terfi edildi")
+        
+        return {
+            "status": "success",
+            "promoted_entities": total_promoted,
+            "relationships_created": total_relationships_created,
+            "promotion_details": promotion_details
+        }
+        
+    except Exception as e:
+        logging.error(f"Entity promotion hatası: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "promoted_entities": 0,
+            "relationships_created": 0
+        }

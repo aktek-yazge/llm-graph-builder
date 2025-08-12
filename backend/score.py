@@ -283,6 +283,9 @@ async def extract_knowledge_graph_from_file(
     # Post-processing parametreleri
     enable_post_processing=Form(False),
     post_processing_rules=Form(None),  # JSON array: [{"sourceNodeType":"Year","targetNodeType":"Document","relationshipType":"HAS_YEAR","removeExistingRelationships":false}]
+    # Entity Promotion parametreleri
+    enable_entity_promotion=Form(True),  # Default olarak aktif
+    entity_promotion_rules=Form(None),   # JSON array: ["Address", "Company", "Person", "Phone", "Email"]
     email=Form(None)
 ):
     """
@@ -450,6 +453,69 @@ async def extract_knowledge_graph_from_file(
                 result['policy_cleanup'] = {
                     'status': 'error',
                     'error': str(policy_cleanup_error),
+                    'elapsed_time': '0.00'
+                }
+            
+            # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
+            try:
+                if enable_entity_promotion:
+                    logging.info(f"Entity promotion başlıyor: {file_name}")
+                    
+                    # Default entity promotion kuralları (eğer param gönderilmemişse)
+                    default_promotion_rules = ["Address", "Company", "Person", "Phone", "Email", "Agent", "InsuranceCompany"]
+                    
+                    if entity_promotion_rules:
+                        if isinstance(entity_promotion_rules, str):
+                            promotion_rules = json.loads(entity_promotion_rules)
+                        else:
+                            promotion_rules = entity_promotion_rules
+                    else:
+                        promotion_rules = default_promotion_rules
+                    
+                    logging.info(f"Entity promotion kuralları: {promotion_rules}")
+                    
+                    from src.policy_cleanup import promote_chunk_entities_to_document
+                    entity_promotion_start_time = time.time()
+                    
+                    # Entity promotion işlemi
+                    entity_promotion_result = await asyncio.to_thread(
+                        promote_chunk_entities_to_document,
+                        graph,
+                        file_name,
+                        promotion_rules
+                    )
+                    
+                    entity_promotion_end_time = time.time()
+                    
+                    # Result'a Entity promotion bilgilerini ekle
+                    result['entity_promotion'] = {
+                        'status': entity_promotion_result['status'],
+                        'enabled': True,
+                        'promoted_entities': entity_promotion_result['promoted_entities'],
+                        'relationships_created': entity_promotion_result['relationships_created'],
+                        'elapsed_time': f"{entity_promotion_end_time - entity_promotion_start_time:.2f}",
+                        'promotion_rules': promotion_rules,
+                        'promotion_details': entity_promotion_result.get('promotion_details', [])
+                    }
+                    
+                    # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle
+                    if entity_promotion_result['relationships_created'] > 0:
+                        final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                        if final_count_response:
+                            result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+                            result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+                            
+                    logging.info(f"Entity promotion tamamlandı: {entity_promotion_result['promoted_entities']} entity terfi edildi, {entity_promotion_result['relationships_created']} Document ilişkisi oluşturuldu")
+                else:
+                    result['entity_promotion'] = {'enabled': False}
+                    logging.info("Entity promotion devre dışı")
+                
+            except Exception as entity_promotion_error:
+                logging.error(f"Entity promotion hatası: {entity_promotion_error}")
+                result['entity_promotion'] = {
+                    'status': 'error',
+                    'enabled': True,
+                    'error': str(entity_promotion_error),
                     'elapsed_time': '0.00'
                 }
             
