@@ -399,20 +399,30 @@ RETURN text,
         documentMetadata: documentMetadata} AS metadata
 """ 
 
+
 ### Vector graph search 
 VECTOR_GRAPH_SEARCH_ENTITY_LIMIT = 40
 VECTOR_GRAPH_SEARCH_EMBEDDING_MIN_MATCH = 0.3
 VECTOR_GRAPH_SEARCH_EMBEDDING_MAX_MATCH = 0.9
 VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MINMAX_CASE = 20
 VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MAX_CASE = 40
+VECTOR_GRAPH_SEARCH_CHUNK_LIMIT = 5
 
 VECTOR_GRAPH_SEARCH_QUERY_PREFIX = """
-WITH node as chunk, score
-// find the document of the chunk
-MATCH (chunk)-[:PART_OF]->(d:Document)
+WITH node as document, score
+// Document'lardan chunk'ları al
+MATCH (document)<-[:PART_OF]-(c:Chunk)
+
+// Chunk'ları score'a göre sırala ve limit uygula  
+WITH collect({chunk: c, score: score, document: document}) AS allChunks
+UNWIND allChunks AS chunkData
+WITH chunkData.chunk AS chunk, chunkData.score AS score, chunkData.document AS d
+ORDER BY score DESC
+LIMIT """ + str(VECTOR_GRAPH_SEARCH_CHUNK_LIMIT) + """
 
 // En yüksek skoru alan chunk'ların SIMILAR chunk'larını da dahil et (maksimum 2 similar chunk per ana chunk)
-OPTIONAL MATCH (chunk)-[sim:SIMILAR]-(similarChunk:Chunk)
+// SADECE aynı document'tan similar chunk'ları al
+OPTIONAL MATCH (chunk)-[sim:SIMILAR]-(similarChunk:Chunk)-[:PART_OF]->(d)
 WHERE similarChunk.embedding IS NOT NULL
 
 // Similar chunks'ı UNWIND ile aç, ORDER BY ile sırala, ilk 2'yi al
@@ -423,36 +433,44 @@ ORDER BY sc.simScore DESC
 WITH d, chunk, score, collect(sc)[0..2] AS topSimilarChunks
 
 // Önce flatSimilarChunks'u oluştur
-
 WITH d, chunk, score, apoc.coll.flatten([sc IN topSimilarChunks WHERE sc IS NOT NULL | [{chunk: sc.chunk, score: score * 0.8}]]) AS flatSimilarChunks
 WITH d, collect({chunk: chunk, score: score}) AS mainChunks, collect(flatSimilarChunks) AS allFlatSimilarChunks, avg(score) as avg_score
 WITH d, apoc.coll.flatten(mainChunks + apoc.coll.flatten(allFlatSimilarChunks)) AS chunks, avg_score
 
 // fetch entities
-CALL { WITH chunks
+CALL { WITH chunks, d
 UNWIND chunks as chunkScore
-WITH chunkScore.chunk as chunk
+WITH chunkScore.chunk as chunk, d
 """
 
 VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
     // ENHANCED: Fetch both chunk-level and document-level entities
+    // Chunk'ın ait olduğu document LLM'den gelen document olmalı
     OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(e)
+    WHERE (chunk)-[:PART_OF]->(d)
     OPTIONAL MATCH (chunk)-[:PART_OF]->(doc:Document)-[:CONTAINS_ENTITY]->(de)
+    WHERE doc = d
     
-    WITH coalesce(e, de) AS entity, count(*) AS numChunks 
+    WITH coalesce(e, de) AS entity, count(*) AS numChunks, d
     WHERE entity IS NOT NULL
     ORDER BY numChunks DESC 
-    LIMIT {no_of_entites}
+    LIMIT """ + str(VECTOR_GRAPH_SEARCH_ENTITY_LIMIT) + """
 
+    // CRITICAL: Önce tüm LLM document'ından gelen entity'leri collect et
+    WITH collect(DISTINCT entity) AS documentEntities, d
+    
+    // Her entity için relationship path'larını al, ama SADECE documentEntities ile sınırlı
+    UNWIND documentEntities AS entity
     WITH 
     CASE 
-        WHEN entity.embedding IS NULL OR ({embedding_match_min} <= vector.similarity.cosine($query_vector, entity.embedding) AND vector.similarity.cosine($query_vector, entity.embedding) <= {embedding_match_max}) THEN 
-            collect {{
-                // Normal entity relationships
-                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,1}}(:!Chunk&!Document&!__Community__)
+        WHEN entity.embedding IS NULL OR (""" + str(VECTOR_GRAPH_SEARCH_EMBEDDING_MIN_MATCH) + """ <= vector.similarity.cosine($query_vector, entity.embedding) AND vector.similarity.cosine($query_vector, entity.embedding) <= """ + str(VECTOR_GRAPH_SEARCH_EMBEDDING_MAX_MATCH) + """) THEN 
+            collect {
+                // DOCUMENT-CONSTRAINED: Normal entity relationships, ama target entity de documentEntities'de olmalı
+                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-(targetEntity)){0,1}(:!Chunk&!Document&!__Community__)
+                WHERE targetEntity IN documentEntities
                 
-                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
-                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                // SPECIAL: Person entity ise sadece LLM document ile olan HAS_POLICY ilişkisini dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(d)
                 WHERE "Person" IN labels(entity)
                 
                 WITH CASE WHEN policyPath IS NOT NULL 
@@ -460,15 +478,16 @@ VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
                          ELSE [normalPath] 
                      END as allPaths
                 UNWIND allPaths as path
-                RETURN path LIMIT {entity_limit_minmax_case}
-            }}
-        WHEN entity.embedding IS NOT NULL AND vector.similarity.cosine($query_vector, entity.embedding) >  {embedding_match_max} THEN
-            collect {{
-                // Normal entity relationships
-                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-()){{0,2}}(:!Chunk&!Document&!__Community__)
+                RETURN path LIMIT """ + str(VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MINMAX_CASE) + """
+            }
+        WHEN entity.embedding IS NOT NULL AND vector.similarity.cosine($query_vector, entity.embedding) >  """ + str(VECTOR_GRAPH_SEARCH_EMBEDDING_MAX_MATCH) + """ THEN
+            collect {
+                // DOCUMENT-CONSTRAINED: Normal entity relationships, ama target entity de documentEntities'de olmalı
+                OPTIONAL MATCH normalPath=(entity)(()-[rels:!HAS_ENTITY&!PART_OF&!CONTAINS_ENTITY]-(targetEntity)){0,2}(:!Chunk&!Document&!__Community__)
+                WHERE targetEntity IN documentEntities
                 
-                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
-                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                // SPECIAL: Person entity ise sadece LLM document ile olan HAS_POLICY ilişkisini dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(d)
                 WHERE "Person" IN labels(entity)
                 
                 WITH CASE WHEN policyPath IS NOT NULL 
@@ -476,14 +495,14 @@ VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
                          ELSE [normalPath] 
                      END as allPaths
                 UNWIND allPaths as path
-                RETURN path LIMIT {entity_limit_max_case} 
-            }} 
+                RETURN path LIMIT """ + str(VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MAX_CASE) + """ 
+            } 
         ELSE 
-            collect {{ 
+            collect { 
                 MATCH entityPath=(entity)
                 
-                // SPECIAL: Person entity ise HAS_POLICY ilişkilerini de dahil et
-                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(policyDoc:Document)
+                // SPECIAL: Person entity ise sadece LLM document ile olan HAS_POLICY ilişkisini dahil et
+                OPTIONAL MATCH policyPath=(entity)-[:HAS_POLICY]->(d)
                 WHERE "Person" IN labels(entity)
                 
                 WITH CASE WHEN policyPath IS NOT NULL 
@@ -492,8 +511,8 @@ VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
                      END as allPaths
                 UNWIND allPaths as path
                 RETURN path 
-            }}
-    END AS paths, entity AS e
+            }
+    END AS paths, entity AS e, d
 """
 
 # VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
@@ -576,14 +595,15 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
 // Document metadata entities al (sayfa sayisi, belge adi, vb.)
 OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
 
-// Person entity'lerin tüm poliçe bilgilerini al
+// Person entity'lerin LLM'den gelen document'lardaki poliçe bilgilerini al
 CALL {
-    WITH entities
+    WITH entities, d
     UNWIND [entity IN entities WHERE "Person" IN labels(entity)] AS person
-    OPTIONAL MATCH (person)-[:HAS_POLICY]->(policyDoc:Document)
+    // Sadece LLM'den gelen document ile olan HAS_POLICY ilişkisini kontrol et
+    OPTIONAL MATCH (person)-[:HAS_POLICY]->(d)
     WITH person, 
-         count(DISTINCT policyDoc) as totalPolicies,
-         collect(DISTINCT policyDoc.fileName) as allPolicyFiles
+         count(DISTINCT d) as totalPolicies,
+         collect(DISTINCT d.fileName) as allPolicyFiles
     WHERE totalPolicies > 0
     RETURN collect({
         person_id: person.id,
@@ -667,13 +687,7 @@ RETURN
    } AS metadata
 """
 
-VECTOR_GRAPH_SEARCH_QUERY = VECTOR_GRAPH_SEARCH_QUERY_PREFIX+ VECTOR_GRAPH_SEARCH_ENTITY_QUERY.format(
-    no_of_entites=VECTOR_GRAPH_SEARCH_ENTITY_LIMIT,
-    embedding_match_min=VECTOR_GRAPH_SEARCH_EMBEDDING_MIN_MATCH,
-    embedding_match_max=VECTOR_GRAPH_SEARCH_EMBEDDING_MAX_MATCH,
-    entity_limit_minmax_case=VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MINMAX_CASE,
-    entity_limit_max_case=VECTOR_GRAPH_SEARCH_ENTITY_LIMIT_MAX_CASE
-) + VECTOR_GRAPH_SEARCH_QUERY_SUFFIX
+VECTOR_GRAPH_SEARCH_QUERY = VECTOR_GRAPH_SEARCH_QUERY_PREFIX + VECTOR_GRAPH_SEARCH_ENTITY_QUERY + VECTOR_GRAPH_SEARCH_QUERY_SUFFIX
 
 ### Local community search
 LOCAL_COMMUNITY_TOP_K = 10

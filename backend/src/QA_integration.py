@@ -35,6 +35,7 @@ from langchain_community.chat_models import ChatOllama
 from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
+from src.custom_neo4j_vector import CustomNeo4jVector
 load_dotenv() 
 
 # Neo4j ve langchain loglama seviyelerini ayarla
@@ -443,7 +444,7 @@ def create_document_retriever_chain(llm, retriever):
         logging.error(f"Error creating document retriever chain: {e}", exc_info=True)
         raise
 
-def initialize_neo4j_vector(graph, chat_mode_settings):
+def initialize_neo4j_vector(graph, chat_mode_settings, llm=None):
     try:
         retrieval_query = chat_mode_settings.get("retrieval_query")
         index_name = chat_mode_settings.get("index_name")
@@ -452,49 +453,80 @@ def initialize_neo4j_vector(graph, chat_mode_settings):
         embedding_node_property = chat_mode_settings.get("embedding_node_property")
         text_node_properties = chat_mode_settings.get("text_node_properties")
 
-        print(f"========== NEO4J VECTOR INITIALIZATION ==========")
+        print(f"========== CUSTOM NEO4J VECTOR INITIALIZATION ==========")
         print(f"Index Name: {index_name}")
         print(f"Node Label: {node_label}")
         print(f"Embedding Property: {embedding_node_property}")
         print(f"Text Properties: {text_node_properties}")
         print(f"Keyword Index: {keyword_index}")
+        print(f"LLM Available: {llm is not None}")
         print(f"Retrieval Query (first 300 chars):")
         print(f"{retrieval_query[:300] if retrieval_query else 'None'}...")
-        print("================================================")
+        print("========================================================")
 
         if not retrieval_query or not index_name:
             raise ValueError("Required settings 'retrieval_query' or 'index_name' are missing.")
 
-        if keyword_index:
-            neo_db = Neo4jVector.from_existing_graph(
-                embedding=EMBEDDING_FUNCTION,
-                index_name=index_name,
-                retrieval_query=retrieval_query,
-                graph=graph,
-                search_type="hybrid",
-                node_label=node_label,
-                embedding_node_property=embedding_node_property,
-                text_node_properties=text_node_properties,
-                keyword_index_name=keyword_index
-            )
-            print(f"========== NEO4J VECTOR HYBRID INDEX CREATED ==========")
-            print(f"Index: {index_name}, Keyword Index: {keyword_index}")
-            print("======================================================")
-            logging.info(f"Successfully retrieved Neo4jVector Fulltext index '{index_name}' and keyword index '{keyword_index}'")
+        # LLM varsa CustomNeo4jVector kullan, yoksa normal Neo4jVector
+        if llm:
+            print("========== USING CUSTOM NEO4J VECTOR WITH LLM ==========")
+            if keyword_index:
+                neo_db = CustomNeo4jVector.from_existing_graph_with_llm(
+                    embedding=EMBEDDING_FUNCTION,
+                    index_name=index_name,
+                    retrieval_query=retrieval_query,
+                    graph=graph,
+                    llm=llm,
+                    search_type="hybrid",
+                    node_label=node_label,
+                    embedding_node_property=embedding_node_property,
+                    text_node_properties=text_node_properties,
+                    keyword_index_name=keyword_index
+                )
+            else:
+                neo_db = CustomNeo4jVector.from_existing_graph_with_llm(
+                    embedding=EMBEDDING_FUNCTION,
+                    index_name=index_name,
+                    retrieval_query=retrieval_query,
+                    graph=graph,
+                    llm=llm,
+                    node_label=node_label,
+                    embedding_node_property=embedding_node_property,
+                    text_node_properties=text_node_properties
+                )
+            print("========== CUSTOM NEO4J VECTOR CREATED SUCCESSFULLY ==========")
         else:
-            neo_db = Neo4jVector.from_existing_graph(
-                embedding=EMBEDDING_FUNCTION,
-                index_name=index_name,
-                retrieval_query=retrieval_query,
-                graph=graph,
-                node_label=node_label,
-                embedding_node_property=embedding_node_property,
-                text_node_properties=text_node_properties
-            )
-            print(f"========== NEO4J VECTOR INDEX CREATED ==========")
-            print(f"Index: {index_name}")
-            print("===============================================")
-            logging.info(f"Successfully retrieved Neo4jVector index '{index_name}'")
+            print("========== USING STANDARD NEO4J VECTOR ==========")
+            if keyword_index:
+                neo_db = Neo4jVector.from_existing_graph(
+                    embedding=EMBEDDING_FUNCTION,
+                    index_name=index_name,
+                    retrieval_query=retrieval_query,
+                    graph=graph,
+                    search_type="hybrid",
+                    node_label=node_label,
+                    embedding_node_property=embedding_node_property,
+                    text_node_properties=text_node_properties,
+                    keyword_index_name=keyword_index
+                )
+                print(f"========== NEO4J VECTOR HYBRID INDEX CREATED ==========")
+                print(f"Index: {index_name}, Keyword Index: {keyword_index}")
+                print("======================================================")
+                logging.info(f"Successfully retrieved Neo4jVector Fulltext index '{index_name}' and keyword index '{keyword_index}'")
+            else:
+                neo_db = Neo4jVector.from_existing_graph(
+                    embedding=EMBEDDING_FUNCTION,
+                    index_name=index_name,
+                    retrieval_query=retrieval_query,
+                    graph=graph,
+                    node_label=node_label,
+                    embedding_node_property=embedding_node_property,
+                    text_node_properties=text_node_properties
+                )
+                print(f"========== NEO4J VECTOR INDEX CREATED ==========")
+                print(f"Index: {index_name}")
+                print("===============================================")
+                logging.info(f"Successfully retrieved Neo4jVector index '{index_name}'")
     except Exception as e:
         index_name = chat_mode_settings.get("index_name")
         print(f"========== NEO4J VECTOR INDEX ERROR ==========")
@@ -544,10 +576,10 @@ def create_retriever(neo_db, document_names, chat_mode_settings,search_k, score_
         logging.info(f"Successfully created retriever with search_k={search_k}, score_threshold={score_threshold}")
     return retriever
 
-def get_neo4j_retriever(graph, document_names,chat_mode_settings, score_threshold=CHAT_SEARCH_KWARG_SCORE_THRESHOLD):
+def get_neo4j_retriever(graph, document_names, chat_mode_settings, score_threshold=CHAT_SEARCH_KWARG_SCORE_THRESHOLD, llm=None):
     try:
 
-        neo_db = initialize_neo4j_vector(graph, chat_mode_settings)
+        neo_db = initialize_neo4j_vector(graph, chat_mode_settings, llm)
         # document_names= list(map(str.strip, json.loads(document_names)))
         search_k = chat_mode_settings["top_k"]
         ef_ratio = int(os.getenv("EFFECTIVE_SEARCH_RATIO", "2")) if os.getenv("EFFECTIVE_SEARCH_RATIO", "2").isdigit() else 2
@@ -568,7 +600,7 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
         llm, model_name = get_llm(model=model)
         logging.info(f"Model called in chat: {model} (version: {model_name})")
 
-        retriever = get_neo4j_retriever(graph=graph, chat_mode_settings=chat_mode_settings, document_names=document_names)
+        retriever = get_neo4j_retriever(graph=graph, chat_mode_settings=chat_mode_settings, document_names=document_names, llm=llm)
         doc_retriever = create_document_retriever_chain(llm, retriever)
         
         chat_setup_time = time.time() - start_time
@@ -605,7 +637,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
             result = {
                 'sources': [], 
                 'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
-                'entities': {'entityids': [], "relationshipids": []}
+                'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': []}
             }
             formatted_docs = ""
             
@@ -617,7 +649,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
             else:
                 content = "I couldn't find any relevant documents to answer your question."
-                result = {"sources": list(), "nodedetails": list(), "entities": list()}
+                result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': []}}
                 total_tokens = 0
                 formatted_docs = ""
         
@@ -822,18 +854,18 @@ def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
         chat_mode_settings = settings_map.get(mode, default_settings)
         chat_mode_settings["mode"] = mode
         
-        print(f"========== CHAT MODE SETTINGS ==========")
-        print(f"Requested Mode: {mode}")
-        print(f"Default Mode: {CHAT_DEFAULT_MODE}")
-        print(f"Selected Settings:")
-        for key, value in chat_mode_settings.items():
-            if key == "retrieval_query":
-                print(f"  {key}: {str(value) if value else 'None'}...")
-            else:
-                print(f"  {key}: {value}")
-        print("=======================================")
+        # print(f"========== CHAT MODE SETTINGS ==========")
+        # print(f"Requested Mode: {mode}")
+        # print(f"Default Mode: {CHAT_DEFAULT_MODE}")
+        # print(f"Selected Settings:")
+        # for key, value in chat_mode_settings.items():
+        #     if key == "retrieval_query":
+        #         print(f"  {key}: {str(value) if value else 'None'}...")
+        #     else:
+        #         print(f"  {key}: {value}")
+        # print("=======================================")
         
-        logging.info(f"Chat mode settings: {chat_mode_settings}")
+        # logging.info(f"Chat mode settings: {chat_mode_settings}")
     
     except Exception as e:
         logging.error(f"Unexpected error: {e}", exc_info=True)
