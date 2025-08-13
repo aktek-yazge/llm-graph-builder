@@ -37,6 +37,17 @@ from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
 load_dotenv() 
 
+# Neo4j ve langchain loglama seviyelerini ayarla
+# DEBUG seviyesi çok ayrıntılı log üretir, gerekirse açabilirsiniz
+# logging.getLogger("neo4j").setLevel(logging.DEBUG)
+# logging.getLogger("langchain_neo4j").setLevel(logging.DEBUG)
+# logging.getLogger("langchain.retrievers").setLevel(logging.DEBUG)
+
+# Daha az gürültülü loglar için INFO seviyesi kullan
+logging.getLogger("neo4j").setLevel(logging.INFO)
+logging.getLogger("langchain_neo4j").setLevel(logging.INFO)
+logging.getLogger("langchain.retrievers").setLevel(logging.INFO)
+
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
 EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL) 
 
@@ -63,6 +74,22 @@ class CustomCallback(BaseCallbackHandler):
     ) -> None:
         logging.info("question transformed")
         self.transformed_question = response.generations[0][0].text.strip()
+        print(f"========== QUESTION TRANSFORMED ==========")
+        print(f"Original to Transformed: {self.transformed_question}")
+        print("=========================================")
+        
+    def on_retriever_start(self, serialized, query, **kwargs):
+        print(f"========== RETRIEVER QUERY BAŞLADI ==========")
+        print(f"Serialized: {serialized}")
+        print(f"Query: {query}")
+        print("============================================")
+        
+    def on_retriever_end(self, documents, **kwargs):
+        print(f"========== RETRIEVER QUERY BİTTİ ==========")
+        print(f"Retrieved {len(documents)} documents")
+        if documents:
+            print(f"First document preview: {documents[0].page_content[:100]}...")
+        print("===========================================")
 
 def is_casual_conversation(question, llm):
     """
@@ -277,6 +304,16 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     try:
         formatted_docs, sources, entitydetails, communities = format_documents(docs, model,chat_mode_settings)
         
+        print(f"========== FORMATTED DOCUMENTS ==========")
+        print(f"Total Documents Formatted: {len(docs)}")
+        print(f"Sources Found: {sources}")
+        print(f"Entity Details: {entitydetails}")
+        print(f"Communities: {communities}")
+        print("--- FORMATTED CONTEXT FOR LLM ---")
+        print(f"{formatted_docs}...")  # İlk 1000 karakteri göster
+        print("--- END OF FORMATTED CONTEXT ---")
+        print("==========================================")
+        
         rag_chain = get_rag_chain(llm=llm)
         
         ai_response = rag_chain.invoke({
@@ -319,16 +356,44 @@ def retrieve_documents(doc_retriever, messages):
 
     start_time = time.time()
     try:
+        # Son mesajı (kullanıcı sorusu) al
+        user_question = messages[-1].content if messages else ""
+        print(f"========== DOCUMENT RETRIEVAL BAŞLADI ==========")
+        print(f"Original User Question: {user_question}")
+        print(f"Message Count: {len(messages)}")
+        print("==============================================")
+        
         handler = CustomCallback()
         docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
         transformed_question = handler.transformed_question
+        
+        print(f"========== DOCUMENT RETRIEVAL SONUÇLARI ==========")
         if transformed_question:
+            print(f"Transformed Question: {transformed_question}")
             logging.info(f"Transformed question : {transformed_question}")
+        else:
+            print(f"Transformed Question: {user_question} (no transformation)")
+            
+        print(f"Retrieved Documents Count: {len(docs) if docs else 0}")
+        
+        if docs:
+            print("========== RETRIEVED DOCUMENTS DETAILS ==========")
+            for i, doc in enumerate(docs[:3]):  # İlk 3 dokümanı göster
+                print(f"Document {i+1}:")
+                print(f"  Content: {doc.page_content[:150]}...")
+                print(f"  Metadata: {doc.metadata}")
+                print("-" * 50)
+        
+        print("==============================================")
+        
         doc_retrieval_time = time.time() - start_time
         logging.info(f"Documents retrieved in {doc_retrieval_time:.2f} seconds")
         
     except Exception as e:
         error_message = f"Error retrieving documents: {str(e)}"
+        print(f"========== DOCUMENT RETRIEVAL ERROR ==========")
+        print(f"Error: {error_message}")
+        print("============================================")
         logging.error(error_message)
         docs = None
         transformed_question = None
@@ -387,6 +452,15 @@ def initialize_neo4j_vector(graph, chat_mode_settings):
         embedding_node_property = chat_mode_settings.get("embedding_node_property")
         text_node_properties = chat_mode_settings.get("text_node_properties")
 
+        print(f"========== NEO4J VECTOR INITIALIZATION ==========")
+        print(f"Index Name: {index_name}")
+        print(f"Node Label: {node_label}")
+        print(f"Embedding Property: {embedding_node_property}")
+        print(f"Text Properties: {text_node_properties}")
+        print(f"Keyword Index: {keyword_index}")
+        print(f"Retrieval Query (first 300 chars):")
+        print(f"{retrieval_query[:300] if retrieval_query else 'None'}...")
+        print("================================================")
 
         if not retrieval_query or not index_name:
             raise ValueError("Required settings 'retrieval_query' or 'index_name' are missing.")
@@ -403,6 +477,9 @@ def initialize_neo4j_vector(graph, chat_mode_settings):
                 text_node_properties=text_node_properties,
                 keyword_index_name=keyword_index
             )
+            print(f"========== NEO4J VECTOR HYBRID INDEX CREATED ==========")
+            print(f"Index: {index_name}, Keyword Index: {keyword_index}")
+            print("======================================================")
             logging.info(f"Successfully retrieved Neo4jVector Fulltext index '{index_name}' and keyword index '{keyword_index}'")
         else:
             neo_db = Neo4jVector.from_existing_graph(
@@ -414,30 +491,56 @@ def initialize_neo4j_vector(graph, chat_mode_settings):
                 embedding_node_property=embedding_node_property,
                 text_node_properties=text_node_properties
             )
+            print(f"========== NEO4J VECTOR INDEX CREATED ==========")
+            print(f"Index: {index_name}")
+            print("===============================================")
             logging.info(f"Successfully retrieved Neo4jVector index '{index_name}'")
     except Exception as e:
         index_name = chat_mode_settings.get("index_name")
+        print(f"========== NEO4J VECTOR INDEX ERROR ==========")
+        print(f"Index Name: {index_name}")
+        print(f"Error: {str(e)}")
+        print("===============================================")
         logging.error(f"Error retrieving Neo4jVector index {index_name} : {e}")
         raise
     return neo_db
 
 def create_retriever(neo_db, document_names, chat_mode_settings,search_k, score_threshold,ef_ratio):
     if document_names and chat_mode_settings["document_filter"]:
+        search_kwargs = {
+            'top_k': search_k,
+            'effective_search_ratio': ef_ratio,
+            'score_threshold': score_threshold,
+            'filter': {'fileName': {'$in': document_names}}
+        }
         retriever = neo_db.as_retriever(
             search_type="similarity_score_threshold",
-            search_kwargs={
-                'top_k': search_k,
-                'effective_search_ratio': ef_ratio,
-                'score_threshold': score_threshold,
-                'filter': {'fileName': {'$in': document_names}}
-            }
+            search_kwargs=search_kwargs
         )
+        print(f"========== RETRIEVER CREATED WITH DOCUMENT FILTER ==========")
+        print(f"Chat Mode: {chat_mode_settings.get('mode', 'N/A')}")
+        print(f"Index Name: {chat_mode_settings.get('index_name', 'N/A')}")
+        print(f"Node Label: {chat_mode_settings.get('node_label', 'N/A')}")
+        print(f"Search Type: similarity_score_threshold")
+        print(f"Search Kwargs: {search_kwargs}")
+        print(f"Document Names Filter: {document_names}")
+        print(f"Retrieval Query: {chat_mode_settings.get('retrieval_query', 'N/A')[:200]}...")
+        print("============================================================")
         logging.info(f"Successfully created retriever with search_k={search_k}, score_threshold={score_threshold} for documents {document_names}")
     else:
+        search_kwargs = {'top_k': search_k,'effective_search_ratio': ef_ratio, 'score_threshold': score_threshold}
         retriever = neo_db.as_retriever(
             search_type="similarity_score_threshold",
-            search_kwargs={'top_k': search_k,'effective_search_ratio': ef_ratio, 'score_threshold': score_threshold}
+            search_kwargs=search_kwargs
         )
+        print(f"========== RETRIEVER CREATED WITHOUT DOCUMENT FILTER ==========")
+        print(f"Chat Mode: {chat_mode_settings.get('mode', 'N/A')}")
+        print(f"Index Name: {chat_mode_settings.get('index_name', 'N/A')}")
+        print(f"Node Label: {chat_mode_settings.get('node_label', 'N/A')}")
+        print(f"Search Type: similarity_score_threshold")
+        print(f"Search Kwargs: {search_kwargs}")
+        print(f"Retrieval Query: {chat_mode_settings.get('retrieval_query', 'N/A')[:200]}...")
+        print("===============================================================")
         logging.info(f"Successfully created retriever with search_k={search_k}, score_threshold={score_threshold}")
     return retriever
 
@@ -719,6 +822,17 @@ def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
         chat_mode_settings = settings_map.get(mode, default_settings)
         chat_mode_settings["mode"] = mode
         
+        print(f"========== CHAT MODE SETTINGS ==========")
+        print(f"Requested Mode: {mode}")
+        print(f"Default Mode: {CHAT_DEFAULT_MODE}")
+        print(f"Selected Settings:")
+        for key, value in chat_mode_settings.items():
+            if key == "retrieval_query":
+                print(f"  {key}: {str(value) if value else 'None'}...")
+            else:
+                print(f"  {key}: {value}")
+        print("=======================================")
+        
         logging.info(f"Chat mode settings: {chat_mode_settings}")
     
     except Exception as e:
@@ -876,6 +990,16 @@ async def process_chat_response_stream(messages, history, question, model, graph
                 formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
                 sources = sources_list
                 entities = entities_dict
+                
+                print(f"========== STREAMING FORMATTED DOCUMENTS ==========")
+                print(f"Total Documents Formatted: {len(docs)}")
+                print(f"Sources Found: {sources}")
+                print(f"Entity Details: {entities}")
+                print(f"Communities: {communities}")
+                print("--- FORMATTED CONTEXT FOR STREAMING LLM ---")
+                print(f"{formatted_docs[:1000]}...")  # İlk 1000 karakteri göster
+                print("--- END OF FORMATTED CONTEXT ---")
+                print("==================================================")
                 
                 if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
                     nodedetails["entitydetails"] = entities_dict
