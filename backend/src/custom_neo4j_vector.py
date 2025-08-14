@@ -83,16 +83,8 @@ class CustomNeo4jVector(Neo4jVector):
             node_labels, relationship_types = self.get_schema_info()
             
             cypher_prompt = f"""
-Sen Neo4j Cypher query uzmanısın. Verilen schema ve kullanıcı sorusuna göre uygun Cypher query'si yazacaksın.
+Sen Neo4j Cypher query uzmanısın. Verilen kullanıcı sorusuna göre uygun Cypher query'si yazacaksın.
 
-
-
-## QUERY YAZMA KURALLARI:
-
-1. **Document Odaklı Başlangıç**: Önce doğru Document'i bul
-2. **Entity Farkındalığı**: Document'in entity'lerini göz önünde bulundur  
-3. **Document Dönüşü**: Sonuçta mutlaka Document'ları döndür (chunk değil)
-4. **apoc.text.clean**: Türkçe karakter sorunları için mutlaka kullan
 
 ## QUERY ÖRNEKLERİ:
 
@@ -114,12 +106,24 @@ RETURN d AS node
 ``` 
 
 ### Poliçe Türü Araması:
+Sadece Poliçe türlerini gelebilir. konut, dask, trafik, deprem vb..
 ```cypher
-// Belirli poliçe türü araması - Document döndüren versiyon
 MATCH (d:Document)
 WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("DASK")
    OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Konut")
    OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Trafik")
+RETURN d AS node
+```
+Taksit, tutar vb. eklemeleri sorguya ekleme!!!
+
+!!!DİKKAT!!! Aşağıdaki sorgu hatalı çünkü poliçe türleri dışında sigorta taksitler gibi soruda geçen konular eklenmiş. Bunu yapma
+```cypher
+MATCH (d:Document)
+WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça Dinçkök")
+  AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("2020"))
+  AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("D4 Konut")
+  AND (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("sigorta") OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("poliçe"))
+  AND (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("taksit") OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("tutar"))
 RETURN d AS node
 ```
 
@@ -190,7 +194,13 @@ apoc.text.clean kodu çok önemli!
         print(f"========== ENTITY-FIRST SEARCH ==========")
         
         # LLM ile query oluştur
-        generated_query = self.generate_cypher_with_llm(query)
+        generated_query = """
+        MATCH (d:Document)
+          WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça"))
+            AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("2020"))
+          RETURN d AS node
+        """
+        # generated_query = self.generate_cypher_with_llm(query)
         if not generated_query:
             print("Failed to generate Cypher query")
             return []
@@ -207,11 +217,25 @@ apoc.text.clean kodu çok önemli!
             }
             
             print("=" * 80)
-            print("📊 CYPHER QUERY PARAMETRELER:")
+            print("📊 CYPHER QUERY PARAMETRELER - DETAYLI LOG:")
             print("=" * 80)
-            print(f"Query Vector Length: {len(query_embedding)}")
-            print(f"Question: {query}")
-            print(f"K: {k}")
+            print(f"📋 PARAMS Dictionary İçeriği:")
+            for key, value in params.items():
+                if key == 'query_vector':
+                    print(f"  🔢 {key}: [embedding vector] - Length: {len(value) if value else 0}")
+                    print(f"     Vector Type: {type(value)}")
+                    print(f"     First 5 values: {value[:5] if value else 'None'}")
+                    print(f"     Vector Sample Stats: min={min(value) if value else 'N/A':.4f}, max={max(value) if value else 'N/A':.4f}")
+                else:
+                    print(f"  📝 {key}: {repr(value)}")
+                    print(f"     Type: {type(value)}")
+                    print(f"     Length/Size: {len(str(value))}")
+            
+            print(f"📊 Total Params Count: {len(params)}")
+            print(f"🔍 Params Keys: {list(params.keys())}")
+            print(f"🎯 Query Vector Valid: {params.get('query_vector') is not None}")
+            print(f"❓ Question Valid: {params.get('question') is not None and len(str(params.get('question', ''))) > 0}")
+            print(f"🔢 K Valid: {params.get('k') is not None and params.get('k') > 0}")
             print("=" * 80)
             
             # Eğer retrieval_query var ise, generated_query ile birleştir
@@ -232,17 +256,68 @@ apoc.text.clean kodu çok önemli!
                 print("=" * 80)
                 print(combined_query)
                 print("=" * 80)
-                print("📋 COMBINED QUERY PARAMETRELERİ:")
+                print("📋 COMBINED QUERY PARAMETRELERİ - DETAYLI:")
                 print("=" * 80)
-                print(f"Query parametreleri: {list(params.keys())}")
+                print(f"📊 Params Object Type: {type(params)}")
+                print(f"📊 Params Object ID: {id(params)}")
+                print(f"📊 Params Keys Count: {len(params)}")
+                print()
+                
                 for key, value in params.items():
-                    if key != 'query_vector':  # Vector'ü print etme, çok uzun
-                        print(f"  {key}: {value}")
+                    print(f"🔑 Parameter: '{key}'")
+                    print(f"   📝 Value Type: {type(value)}")
+                    
+                    if key == 'query_vector':
+                        if value is not None:
+                            print(f"   📏 Vector Length: {len(value)}")
+                            print(f"   🔢 Vector Stats: min={min(value):.6f}, max={max(value):.6f}")
+                            print(f"   📊 First 3 values: {value[:3]}")
+                            print(f"   📊 Last 3 values: {value[-3:]}")
+                        else:
+                            print(f"   ⚠️ Vector is None!")
+                    else:
+                        print(f"   📋 Value: {repr(value)}")
+                        print(f"   📏 Value Length: {len(str(value)) if value is not None else 0}")
+                    print()
+                
+                # Parametrelerin Neo4j query'sine geçiş öncesi son kontrol
+                print("🧪 NEO4J QUERY EXECUTION ÖNCESİ PARAMETRE KONTROLÜ:")
+                print(f"   ✅ query_vector hazır: {params.get('query_vector') is not None}")
+                print(f"   ✅ question hazır: {params.get('question') is not None}")
+                print(f"   ✅ k hazır: {params.get('k') is not None}")
+                print("=" * 80)
+                
+                print("🚀 NEO4J GRAPH.QUERY() ÇAĞRILIYOR...")
+                print(f"   📝 Query Length: {len(combined_query)} characters")
+                print(f"   📊 Params Count: {len(params)} parameters")
                 print("=" * 80)
                 
                 final_results = self.graph.query(combined_query, params)
-                print("✅ COMBINED QUERY TAMAMLANDI!")
+                
+                print("✅ NEO4J COMBINED QUERY TAMAMLANDI!")
+                print("=" * 80)
+                print("📊 QUERY EXECUTION SONUÇLARI:")
+                print("=" * 80)
                 print(f"🎯 Final Results Count: {len(final_results)}")
+                print(f"📊 Results Type: {type(final_results)}")
+                
+                if final_results:
+                    print(f"📋 First Result Keys: {list(final_results[0].keys()) if final_results[0] else 'No keys'}")
+                    print(f"📝 Sample Result Structure:")
+                    
+                    for i, result in enumerate(final_results[:3]):  # İlk 3 sonucu göster
+                        print(f"   Result #{i+1}:")
+                        for key, value in result.items():
+                            if key == 'query_vector':
+                                print(f"     {key}: [vector - length: {len(value) if value else 0}]")
+                            elif isinstance(value, str) and len(value) > 100:
+                                print(f"     {key}: '{value[:100]}...' (length: {len(value)})")
+                            else:
+                                print(f"     {key}: {repr(value)} ({type(value).__name__})")
+                else:
+                    print("⚠️ Sonuç boş!")
+                    
+                print("=" * 80)
             else:
                 print("⚠️ Retrieval query bulunamadı, sadece LLM query çalıştırılıyor")
                 print("🚀 LLM CYPHER QUERY ÇALIŞTIRILIYOR...")

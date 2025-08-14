@@ -245,6 +245,8 @@ def format_documents(documents, model,chat_mode_settings):
     entities = dict()
     global_communities = list()
     person_policy_info = []  # YENI: Person Policy Info için
+    document_list = set()  # YENI: Ana document listesi için
+    total_documents = 0  # YENI: Toplam document sayısı için
 
     for doc in sorted_documents:
         try:
@@ -255,8 +257,17 @@ def format_documents(documents, model,chat_mode_settings):
             if 'personPolicyInfo' in doc.metadata:
                 for ppi in doc.metadata['personPolicyInfo']:
                     # Duplicate check
-                    if not any(existing['person_id'] == ppi['person_id'] for existing in person_policy_info):
+                    if not any(existing.get('person_id') == ppi.get('person_id') and 
+                              existing.get('policy_id') == ppi.get('policy_id') for existing in person_policy_info):
                         person_policy_info.append(ppi)
+            
+            # YENI: documentList metadata'sını topla
+            if 'documentList' in doc.metadata:
+                document_list.update(doc.metadata['documentList'])
+            
+            # YENI: totalDocuments metadata'sını topla
+            if 'totalDocuments' in doc.metadata:
+                total_documents = max(total_documents, doc.metadata['totalDocuments'])
             
             if 'entities' in doc.metadata:
                 if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
@@ -286,6 +297,7 @@ def format_documents(documents, model,chat_mode_settings):
     
     # Set tipindeki verileri list'e çevir (JSON serialization için)
     sources_list = list(sources)
+    document_list_final = list(document_list)
     entities_list = {}
     for key, value in entities.items():
         if isinstance(value, set):
@@ -296,6 +308,12 @@ def format_documents(documents, model,chat_mode_settings):
     # YENI: PersonPolicyInfo'yu entities'e ekle
     if person_policy_info:
         entities_list['personPolicyInfo'] = person_policy_info
+    
+    # YENI: DocumentList ve TotalDocuments'i entities'e ekle
+    if document_list_final:
+        entities_list['documentList'] = document_list_final
+    if total_documents > 0:
+        entities_list['totalDocuments'] = total_documents
     
     return "\n\n".join(formatted_docs), sources_list, entities_list, global_communities
 
@@ -637,7 +655,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
             result = {
                 'sources': [], 
                 'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
-                'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': []}
+                'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}
             }
             formatted_docs = ""
             
@@ -648,8 +666,8 @@ def process_chat_response(messages, history, question, model, graph, document_na
             if docs:
                 content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
             else:
-                content = "I couldn't find any relevant documents to answer your question."
-                result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': []}}
+                content = "Sorunuza cevap verebilecek ilgili doküman bulamadım."
+                result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}}
                 total_tokens = 0
                 formatted_docs = ""
         
@@ -674,7 +692,9 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 "mode": chat_mode_settings["mode"],
                 "entities": result["entities"],
                 "metric_details": metric_details,
-                "personPolicyInfo": result["entities"].get('personPolicyInfo', [])  # YENI: PersonPolicyInfo ekle
+                "personPolicyInfo": result["entities"].get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
+                "documentList": result["entities"].get('documentList', []),  # YENI: DocumentList ekle
+                "totalDocuments": result["entities"].get('totalDocuments', 0)  # YENI: TotalDocuments ekle
             },
             
             "user": "chatbot"
@@ -1110,7 +1130,9 @@ async def process_chat_response_stream(messages, history, question, model, graph
                 "cypher_query": "",  # Streaming'de cypher query yok
                 "error": "",
                 "metric_details": metric_details,
-                "personPolicyInfo": entities.get('personPolicyInfo', [])  # YENI: PersonPolicyInfo ekle
+                "personPolicyInfo": entities.get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
+                "documentList": entities.get('documentList', []),  # YENI: DocumentList ekle
+                "totalDocuments": entities.get('totalDocuments', 0)  # YENI: TotalDocuments ekle
             },
             "is_complete": True,
             "user": "chatbot"

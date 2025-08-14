@@ -410,12 +410,20 @@ VECTOR_GRAPH_SEARCH_CHUNK_LIMIT = 5
 
 VECTOR_GRAPH_SEARCH_QUERY_PREFIX = """
 WITH node as document
+
+// LLM'den gelen document'ların toplam sayısını hesapla
+WITH collect(document) AS allDocuments, count(document) AS totalDocumentCount
+UNWIND allDocuments AS document
+
 // LLM'den gelen document'lardaki chunk'ları al ve vector similarity ile score hesapla
 MATCH (document)<-[:PART_OF]-(c:Chunk)
 WHERE c.embedding IS NOT NULL
 
+// totalDocumentCount'u her document için aynı değeri taşı
+WITH c, document, totalDocumentCount, allDocuments
+
 // Kullanıcı sorusu ile chunk embedding'leri arasında vector similarity hesapla
-WITH c, document, vector.similarity.cosine($query_vector, c.embedding) AS chunk_score
+WITH c, document, vector.similarity.cosine($query_vector, c.embedding) AS chunk_score, totalDocumentCount, allDocuments
 WHERE chunk_score > 0.1
 ORDER BY chunk_score DESC
 LIMIT """ + str(VECTOR_GRAPH_SEARCH_CHUNK_LIMIT) + """
@@ -426,22 +434,22 @@ OPTIONAL MATCH (c)-[sim:SIMILAR]-(similarChunk:Chunk)-[:PART_OF]->(document)
 WHERE similarChunk.embedding IS NOT NULL
 
 // Similar chunks'ı UNWIND ile aç, ORDER BY ile sırala, ilk 2'yi al
-WITH document, c, chunk_score, collect({chunk: similarChunk, simScore: coalesce(sim.score, 0)}) AS allSimilarChunks
+WITH document, c, chunk_score, totalDocumentCount, allDocuments, collect({chunk: similarChunk, simScore: coalesce(sim.score, 0)}) AS allSimilarChunks
 UNWIND CASE WHEN size(allSimilarChunks) > 0 THEN allSimilarChunks ELSE [NULL] END AS sc
-WITH document, c, chunk_score, sc
+WITH document, c, chunk_score, totalDocumentCount, allDocuments, sc
 ORDER BY sc.simScore DESC
-WITH document, c, chunk_score, collect(sc)[0..2] AS topSimilarChunks
+WITH document, c, chunk_score, totalDocumentCount, allDocuments, collect(sc)[0..2] AS topSimilarChunks
 
 // Chunk'ları birleştir - main chunk ve similar chunk'lar
-WITH document, collect({chunk: c, score: chunk_score}) AS mainChunks, 
+WITH document, totalDocumentCount, allDocuments, collect({chunk: c, score: chunk_score}) AS mainChunks, 
      collect(apoc.coll.flatten([sc IN topSimilarChunks WHERE sc IS NOT NULL | [{chunk: sc.chunk, score: chunk_score * 0.8}]])) AS allFlatSimilarChunks,
      avg(chunk_score) as avg_score
-WITH document AS d, apoc.coll.flatten(mainChunks + apoc.coll.flatten(allFlatSimilarChunks)) AS chunks, avg_score
+WITH document AS d, apoc.coll.flatten(mainChunks + apoc.coll.flatten(allFlatSimilarChunks)) AS chunks, avg_score, totalDocumentCount, allDocuments
 
 // fetch entities
-CALL { WITH chunks, d
+CALL { WITH chunks, d, totalDocumentCount, allDocuments
 UNWIND chunks as chunkScore
-WITH chunkScore.chunk as chunk, d
+WITH chunkScore.chunk as chunk, d, totalDocumentCount, allDocuments
 """
 
 # VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
@@ -516,21 +524,21 @@ VECTOR_GRAPH_SEARCH_ENTITY_QUERY = """
 
     // 1) Chunk'lardaki entity'leri frekanslarına göre topla
     OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(e)
-    WITH d, e, count(DISTINCT chunk) AS numChunks, collect(DISTINCT chunk) AS allowedChunks
+    WITH d, totalDocumentCount, allDocuments, e, count(DISTINCT chunk) AS numChunks, collect(DISTINCT chunk) AS allowedChunks
     WHERE e IS NOT NULL
     ORDER BY numChunks DESC
     LIMIT """ + str(VECTOR_GRAPH_SEARCH_ENTITY_LIMIT) + """
-    WITH d, allowedChunks, collect(DISTINCT e) AS topChunkEntities
+    WITH d, totalDocumentCount, allDocuments, allowedChunks, collect(DISTINCT e) AS topChunkEntities
 
     // 2) Document seviyesindeki entity'leri ekle (aggregation karışımını önlemek için iki aşama)
-    WITH d, allowedChunks, topChunkEntities
+    WITH d, totalDocumentCount, allDocuments, allowedChunks, topChunkEntities
     OPTIONAL MATCH (d)-[:CONTAINS_ENTITY]->(de)
-    WITH d, allowedChunks, topChunkEntities, collect(DISTINCT de) AS docLevelEntities
-    WITH d, allowedChunks, apoc.coll.toSet(topChunkEntities + docLevelEntities) AS documentEntities
+    WITH d, totalDocumentCount, allDocuments, allowedChunks, topChunkEntities, collect(DISTINCT de) AS docLevelEntities
+    WITH d, totalDocumentCount, allDocuments, allowedChunks, apoc.coll.toSet(topChunkEntities + docLevelEntities) AS documentEntities
 
     // 3) Her entity için (yalnızca aynı dokümanın bağlamında) path çıkar
     UNWIND documentEntities AS entity
-    WITH entity, d, documentEntities, allowedChunks,
+    WITH entity, d, totalDocumentCount, allDocuments, documentEntities, allowedChunks,
     CASE 
         WHEN entity.embedding IS NULL THEN 
             collect {
@@ -575,20 +583,59 @@ VECTOR_GRAPH_SEARCH_QUERY_SUFFIX = """
        entities
 }
 
-// Document metadata entities al
-OPTIONAL MATCH (d)-[:HAS_METADATA]->(docMeta:__Entity__)
+// Document metadata'sını doğrudan document node'undan al  
+WITH d, avg_score, chunks, nodes, rels, entities, totalDocumentCount, allDocuments,
+     {
+         fileName: d.fileName,
+         documentType: coalesce(d.fileType, 'pdf'),
+         year: coalesce(d.year, toString(date().year)),
+         entityNodeCount: coalesce(d.entityNodeCount, 0),
+         chunkNodeCount: coalesce(d.chunkNodeCount, 0),
+         createdAt: toString(d.createdAt),
+         model: coalesce(d.model, 'unknown'),
+         nodeCount: coalesce(d.nodeCount, 0),
+         relationshipCount: coalesce(d.relationshipCount, 0),
+         updatedAt: toString(d.updatedAt),
+         owner: coalesce(d.owner, 'unknown'),
+         pageCount: coalesce(d.pageCount, 0),
+         communityNodeCount: coalesce(d.communityNodeCount, 0),
+         chunkRelCount: coalesce(d.chunkRelCount, 0),
+         fileSource: coalesce(d.fileSource, 'unknown'),
+         documentName: d.fileName,
+         communityRelCount: coalesce(d.communityRelCount, 0),
+         total_chunks: coalesce(d.total_chunks, 0),
+         entityEntityRelCount: coalesce(d.entityEntityRelCount, 0),
+         fileSize: coalesce(d.fileSize, 0),
+         processed_chunk: coalesce(d.processed_chunk, 0),
+         fileType: coalesce(d.fileType, 'pdf')
+     } AS documentMetadata
 
-WITH d, avg_score, chunks, nodes, rels, entities,
-     collect(DISTINCT docMeta) AS documentMetadataNodes
+// Person Policy Info bilgilerini topla
+WITH d, avg_score, chunks, nodes, rels, entities, documentMetadata, totalDocumentCount, allDocuments
+OPTIONAL MATCH (d)-[:HAS_PERSON|HAS_POLICY]->(personPolicy)
+WHERE personPolicy:Person OR personPolicy:Policy
+
+WITH d, avg_score, chunks, nodes, rels, entities, documentMetadata, totalDocumentCount, allDocuments,
+     collect(DISTINCT {
+         person_id: CASE WHEN personPolicy:Person THEN elementId(personPolicy) ELSE null END,
+         person_name: CASE WHEN personPolicy:Person THEN coalesce(personPolicy.name, personPolicy.id, "") ELSE null END,
+         policy_id: CASE WHEN personPolicy:Policy THEN elementId(personPolicy) ELSE null END,
+         policy_number: CASE WHEN personPolicy:Policy THEN coalesce(personPolicy.policyNumber, personPolicy.id, "") ELSE null END,
+         policy_type: CASE WHEN personPolicy:Policy THEN coalesce(personPolicy.type, personPolicy.policyType, "") ELSE null END,
+         document_name: d.fileName
+     }) AS personPolicyInfo
+
+// WITH node as document ile gelen document'ların sayısını hesapla
+WITH d, avg_score, chunks, nodes, rels, entities, documentMetadata, personPolicyInfo, totalDocumentCount, allDocuments
 
 // Text ve metadata oluştur - Document node'unu da entities'e dahil et
-WITH d, avg_score,
+WITH d, avg_score, [doc IN allDocuments | doc.fileName] AS documentList, totalDocumentCount, documentMetadata, personPolicyInfo, chunks, nodes, rels, entities,
     [c IN chunks | c.chunk.text] AS texts,
     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
-    [n IN nodes + documentMetadataNodes + [d] | elementId(n)] AS entityIds,
+    [n IN nodes + [d] | elementId(n)] AS entityIds,
     [r IN rels | elementId(r)] AS relIds,
     apoc.coll.sort([
-        n IN nodes + documentMetadataNodes + [d] |
+        n IN nodes + [d] |
         coalesce(apoc.coll.removeAll(labels(n), ['__Entity__'])[0], "") + ":" +
         coalesce(
             n.id,
@@ -615,15 +662,28 @@ WITH d, avg_score,
             ""
         )
     ]) AS relTexts,
-    entities,
-    [docMeta IN documentMetadataNodes | docMeta.id] AS documentMetadata
+    [ppi IN personPolicyInfo WHERE ppi.person_id IS NOT NULL OR ppi.policy_id IS NOT NULL] AS validPersonPolicyInfo
 
-WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata,
+WITH d, avg_score, chunkdetails, entityIds, relIds, documentMetadata, validPersonPolicyInfo, documentList, totalDocumentCount, texts, nodeTexts, relTexts,
     "Text Content:\n" + apoc.text.join(texts, "\n----\n") +
     "\n----\nEntities:\n" + apoc.text.join(nodeTexts, "\n") +
     "\n----\nRelationships:\n" + apoc.text.join(relTexts, "\n") +
-    CASE WHEN size(documentMetadata) > 0 
-         THEN "\n----\nDocument Metadata: " + apoc.text.join(documentMetadata, ", ") 
+    "\n----\nDocument Metadata:\n" +
+    "  File Name: " + documentMetadata.fileName + "\n" +
+    "  Document Type: " + documentMetadata.documentType + "\n" +
+    "  Year: " + documentMetadata.year + "\n" +
+    "  Entity Node Count: " + toString(documentMetadata.entityNodeCount) + "\n" +
+    "  Chunk Node Count: " + toString(documentMetadata.chunkNodeCount) + "\n" +
+    "  Created At: " + documentMetadata.createdAt + "\n" +
+    "  Model: " + documentMetadata.model + "\n" +
+    "  Node Count: " + toString(documentMetadata.nodeCount) + "\n" +
+    "  Relationship Count: " + toString(documentMetadata.relationshipCount) + "\n" +
+    "  Owner: " + documentMetadata.owner + "\n" +
+    "  Page Count: " + toString(documentMetadata.pageCount) + "\n" +
+    "  File Source: " + documentMetadata.fileSource + "\n" +
+    "  File Size: " + toString(documentMetadata.fileSize) + " bytes" +
+    CASE WHEN size(documentList) > 0 
+         THEN "\n----\nDocuments (Total: " + toString(totalDocumentCount) + "):\n  - " + apoc.text.join(documentList, "\n  - ") 
          ELSE "" 
     END AS text,
     entities
@@ -638,7 +698,10 @@ RETURN
            entityids: entityIds,
            relationshipids: relIds
        },
-       documentMetadata: documentMetadata
+       documentMetadata: documentMetadata,
+       personPolicyInfo: validPersonPolicyInfo,
+       documentList: documentList,
+       totalDocuments: totalDocumentCount
    } AS metadata
 """
 
