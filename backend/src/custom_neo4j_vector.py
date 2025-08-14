@@ -92,15 +92,9 @@ Sen Neo4j Cypher query uzmanısın. Verilen schema ve kullanıcı sorusuna göre
 1. **Document Odaklı Başlangıç**: Önce doğru Document'i bul
 2. **Entity Farkındalığı**: Document'in entity'lerini göz önünde bulundur  
 3. **Document Dönüşü**: Sonuçta mutlaka Document'ları döndür (chunk değil)
-4. **Skor Hesabı**: Document uygunluğuna göre skoru belirle
-6. **apoc.text.clean**: Türkçe karakter sorunları için mutlaka kullan
+4. **apoc.text.clean**: Türkçe karakter sorunları için mutlaka kullan
 
 ## QUERY ÖRNEKLERİ:
-
-
-Custom Neo4j Vector Store for LLM Graph Builder
-Önce entity-based arama yapar, sonra chunk-level ### İsim ve Yıl Araması Birlikte:
-```cypher## QUERY ÖRNEKLERİ:
 
 ### İsim ve Yıl Araması Birlikte (Document-Centric):
 ```cypher
@@ -108,12 +102,7 @@ Custom Neo4j Vector Store for LLM Graph Builder
 MATCH (d:Document)
 WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")) 
   AND (d.year = "2020" OR d.fileName CONTAINS "2020")
-WITH d,
-     CASE WHEN d.year = "2020" AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça") THEN 0.95
-          WHEN d.fileName CONTAINS "2020" AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça") THEN 0.85
-          ELSE 0.75 
-     END AS relevance_score
-RETURN d AS node, relevance_score AS score
+RETURN d AS node
 ```
 
 ### Sadece İsim Bilgisi Araması (Document-Centric):
@@ -121,20 +110,8 @@ RETURN d AS node, relevance_score AS score
 // Ayça hanımın tüm poliçeleri - Document döndüren versiyon
 MATCH (d:Document)
 WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")
-RETURN d AS node, 0.9 AS score
-
+RETURN d AS node
 ``` 
-MATCH (d:Document)
-WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")) 
-  AND (d.year = "2020" OR d.fileName CONTAINS "2020")
-WITH d,
-     CASE WHEN d.year = "2020" AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça") THEN 0.95
-          WHEN d.fileName CONTAINS "2020" AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça") THEN 0.85
-          ELSE 0.75 
-     END AS relevance_score
-RETURN d AS node, relevance_score AS score
-
-```
 
 ### Poliçe Türü Araması:
 ```cypher
@@ -143,17 +120,15 @@ MATCH (d:Document)
 WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("DASK")
    OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Konut")
    OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Trafik")
-RETURN d AS node, 0.85 AS score
-
+RETURN d AS node
 ```
 
 ## GERİ DÖNDÜRME FORMATI:
 Query mutlaka şu formatı kullanmalı
 ```cypher
 // Query logic here...
-RETURN d AS node, [score] AS score
-
-```ar
+RETURN d AS node
+```
 
 apoc.text.clean kodu çok önemli!
 ## KULLANICI SORUSU:
@@ -248,7 +223,6 @@ apoc.text.clean kodu çok önemli!
                 CALL {{
                     {generated_query}
                 }}
-                WITH node, score
                 {self.retrieval_query}
                 """
                 
