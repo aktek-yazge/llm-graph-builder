@@ -16,6 +16,7 @@ from src.shared.schema_extraction import schema_extraction_from_text
 from dotenv import load_dotenv
 from datetime import datetime
 import logging
+import unicodedata
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.document_sources.local_file import get_documents_from_file_by_path
@@ -37,6 +38,24 @@ import shutil
 import urllib.parse
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+
+def normalize_unicode_filename(filename: str) -> str:
+    """
+    Unicode filename normalization for Neo4j consistency
+    Converts decomposed unicode characters to composed form
+    Example: 'Ayç\u0327a' -> 'Ayça' 
+    """
+    if not filename or not isinstance(filename, str):
+        return filename
+    
+    # NFC normalization - Canonical Decomposition followed by Canonical Composition
+    normalized = unicodedata.normalize('NFC', filename)
+    
+    # Additional cleaning
+    normalized = normalized.strip()
+    
+    logging.debug(f"Unicode normalization: '{filename}' -> '{normalized}'")
+    return normalized
 import markdown_to_json
 
 import pandas as pd
@@ -89,11 +108,12 @@ def create_source_node_graph_url_s3(
     for file_info in files_info:
         file_name = file_info["file_key"]
         obj_source_node = sourceNode()
-        obj_source_node.file_name = (
+        raw_filename = (
             file_name.split("/")[-1].strip()
             if isinstance(file_name.split("/")[-1], str)
             else file_name.split("/")[-1]
         )
+        obj_source_node.file_name = normalize_unicode_filename(raw_filename)
         obj_source_node.file_type = "pdf"
         obj_source_node.file_size = file_info["file_size_bytes"]
         obj_source_node.file_source = source_type
@@ -152,11 +172,12 @@ def create_source_node_graph_url_gcs(
     )
     for file_metadata in lst_file_metadata:
         obj_source_node = sourceNode()
-        obj_source_node.file_name = (
+        raw_filename = (
             file_metadata["fileName"].strip()
             if isinstance(file_metadata["fileName"], str)
             else file_metadata["fileName"]
         )
+        obj_source_node.file_name = normalize_unicode_filename(raw_filename)
         obj_source_node.file_size = file_metadata["fileSize"]
         obj_source_node.url = file_metadata["url"]
         obj_source_node.file_source = source_type
@@ -234,7 +255,7 @@ def create_source_node_graph_web_url(graph, model, source_url, source_type):
     obj_source_node.model = model
     obj_source_node.url = urllib.parse.unquote(source_url)
     obj_source_node.created_at = datetime.now()
-    obj_source_node.file_name = title.strip() if isinstance(title, str) else title
+    obj_source_node.file_name = normalize_unicode_filename(title.strip() if isinstance(title, str) else title)
     obj_source_node.language = language
     obj_source_node.file_size = sys.getsizeof(pages[0].page_content)
     obj_source_node.chunkNodeCount = 0
@@ -277,7 +298,7 @@ def create_source_node_graph_url_youtube(graph, model, source_url, source_type):
     obj_source_node.communityRelCount = 0
     match = re.search(r"(?:v=)([0-9A-Za-z_-]{11})\s*", obj_source_node.url)
     logging.info(f"match value: {match}")
-    obj_source_node.file_name = match.group(1)
+    obj_source_node.file_name = normalize_unicode_filename(match.group(1))
     transcript = get_youtube_combined_transcript(match.group(1))
     logging.info(f"Youtube transcript : {transcript}")
     if transcript == None or len(transcript) == 0:
@@ -323,7 +344,7 @@ def create_source_node_graph_url_wikipedia(graph, model, wiki_query, source_type
         raise LLMGraphBuilderException(message)
     else:
         obj_source_node = sourceNode()
-        obj_source_node.file_name = wiki_query_id.strip()
+        obj_source_node.file_name = normalize_unicode_filename(wiki_query_id.strip())
         obj_source_node.file_type = "text"
         obj_source_node.file_source = source_type
         obj_source_node.file_size = sys.getsizeof(pages[0].page_content)
@@ -830,9 +851,10 @@ async def processing_source(
         if result[0]["Status"] != "Processing":
             obj_source_node = sourceNode()
             status = "Processing"
-            obj_source_node.file_name = (
+            raw_filename = (
                 file_name.strip() if isinstance(file_name, str) else file_name
             )
+            obj_source_node.file_name = normalize_unicode_filename(raw_filename)
             obj_source_node.status = status
             obj_source_node.total_chunks = total_chunks
             obj_source_node.model = model
@@ -914,7 +936,7 @@ async def processing_source(
                     processed_time = end_time - start_time
 
                     obj_source_node = sourceNode()
-                    obj_source_node.file_name = file_name
+                    obj_source_node.file_name = normalize_unicode_filename(file_name)
                     obj_source_node.updated_at = end_time
                     obj_source_node.processing_time = processed_time
                     obj_source_node.processed_chunk = (
@@ -943,9 +965,10 @@ async def processing_source(
             end_time = datetime.now()
             processed_time = end_time - start_time
             obj_source_node = sourceNode()
-            obj_source_node.file_name = (
+            raw_filename = (
                 file_name.strip() if isinstance(file_name, str) else file_name
             )
+            obj_source_node.file_name = normalize_unicode_filename(raw_filename)
             obj_source_node.status = job_status
             obj_source_node.processing_time = processed_time
 
@@ -1342,9 +1365,10 @@ def upload_file(
         logging.info("File merged successfully")
         file_extension = originalname.split(".")[-1]
         obj_source_node = sourceNode()
-        obj_source_node.file_name = (
+        raw_filename = (
             originalname.strip() if isinstance(originalname, str) else originalname
         )
+        obj_source_node.file_name = normalize_unicode_filename(raw_filename)
         obj_source_node.file_type = file_extension
         obj_source_node.file_size = file_size
         obj_source_node.file_source = "local file"
@@ -1433,9 +1457,10 @@ def manually_cancelled_job(graph, filenames, source_types, merged_dir, uri):
 
     for file_name, source_type in zip(filename_list, source_types_list):
         obj_source_node = sourceNode()
-        obj_source_node.file_name = (
+        raw_filename = (
             file_name.strip() if isinstance(file_name, str) else file_name
         )
+        obj_source_node.file_name = normalize_unicode_filename(raw_filename)
         obj_source_node.is_cancelled = True
         obj_source_node.status = "Cancelled"
         obj_source_node.updated_at = datetime.now()
@@ -1478,9 +1503,10 @@ def set_status_retry(graph, file_name, retry_condition):
     graphDb_data_Access = graphDBdataAccess(graph)
     obj_source_node = sourceNode()
     status = "Ready to Reprocess"
-    obj_source_node.file_name = (
+    raw_filename = (
         file_name.strip() if isinstance(file_name, str) else file_name
     )
+    obj_source_node.file_name = normalize_unicode_filename(raw_filename)
     obj_source_node.status = status
     obj_source_node.retry_condition = retry_condition
     obj_source_node.is_cancelled = False
