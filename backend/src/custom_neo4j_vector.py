@@ -91,41 +91,25 @@ Sen Neo4j Cypher query uzmanısın. Verilen kullanıcı sorusuna göre uygun Cyp
 ### İsim ve Yıl Araması Birlikte (Document-Centric):
 ```cypher
 // Ayça hanımın 2020 yılı poliçeleri - Document döndüren versiyon
+WITH apoc.text.regreplace(apoc.text.clean("Ayça"), "[^a-z0-9 ]", "") AS queryText
 MATCH (d:Document)
-WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")) 
-  AND (d.year = "2020" OR d.fileName CONTAINS "2020")
-RETURN d AS node
+WHERE apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS queryText
+  AND (
+    d.year = "2020" 
+    OR apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS "2020"
+  )
+RETURN d AS node;
 ```
 
 ### Sadece İsim Bilgisi Araması (Document-Centric):
 ```cypher
 // Ayça hanımın tüm poliçeleri - Document döndüren versiyon
+WITH apoc.text.regreplace(apoc.text.clean("Ayça"), "[^a-z0-9 ]", "") AS queryText
 MATCH (d:Document)
-WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")
-RETURN d AS node
+WHERE apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS queryText
+RETURN d AS node;
+
 ``` 
-
-### Poliçe Türü Araması:
-Sadece Poliçe türlerini gelebilir. konut, dask, trafik, deprem vb..
-```cypher
-MATCH (d:Document)
-WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("DASK")
-   OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Konut")
-   OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Trafik")
-RETURN d AS node
-```
-Taksit, tutar vb. eklemeleri sorguya ekleme!!!
-
-!!!DİKKAT!!! Aşağıdaki sorgu hatalı çünkü poliçe türleri dışında sigorta taksitler gibi soruda geçen konular eklenmiş. Bunu yapma
-```cypher
-MATCH (d:Document)
-WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça Dinçkök")
-  AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("2020"))
-  AND apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("D4 Konut")
-  AND (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("sigorta") OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("poliçe"))
-  AND (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("taksit") OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("tutar"))
-RETURN d AS node
-```
 
 ## GERİ DÖNDÜRME FORMATI:
 Query mutlaka şu formatı kullanmalı
@@ -134,7 +118,7 @@ Query mutlaka şu formatı kullanmalı
 RETURN d AS node
 ```
 
-apoc.text.clean kodu çok önemli!
+apoc.text.regreplace(apoc.text.clean kodu çok önemli!
 ## KULLANICI SORUSU:
 {query}
 
@@ -194,13 +178,13 @@ apoc.text.clean kodu çok önemli!
         print(f"========== ENTITY-FIRST SEARCH ==========")
         
         # LLM ile query oluştur
-        generated_query = """
-        MATCH (d:Document)
-          WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça"))
-            AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("2020"))
-          RETURN d AS node
-        """
-        # generated_query = self.generate_cypher_with_llm(query)
+        # generated_query = """
+        # MATCH (d:Document)
+        #   WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça"))
+        #     AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("2020"))
+        #   RETURN d AS node
+        # """
+        generated_query = self.generate_cypher_with_llm(query)
         if not generated_query:
             print("Failed to generate Cypher query")
             return []
