@@ -91,25 +91,20 @@ Sen Neo4j Cypher query uzmanısın. Verilen kullanıcı sorusuna göre uygun Cyp
 ### İsim ve Yıl Araması Birlikte (Document-Centric):
 ```cypher
 // Ayça hanımın 2020 yılı poliçeleri - Document döndüren versiyon
-WITH apoc.text.regreplace(apoc.text.clean("Ayça"), "[^a-z0-9 ]", "") AS queryText
 MATCH (d:Document)
-WHERE apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS queryText
-  AND (
-    d.year = "2020" 
-    OR apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS "2020"
-  )
-RETURN d AS node;
+WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")) 
+  AND (d.year = "2020" OR d.fileName CONTAINS "2020")
+RETURN d AS node
 ```
 
 ### Sadece İsim Bilgisi Araması (Document-Centric):
 ```cypher
 // Ayça hanımın tüm poliçeleri - Document döndüren versiyon
-WITH apoc.text.regreplace(apoc.text.clean("Ayça"), "[^a-z0-9 ]", "") AS queryText
 MATCH (d:Document)
-WHERE apoc.text.regreplace(apoc.text.clean(d.fileName), "[^a-z0-9 ]", "") CONTAINS queryText
-RETURN d AS node;
-
+WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")
+RETURN d AS node
 ``` 
+
 
 ## GERİ DÖNDÜRME FORMATI:
 Query mutlaka şu formatı kullanmalı
@@ -118,7 +113,7 @@ Query mutlaka şu formatı kullanmalı
 RETURN d AS node
 ```
 
-apoc.text.regreplace(apoc.text.clean kodu çok önemli!
+apoc.text.clean kodu çok önemli!
 ## KULLANICI SORUSU:
 {query}
 
