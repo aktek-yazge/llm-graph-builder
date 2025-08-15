@@ -26,6 +26,8 @@ from typing import List, Optional
 from google.oauth2.credentials import Credentials
 import os
 import re
+from urllib.parse import unquote
+from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
 from datetime import datetime, timezone
 import time
@@ -59,10 +61,15 @@ MARKDOWN_CACHE_DIR = os.path.join(os.path.dirname(__file__), "markdown_cache")
 def sanitize_filename(filename):
    """
    Sanitize the user-provided filename to prevent directory traversal and remove unsafe characters.
+   Also normalizes UTF-8 encoding for consistency.
    """
    # Remove path separators and collapse redundant separators
    filename = os.path.basename(filename)
    filename = os.path.normpath(filename)
+   
+   # Normalize UTF-8 encoding for consistency
+   filename = normalize_file_name(filename)
+   
    return filename
 
 def create_markdown_cache_key(filename, file_size):
@@ -162,7 +169,29 @@ class CustomGZipMiddleware:
             compresslevel=self.compresslevel
         )
         await gzip_middleware(scope, receive, send)
+
+class UTF8JSONResponse:
+    """UTF-8 JSON Response Middleware"""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            async def send_wrapper(message):
+                if message["type"] == "http.response.start":
+                    headers = dict(message.get("headers", []))
+                    # Content-Type header'ını UTF-8 ile güncelle
+                    for key, value in headers.items():
+                        if key == b"content-type" and value.startswith(b"application/json"):
+                            headers[key] = b"application/json; charset=utf-8"
+                    message["headers"] = list(headers.items())
+                await send(message)
+            await self.app(scope, receive, send_wrapper)
+        else:
+            await self.app(scope, receive, send)
+
 app = FastAPI()
+app.add_middleware(UTF8JSONResponse)
 app.add_middleware(XContentTypeOptions)
 app.add_middleware(XFrame, Option={'X-Frame-Options': 'DENY'})
 app.add_middleware(CustomGZipMiddleware, minimum_size=1000, compresslevel=5,paths=["/sources_list","/url/scan","/extract","/chat_bot","/chat_bot_stream","/chunk_entities","/get_neighbours","/graph_query","/schema","/populate_graph_schema","/get_unconnected_nodes_list","/get_duplicate_nodes","/fetch_chunktext","/schema_visualization"])
@@ -1548,6 +1577,14 @@ def encode_password(pwd):
 
 @app.get("/update_extract_status/{file_name}")
 async def update_extract_status(request: Request, file_name: str, uri:str=None, userName:str=None, password:str=None, database:str=None):
+    # URL decode the file name and normalize Unicode characters
+    try:
+        file_name = unquote(file_name)
+        file_name = normalize_file_name(file_name)
+        logging.info(f"Decoded and normalized file name: {file_name}")
+    except Exception as e:
+        logging.error(f"Error decoding/normalizing file name: {e}")
+    
     async def generate():
         status = ''
         
@@ -1627,6 +1664,14 @@ async def delete_document_and_entities(uri=Form(None),
 
 @app.get('/document_status/{file_name}')
 async def get_document_status(file_name, url, userName, password, database):
+    # URL decode and normalize the file name
+    try:
+        file_name = unquote(file_name)
+        file_name = normalize_file_name(file_name)
+        logging.info(f"Getting status for normalized file name: {file_name}")
+    except Exception as e:
+        logging.error(f"Error decoding/normalizing file name: {e}")
+    
     decoded_password = decode_password(password)
    
     try:

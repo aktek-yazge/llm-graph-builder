@@ -4,7 +4,10 @@ Unicode Normalization Migration for existing Neo4j Documents
 """
 
 import os
-import unicodedata
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+
+from src.utf8_utils import normalize_unicode_text, normalize_file_name, validate_utf8_text
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
@@ -15,23 +18,6 @@ load_dotenv()
 NEO4J_URI = os.getenv('NEO4J_URI', 'neo4j://localhost:7687')
 NEO4J_USER = os.getenv('NEO4J_USERNAME', 'neo4j')
 NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD', 'qwerty5555')
-
-def normalize_unicode_filename(filename: str) -> str:
-    """
-    Unicode filename normalization for Neo4j consistency
-    Converts decomposed unicode characters to composed form
-    Example: 'Ayç\u0327a' -> 'Ayça' 
-    """
-    if not filename or not isinstance(filename, str):
-        return filename
-    
-    # NFC normalization - Canonical Decomposition followed by Canonical Composition
-    normalized = unicodedata.normalize('NFC', filename)
-    
-    # Additional cleaning
-    normalized = normalized.strip()
-    
-    return normalized
 
 def migrate_unicode_document_names():
     """Mevcut database'deki document fileName'lerini Unicode normalize et"""
@@ -65,7 +51,7 @@ def migrate_unicode_document_names():
         
         for doc in document_list:
             original = doc['originalFileName']
-            normalized = normalize_unicode_filename(original)
+            normalized = normalize_file_name(original)  # Yeni utility fonksiyonunu kullan
             
             if original != normalized:
                 needs_normalization.append({
