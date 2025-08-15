@@ -10,6 +10,7 @@ import chardet
 from langchain_core.document_loaders import BaseLoader
 from docling_core.types.doc import DocItemLabel
 from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import csv
 import io
 from pathlib import Path
@@ -290,13 +291,21 @@ def get_documents_from_file_by_path(file_path, file_name):
     if not file_path.exists():
         logging.info(f"File {file_name} does not exist")
         raise Exception(f"File {file_name} does not exist")
+    
+    # File name'i normalize et
+    file_name = normalize_file_name(file_name)
     logging.info(f"file {file_name} processing")
+    
     try:
         loader, encoding_flag = load_document_content(file_path)
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
             loaded_docs = loader.load()
             content = loaded_docs[0].page_content
+            
+            # UTF-8 ve Unicode normalization
+            content = normalize_unicode_text(content)
+            
             txt = markdown_to_text_with_csv_tables(content, delimiter=",")
             # Eğer sadece bir Document ve içinde [PAGE BREAK] varsa split et
             if (

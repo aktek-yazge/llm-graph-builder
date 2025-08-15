@@ -29,6 +29,7 @@ from src.shared.common_fn import *
 from src.make_relationships import *
 from src.document_sources.web_pages import *
 from src.graph_query import get_graphDB_driver
+from src.utf8_utils import normalize_unicode_text, normalize_file_name, ensure_utf8_encoding
 import re
 from langchain_community.document_loaders import WikipediaLoader, WebBaseLoader
 import warnings
@@ -1152,9 +1153,17 @@ def get_chunkId_chunkDoc_list(
 ):
     if not retry_condition:
         logging.info("Break down file into chunks")
+        
+        # File name'i normalize et
+        file_name = normalize_file_name(file_name)
+        
         bad_chars = ['"', "\n", "'"]
         for i in range(0, len(pages)):
             text = pages[i].page_content
+            
+            # UTF-8 ve Unicode normalization
+            text = normalize_unicode_text(text)
+            
             for j in bad_chars:
                 if j == "\n":
                     text = text.replace(j, " ")

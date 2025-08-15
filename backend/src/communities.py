@@ -366,7 +366,9 @@ def create_community_embeddings(gds):
             batch_rows = rows[i:i+batch_size]            
             for row in batch_rows:
                 try:
-                    row['embedding'] = embeddings.embed_query(row['text'])
+                    from src.utf8_utils import normalize_unicode_text
+                    normalized_text = normalize_unicode_text(row['text'])
+                    row['embedding'] = embeddings.embed_query(normalized_text)
                 except Exception as e:
                     logging.error(f"Failed to embed text for community ID {row['communityId']}: {e}")
                     row['embedding'] = None

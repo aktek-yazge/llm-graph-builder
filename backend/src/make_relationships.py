@@ -2,6 +2,7 @@ from langchain_neo4j import Neo4jGraph
 from langchain.docstore.document import Document
 from src.shared.common_fn import load_embedding_model,execute_graph_query
 from src.shared.common_fn import load_embedding_model,execute_graph_query
+from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import logging
 from typing import List
 import os
@@ -52,12 +53,18 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     logging.info(f"update embedding and vector index for chunks")
     for row in chunkId_chunkDoc_list:
         if isEmbedding.upper() == "TRUE":
-            embeddings_arr = embeddings.embed_query(row['chunk_doc'].page_content)
-                                    
-            data_for_query.append({
-                "chunkId": row['chunk_id'],
-                "embeddings": embeddings_arr
-            })
+            try:
+                # Dosya içeriğini normalize et
+                from src.utf8_utils import normalize_unicode_text
+                normalized_content = normalize_unicode_text(row['chunk_doc'])
+                embeddings_arr = embeddings.embed_query(normalized_content)
+                data_for_query.append({
+                    "chunkId": row['chunk_id'],
+                    "embeddings": embeddings_arr
+                })
+            except Exception as e:
+                logging.error(f"Embedding creation failed for chunk {row['chunk_id']}: {e}")
+                continue
     
     query_to_create_embedding = """
         UNWIND $data AS row
@@ -71,13 +78,20 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     
 def create_relation_between_chunks(graph, file_name, chunks: List[Document])->list:
     logging.info("creating FIRST_CHUNK and NEXT_CHUNK relationships between chunks")
+    
+    # File name'i normalize et
+    file_name = normalize_file_name(file_name)
+    
     current_chunk_id = ""
     lst_chunks_including_hash = []
     batch_data = []
     relationships = []
     offset=0
     for i, chunk in enumerate(chunks):
-        page_content_sha1 = hashlib.sha1(chunk.page_content.encode())
+        # UTF-8 ve Unicode normalization for consistent hashing
+        content = normalize_unicode_text(chunk.page_content)
+        
+        page_content_sha1 = hashlib.sha1(content.encode('utf-8'))
         previous_chunk_id = current_chunk_id
         current_chunk_id = page_content_sha1.hexdigest()
         position = i + 1 
@@ -89,7 +103,7 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
             firstChunk = False  
         metadata = {"position": position,"length": len(chunk.page_content), "content_offset":offset}
         chunk_document = Document(
-            page_content=chunk.page_content, metadata=metadata
+            page_content=content, metadata=metadata  # Normalized content kullan
         )
         
         chunk_data = {
@@ -318,7 +332,9 @@ def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
         
         # Create embeddings for the new entity nodes
         for entity in entities:
-            embedding = EMBEDDING_FUNCTION.embed_query(entity["id"])
+            from src.utf8_utils import normalize_unicode_text
+            normalized_entity_id = normalize_unicode_text(entity["id"])
+            embedding = EMBEDDING_FUNCTION.embed_query(normalized_entity_id)
             embedding_query = """
             MATCH (e:__Entity__ {id: $id})
             SET e.embedding = $embedding

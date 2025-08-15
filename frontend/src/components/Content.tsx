@@ -53,6 +53,7 @@ import { ChevronUpIconOutline, ChevronDownIconOutline } from '@neo4j-ndl/react/i
 import { ThemeWrapperContext } from '../context/ThemeWrapper';
 import { useAuth0 } from '@auth0/auth0-react';
 import React from 'react';
+import { normalizeFileName } from '../utils/utf8';
 
 const ConfirmationDialog = lazy(() => import('./Popups/LargeFilePopUp/ConfirmationDialog'));
 
@@ -283,7 +284,7 @@ const Content: React.FC<ContentProps> = ({
         }
         setFilesData((prevfiles) => {
           return prevfiles.map((curfile) => {
-            if (curfile.name == apiResponse?.data?.fileName) {
+            if (normalizeFileName(curfile.name) === normalizeFileName(apiResponse?.data?.fileName)) {
               const apiRes = apiResponse?.data;
               return {
                 ...curfile,
@@ -316,7 +317,7 @@ const Content: React.FC<ContentProps> = ({
             showErrorToast(message);
             setFilesData((prevfiles) =>
               prevfiles.map((curfile) => {
-                if (curfile.name == fileName) {
+                if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
                   return { ...curfile, status: 'Failed', errorMessage };
                 }
                 return curfile;

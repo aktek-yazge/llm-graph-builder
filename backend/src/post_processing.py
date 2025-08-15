@@ -186,9 +186,11 @@ def fetch_entities_for_embedding(graph):
 def update_embeddings(rows, graph):
     embedding_model = os.getenv('EMBEDDING_MODEL')
     embeddings, dimension = load_embedding_model(embedding_model)
+    from src.utf8_utils import normalize_unicode_text
     logging.info(f"update embedding for entities")
     for row in rows:
-        row['embedding'] = embeddings.embed_query(row['text'])                        
+        normalized_text = normalize_unicode_text(row['text'])
+        row['embedding'] = embeddings.embed_query(normalized_text)                        
     query = """
       UNWIND $rows AS row
       MATCH (e) WHERE elementId(e) = row.elementId

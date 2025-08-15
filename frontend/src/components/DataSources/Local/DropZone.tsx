@@ -9,19 +9,18 @@ import { buttonCaptions, chunkSize } from '../../../utils/Constants';
 import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
 import { IconButtonWithToolTip } from '../../UI/IconButtonToolTip';
 import { uploadAPI } from '../../../utils/FileAPI';
+import { normalizeFileName } from '../../../utils/utf8';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
 
 const DropZone: FunctionComponent = () => {
   const { filesData, setFilesData, model } = useFileContext();
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isClicked, setIsClicked] = useState<boolean>(false);
   const { userCredentials } = useCredentials();
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
-    console.log('Files dropped:', f);
-    setIsClicked(true);
-    setSelectedFiles(f.map((f) => f as File));
     setIsLoading(false);
+    setSelectedFiles(f.map((f) => f as File));
+
     if (f.length) {
       const defaultValues: CustomFileBase = {
         processingTotalTime: 0,
@@ -79,14 +78,12 @@ const DropZone: FunctionComponent = () => {
   useEffect(() => {
     if (selectedFiles.length > 0) {
       selectedFiles.forEach((file) => {
-        console.log('Starting upload for file:', file.name);
         uploadFileInChunks(file);
       });
     }
   }, [selectedFiles]);
 
   const uploadFileInChunks = (file: File) => {
-    console.log('Uploading file in chunks:', file);
     const totalChunks = Math.ceil(file.size / chunkSize);
     const chunkProgressIncrement = 100 / totalChunks;
     let chunkNumber = 1;
@@ -107,7 +104,7 @@ const DropZone: FunctionComponent = () => {
         setIsLoading(true);
         setFilesData((prevfiles) =>
           prevfiles.map((curfile) => {
-            if (curfile.name == file.name) {
+            if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
               return {
                 ...curfile,
                 status: 'Uploading',
@@ -124,7 +121,7 @@ const DropZone: FunctionComponent = () => {
             if (apiResponse.data) {
               setFilesData((prevfiles) =>
                 prevfiles.map((curfile) => {
-                  if (curfile.name == file.name) {
+                  if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                     return {
                       ...curfile,
                       uploadProgress: Math.ceil(chunkNumber * chunkProgressIncrement),
@@ -136,7 +133,7 @@ const DropZone: FunctionComponent = () => {
             }
             setFilesData((prevfiles) =>
               prevfiles.map((curfile) => {
-                if (curfile.name == file.name) {
+                if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                   return {
                     ...curfile,
                     uploadProgress: Math.ceil(chunkNumber * chunkProgressIncrement),
@@ -161,7 +158,7 @@ const DropZone: FunctionComponent = () => {
           }
           setFilesData((prevfiles) =>
             prevfiles.map((curfile) => {
-              if (curfile.name == file.name) {
+              if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                 return {
                   ...curfile,
                   status: 'Upload Failed',
@@ -175,7 +172,7 @@ const DropZone: FunctionComponent = () => {
       } else {
         setFilesData((prevfiles) =>
           prevfiles.map((curfile) => {
-            if (curfile.name == file.name) {
+            if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
               return {
                 ...curfile,
                 status: 'New',
@@ -186,7 +183,6 @@ const DropZone: FunctionComponent = () => {
             return curfile;
           })
         );
-        setIsClicked(false);
         setIsLoading(false);
         showSuccessToast(`${file.name} uploaded successfully`);
       }

@@ -8,6 +8,7 @@ from src.document_sources.gcs_bucket import delete_file_from_gcs
 from src.shared.constants import BUCKET_UPLOAD,NODEREL_COUNT_QUERY_WITH_COMMUNITY, NODEREL_COUNT_QUERY_WITHOUT_COMMUNITY
 from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
+from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import json
 from dotenv import load_dotenv
 
@@ -60,6 +61,10 @@ class graphDBdataAccess:
             # Eğer string ise, minimal Document node oluştur
             if isinstance(obj_source_node_or_filename, str):
                 file_name = obj_source_node_or_filename
+                
+                # UTF-8 ve Unicode normalization
+                file_name = normalize_file_name(file_name)
+                
                 logging.info(f"Minimal Document node oluşturuluyor: {file_name}")
                 
                 # Dosya bilgilerini file_name'den çıkar
@@ -139,6 +144,10 @@ class graphDBdataAccess:
             
             # sourceNode objesi ise, orijinal işlemi yap
             obj_source_node = obj_source_node_or_filename
+            
+            # UTF-8 ve Unicode normalization for file_name
+            obj_source_node.file_name = normalize_file_name(obj_source_node.file_name)
+            
             job_status = "New"
             logging.info(f"Tam Document node oluşturuluyor: {obj_source_node.file_name}")
             self.graph.query("""MERGE(d:Document {fileName :$fn}) SET d.fileSize = $fs, d.fileType = $ft ,
