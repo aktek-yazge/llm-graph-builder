@@ -2,6 +2,7 @@ import { useFileContext } from '../context/UsersFiles';
 import { eventResponsetypes } from '../types';
 import { batchSize } from '../utils/Constants';
 import { calculateProcessingTime } from '../utils/Utils';
+import { normalizeFileName } from '../utils/utf8';
 
 export default function useServerSideEvent(
   alertHandler: (inMinutes: boolean, minutes: number, filename: string) => void,
@@ -40,7 +41,7 @@ export default function useServerSideEvent(
           processcountmap[fileName] = processed_chunk;
           setFilesData((prevfiles) => {
             return prevfiles.map((curfile) => {
-              if (curfile.name == fileName) {
+              if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
                 return {
                   ...curfile,
                   status: total_chunks === processed_chunk ? 'Completed' : status,
@@ -65,7 +66,7 @@ export default function useServerSideEvent(
     } else if (status === 'Completed') {
       setFilesData((prevfiles) => {
         return prevfiles.map((curfile) => {
-          if (curfile.name == fileName) {
+          if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
             return {
               ...curfile,
               status: status,
@@ -94,7 +95,7 @@ export default function useServerSideEvent(
     } else if (eventSourceRes.status === 'Failed') {
       setFilesData((prevfiles) => {
         return prevfiles.map((curfile) => {
-          if (curfile.name == fileName) {
+          if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
             return {
               ...curfile,
               status: status,

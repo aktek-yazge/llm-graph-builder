@@ -68,6 +68,7 @@ import BreakDownPopOver from './BreakDownPopOver';
 import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
 import { useAuth0 } from '@auth0/auth0-react';
 import React from 'react';
+import { normalizeFileName } from '../utils/utf8';
 
 let onlyfortheFirstRender = true;
 
@@ -723,7 +724,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                   waitingQueue.length && waitingQueue.find((f: CustomFile) => f.name === item.fileName);
                 if (isFileCompleted(waitingFile as CustomFile, item)) {
                   setProcessedCount((prev) => calculateProcessedCount(prev, batchSize));
-                  queue.remove((i) => i.name === item.fileName);
+                  queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(item.fileName));
                 }
                 if (waitingFile && item.status === 'Completed') {
                   setProcessedCount((prev) => {
@@ -732,7 +733,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                     }
                     return prev + 1;
                   });
-                  queue.remove((i) => i.name === item.fileName);
+                  queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(item.fileName));
                 }
                 prefiles.push({
                   name: item?.fileName,
@@ -790,7 +791,6 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         }
         setIsLoading(false);
       } catch (error: any) {
-        console.log(error);
         if (error instanceof Error) {
           showErrorToast(error.message);
         }
@@ -860,7 +860,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           }
           return prev + 1;
         });
-        queue.remove((i) => i.name === fileName);
+        queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(fileName));
       } else {
         let errorobj = { error: res.data.error, message: res.data.message, fileName };
         throw new Error(JSON.stringify(errorobj));
@@ -908,7 +908,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     if (fileName && total_chunks) {
       setFilesData((prevfiles) =>
         prevfiles.map((curfile) => {
-          if (curfile.name == fileName) {
+          if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
             return {
               ...curfile,
               status: status,
@@ -934,7 +934,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         }
         return prev + 1;
       });
-      queue.remove((i) => i.name === fileName);
+      queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(fileName));
     }
   };
 
@@ -957,7 +957,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     if (fileName && total_chunks) {
       setFilesData((prevfiles) =>
         prevfiles.map((curfile) => {
-          if (curfile.name == fileName) {
+          if (normalizeFileName(curfile.name) === normalizeFileName(fileName)) {
             return {
               ...curfile,
               status: status,

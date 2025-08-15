@@ -6,6 +6,7 @@ import { useCredentials } from '../../../context/UserCredentials';
 import { CustomFile, CustomFileBase } from '../../../types';
 import { chunkSize } from '../../../utils/Constants';
 import { uploadAPI } from '../../../utils/FileAPI';
+import { normalizeFileName } from '../../../utils/utf8';
 import { v4 as uuidv4 } from 'uuid';
 import { LoadingSpinner } from '@neo4j-ndl/react';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
@@ -38,7 +39,7 @@ export default function DropZoneForSmallLayouts() {
         setIsLoading(true);
         setFilesData((prevfiles) =>
           prevfiles.map((curfile) => {
-            if (curfile.name == file.name) {
+            if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
               return {
                 ...curfile,
                 status: 'Uploading',
@@ -55,7 +56,7 @@ export default function DropZoneForSmallLayouts() {
             if (apiResponse.data) {
               setFilesData((prevfiles) =>
                 prevfiles.map((curfile) => {
-                  if (curfile.name == file.name) {
+                  if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                     return {
                       ...curfile,
                       uploadprogess: chunkNumber * chunkProgressIncrement,
@@ -67,7 +68,7 @@ export default function DropZoneForSmallLayouts() {
             }
             setFilesData((prevfiles) =>
               prevfiles.map((curfile) => {
-                if (curfile.name == file.name) {
+                if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                   return {
                     ...curfile,
                     uploadprogess: chunkNumber * chunkProgressIncrement,
@@ -92,7 +93,7 @@ export default function DropZoneForSmallLayouts() {
           }
           setFilesData((prevfiles) =>
             prevfiles.map((curfile) => {
-              if (curfile.name == file.name) {
+              if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
                 return {
                   ...curfile,
                   status: 'Upload Failed',
@@ -106,7 +107,7 @@ export default function DropZoneForSmallLayouts() {
       } else {
         setFilesData((prevfiles) =>
           prevfiles.map((curfile) => {
-            if (curfile.name == file.name) {
+            if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
               return {
                 ...curfile,
                 status: 'New',

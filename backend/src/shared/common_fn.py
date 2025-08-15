@@ -62,10 +62,21 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
                  
 def create_graph_database_connection(uri, userName, password, database):
   enable_user_agent = os.environ.get("ENABLE_USER_AGENT", "False").lower() in ("true", "1", "yes")
+  
+  # UTF-8 desteği için driver config
+  driver_config = {
+    'encrypted': False,  # Eğer SSL kullanmıyorsanız
+    'trust': 'TRUST_ALL_CERTIFICATES',  # Geliştirme ortamı için
+    'max_connection_lifetime': 3600,
+    'max_connection_pool_size': 50,
+    'connection_acquisition_timeout': 60
+  }
+  
   if enable_user_agent:
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True,driver_config={'user_agent':os.environ.get('NEO4J_USER_AGENT')})  
+    driver_config['user_agent'] = os.environ.get('NEO4J_USER_AGENT')
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True, driver_config=driver_config)  
   else:
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True)    
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True, driver_config=driver_config)    
   return graph
 
 
