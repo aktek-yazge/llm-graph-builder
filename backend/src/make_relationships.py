@@ -54,9 +54,16 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     for row in chunkId_chunkDoc_list:
         if isEmbedding.upper() == "TRUE":
             try:
+                # Document objesi'nden page_content'i al
+                chunk_doc = row['chunk_doc']
+                if hasattr(chunk_doc, 'page_content'):
+                    content = chunk_doc.page_content
+                else:
+                    content = str(chunk_doc)
+                
                 # Dosya içeriğini normalize et
                 from src.utf8_utils import normalize_unicode_text
-                normalized_content = normalize_unicode_text(row['chunk_doc'])
+                normalized_content = normalize_unicode_text(content)
                 embeddings_arr = embeddings.embed_query(normalized_content)
                 data_for_query.append({
                     "chunkId": row['chunk_id'],

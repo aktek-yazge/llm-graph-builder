@@ -204,6 +204,8 @@ class IntelligentAgent:
 
 ## Kurallar:
 - İlk olarak basit Cypher sorguları dene
+- **ÖNEMLİ**: WHERE contains sorgularında mutlaka apoc.text.clean kullan
+- Örnek: WHERE apoc.text.clean(p.name) CONTAINS apoc.text.clean("değer")
 - Başarısızsa farklı node'lar veya ilişkiler dene
 - Eğer hiç sonuç bulamazsan vector search kullan
 - Her adımda açık düşüncelerini belirt
@@ -212,7 +214,7 @@ class IntelligentAgent:
 
 ## Eylem Formatı:
 Action: cypher_query
-Query: MATCH (n:NodeType) WHERE n.property = "value" RETURN n
+Query: MATCH (n:NodeType) WHERE apoc.text.clean(n.property) CONTAINS apoc.text.clean("value") RETURN n
 
 veya
 
@@ -656,7 +658,7 @@ Answer: Kullanıcıya vereceğin final cevap
 ## Action Türleri:
 ### cypher_query
 - Entity'leri bul, chunk'lara ulaşmak için kullan
-- Örnek: MATCH (p:Person) WHERE p.id CONTAINS "AYÇA" RETURN p
+- Örnek: MATCH (p:Person) WHERE apoc.text.clean(p.id) CONTAINS apoc.text.clean("AYÇA") RETURN p
 
 ### vector_search  
 - Semantic arama yap, doğrudan chunk'lara ulaş
@@ -671,6 +673,8 @@ Answer: Kullanıcıya vereceğin final cevap
 
 ## Kurallar:
 - İlk olarak basit Cypher ile entity bul
+- **ÖNEMLİ**: WHERE contains sorgularında mutlaka apoc.text.clean kullan
+- Örnek: WHERE apoc.text.clean(p.name) CONTAINS apoc.text.clean("Ayça")
 - Entity'lerden chunk'lara ulaş
 - Chunk sayısı arttıkça daha iyi sonuç alırsın
 - Relevance score'lara dikkat et (>0.3 iyi sayılır)
@@ -680,7 +684,7 @@ Answer: Kullanıcıya vereceğin final cevap
 
 ## Eylem Formatı:
 Action: cypher_query
-Query: MATCH (p:Person) WHERE p.id CONTAINS "AYÇA" RETURN p.id
+Query: MATCH (p:Person) WHERE apoc.text.clean(p.id) CONTAINS apoc.text.clean("AYÇA") RETURN p.id
 
 veya
 
@@ -702,7 +706,7 @@ def test_agent():
     
     # Neo4j bağlantısı - server environment'tan al
     graph = Neo4jGraph(
-        url=os.getenv("NEO4J_URI_SERVER", "bolt://3.76.55.209:7687"),
+        url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
         username=os.getenv("NEO4J_USERNAME", "neo4j"),
         password=os.getenv("NEO4J_PASSWORD", "qwerty5555"),
         database=os.getenv("NEO4J_DATABASE", "neo4j")
