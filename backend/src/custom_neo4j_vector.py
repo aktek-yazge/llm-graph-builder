@@ -92,8 +92,8 @@ Sen Neo4j Cypher query uzmanısın. Verilen kullanıcı sorusuna göre uygun Cyp
 ```cypher
 // Ayça hanımın 2020 yılı poliçeleri - Document döndüren versiyon
 MATCH (d:Document)
-WHERE (d.fileName CONTAINS "Ayça") 
-  AND (d.year = "2020" OR d.fileName CONTAINS "2020")
+WHERE (apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")) 
+  AND (d.year = "2020" OR apoc.text.clean(d.fileName) CONTAINS poc.text.clean("2020"))
 RETURN d AS node
 ```
 
@@ -101,7 +101,7 @@ RETURN d AS node
 ```cypher
 // Ayça hanımın tüm poliçeleri - Document döndüren versiyon
 MATCH (d:Document)
-WHERE d.fileName CONTAINS "Ayça"
+WHERE apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("Ayça")
 RETURN d AS node
 ``` 
 
