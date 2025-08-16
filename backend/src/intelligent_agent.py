@@ -382,41 +382,79 @@ Action: final_answer
             return []
     
     def rank_chunks_by_semantic_similarity(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
-        """Chunk'ları semantic similarity'ye göre sırala"""
+        """Chunk'ları semantic similarity'ye göre sırala - Önceden hesaplanmış embedding'leri kullan"""
         try:
             if not chunks:
                 return chunks
             
-            # Query embedding'i al
+            # Query embedding'i al (sadece bir kez)
             query_embedding = self.embedding_model.embed_query(query)
             
+            # Chunk'ların Neo4j'den embedding'lerini al
+            chunk_ids = [chunk.chunk_id for chunk in chunks if chunk.chunk_id]
+            if not chunk_ids:
+                return chunks
+            
+            # Batch olarak embedding'leri çek
+            chunk_ids_str = "', '".join(chunk_ids)
+            embedding_query = f"""
+            MATCH (c:Chunk)
+            WHERE c.chunkId IN ['{chunk_ids_str}']
+            RETURN c.chunkId as chunk_id, c.embedding as embedding
+            """
+            
+            success, embedding_results = self.execute_cypher_query(embedding_query)
+            if not success or not embedding_results:
+                logger.warning("Chunk embedding'leri alınamadı, fallback similarity kullanılıyor")
+                return self._fallback_similarity_ranking(chunks, query)
+            
+            # Embedding'leri chunk'lara eşle
+            embedding_map = {}
+            for result in embedding_results:
+                embedding_map[result['chunk_id']] = result['embedding']
+            
+            # Similarity hesapla
             for chunk in chunks:
-                if chunk.text:
-                    # Chunk text'ini küçük parçalara böl ve her parça için similarity hesapla
-                    split_texts = self.text_splitter.split_text(chunk.text)
-                    chunk.split_texts = split_texts
-                    chunk.split_scores = []
-                    
-                    max_score = 0.0
-                    for split_text in split_texts:
-                        if len(split_text.strip()) > 10:  # Çok kısa metinleri atla
-                            text_embedding = self.embedding_model.embed_query(split_text)
-                            similarity = float(cosine_similarity([query_embedding], [text_embedding])[0][0])
-                            chunk.split_scores.append(similarity)
-                            max_score = max(max_score, similarity)
-                    
-                    chunk.relevance_score = max_score
+                if chunk.chunk_id in embedding_map:
+                    chunk_embedding = embedding_map[chunk.chunk_id]
+                    if chunk_embedding and len(chunk_embedding) == len(query_embedding):
+                        similarity = float(cosine_similarity([query_embedding], [chunk_embedding])[0][0])
+                        chunk.relevance_score = similarity
+                    else:
+                        chunk.relevance_score = 0.0
                 else:
                     chunk.relevance_score = 0.0
             
             # Similarity'ye göre sırala
             chunks.sort(key=lambda x: x.relevance_score, reverse=True)
             
-            logger.info(f"Chunk'lar semantic similarity'ye göre sıralandı. En yüksek score: {chunks[0].relevance_score:.3f}")
+            logger.info(f"Chunk'lar önceden hesaplanmış embedding'lerle sıralandı. En yüksek score: {chunks[0].relevance_score:.3f}")
             return chunks
             
         except Exception as e:
             logger.error(f"Semantic ranking hatası: {e}")
+            return self._fallback_similarity_ranking(chunks, query)
+    
+    def _fallback_similarity_ranking(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
+        """Fallback: Text-based similarity ranking"""
+        try:
+            query_embedding = self.embedding_model.embed_query(query)
+            
+            for chunk in chunks:
+                if chunk.text:
+                    # Sadece chunk text'inin tamamı için embedding al
+                    text_embedding = self.embedding_model.embed_query(chunk.text)
+                    similarity = float(cosine_similarity([query_embedding], [text_embedding])[0][0])
+                    chunk.relevance_score = similarity
+                else:
+                    chunk.relevance_score = 0.0
+            
+            chunks.sort(key=lambda x: x.relevance_score, reverse=True)
+            logger.info(f"Fallback similarity ranking uygulandı. En yüksek score: {chunks[0].relevance_score:.3f}")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Fallback similarity ranking hatası: {e}")
             return chunks
 
     def find_chunks_from_entities(self, entity_ids: List[str], state: AgentState) -> List[ChunkInfo]:
