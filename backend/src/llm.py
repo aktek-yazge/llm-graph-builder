@@ -252,35 +252,42 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
        logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
     
-       # allowedNodes işleme
-       logging.info("=== allowedNodes İŞLEME BAŞLIYOR ===")
-       if allowedNodes:
-           allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
-           logging.info(f"Split edilmiş node sayısı: {len(allowed_nodes)}")
-           logging.info(f"İşlenmiş allowed_nodes (ilk 10): {allowed_nodes[:10]}")
-           logging.info(f"İşlenmiş allowed_nodes (tümü): {allowed_nodes}")
-       else:
-           allowed_nodes = []
-           logging.info("allowedNodes boş, empty list atandı")
+       # allowedNodes işleme - TEMPORARILY DISABLED FOR POLICY EXTRACTION
+       logging.info("=== allowedNodes İŞLEME BAŞLIYOR (DEVRE DIŞI) ===")
+       # if allowedNodes:
+       #     allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
+       #     logging.info(f"Split edilmiş node sayısı: {len(allowed_nodes)}")
+       #     logging.info(f"İşlenmiş allowed_nodes (ilk 10): {allowed_nodes[:10]}")
+       #     logging.info(f"İşlenmiş allowed_nodes (tümü): {allowed_nodes}")
+       # else:
+       #     allowed_nodes = []
+       #     logging.info("allowedNodes boş, empty list atandı")
+       
+       # Policy için özel node türleri kullan
+       allowed_nodes = []  # LLM'e serbest bırak
+       logging.info("Policy extraction için allowedNodes kısıtlaması kaldırıldı")
     
-       # allowedRelationship işleme
-       logging.info("=== allowedRelationship İŞLEME BAŞLIYOR ===")
+       # allowedRelationship işleme - TEMPORARILY DISABLED FOR POLICY EXTRACTION
+       logging.info("=== allowedRelationship İŞLEME BAŞLIYOR (DEVRE DIŞI) ===")
        allowed_relationships = []
-       if allowedRelationship:
-           items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
-           if len(items) % 3 != 0:
-               raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
-           for i in range(0, len(items), 3):
-               source, relation, target = items[i:i + 3]
-               if source not in allowed_nodes or target not in allowed_nodes:
-                   raise LLMGraphBuilderException(
-                       f"Invalid relationship ({source}, {relation}, {target}): "
-                       f"source or target not in allowedNodes"
-                   )
-               allowed_relationships.append((source, relation, target))
-           logging.info(f"Allowed relationships: {allowed_relationships}")
-       else:
-           logging.info("No allowed relationships provided")
+       # if allowedRelationship:
+       #     items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
+       #     if len(items) % 3 != 0:
+       #         raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
+       #     for i in range(0, len(items), 3):
+       #         source, relation, target = items[i:i + 3]
+       #         if source not in allowed_nodes or target not in allowed_nodes:
+       #             raise LLMGraphBuilderException(
+       #                 f"Invalid relationship ({source}, {relation}, {target}): "
+       #                 f"source or target not in allowedNodes"
+       #             )
+       #         allowed_relationships.append((source, relation, target))
+       #     logging.info(f"Allowed relationships: {allowed_relationships}")
+       # else:
+       #     logging.info("No allowed relationships provided")
+       
+       # Policy için relationship kısıtlaması kaldırıldı
+       logging.info("Policy extraction için allowedRelationship kısıtlaması kaldırıldı")
 
        graph_document_list = await get_graph_document_list(
            llm,

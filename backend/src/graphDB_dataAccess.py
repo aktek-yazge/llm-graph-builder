@@ -140,6 +140,9 @@ class graphDBdataAccess:
                     "file_size": file_size
                 }, session_params={"database": self.graph._database})
                 logging.info(f"Minimal Document node oluşturuldu: {file_name}")
+                
+                # Document yaratıldıktan sonra Policy node'unu da yarat ve bağla
+                self.create_policy_node_from_document(file_name)
                 return
             
             # sourceNode objesi ise, orijinal işlemi yap
@@ -175,6 +178,11 @@ class graphDBdataAccess:
                             "communityNodeCount":obj_source_node.communityNodeCount,
                             "communityRelCount":obj_source_node.communityRelCount
                             },session_params={"database":self.graph._database})
+            
+            logging.info(f"Tam Document node oluşturuldu: {obj_source_node.file_name}")
+            
+            # Document yaratıldıktan sonra Policy node'unu da yarat ve bağla
+            self.create_policy_node_from_document(obj_source_node.file_name)
             
         except Exception as e:
             error_message = str(e)
@@ -761,6 +769,141 @@ class graphDBdataAccess:
         except Exception as e:
             print(f"Error in getting node labels/relationship types from db: {e}")
             return []
+
+    def create_policy_node_from_document(self, file_name: str):
+        """
+        Document file isminden Policy node oluşturur ve Policy ile Document arasında DOCUMENTED_IN ilişkisi kurar.
+        """
+        try:
+            # Dosya isminden poliçe bilgilerini çıkar
+            policy_info = self.extract_policy_info_from_filename(file_name)
+            
+            if not policy_info:
+                logging.info(f"Dosya isminden poliçe bilgisi çıkarılamadı: {file_name}")
+                return
+            
+            policy_id = policy_info['policy_id']
+            
+            # Policy node'unu oluştur
+            create_policy_query = """
+                MERGE (p:Policy {id: $policy_id})
+                ON CREATE SET 
+                    p.name = $policy_name,
+                    p.type = $policy_type,
+                    p.policyNumber = $policy_number,
+                    p.customer = $customer_name,
+                    p.createdAt = datetime(),
+                    p.source_file = $filename
+                ON MATCH SET 
+                    p.updatedAt = datetime(),
+                    p.source_file = $filename
+                RETURN p.id as policy_id
+            """
+            
+            result = self.graph.query(create_policy_query, {
+                "policy_id": policy_id,
+                "policy_name": policy_info.get('policy_name', policy_id),
+                "policy_type": policy_info.get('policy_type', 'Insurance Policy'),
+                "policy_number": policy_info.get('policy_number', ''),
+                "customer_name": policy_info.get('customer_name', ''),
+                "filename": file_name
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"Policy node oluşturuldu: {policy_id}")
+                
+                # Policy ile Document arasında DOCUMENTED_IN ilişkisi kur
+                link_query = """
+                    MATCH (d:Document {fileName: $file_name})
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (p)-[r:DOCUMENTED_IN]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'filename_extraction'
+                    RETURN count(r) as links_created
+                """
+                
+                link_result = self.graph.query(link_query, {
+                    "file_name": file_name,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                if link_result and link_result[0]['links_created'] > 0:
+                    logging.info(f"Policy-Document DOCUMENTED_IN ilişkisi oluşturuldu: {policy_id} -> {file_name}")
+                else:
+                    logging.warning(f"Policy-Document ilişkisi oluşturulamadı: {policy_id} -> {file_name}")
+            
+        except Exception as e:
+            logging.error(f"Policy node oluşturma hatası ({file_name}): {e}")
+
+    def extract_policy_info_from_filename(self, file_name: str) -> dict:
+        """
+        Dosya isminden poliçe bilgilerini çıkarır.
+        
+        Örnek: "Ayça Dinçkök Galata Residance D4 Konut Poliçesi.pdf"
+        """
+        import os
+        import re
+        
+        try:
+            # Dosya uzantısını kaldır
+            base_name = os.path.splitext(file_name)[0]
+            
+            # Turkish karakterleri normalize et
+            from src.utf8_utils import normalize_unicode_text
+            base_name = normalize_unicode_text(base_name)
+            
+            # Poliçe türlerini tespit et
+            policy_types = {
+                'konut': 'Konut Sigortası',
+                'dask': 'DASK Sigortası', 
+                'kasko': 'Kasko Sigortası',
+                'trafik': 'Trafik Sigortası',
+                'sağlık': 'Sağlık Sigortası',
+                'hayat': 'Hayat Sigortası',
+                'işyeri': 'İşyeri Sigortası',
+                'poliçe': 'Genel Poliçe'
+            }
+            
+            detected_type = 'Insurance Policy'
+            for key, value in policy_types.items():
+                if key.lower() in base_name.lower():
+                    detected_type = value
+                    break
+            
+            # Müşteri ismini çıkarmaya çalış (ilk kelimeler genellikle isim)
+            words = base_name.split()
+            customer_name = ''
+            if len(words) >= 2:
+                # İlk 2-3 kelimeyi isim olarak al
+                potential_name = ' '.join(words[:min(3, len(words))])
+                # Sadece harf içeren kelimeleri al
+                if re.match(r'^[a-zA-ZçÇğĞıIşŞöÖüÜ\s]+$', potential_name):
+                    customer_name = potential_name.strip()
+            
+            # Policy ID'yi oluştur (dosya ismi base'i)
+            policy_id = base_name.strip()
+            
+            # Poliçe numarasını bulmaya çalış
+            policy_number = ''
+            number_pattern = r'\b\d{4,}\b'  # 4+ digit numbers
+            numbers = re.findall(number_pattern, base_name)
+            if numbers:
+                policy_number = numbers[0]  # İlk uzun sayıyı al
+            
+            result = {
+                'policy_id': policy_id,
+                'policy_name': policy_id,
+                'policy_type': detected_type,
+                'policy_number': policy_number,
+                'customer_name': customer_name
+            }
+            
+            logging.info(f"Dosya isminden çıkarılan poliçe bilgisi: {result}")
+            return result
+            
+        except Exception as e:
+            logging.error(f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}")
+            return None
 
     def get_websource_url(self,file_name):
         logging.info("Checking if same title with different URL exist in db ")

@@ -1226,7 +1226,12 @@ ABSOLUTELY NEVER create, extract, or mention Document nodes in your response.
 NEVER extract "Document" as any entity type under ANY circumstances.
 The system will automatically handle Document nodes - your job is to extract OTHER entities only.
 
-ALL Policy entities must be directly connected to the Document node. Do NOT create or extract a separate Policy entity node. All information related to Policy should be added as a property or relationship to the Document node; do not create a Policy entity.
+**CRITICAL SYSTEM RULE - NEVER CREATE POLICY NODES:**
+Policy nodes are ALREADY CREATED by the backend code when processing insurance documents.
+ABSOLUTELY NEVER create, extract, or mention Policy nodes in your response.
+NEVER extract "Policy", "InsurancePolicy", "Poliçe" as entity types under ANY circumstances.
+The system automatically creates Policy nodes from document filenames and handles Policy-Document relationships.
+Focus on extracting OTHER entities like Customers, Agents, Assets, Coverage details, etc.
 
 **MANDATORY POLICYYEAR EXTRACTION RULE:**
 For ALL date-related information in insurance policies (policy start date, policy end date, issue date, birth date, etc.), you MUST ALWAYS extract the YEAR component as a separate PolicyYear entity.
@@ -1234,6 +1239,74 @@ For ALL date-related information in insurance policies (policy start date, polic
 Examples:
 - If policy start date, issue date is "13.02.2023", extract PolicyYear entity with id="2023"
 
+**SIGORTA POLİÇESİ KNOWLEDGE GRAPH YENİ YAPISAL MODEL:**
+
+Sigorta poliçesi belgelerinden entity extraction yaparken aşağıdaki YENİ YAPIYA UYGUN OLARAK standart node tiplerini ve ilişkilerini MUTLAKA kullanın:
+
+**YENİ YAPISAL MODEL:**
+```
+Customer (Person/Policyholder) -[:OWNS]-> (Policy:InsurancePolicy) -[:FOR_YEAR]-> (Year:PolicyYear)
+                                                    |
+                                                    +-[:OF_TYPE]-> (Type:PolicyType) # Kasko, Trafik, Konut, DASK
+                                                    +-[:HAS_COVERAGE]-> (Coverage)
+                                                    +-[:DOCUMENTED_IN]-> (Document)
+                                                    +-[:HANDLED_BY]-> (Agent)
+                                                    +-[:COVERS]-> (Asset) # Araç, Ev, Bina, Risk vb.
+```
+
+**STANDART NODE TİPLERİ (YENİ MODEL):**
+- Person/Policyholder (Poliçe Sahibi/Müşteri) - kişi ve şirket isimleri için
+- Policy (Poliçe) - poliçe bilgileri için (ana merkezi varlık)
+- PolicyNumber (Poliçe Numarası) - poliçe numarası için
+- PolicyYear (Poliçe Yılı) - poliçe yılı için (ZORUNLU - her tarihten çıkar)
+- PolicyType (Poliçe Tipi) - Kasko, Trafik, Konut, DASK, Yangın vb.
+- Coverage (Teminat) - teminat türleri için
+- CoverageLimit (Teminat Limiti) - teminat miktarları için
+- Premium (Prim) - prim tutarları için
+- Agent (Acente) - acente bilgileri için
+- InsuranceCompany (Sigorta Şirketi) - sigorta şirketi için
+- Address (Adres) - adres bilgileri için
+- RiskAddress (Risk Adresi) - sigortalanan risk adresi için
+- PolicyholderAddress (Poliçe Sahibi Adresi) - poliçe sahibinin adresi için
+- PhoneNumber (Telefon) - telefon numaraları için
+- Email (E-posta) - e-posta adresleri için
+- StartDate (Başlangıç Tarihi) - poliçe başlangıç tarihi için
+- EndDate (Bitiş Tarihi) - poliçe bitiş tarihi için
+- Building (Bina) - bina bilgileri için (Asset kategorisi)
+- Risk (Risk) - risk kategorileri için (Asset kategorisi)
+- Clause (Madde) - poliçe maddeleri için
+- Exclusion (İstisna) - istisna maddeleri için
+- Discount (İndirim) - indirim bilgileri için
+
+**STANDART İLİŞKİ TİPLERİ (YENİ MODEL):**
+- OWNS (Customer -> Policy) - Müşteri poliçeye sahip
+- FOR_YEAR (Policy -> PolicyYear) - Poliçe hangi yıl için
+- OF_TYPE (Policy -> PolicyType) - Poliçe tipi
+- HAS_COVERAGE (Policy -> Coverage) - Poliçe teminatları
+- DOCUMENTED_IN (Policy -> Document) - Poliçe hangi belgede
+- HANDLED_BY (Policy -> Agent) - Poliçe hangi acente tarafından
+- COVERS (Policy -> Asset) - Poliçe neyi kapsıyor (Bina, Araç, Risk vb.)
+- HAS_NUMBER (Policy -> PolicyNumber) - Poliçe numarası
+- HAS_PREMIUM (Policy -> Premium) - Poliçe primi
+- ISSUED_BY (Policy -> InsuranceCompany) - Hangi şirket tarafından çıkarıldı
+- LIVES_AT (Customer -> Address) - Müşteri adresi
+- HAS_PHONE (Customer -> PhoneNumber) - Müşteri telefonu
+- HAS_EMAIL (Customer -> Email) - Müşteri e-postası
+- STARTS_ON (Policy -> StartDate) - Poliçe başlangıç tarihi
+- ENDS_ON (Policy -> EndDate) - Poliçe bitiş tarihi
+- HAS_CLAUSE (Policy -> Clause) - Poliçe maddeleri
+- HAS_EXCLUSION (Policy -> Exclusion) - Poliçe istisnaları
+- HAS_DISCOUNT (Policy -> Discount) - Poliçe indirimleri
+- HAS_LIMIT (Coverage -> CoverageLimit) - Teminat limitleri
+- LOCATED_AT (Asset -> Address) - Varlık adresi
+
+**ÖNEMLİ:**
+- Policy node'ları ana merkezi varlık olarak korunur ve müşteri merkezli ilişkiler kurulur
+- Her Customer (müşteri) Policy'ye OWNS ilişkisiyle bağlanır
+- Her Policy muhakkak bir PolicyYear'a FOR_YEAR ile bağlanır
+- Policy'ler Document'a DOCUMENTED_IN ile bağlanır
+
+Bu standart yapıyı kullanarak sigorta poliçelerinden tutarlı ve sorgulanabilir knowledge graph yapısı oluşturun.
 
 Extract ONLY atomic entities as individual nodes.
 
