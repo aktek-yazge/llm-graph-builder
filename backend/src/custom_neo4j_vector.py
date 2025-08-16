@@ -83,11 +83,16 @@ class CustomNeo4jVector(Neo4jVector):
             node_labels, relationship_types = self.get_schema_info()
             
             cypher_prompt = f"""
-Sen Neo4j Cypher query uzmanısın. Verilen kullanıcı sorusuna göre uygun Cypher query'si yazacaksın.
-
+erilen kullanıcı sorusuna göre aşağıdaki talimatlara göre Cypher query'si yaz.
+WHERE içindeki alanlara ekstra ekleme yapma!!!!!
 
 ## QUERY ÖRNEKLERİ:
+### Sadece İsim Bilgisi Araması (Document-Centric):
+Soru 1: Ayça hanımın 2020 yılında sigorta poliçeleri neler
+Soru 2: Ayça hanımın 2020 yılında D4 poliçesinin detayları neler
+Soru 2: Ayça hanımın 2020 yılında D4 poliçesinin taksitleri neler
 
+Aşağıda gördüğün gibi sadece isim sorgusu var
 ### İsim ve Yıl Araması Birlikte (Document-Centric):
 ```cypher
 // Ayça hanımın 2020 yılı poliçeleri - Document döndüren versiyon
@@ -98,6 +103,11 @@ RETURN d AS node
 ```
 
 ### Sadece İsim Bilgisi Araması (Document-Centric):
+Soru 1: Ayça hanımın sigorta poliçeleri neler
+Soru 2: Ayça hanımın D4 poliçesinin detayları neler
+Soru 2: Ayça hanımın D4 poliçesinin taksitleri neler
+
+Aşağıda gördüğün gibi sadece isim sorgusu var
 ```cypher
 // Ayça hanımın tüm poliçeleri - Document döndüren versiyon
 MATCH (d:Document)
@@ -107,6 +117,7 @@ RETURN d AS node
 
 
 ## GERİ DÖNDÜRME FORMATI:
+RETURN count(d) AS node değil RETURN d AS node buna çok dikkat et
 Query mutlaka şu formatı kullanmalı
 ```cypher
 // Query logic here...
