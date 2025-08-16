@@ -91,13 +91,14 @@ class AgentState:
 class IntelligentAgent:
     """
     ReAct pattern kullanan Neo4j intelligent agent
-    Chunk-based arama ve text splitting ile geliştirilmiş
+    LLM kendi arama stratejisini belirler ve iteratif olarak doğru veriye ulaşır
     """
     
     def __init__(self, graph: Neo4jGraph, model_name: str = "openai_gpt_4o"):
         self.graph = graph
         self.llm, _ = get_llm(model_name)
         self.embedding_model, _ = load_embedding_model("openai")
+        self.max_iterations = 10  # Derinlemesine araştırma için
         self.max_iterations = 8
         self.schema_cache = None
         
@@ -192,41 +193,51 @@ class IntelligentAgent:
         for rel in schema['sample_relationships']:
             schema_text += f"- ({rel['from_label']})-[:{rel['rel_type']}]->({rel['to_label']})\n"
         
-        system_prompt = f"""Sen Neo4j veritabanında bilgi arayan akıllı bir agent'sın. ReAct pattern kullanarak çalışıyorsun.
+        system_prompt = f"""Sen bir Neo4j veritabanında bilgi arayan AKILLI BİLGİ MADENCİSİ'sin.
 
 {schema_text}
 
-## Çalışma Şeklin:
-1. **Observation**: Mevcut durumu gözlemle
-2. **Thought**: Ne yapman gerektiğini düşün
-3. **Action**: Bir eylem belirle (cypher_query, vector_search, veya final_answer)
-4. **Result**: Eylemin sonucunu değerlendir
+## ANA STRATEJI: ENTITY-DRIVEN SEARCH
 
-## Kurallar:
-- İlk olarak basit Cypher sorguları dene
-- **ÖNEMLİ**: WHERE contains sorgularında mutlaka apoc.text.clean kullan
-- Örnek: WHERE apoc.text.clean(p.name) CONTAINS apoc.text.clean("değer")
-- Başarısızsa farklı node'lar veya ilişkiler dene
-- Eğer hiç sonuç bulamazsan vector search kullan
-- Her adımda açık düşüncelerini belirt
-- Türkçe karakterleri normalize et
-- Maksimum 5 iterasyon
+### İLK ADIM: Entity Search (ZORUNLU)
+Kullanıcı sorusundan anahtar kelime çıkar ve:
+Action: entity_search
+[anahtar kelime]
 
-## Eylem Formatı:
+ÖRNEK:
+- "Ayça hanımın poliçeleri" → Action: entity_search, Ayça
+- "2020 yılı poliçeleri" → Action: entity_search, 2020
+- "DASK sigortası" → Action: entity_search, DASK
+
+### BACKUP STRATEJİLER:
+Sadece entity_search boş sonuç verirse:
+
+**Sayısal Sorgular:**
 Action: cypher_query
-Query: MATCH (n:NodeType) WHERE apoc.text.clean(n.property) CONTAINS apoc.text.clean("value") RETURN n
+MATCH (p:Policy) RETURN count(*)
 
-veya
-
+**Vector Search:**
 Action: vector_search
-Query: semantic arama metni
+[semantic arama metni]
+
+## FORMAT (ZORUNLU):
+Observation: [durum]
+Thought: [düşünce]
+Action: entity_search
+[tek anahtar kelime]
 
 veya
 
 Action: final_answer
-Answer: Kullanıcıya vereceğin final cevap
+[cevap]
 
-Şimdi kullanıcının sorusunu analiz et ve adım adım çöz."""
+## KURALLAR:
+1. İLK ACTION MUTLAKA entity_search OLMALI
+2. Tek seferde tek anahtar kelime kullan
+3. Boş sonuç alırsan farklı kelime dene
+4. Maksimum 5 iterasyon
+
+Şimdi MUTLAKA entity_search ile başla!"""
 
         return system_prompt
     
@@ -241,6 +252,173 @@ Answer: Kullanıcıya vereceğin final cevap
             logger.error(f"Cypher sorgu hatası: {e}")
             return False, str(e)
     
+    def entity_driven_search(self, search_term: str, state: AgentState) -> List[ChunkInfo]:
+        """
+        Entity-driven arama stratejisi:
+        1. __Entity__ node'larında arama yap
+        2. Bulunan entity'lerden chunk'lara ulaş
+        3. Chunk relationship'lerini takip et
+        4. Embedding ile semantic matching yap
+        """
+        logger.info(f"Entity-driven search başlatılıyor: {search_term}")
+        
+        # Adım 1: Entity'lerde arama
+        entities = self.search_entities(search_term)
+        if not entities:
+            logger.info("Hiç entity bulunamadı")
+            return []
+        
+        logger.info(f"{len(entities)} entity bulundu")
+        
+        # Adım 2: Entity'lerden chunk'lara ulaş
+        primary_chunks = self.find_chunks_from_entities([e['id'] for e in entities], state)
+        
+        # Adım 3: İlişkili chunk'ları da bul
+        all_chunks = primary_chunks.copy()
+        for chunk in primary_chunks:
+            related_chunks = self.find_related_chunks(chunk.chunk_id, state)
+            all_chunks.extend(related_chunks)
+        
+        # Duplikasyon temizle
+        unique_chunks = {}
+        for chunk in all_chunks:
+            if chunk.chunk_id not in unique_chunks:
+                unique_chunks[chunk.chunk_id] = chunk
+        
+        chunks = list(unique_chunks.values())
+        logger.info(f"Toplam {len(chunks)} unique chunk bulundu")
+        
+        # Adım 4: Embedding ile semantic matching
+        if chunks:
+            chunks = self.rank_chunks_by_semantic_similarity(chunks, search_term)
+        
+        return chunks[:state.max_chunks_limit]
+    
+    def search_entities(self, search_term: str) -> List[Dict[str, Any]]:
+        """__Entity__ node'larında arama yap"""
+        try:
+            # Farklı arama stratejileri dene
+            strategies = [
+                # CONTAINS arama
+                f"""
+                MATCH (e:__Entity__)
+                WHERE apoc.text.clean(e.id) CONTAINS apoc.text.clean('{search_term}')
+                RETURN e.id as id, e.entity_type as type, labels(e) as labels
+                LIMIT 20
+                """,
+                # Daha geniş arama
+                f"""
+                MATCH (e:__Entity__)
+                WHERE apoc.text.clean(e.id) =~ '(?i).*{search_term}.*'
+                RETURN e.id as id, e.entity_type as type, labels(e) as labels
+                LIMIT 20
+                """,
+                # Tüm property'lerde arama
+                f"""
+                MATCH (e:__Entity__)
+                WHERE any(prop IN keys(e) WHERE apoc.text.clean(toString(e[prop])) CONTAINS apoc.text.clean('{search_term}'))
+                RETURN e.id as id, e.entity_type as type, labels(e) as labels
+                LIMIT 20
+                """
+            ]
+            
+            all_entities = []
+            for strategy in strategies:
+                success, result = self.execute_cypher_query(strategy)
+                if success and result:
+                    all_entities.extend(result)
+                    if len(all_entities) >= 10:  # Yeterince entity bulundu
+                        break
+            
+            # Duplikasyon temizle
+            unique_entities = {}
+            for entity in all_entities:
+                entity_id = entity.get('id')
+                if entity_id and entity_id not in unique_entities:
+                    unique_entities[entity_id] = entity
+            
+            return list(unique_entities.values())
+            
+        except Exception as e:
+            logger.error(f"Entity arama hatası: {e}")
+            return []
+    
+    def find_related_chunks(self, chunk_id: str, state: AgentState) -> List[ChunkInfo]:
+        """Bir chunk'ın ilişkili chunk'larını bul"""
+        try:
+            # SIMILAR ilişkileri takip et
+            query = f"""
+            MATCH (c1:Chunk {{chunkId: '{chunk_id}'}})-[:SIMILAR]->(c2:Chunk)
+            OPTIONAL MATCH (c2)-[:PART_OF]->(d:Document)
+            RETURN c2.chunkId as chunk_id, c2.text as text, c2.page_number as page_number,
+                   d.fileName as document_name
+            UNION
+            MATCH (c1:Chunk {{chunkId: '{chunk_id}'}})<-[:SIMILAR]-(c2:Chunk)
+            OPTIONAL MATCH (c2)-[:PART_OF]->(d:Document)
+            RETURN c2.chunkId as chunk_id, c2.text as text, c2.page_number as page_number,
+                   d.fileName as document_name
+            LIMIT 10
+            """
+            
+            success, result = self.execute_cypher_query(query)
+            if not success or not result:
+                return []
+            
+            chunks = []
+            for row in result:
+                chunk_info = ChunkInfo(
+                    chunk_id=row['chunk_id'] or "",
+                    text=row['text'] or "",
+                    page_number=row['page_number'],
+                    document_name=row['document_name'] or "Unknown"
+                )
+                chunks.append(chunk_info)
+            
+            logger.info(f"Chunk {chunk_id} için {len(chunks)} ilişkili chunk bulundu")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"İlişkili chunk arama hatası: {e}")
+            return []
+    
+    def rank_chunks_by_semantic_similarity(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
+        """Chunk'ları semantic similarity'ye göre sırala"""
+        try:
+            if not chunks:
+                return chunks
+            
+            # Query embedding'i al
+            query_embedding = self.embedding_model.embed_query(query)
+            
+            for chunk in chunks:
+                if chunk.text:
+                    # Chunk text'ini küçük parçalara böl ve her parça için similarity hesapla
+                    split_texts = self.text_splitter.split_text(chunk.text)
+                    chunk.split_texts = split_texts
+                    chunk.split_scores = []
+                    
+                    max_score = 0.0
+                    for split_text in split_texts:
+                        if len(split_text.strip()) > 10:  # Çok kısa metinleri atla
+                            text_embedding = self.embedding_model.embed_query(split_text)
+                            similarity = float(cosine_similarity([query_embedding], [text_embedding])[0][0])
+                            chunk.split_scores.append(similarity)
+                            max_score = max(max_score, similarity)
+                    
+                    chunk.relevance_score = max_score
+                else:
+                    chunk.relevance_score = 0.0
+            
+            # Similarity'ye göre sırala
+            chunks.sort(key=lambda x: x.relevance_score, reverse=True)
+            
+            logger.info(f"Chunk'lar semantic similarity'ye göre sıralandı. En yüksek score: {chunks[0].relevance_score:.3f}")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Semantic ranking hatası: {e}")
+            return chunks
+
     def find_chunks_from_entities(self, entity_ids: List[str], state: AgentState) -> List[ChunkInfo]:
         """Entity'lerden chunk'lara ulaş"""
         try:
@@ -329,11 +507,25 @@ Answer: Kullanıcıya vereceğin final cevap
             return []
     
     def calculate_text_relevance(self, chunk_info: ChunkInfo, question: str) -> ChunkInfo:
-        """Chunk text'ini böl ve soru ile ilişkililik hesapla - optimize edilmiş"""
+        """Chunk text'ini böl ve soru ile ilişkililik hesapla - Neo4j chunk embedding kullan"""
         try:
             if not chunk_info.text:
                 return chunk_info
                 
+            # Chunk'ın Neo4j'deki embedding'ini al
+            chunk_embedding_query = """
+            MATCH (c:Chunk {id: $chunk_id})
+            RETURN c.embedding as embedding
+            """
+            
+            result = self.graph.query(chunk_embedding_query, {'chunk_id': chunk_info.chunk_id})
+            if not result or not result[0].get('embedding'):
+                logger.warning(f"Chunk {chunk_info.chunk_id} için embedding bulunamadı")
+                chunk_info.relevance_score = 0.0
+                return chunk_info
+            
+            chunk_embedding = result[0]['embedding']
+            
             # Text'i böl
             split_texts = self.text_splitter.split_text(chunk_info.text)
             
@@ -344,9 +536,13 @@ Answer: Kullanıcıya vereceğin final cevap
                 chunk_info.relevance_score = 0.0
                 return chunk_info
             
-            # Batch embedding - tek seferde tüm split'ler için
+            # Soru için embedding oluştur
             question_embedding = self.embedding_model.embed_query(normalize_unicode_text(question))
             
+            # Chunk'ın mevcut embedding'i ile soru embedding'ini karşılaştır
+            chunk_similarity = cosine_similarity([question_embedding], [chunk_embedding])[0][0]
+            
+            # Split'ler için ayrı ayrı embedding oluştur ve en iyisini bul
             if len(valid_splits) > 1:
                 split_embeddings = self.embedding_model.embed_documents([
                     normalize_unicode_text(text) for _, text in valid_splits
@@ -371,9 +567,12 @@ Answer: Kullanıcıya vereceğin final cevap
             # Threshold üzerindeki ilk 3'ü al
             chunk_info.split_texts = [text for text, score in scored_splits[:3] if score > 0.1]
             chunk_info.split_scores = [score for text, score in scored_splits[:3] if score > 0.1]
-            chunk_info.relevance_score = max(scores) if scores else 0.0
             
-            logger.debug(f"Chunk {chunk_info.chunk_id} relevance: {chunk_info.relevance_score:.3f}")
+            # Chunk embedding similarity ile split similarity'lerini birleştir
+            max_split_score = max(scores) if scores else 0.0
+            chunk_info.relevance_score = max(chunk_similarity, max_split_score)
+            
+            logger.debug(f"Chunk {chunk_info.chunk_id} relevance: {chunk_info.relevance_score:.3f} (chunk: {chunk_similarity:.3f}, max_split: {max_split_score:.3f})")
             return chunk_info
             
         except Exception as e:
@@ -382,12 +581,13 @@ Answer: Kullanıcıya vereceğin final cevap
             return chunk_info
     
     def vector_search_with_chunks(self, query_text: str, state: AgentState, limit: int = 10) -> List[ChunkInfo]:
-        """Vector search yap ve chunk bilgilerini döndür - optimize edilmiş"""
+        """Vector search yap ve chunk bilgilerini döndür - Neo4j chunk embedding kullan"""
         try:
             logger.info(f"Vector search: {query_text}")
             normalized_query = normalize_unicode_text(query_text)
             query_embedding = self.embedding_model.embed_query(normalized_query)
             
+            # Neo4j vector index'ini kullanarak chunk embedding'leri ile karşılaştır
             vector_query = """
             CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
             YIELD node, score
@@ -396,6 +596,7 @@ Answer: Kullanıcıya vereceğin final cevap
                 node.id as chunk_id,
                 node.text as text, 
                 node.page_number as page_number,
+                node.embedding as chunk_embedding,
                 d.fileName as document_name,
                 d as document_metadata,
                 score
@@ -419,17 +620,14 @@ Answer: Kullanıcıya vereceğin final cevap
                     page_number=row['page_number'],
                     document_name=row['document_name'] or "Unknown",
                     document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {},
-                    relevance_score=float(row['score'])
+                    relevance_score=float(row['score'])  # Neo4j vector search score'unu kullan
                 )
                 chunks.append(chunk_info)
             
-            # Batch text processing - tüm chunk'ları tek seferde işle
-            logger.info(f"Vector search'ten {len(chunks)} chunk alındı, text relevance hesaplanıyor...")
-            for chunk_info in chunks:
-                if chunk_info.text and len(chunk_info.text.strip()) >= 20:
-                    chunk_info = self.calculate_text_relevance(chunk_info, query_text)
+            # Artık text relevance hesaplama yapmıyoruz çünkü Neo4j vector search'ü chunk embedding'leri kullanıyor
+            logger.info(f"Vector search'ten {len(chunks)} chunk alındı (Neo4j chunk embeddings kullanıldı)")
                     
-            # Relevance'a göre sırala ve döndür
+            # Relevance'a göre sırala ve döndür (zaten sıralı ama emin olmak için)
             chunks.sort(key=lambda x: x.relevance_score, reverse=True)
             
             logger.info(f"Vector search sonucu: {len(chunks)} chunk")
@@ -465,6 +663,9 @@ Answer: Kullanıcıya vereceğin final cevap
                 action_content = line.replace('Query:', '').strip()
             elif line.startswith('Answer:'):
                 action_content = line.replace('Answer:', '').strip()
+            elif line.startswith('Content:'):
+                # "Content:" prefix'ini kaldır ve action_content'e ekle
+                action_content = line.replace('Content:', '').strip()
             elif current_section and line:
                 if current_section == 'observation':
                     observation += ' ' + line
@@ -474,7 +675,9 @@ Answer: Kullanıcıya vereceğin final cevap
                     if not action:
                         action = line
                     else:
-                        action_content += ' ' + line
+                        # Eğer line "Content:" ile başlamıyorsa action_content'e ekle
+                        if not line.startswith('Content:'):
+                            action_content += ' ' + line
         
         return observation.strip(), thought.strip(), (action.strip(), action_content.strip())
     
@@ -525,6 +728,8 @@ Answer: Kullanıcıya vereceğin final cevap
                 # Response'u parse et
                 observation, thought, (action, action_content) = self.parse_agent_response(agent_response)
                 
+                logger.info(f"Parse edildi - Action: '{action}', Content: '{action_content[:50]}...'")
+                
                 conversation_history.append(f"Thought: {thought}\nAction: {action}\nContent: {action_content}")
                 
                 # Action'ı uygula
@@ -534,6 +739,17 @@ Answer: Kullanıcıya vereceğin final cevap
                     final_answer = f"{action_content}\n\n### Kaynak Bilgileri:\n{context}"
                     break
                     
+                elif action == "entity_search":
+                    # Yeni entity-driven arama
+                    chunks = self.entity_driven_search(action_content, state)
+                    for chunk in chunks:
+                        state.add_chunk(chunk)
+                    
+                    if chunks:
+                        current_observation = f"Entity-driven search: {len(chunks)} chunk bulundu. En yüksek relevance: {max([c.relevance_score for c in chunks]):.3f}. Toplam chunk: {len(state.discovered_chunks)}"
+                    else:
+                        current_observation = f"'{action_content}' için entity bulunamadı. Farklı anahtar kelime dene."
+                        
                 elif action == "cypher_query":
                     success, result = self.execute_cypher_query(action_content)
                     if success and result:
@@ -582,7 +798,7 @@ Answer: Kullanıcıya vereceğin final cevap
                         current_observation = f"Graph pattern search hatası: {e}"
                         
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, vector_search, graph_pattern_search, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: entity_search, cypher_query, vector_search, graph_pattern_search, final_answer"
                 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -639,64 +855,113 @@ Answer: Kullanıcıya vereceğin final cevap
         for rel in schema['sample_relationships']:
             schema_text += f"- ({rel['from_label']})-[:{rel['rel_type']}]->({rel['to_label']})\n"
         
-        system_prompt = f"""Sen Neo4j veritabanında bilgi arayan akıllı bir agent'sın. ReAct pattern kullanarak çalışıyorsun.
+        system_prompt = f"""Sen bir Neo4j veritabanında çalışan AKILLI BİLGİ ARAŞTIRMACISI ve VERİ MADENCİSİ'sin.
+Kullanıcı sorusuna göre mevcut schema'yı analiz ederek en uygun entity'leri bulur, chunk'lara ulaşır ve doğru bilgiyi çıkarırsın.
 
 {schema_text}
 
-## ÖNEMLİ: Chunk-Based Arama Sistemi
-- Her sorgu entity'lere ulaşır, entity'ler chunk'lara bağlıdır (HAS_ENTITY ilişkisi)
-- Chunk'lar document'lara bağlıdır (PART_OF ilişkisi)
-- Her chunk'ın page_number bilgisi vardır
-- Chunk text'leri küçük parçalara bölünür ve soru ile ilişkililik hesaplanır
+## ZORUNLU BAŞLAMA KURALI:
+**HER SORU İÇİN İLK AKSİYON MUTLAKA 'entity_search' OLMALIDIR!**
+**BAŞKA HİÇBİR AKSİYON KULLANMADAN ÖNCE entity_search YAPMAK ZORUNLUDUR!**
 
-## Çalışma Şeklin:
-1. **Observation**: Mevcut durumu gözlemle (kaç chunk bulundu, relevance skorları)
-2. **Thought**: Ne yapman gerektiğini düşün (hangi entity'leri ara, hangi pattern'i kullan)
-3. **Action**: Bir eylem belirle
-4. **Result**: Eylemin sonucunu değerlendir
+## BİLGİ ARAŞTIRMA SÜRECİ:
 
-## Action Türleri:
+### ADIM 1: ZORUNLU ENTITY SEARCH
+- MUTLAKA ilk adımda entity_search yap
+- Sorudaki anahtar kelimeleri kullan
+- Kişi isimleri, şirket isimleri, ürün isimleri ile başla
+- Örnek: Soru "Ayça hanımın..." ise: entity_search → "Ayça"
+
+### ADIM 2: ENTITY KEŞFİ STRATEJİSİ
+- Schema'daki node türlerini sırayla dene:
+  1. Anahtar kavramları içeren entity'leri ara
+  2. Farklı node türlerinde benzer terimleri ara
+  3. İlişkili entity'leri keşfet (relationship'ler boyunca)
+- Her denemeyi değerlendir: "Bu entity'ler soruyla ilgili mi?"
+
+### ADIM 3: CHUNK KEŞFİ VE EMBEDDİNG ANALİZİ  
+- Bulunan entity'lerden chunk'lara ulaş
+- Chunk embedding'lerini soru embedding'i ile karşılaştır
+- Yüksek relevance score'lu chunk'ları öncelikle analiz et
+- Chunk text'lerini detaylı incele
+
+### ADIM 4: BİLGİ ÇIKARMA VE DOĞRULAMa
+- Chunk'lardaki text'lerden soruyla ilgili bilgileri çıkar
+- Sayısal veri arıyorsan: rakamları, miktarları bul
+- İsim arıyorsan: kişi, yer, kurum isimlerini bul  
+- Tarih arıyorsan: zaman bilgilerini bul
+- Bulunan bilgiyi doğrula: "Bu bilgi soruyu tam karşılıyor mu?"
+
+### ADIM 5: İTERATİF GELİŞTİRME
+- Yeterli bilgi yoksa: farklı node türlerini dene
+- Eksik bilgi varsa: ilişkili entity'leri ara  
+- Belirsizlik varsa: daha spesifik query'ler yaz
+- "Soruyu tam cevaplayabilir miyim?" kendine sor
+
+## ACTION TÜRLERI:
+
+### entity_search - ZORUNLU İLK ADIM
+- Sorudaki anahtar kelimeyi ara
+- __Entity__ node'larında arama yapar
+- İlgili chunk'ları getirir
+- Örnek: Action: entity_search, Content: Ayça
+
 ### cypher_query
-- Entity'leri bul, chunk'lara ulaşmak için kullan
-- Örnek: MATCH (p:Person) WHERE apoc.text.clean(p.id) CONTAINS apoc.text.clean("AYÇA") RETURN p
+- Neo4j schema'sına göre optimal query'ler yaz
+- Farklı node türlerini sistematik olarak dene
+- Relationship'leri kullanarak ilişkili entity'leri keşfet
+- Örnek: MATCH (n:NodeType) WHERE n.property CONTAINS "anahtar_kelime" RETURN n
 
 ### vector_search  
-- Semantic arama yap, doğrudan chunk'lara ulaş
-- Örnek: Ayça hanımın poliçe bilgileri
-
-### graph_pattern_search
-- Karmaşık graph pattern'ları için
-- Entity'den chunk'a giden query yazma
+- Soruyla semantik olarak benzer chunk'ları bul
+- Doğrudan text-based arama yap
+- Örnek: "2020 yılı poliçe bilgileri"
 
 ### final_answer
-- Toplanan bilgilerle final cevabı ver
+- Yeterli bilgi toplandığında sonucu ver
+- Kaynak chunk'ları belirt
+- Güven seviyeni belirt
 
-## Kurallar:
-- İlk olarak basit Cypher ile entity bul
-- **ÖNEMLİ**: WHERE contains sorgularında mutlaka apoc.text.clean kullan
-- Örnek: WHERE apoc.text.clean(p.name) CONTAINS apoc.text.clean("Ayça")
-- Entity'lerden chunk'lara ulaş
-- Chunk sayısı arttıkça daha iyi sonuç alırsın
-- Relevance score'lara dikkat et (>0.3 iyi sayılır)
-- En az 3-5 chunk toplamaya çalış
-- Türkçe karakterleri normalize et
-- Maksimum 8 iterasyon
+## ÖRNek BİLGİ ARAŞTIRMA AKIŞI:
 
-## Eylem Formatı:
+**Soru: "2020 yılında kaç adet X türü Y var?"**
+
+1. **Schema Analysis**: PolicyType, Policy, Customer, Year node'larına bak
+2. **Entity Search**: 
+   - MATCH (pt:PolicyType) WHERE pt.id CONTAINS "X" → X türü pol
+   - MATCH (y:Year) WHERE y.id = "2020" → 2020 yılı
+3. **Relationship Exploration**:
+   - MATCH (policy)-[:OF_TYPE]→(pt) → Poliçe türü bağlantısı
+   - MATCH (policy)-[:FOR_YEAR]→(y) → Yıl bağlantısı  
+4. **Combined Query**:
+   - Hem tür hem yıl şartını sağlayan poliçeleri say
+5. **Chunk Analysis**: 
+   - Bulunan entity'lerden chunk'lara git
+   - Chunk text'lerinde sayısal veri ara
+6. **Result**: Kesin sayı ver
+
+## ACTION FORMAT:
+Observation: Mevcut durumu gözlemle
+Thought: Hangi stratejiyi kullanacağını düşün
 Action: cypher_query
-Query: MATCH (p:Person) WHERE apoc.text.clean(p.id) CONTAINS apoc.text.clean("AYÇA") RETURN p.id
+Query: MATCH (pt:PolicyType) RETURN count(DISTINCT pt.id) as policy_type_count
 
-veya
+VEYA
 
-Action: vector_search
-Query: Ayça hanımın 2020 yılı poliçeleri
-
-veya
-
+Observation: Vector search sonuçlarını değerlendir
+Thought: Chunk'larda yeterli bilgi var mı kontrol et
 Action: final_answer
-Answer: Toplanan bilgilere dayanarak final cevap
+Answer: Topladığım bilgilere göre cevap
 
-Şimdi kullanıcının sorusunu analiz et ve chunk'ları keşfetmeye başla."""
+KURALLAR:
+- Her adımda "Bu bilgi soruyla ilgili mi?" diye sorgula
+- Schema'daki TÜM node türlerini sistematik olarak dene
+- Relationship'leri aktif kullan (bağlantıları takip et)
+- Chunk relevance score'larına dikkat et (>0.3 iyi)
+- En az 3-5 farklı query stratejisi dene
+- Maksimum 10 iterasyon (derinlemesine araştırma)
+
+Şimdi verilen soruyu bilimsel bir araştırmacı gibi incele ve adım adım çöz."""
 
         return system_prompt
 
