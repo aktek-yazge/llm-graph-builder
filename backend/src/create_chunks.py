@@ -108,20 +108,25 @@ class CreateChunksofDocument:
             if i < 3:  # Log first 3 pages content preview
                 logging.info(f"DEBUG: Page {i+1} preview: {page_content[:100]}...")
 
-        # Concatenate pages without markers but record start/end offsets for each page
+        # Concatenate pages with page separators and record start/end offsets for each page
         page_texts = []
         page_starts = []
         page_ends = []
         current_offset = 0
+        
         for i, p in enumerate(self.pages):
             page_text = p.page_content if hasattr(p, 'page_content') else str(p)
-            # normalize newlines to keep offsets stable
-            page_text = page_text
+            # Clean and normalize text
+            page_text = str(page_text).strip()
+            
             page_texts.append(page_text)
             page_starts.append(current_offset)
             current_offset += len(page_text)
             page_ends.append(current_offset)
+            
             logging.info(f"DEBUG: Page {i+1} - start: {page_starts[i]}, end: {page_ends[i]}, length: {len(page_text)}")
+            if i < 3:  # Log first 3 pages content preview
+                logging.info(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
 
         full_text = "".join(page_texts)
         logging.info(f"DEBUG: Full text length after concatenation: {len(full_text)} chars")
@@ -143,39 +148,80 @@ class CreateChunksofDocument:
             logging.info(f"DEBUG: Raw chunk {i+1} length: {len(chunk)}, preview: {chunk[:100]}...")
 
         documents = []
-        for ch in raw_chunks:  # Process all chunks, no limit
+        for ch_idx, ch in enumerate(raw_chunks):  # Process all chunks, no limit
             meta = {}
-            try:
-                idx = full_text.index(ch)
-            except ValueError:
-                # If exact match not found, try a relaxed search (strip)
+            
+            # Clean chunk content for searching
+            clean_ch = ch.strip()
+            if not clean_ch:
+                # Empty chunk, assign first page as fallback
+                meta['page_number'] = 1
+                documents.append(Document(page_content=ch, metadata=meta))
+                logging.info(f"DEBUG: Empty chunk {ch_idx+1} assigned to page 1")
+                continue
+            
+            # Try multiple search strategies to find chunk position
+            idx = -1
+            search_attempts = [
+                ch,  # exact match
+                clean_ch,  # stripped
+                ch[:min(100, len(ch))],  # first 100 chars
+                clean_ch[:min(50, len(clean_ch))] if len(clean_ch) >= 50 else clean_ch  # first 50 chars
+            ]
+            
+            for attempt in search_attempts:
+                if not attempt:
+                    continue
                 try:
-                    idx = full_text.index(ch.strip())
-                except Exception:
-                    idx = -1
-
+                    idx = full_text.index(attempt)
+                    break
+                except ValueError:
+                    continue
+            
             if idx >= 0:
                 start_idx = idx
                 end_idx = idx + len(ch) - 1
 
-                # find start_page
+                # Find start_page and end_page with improved logic
                 start_page = None
                 end_page = None
+                
+                # Find which page contains the start of the chunk
                 for pi, (s, e) in enumerate(zip(page_starts, page_ends)):
-                    if start_page is None and start_idx < e:
+                    if start_idx >= s and start_idx < e:
                         start_page = pi + 1
-                    if end_idx < e:
+                        break
+                
+                # Find which page contains the end of the chunk
+                for pi, (s, e) in enumerate(zip(page_starts, page_ends)):
+                    if end_idx >= s and end_idx < e:
                         end_page = pi + 1
                         break
+                
+                # Assign metadata based on what we found
                 if start_page and end_page:
                     if start_page == end_page:
                         meta['page_number'] = start_page
                     else:
-                        meta['start_page'] = start_page
+                        meta['page_number'] = start_page  # Use start page as primary
                         meta['end_page'] = end_page
+                elif start_page:
+                    meta['page_number'] = start_page
+                elif end_page:
+                    meta['page_number'] = end_page
+                else:
+                    # Fallback: assign to middle page based on chunk index
+                    estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(raw_chunks)) + 1))
+                    meta['page_number'] = estimated_page
+                    logging.warning(f"Could not determine exact page for chunk {ch_idx+1}, assigned estimated page {estimated_page}")
+            else:
+                # Could not find chunk in full text, use estimation
+                estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(raw_chunks)) + 1))
+                meta['page_number'] = estimated_page
+                logging.warning(f"Could not locate chunk {ch_idx+1} in full text, assigned estimated page {estimated_page}")
 
             documents.append(Document(page_content=ch, metadata=meta))
-            logging.info(f"DEBUG: Final chunk {len(documents)} - metadata: {meta}, content length: {len(ch)}")
+            logging.info(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(ch)}")
 
         logging.info(f"DEBUG: Total final documents created: {len(documents)}")
         return documents

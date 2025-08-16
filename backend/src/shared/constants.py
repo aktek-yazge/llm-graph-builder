@@ -1245,7 +1245,7 @@ Sigorta poliçesi belgelerinden entity extraction yaparken aşağıdaki YENİ YA
 
 **YENİ YAPISAL MODEL:**
 ```
-Customer (Person/Policyholder) -[:OWNS]-> (Policy:InsurancePolicy) -[:FOR_YEAR]-> (Year:PolicyYear)
+Customer -[:OWNS]-> (Policy:InsurancePolicy) -[:FOR_YEAR]-> (Year:PolicyYear)
                                                     |
                                                     +-[:OF_TYPE]-> (Type:PolicyType) # Kasko, Trafik, Konut, DASK
                                                     +-[:HAS_COVERAGE]-> (Coverage)
@@ -1255,7 +1255,7 @@ Customer (Person/Policyholder) -[:OWNS]-> (Policy:InsurancePolicy) -[:FOR_YEAR]-
 ```
 
 **STANDART NODE TİPLERİ (YENİ MODEL):**
-- Person/Policyholder (Poliçe Sahibi/Müşteri) - kişi ve şirket isimleri için
+- Customer (Müşteri) - müşteri isimleri için
 - Policy (Poliçe) - poliçe bilgileri için (ana merkezi varlık)
 - PolicyNumber (Poliçe Numarası) - poliçe numarası için
 - PolicyYear (Poliçe Yılı) - poliçe yılı için (ZORUNLU - her tarihten çıkar)
