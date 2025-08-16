@@ -43,6 +43,7 @@ from starlette.requests import Request
 from dotenv import load_dotenv
 import tempfile
 from pathlib import Path
+from src.intelligent_agent import IntelligentAgent
 try:
     from docling.document_converter import DocumentConverter
     DOCLING_AVAILABLE = True
@@ -242,7 +243,7 @@ async def create_source_knowledge_graph_url(
             lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_s3,graph, model, source_url, aws_access_key_id, aws_secret_access_key, source_type
             )
         elif source_type == 'gcs bucket':
-            lst_file_name,success_count,failed_count = create_source_node_graph_url_gcs(graph, model, gcs_project_id, gcs_bucket_name, gcs_bucket_folder, source_type,Credentials(access_token)
+            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_gcs, graph, model, gcs_project_id, gcs_bucket_name, gcs_bucket_folder, source_type, Credentials(access_token)
             )
         elif source_type == 'web-url':
             lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_web_url,graph, model, source_url, source_type
@@ -362,7 +363,8 @@ async def extract_knowledge_graph_from_file(
             count_node_time = time.time()
             graph = create_graph_database_connection(uri, userName, password, database)   
             graphDb_data_Access = graphDBdataAccess(graph)
-            count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+            # Thread'e taşı - blocking işlem
+            count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
             logging.info("Nodes and Relationship Counts updated")
             
             # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
@@ -424,8 +426,8 @@ async def extract_knowledge_graph_from_file(
                         'rules': rules_list
                     }
                     
-                    # Node count'ları güncelle
-                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                    # Node count'ları güncelle - thread'e taşı
+                    final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
                     if final_count_response:
                         result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
                         result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
@@ -442,47 +444,83 @@ async def extract_knowledge_graph_from_file(
             else:
                 result['post_processing'] = {'enabled': False}
             
-            # Policy Node Cleanup - Her dosya yüklemesi sonrasında otomatik çalışır
+            # Policy Node Cleanup - DISABLED: Policy node'ları Document'e çevirmek yerine HAS_METADATA ile bağlıyoruz
+            # try:
+            #     logging.info(f"Policy node cleanup başlıyor: {file_name}")
+            #     
+            #     from src.policy_cleanup import cleanup_policy_nodes_to_document
+            #     policy_cleanup_start_time = time.time()
+            #     
+            #     # Policy cleanup işlemi
+            #     policy_cleanup_result = await asyncio.to_thread(
+            #         cleanup_policy_nodes_to_document,
+            #         graph,
+            #         file_name
+            #     )
+            #     
+            #     policy_cleanup_end_time = time.time()
+            #     
+            #     # Result'a Policy cleanup bilgilerini ekle
+            #     result['policy_cleanup'] = {
+            #         'status': policy_cleanup_result['status'],
+            #         'policy_nodes_found': policy_cleanup_result['policy_nodes_found'],
+            #         'relationships_moved': policy_cleanup_result['relationships_moved'],
+            #         'policy_nodes_deleted': policy_cleanup_result['policy_nodes_deleted'],
+            #         'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
+            #         'processed_policies': policy_cleanup_result.get('processed_policies', [])
+            #     }
+            #     
+            #     # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
+            #     if policy_cleanup_result['policy_nodes_deleted'] > 0:
+            #         final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+            #         if final_count_response:
+            #             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+            #             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+            #             
+            #     logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
+                
+            # Policy Graph Structure Enhancement - Müşteri merkezli yapı oluştur (YENİ MODEL)
             try:
-                logging.info(f"Policy node cleanup başlıyor: {file_name}")
+                logging.info(f"Policy graph structure enhancement başlıyor (YENİ MODEL): {file_name}")
                 
-                from src.policy_cleanup import cleanup_policy_nodes_to_document
-                policy_cleanup_start_time = time.time()
+                from src.policy_metadata_linking import enhance_policy_graph_structure
+                policy_enhancement_start_time = time.time()
                 
-                # Policy cleanup işlemi
-                policy_cleanup_result = await asyncio.to_thread(
-                    cleanup_policy_nodes_to_document,
+                # YENİ müşteri merkezli policy graph yapısını oluştur:
+                # Customer -[:OWNS]-> Policy -[:FOR_YEAR]-> PolicyYear
+                #                     +-[:OF_TYPE]-> PolicyType
+                #                     +-[:HAS_COVERAGE]-> Coverage
+                #                     +-[:DOCUMENTED_IN]-> Document
+                #                     +-[:HANDLED_BY]-> Agent
+                #                     +-[:COVERS]-> Asset
+                policy_enhancement_result = await asyncio.to_thread(
+                    enhance_policy_graph_structure,
                     graph,
                     file_name
                 )
                 
-                policy_cleanup_end_time = time.time()
+                policy_enhancement_end_time = time.time()
                 
-                # Result'a Policy cleanup bilgilerini ekle
-                result['policy_cleanup'] = {
-                    'status': policy_cleanup_result['status'],
-                    'policy_nodes_found': policy_cleanup_result['policy_nodes_found'],
-                    'relationships_moved': policy_cleanup_result['relationships_moved'],
-                    'policy_nodes_deleted': policy_cleanup_result['policy_nodes_deleted'],
-                    'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
-                    'processed_policies': policy_cleanup_result.get('processed_policies', [])
+                # Result'a Policy enhancement bilgilerini ekle
+                result['policy_enhancement'] = {
+                    'status': policy_enhancement_result['status'],
+                    'customers_found': policy_enhancement_result.get('customers_found', 0),
+                    'policies_found': policy_enhancement_result.get('policies_found', 0),
+                    'structures_created': policy_enhancement_result.get('structures_created', 0),
+                    'document_links': policy_enhancement_result.get('document_links', 0),
+                    'elapsed_time': f"{policy_enhancement_end_time - policy_enhancement_start_time:.2f}",
+                    'model': 'customer_centric_policy_structure'
                 }
                 
-                # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
-                if policy_cleanup_result['policy_nodes_deleted'] > 0:
-                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-                    if final_count_response:
-                        result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
-                        result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
-                        
-                logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
+                logging.info(f"Policy enhancement (YENİ MODEL) tamamlandı: {policy_enhancement_result.get('customers_found', 0)} müşteri, {policy_enhancement_result.get('policies_found', 0)} poliçe, {policy_enhancement_result.get('structures_created', 0)} yapı oluşturuldu")
                 
-            except Exception as policy_cleanup_error:
-                logging.error(f"Policy cleanup hatası: {policy_cleanup_error}")
-                result['policy_cleanup'] = {
+            except Exception as policy_enhancement_error:
+                logging.error(f"Policy enhancement (YENİ MODEL) hatası: {policy_enhancement_error}")
+                result['policy_enhancement'] = {
                     'status': 'error',
-                    'error': str(policy_cleanup_error),
-                    'elapsed_time': '0.00'
+                    'error': str(policy_enhancement_error),
+                    'elapsed_time': '0.00',
+                    'model': 'customer_centric_policy_structure'
                 }
             
             # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
@@ -527,9 +565,9 @@ async def extract_knowledge_graph_from_file(
                         'promotion_details': entity_promotion_result.get('promotion_details', [])
                     }
                     
-                    # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle
+                    # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle - thread'e taşı
                     if entity_promotion_result['relationships_created'] > 0:
-                        final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                        final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
                         if final_count_response:
                             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
                             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
@@ -1018,7 +1056,7 @@ async def post_processing(uri=Form(None), userName=Form(None), password=Form(Non
         graph = create_graph_database_connection(uri, userName, password, database)   
         graphDb_data_Access = graphDBdataAccess(graph)
         document_name = ""
-        count_response = graphDb_data_Access.update_node_relationship_count(document_name)
+        count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, document_name)
         if count_response:
             count_response = [{"filename": filename, **counts} for filename, counts in count_response.items()]
             logging.info(f'Updated source node with community related counts')
@@ -2148,6 +2186,52 @@ async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), 
         logging.info(message)
         logging.exception(f'Exception:{error_message}')
         return create_api_response("Failed", message=message, error=error_message)
+    finally:
+        gc.collect()
+
+@app.post("/intelligent_search")
+async def intelligent_search_endpoint(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), question=Form(None), model=Form("openai_gpt_4o")):
+    """
+    ReAct pattern kullanan intelligent agent ile akıllı arama
+    """
+    try:
+        if not question:
+            return create_api_response('Failed', message="question parameter is required")
+            
+        start_time = time.time()
+        
+        # Neo4j bağlantısı oluştur
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        # Intelligent agent'ı oluştur
+        agent = IntelligentAgent(graph, model_name=model)
+        
+        # Soruyu çöz
+        result = agent.solve_question(question)
+        
+        elapsed_time = time.time() - start_time
+        
+        # Logging
+        json_obj = {
+            'api_name': 'intelligent_search', 
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database, 
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'question': question,
+            'model': model,
+            'iterations': result.get('iterations', 0)
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        return create_api_response('Success', data=result, message=f"Intelligent search completed in {elapsed_time:.2f} seconds")
+        
+    except Exception as e:
+        message = f"Unable to complete intelligent search for question: {question}"
+        error_message = str(e)
+        logging.exception(f'Exception in intelligent_search: {error_message}')
+        return create_api_response('Failed', message=message, error=error_message)
     finally:
         gc.collect()
 
