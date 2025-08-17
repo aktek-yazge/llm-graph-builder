@@ -36,6 +36,7 @@ from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
 from src.custom_neo4j_vector import CustomNeo4jVector
+from src.intelligent_agent import IntelligentAgent
 load_dotenv() 
 
 # Neo4j ve langchain loglama seviyelerini ayarla
@@ -371,9 +372,12 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     
     return content, result, total_tokens, formatted_docs
 
-def retrieve_documents(doc_retriever, messages):
+def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None):
 
     start_time = time.time()
+    agent_token_usage = None  # Agent token kullanımını saklamak için
+    agent_result = None  # Agent sonuçlarını saklamak için
+    
     try:
         # Son mesajı (kullanıcı sorusu) al
         user_question = messages[-1].content if messages else ""
@@ -383,8 +387,84 @@ def retrieve_documents(doc_retriever, messages):
         print("==============================================")
         
         handler = CustomCallback()
-        docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
-        transformed_question = handler.transformed_question
+
+        # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
+        if intelligent_agent:
+            # Agent'tan sonuç al
+            user_question = messages[-1].content if messages else ""
+            agent_result = intelligent_agent.solve_question(user_question)
+
+            # Agent token bilgilerini çıkar
+            agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
+            if agent_token_usage:
+                logging.info(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
+                print(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
+
+            # Log agent result summary for debugging (avoid full dump to prevent huge outputs)
+            try:
+                keys = list(agent_result.keys()) if isinstance(agent_result, dict) else []
+                logging.info(f"IntelligentAgent result keys: {keys}")
+                print(f"IntelligentAgent result keys: {keys}")
+
+                chunk_count = len(agent_result.get('chunk_details', [])) if isinstance(agent_result, dict) else 0
+                logging.info(f"Agent chunk_details count: {chunk_count}")
+                print(f"Agent chunk_details count: {chunk_count}")
+
+                llm_prompt = agent_result.get('llm_prompt_structure') if isinstance(agent_result, dict) else None
+                if llm_prompt:
+                    logging.debug("Agent llm_prompt_structure (truncated): %s", llm_prompt[:1000])
+                    print("Agent llm_prompt_structure (truncated):", llm_prompt[:1000])
+
+                context_mem = agent_result.get('context_memory') if isinstance(agent_result, dict) else None
+                if context_mem:
+                    logging.debug("Agent context_memory (truncated): %s", context_mem[:500])
+                    print("Agent context_memory (truncated):", context_mem[:500])
+
+            except Exception as e:
+                logging.exception(f"Error while logging agent_result: {e}")
+                print(f"Error while logging agent_result: {e}")
+
+            # Simple wrapper for expected document shape
+            class SimpleDoc:
+                def __init__(self, page_content, metadata, state=None):
+                    self.page_content = page_content
+                    self.metadata = metadata
+                    self.state = state or {}
+
+            docs = []
+            transformed_question = None
+
+            # agent_result contains 'chunk_details' and 'llm_prompt_structure' etc.
+            for c in agent_result.get('chunk_details', []):
+                doc_name = c.get('document', 'local')
+                page = c.get('page')
+                score = c.get('relevance', 0)
+                preview = c.get('preview', '')
+
+                chunk_id = f"{doc_name}::{page}"
+                metadata = {
+                    'source': doc_name,
+                    'chunkdetails': [{
+                        'id': chunk_id,
+                        'score': score
+                    }],
+                    # Agent tarafından üretilen prompt/context bilgilerini ekle
+                    'agent_prompt': agent_result.get('llm_prompt_structure', ''),
+                    'agent_context': agent_result.get('context_memory', '')
+                }
+
+                state = {'query_similarity_score': score}
+                docs.append(SimpleDoc(page_content=preview, metadata=metadata, state=state))
+
+            # Eğer agent hiçbir chunk dönmediyse, fallback ile retriever çağrısı yap
+            if not docs:
+                docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
+                transformed_question = handler.transformed_question
+            else:
+                transformed_question = user_question
+        else:
+            docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
+            transformed_question = handler.transformed_question
         
         print(f"========== DOCUMENT RETRIEVAL SONUÇLARI ==========")
         if transformed_question:
@@ -418,7 +498,7 @@ def retrieve_documents(doc_retriever, messages):
         transformed_question = None
 
     
-    return docs,transformed_question
+    return docs, transformed_question, agent_token_usage, agent_result
 
 def create_document_retriever_chain(llm, retriever):
     try:
@@ -630,9 +710,19 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
     
     return llm, doc_retriever, model_name
 
-def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings):
+def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None):
+    agent_token_usage = None  # Agent token kullanımını saklamak için
+    agent_result = None  # Agent sonuçlarını saklamak için
+    
     try:
         llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        
+        # Eğer agent parametre olarak gelmemişse, oluştur
+        if intelligent_agent is None:
+            try:
+                intelligent_agent = IntelligentAgent(graph)
+            except Exception:
+                intelligent_agent = None
         
         # Günlük konuşma tespiti yap
         if is_casual_conversation(question, llm):
@@ -658,10 +748,11 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}
             }
             formatted_docs = ""
+            agent_token_usage = None  # Casual conversation'da agent kullanılmıyor
             
         else:
             # Normal işlem: document retrieval yap
-            docs, transformed_question = retrieve_documents(doc_retriever, messages)  
+            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent)  
 
             if docs:
                 content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
@@ -679,24 +770,50 @@ def process_chat_response(messages, history, question, model, graph, document_na
         logging.info("Summarization thread started.")
         # summarize_and_log(history, messages, llm)
         metric_details = {"question":question,"contexts":formatted_docs,"answer":content}
+        
+        # Agent token bilgilerini response'a ekle
+        response_info = {
+            # "metrics" : metrics,
+            "sources": result["sources"],
+            "model": model_version,
+            "nodedetails": result["nodedetails"],
+            "total_tokens": total_tokens,
+            "response_time": 0,
+            "mode": chat_mode_settings["mode"],
+            "entities": result["entities"],
+            "metric_details": metric_details,
+            "personPolicyInfo": result["entities"].get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
+            "documentList": result["entities"].get('documentList', []),  # YENI: DocumentList ekle
+            "totalDocuments": result["entities"].get('totalDocuments', 0)  # YENI: TotalDocuments ekle
+        }
+        
+        # IntelligentAgent token bilgilerini ekle
+        if agent_token_usage:
+            response_info["agent_token_usage"] = agent_token_usage
+            response_info["agent_input_tokens"] = agent_token_usage.get('input_tokens', 0)
+            response_info["agent_output_tokens"] = agent_token_usage.get('output_tokens', 0)
+            response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
+            logging.info(f"Response Agent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
+        
+        # IntelligentAgent chunk ve entity bilgilerini ekle
+        if agent_result:
+            response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+            response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+            response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+            response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+            response_info["agent_iterations"] = agent_result.get('iterations', 0)
+            
+            # Agent entity detaylarını entities formatına çevir
+            if agent_result.get('entity_details', []):
+                entity_ids = [entity['id'] for entity in agent_result.get('entity_details', [])]
+                response_info["entities"] = entity_ids
+            
+            logging.info(f"Agent Found - Entities: {agent_result.get('discovered_entities', 0)}, Chunks: {agent_result.get('discovered_chunks', 0)}, Iterations: {agent_result.get('iterations', 0)}")
+        
         return {
             "session_id": "",  
             "message": content,
-            "info": {
-                # "metrics" : metrics,
-                "sources": result["sources"],
-                "model": model_version,
-                "nodedetails": result["nodedetails"],
-                "total_tokens": total_tokens,
-                "response_time": 0,
-                "mode": chat_mode_settings["mode"],
-                "entities": result["entities"],
-                "metric_details": metric_details,
-                "personPolicyInfo": result["entities"].get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
-                "documentList": result["entities"].get('documentList', []),  # YENI: DocumentList ekle
-                "totalDocuments": result["entities"].get('totalDocuments', 0)  # YENI: TotalDocuments ekle
-            },
-            
+            "info": response_info,
             "user": "chatbot"
         }
     
@@ -893,7 +1010,7 @@ def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
 
     return chat_mode_settings
     
-def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True):
+def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
     logging.info(f"Chat Mode: {mode}")
 
     history = create_neo4j_chat_message_history(graph, session_id, write_access)
@@ -924,13 +1041,13 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
               "user": "chatbot"
             }
         else:
-            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings)
+            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent)
 
     result["session_id"] = session_id
     
     return result
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
@@ -971,7 +1088,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 return
                 
             async for chunk in process_chat_response_stream(
-                messages, history, question, model, graph, document_names, chat_mode_settings, session_id
+                messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent
             ):
                 yield chunk
                 
@@ -985,11 +1102,14 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
             "user": "chatbot"
         }
 
-async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id):
+async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=None):
     """
     Streaming chat response işleme fonksiyonu
     LLM'den gelen her token'i anında frontend'e gönderir
     """
+    agent_token_usage = None  # Agent token kullanımını saklamak için
+    agent_result = None  # Agent sonuçlarını saklamak için
+    
     try:
         # Setup aşaması
         yield {
@@ -1027,8 +1147,15 @@ async def process_chat_response_stream(messages, history, question, model, graph
                 "user": "chatbot"
             }
             
-            docs, transformed_question = await asyncio.get_event_loop().run_in_executor(
-                None, retrieve_documents, doc_retriever, messages
+            # Instantiate intelligent agent for streaming path as well
+            intelligent_agent = None
+            try:
+                intelligent_agent = IntelligentAgent(graph)
+            except Exception:
+                intelligent_agent = None
+
+            docs, transformed_question, agent_token_usage, agent_result = await asyncio.get_event_loop().run_in_executor(
+                None, retrieve_documents, doc_retriever, messages, intelligent_agent
             )
             
             if docs:
@@ -1114,26 +1241,52 @@ async def process_chat_response_stream(messages, history, question, model, graph
             "answer": full_response
         }
         
+        # Response info hazırla
+        response_info = {
+            "sources": sources,
+            "model": model_version,
+            "nodedetails": nodedetails,
+            "total_tokens": total_tokens_count,
+            "response_time": 0,  # Bu daha sonra API seviyesinde hesaplanacak
+            "mode": chat_mode_settings["mode"],
+            "entities": entities,
+            "context": sources,  # Frontend context için sources'ı kullan
+            "cypher_query": "",  # Streaming'de cypher query yok
+            "error": "",
+            "metric_details": metric_details,
+            "personPolicyInfo": entities.get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
+            "documentList": entities.get('documentList', []),  # YENI: DocumentList ekle
+            "totalDocuments": entities.get('totalDocuments', 0)  # YENI: TotalDocuments ekle
+        }
+        
+        # IntelligentAgent token bilgilerini ekle
+        if agent_token_usage:
+            response_info["agent_input_tokens"] = agent_token_usage.get('input_tokens', 0)
+            response_info["agent_output_tokens"] = agent_token_usage.get('output_tokens', 0)
+            response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
+        
+        # IntelligentAgent chunk ve entity bilgilerini ekle
+        if agent_result:
+            response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+            response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+            response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+            response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+            response_info["agent_iterations"] = agent_result.get('iterations', 0)
+            
+            # Agent entity detaylarını entities formatına çevir
+            if agent_result.get('entity_details', []):
+                entity_ids = [entity['id'] for entity in agent_result.get('entity_details', [])]
+                response_info["entities"] = entity_ids
+            else:
+                response_info["entities"] = entities.get('entityids', [])
+        else:
+            response_info["entities"] = entities.get('entityids', [])
+        
         yield {
             "type": "complete",
             "session_id": session_id,
             "message": full_response,
-            "info": {
-                "sources": sources,
-                "model": model_version,
-                "nodedetails": nodedetails,
-                "total_tokens": total_tokens_count,
-                "response_time": 0,  # Bu daha sonra API seviyesinde hesaplanacak
-                "mode": chat_mode_settings["mode"],
-                "entities": entities,
-                "context": sources,  # Frontend context için sources'ı kullan
-                "cypher_query": "",  # Streaming'de cypher query yok
-                "error": "",
-                "metric_details": metric_details,
-                "personPolicyInfo": entities.get('personPolicyInfo', []),  # YENI: PersonPolicyInfo ekle
-                "documentList": entities.get('documentList', []),  # YENI: DocumentList ekle
-                "totalDocuments": entities.get('totalDocuments', 0)  # YENI: TotalDocuments ekle
-            },
+            "info": response_info,
             "is_complete": True,
             "user": "chatbot"
         }

@@ -106,9 +106,15 @@ def process_chunkids(driver, chunk_ids, entities):
         
         records, summary, keys = driver.execute_query(CHUNK_QUERY, chunksIds=chunk_ids,entityIds=entity_dict["entityids"], relationshipIds=entity_dict["relationshipids"])
         result = process_records(records)
-        result["nodes"].extend(records[0]["nodes"])
-        result["nodes"] = remove_duplicate_nodes(result["nodes"])
-        logging.debug(f"Nodes and relationships are processed")
+        
+        # Güvenli erişim kontrolü - records boş olabilir
+        if records and len(records) > 0 and "nodes" in records[0]:
+            result["nodes"].extend(records[0]["nodes"])
+            result["nodes"] = remove_duplicate_nodes(result["nodes"])
+            logging.debug(f"Nodes and relationships are processed")
+        else:
+            logging.warning(f"No records found for chunk ids: {chunk_ids}")
+            logging.debug(f"Records: {records}, Summary: {summary}")
 
         result["chunk_data"] = process_chunk_data(records)
         logging.debug(f"Query process completed successfully for chunk ids: {chunk_ids}")

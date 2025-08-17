@@ -43,6 +43,14 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
   sources,
   model,
   total_tokens,
+  agent_input_tokens,
+  agent_output_tokens,
+  agent_total_tokens,
+  agent_chunk_details,
+  agent_entity_details,
+  agent_discovered_entities,
+  agent_discovered_chunks,
+  agent_iterations,
   response_time,
   nodeDetails,
   mode,
@@ -325,15 +333,48 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
         <div className='flex! flex-col'>
           <Typography variant='h2'>Retriever Bilgileri</Typography>
           <Typography variant='body-medium' className='mb-2'>
-            Bu yanıtı oluşturmak için süreç <span className='font-bold'>{response_time} saniye</span> sürdü,
-            <span className='font-bold'>{total_tokens}</span> token kullanarak model{' '}
-            <span className='font-bold'>{model}</span> ile{' '}
+            Bu yanıtı oluşturmak için süreç <span className='font-bold'>{response_time} saniye</span> sürdü.
+            <br />
+            <span className='font-bold'>RAG Pipeline:</span> <span className='font-bold'>{total_tokens}</span> token
+            kullanarak model <span className='font-bold'>{model}</span> ile{' '}
             <span className='font-bold'>
               {chatModeReadableLables[mode] !== 'vector'
                 ? chatModeReadableLables[mode].replace(/\+/g, ' & ')
                 : chatModeReadableLables[mode]}
             </span>{' '}
             modunda gerçekleştirildi.
+            {agent_total_tokens && agent_total_tokens > 0 && (
+              <>
+                <br />
+                <span className='font-bold'>IntelligentAgent:</span>{' '}
+                <span className='font-bold'>{agent_input_tokens}</span> input +{' '}
+                <span className='font-bold'>{agent_output_tokens}</span> output ={' '}
+                <span className='font-bold'>{agent_total_tokens}</span> token kullandı.
+                {((agent_discovered_entities && agent_discovered_entities > 0) ||
+                  (agent_discovered_chunks && agent_discovered_chunks > 0)) && (
+                  <>
+                    <br />
+                    <span className='font-bold'>Bulunan:</span>{' '}
+                    {agent_discovered_entities && agent_discovered_entities > 0 && (
+                      <span>
+                        <span className='font-bold'>{agent_discovered_entities}</span> entity
+                      </span>
+                    )}
+                    {agent_discovered_entities &&
+                      agent_discovered_entities > 0 &&
+                      agent_discovered_chunks &&
+                      agent_discovered_chunks > 0 &&
+                      ', '}
+                    {agent_discovered_chunks && agent_discovered_chunks > 0 && (
+                      <span>
+                        <span className='font-bold'>{agent_discovered_chunks}</span> chunk
+                      </span>
+                    )}
+                    {agent_iterations && agent_iterations > 0 && <span> ({agent_iterations} iterasyon)</span>}
+                  </>
+                )}
+              </>
+            )}
           </Typography>
         </div>
       </div>
@@ -349,6 +390,7 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
             <>
               {mode != chatModeLables.graph ? <Tabs.Tab tabId={3}>Kullanılan Kaynaklar</Tabs.Tab> : <></>}
               {mode != chatModeLables.graph ? <Tabs.Tab tabId={5}>Chunk'lar</Tabs.Tab> : <></>}
+              {agent_chunk_details && agent_chunk_details.length > 0 && <Tabs.Tab tabId={9}>Agent Chunk'ları</Tabs.Tab>}
               {mode === chatModeLables['graph+vector'] ||
               mode === chatModeLables.graph ||
               mode === chatModeLables['graph+vector+fulltext'] ||
@@ -476,7 +518,17 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
             loading={infoLoading}
             mode={mode}
             graphonly_entities={graphonly_entities}
-            infoEntities={infoEntities}
+            infoEntities={
+              mode === 'agent' && agent_entity_details
+                ? agent_entity_details.map((entity) => ({
+                    element_id: entity.id,
+                    labels: entity.labels,
+                    properties: {
+                      id: entity.id,
+                    },
+                  }))
+                : infoEntities
+            }
           />
         </Tabs.TabPanel>
         <Tabs.TabPanel className='n-flex n-flex-col n-gap-token-4 n-p-token-6' value={activeTab} tabId={5}>
@@ -498,6 +550,31 @@ const ChatInfoModal: React.FC<chatInfoMessage> = ({
           </Tabs.TabPanel>
         ) : (
           <></>
+        )}
+        {agent_chunk_details && agent_chunk_details.length > 0 && (
+          <Tabs.TabPanel className='n-flex n-flex-col n-gap-token-4 n-p-token-6' value={activeTab} tabId={9}>
+            <Typography variant='h5' className='n-mb-token-4'>
+              IntelligentAgent Tarafından Bulunan Chunk'lar
+            </Typography>
+            <div className='max-h-96 overflow-y-auto'>
+              {agent_chunk_details.map((chunk, index) => (
+                <div key={index} className='border border-gray-200 rounded-lg p-4 mb-3'>
+                  <div className='flex justify-between items-start mb-2'>
+                    <Typography variant='h6' className='font-semibold'>
+                      {chunk.document}
+                    </Typography>
+                    <div className='text-right text-sm text-gray-600'>
+                      <div>Sayfa: {chunk.page}</div>
+                      <div>Relevance: {chunk.relevance.toFixed(3)}</div>
+                    </div>
+                  </div>
+                  <Typography variant='body-medium' className='text-gray-700 bg-gray-50 p-2 rounded'>
+                    {chunk.preview}
+                  </Typography>
+                </div>
+              ))}
+            </div>
+          </Tabs.TabPanel>
         )}
       </Flex>
       {activeTab == 4 && nodes?.length && relationships?.length && mode !== chatModeLables.graph ? (

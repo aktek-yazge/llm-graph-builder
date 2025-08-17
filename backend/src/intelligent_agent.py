@@ -102,6 +102,11 @@ class IntelligentAgent:
         self.max_iterations = 8
         self.schema_cache = None
         
+        # Progress tracking ve context memory
+        self.successful_findings = []  # Her iterasyonda başarılı bulunanlar
+        self.context_memory = ""  # Birikimli context prompt
+        self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        
         # Text splitter'ı başlat
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=300,
@@ -226,13 +231,10 @@ Thought: [düşünce]
 Action: entity_search
 [tek anahtar kelime]
 
-veya
-
-Action: final_answer
-[cevap]
-
 ## KURALLAR:
 1. İLK ACTION MUTLAKA entity_search OLMALI
+2. Yeterli chunk bulunduğunda (3-5 chunk) durmaya odaklan
+3. Sadece chunk ve entity toplama yap, cevap verme
 2. Tek seferde tek anahtar kelime kullan
 3. Boş sonuç alırsan farklı kelime dene
 4. Maksimum 5 iterasyon
@@ -252,6 +254,79 @@ Action: final_answer
             logger.error(f"Cypher sorgu hatası: {e}")
             return False, str(e)
     
+    def log_token_usage(self, response, iteration: int):
+        """Token kullanımını logla"""
+        try:
+            # LangChain OpenAI response structure
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                usage = response.usage_metadata
+                # usage_metadata dict olarak geliyor
+                input_tokens = usage.get('input_tokens', 0)
+                output_tokens = usage.get('output_tokens', 0) 
+                total_tokens = usage.get('total_tokens', 0)
+            elif hasattr(response, 'response_metadata') and 'token_usage' in response.response_metadata:
+                # Alternatif structure
+                usage = response.response_metadata['token_usage']
+                input_tokens = usage.get('prompt_tokens', 0)
+                output_tokens = usage.get('completion_tokens', 0)
+                total_tokens = usage.get('total_tokens', 0)
+            else:
+                # Manuel token sayımı (yaklaşık)
+                input_text = str(response.content) if hasattr(response, 'content') else ""
+                input_tokens = len(input_text.split()) * 1.3  # Yaklaşık token hesabı
+                output_tokens = len(input_text.split()) * 0.7
+                total_tokens = input_tokens + output_tokens
+                
+                logger.warning(f"Token usage metadata bulunamadı, yaklaşık hesaplama yapıldı")
+            
+            self.token_usage["input_tokens"] += int(input_tokens)
+            self.token_usage["output_tokens"] += int(output_tokens)
+            self.token_usage["total_tokens"] += int(total_tokens)
+            
+            logger.info(f"İterasyon {iteration} - Token Kullanımı: Input: {int(input_tokens)}, Output: {int(output_tokens)}, Total: {int(total_tokens)}")
+            logger.info(f"Toplam Token Kullanımı: Input: {self.token_usage['input_tokens']}, Output: {self.token_usage['output_tokens']}, Total: {self.token_usage['total_tokens']}")
+            
+        except Exception as e:
+            logger.error(f"Token logging hatası: {e}")
+            # Debug için response structure'ını logla
+            logger.debug(f"Response attributes: {dir(response)}")
+            if hasattr(response, '__dict__'):
+                logger.debug(f"Response dict: {response.__dict__}")
+    
+    def add_successful_finding(self, iteration: int, action: str, finding: str, relevance_score: float = 0.0):
+        """Başarılı bulguyu context memory'e ekle"""
+        finding_entry = {
+            "iteration": iteration,
+            "action": action,
+            "finding": finding,
+            "relevance_score": relevance_score,
+            "timestamp": f"Adım {iteration}"
+        }
+        self.successful_findings.append(finding_entry)
+        
+        # Context memory'i güncelle
+        self.update_context_memory()
+        
+        logger.info(f"Başarılı bulgu eklendi - İterasyon {iteration}: {action} -> {finding[:100]}...")
+    
+    def update_context_memory(self):
+        """Başarılı bulgulardan context prompt oluştur"""
+        if not self.successful_findings:
+            self.context_memory = ""
+            return
+        
+        context_prompt = "## DAHA ÖNCE BULUNAN BAŞARILI BİLGİLER:\n\n"
+        
+        for finding in self.successful_findings[-5:]:  # Son 5 başarılı bulguyu al
+            context_prompt += f"**{finding['timestamp']} - {finding['action'].upper()}:**\n"
+            context_prompt += f"Bulgu: {finding['finding']}\n"
+            if finding['relevance_score'] > 0:
+                context_prompt += f"Relevance Score: {finding['relevance_score']:.3f}\n"
+            context_prompt += "---\n"
+        
+        context_prompt += "\n**BU BİLGİLERİ DİKKATE ALARAK SONRAKI ADIMI BELİRLE!**\n\n"
+        self.context_memory = context_prompt
+    
     def entity_driven_search(self, search_term: str, state: AgentState) -> List[ChunkInfo]:
         """
         Entity-driven arama stratejisi:
@@ -269,6 +344,10 @@ Action: final_answer
             return []
         
         logger.info(f"{len(entities)} entity bulundu")
+        
+        # Entity'leri state'e ekle
+        for entity in entities:
+            state.discovered_entities.append(entity)
         
         # Adım 2: Entity'lerden chunk'lara ulaş
         primary_chunks = self.find_chunks_from_entities([e['id'] for e in entities], state)
@@ -411,19 +490,31 @@ Action: final_answer
                 logger.warning("Chunk embedding'leri alınamadı, fallback similarity kullanılıyor")
                 return self._fallback_similarity_ranking(chunks, query)
             
-            # Embedding'leri chunk'lara eşle
+            # Embedding'leri chunk'lara eşle - güvenli erişim
             embedding_map = {}
             for result in embedding_results:
-                embedding_map[result['chunk_id']] = result['embedding']
+                chunk_id = result.get('chunk_id')
+                embedding = result.get('embedding')
+                if chunk_id and embedding is not None:
+                    # Embedding'in list/array olup olmadığını kontrol et
+                    if isinstance(embedding, (list, tuple, np.ndarray)) and len(embedding) > 0:
+                        embedding_map[chunk_id] = embedding
+                    else:
+                        logger.warning(f"Chunk {chunk_id} için geçersiz embedding: {type(embedding)}")
             
             # Similarity hesapla
             for chunk in chunks:
                 if chunk.chunk_id in embedding_map:
                     chunk_embedding = embedding_map[chunk.chunk_id]
-                    if chunk_embedding and len(chunk_embedding) == len(query_embedding):
-                        similarity = float(cosine_similarity([query_embedding], [chunk_embedding])[0][0])
-                        chunk.relevance_score = similarity
-                    else:
+                    try:
+                        if len(chunk_embedding) == len(query_embedding):
+                            similarity = float(cosine_similarity([query_embedding], [chunk_embedding])[0][0])
+                            chunk.relevance_score = similarity
+                        else:
+                            logger.warning(f"Chunk {chunk.chunk_id} embedding dimension mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
+                            chunk.relevance_score = 0.0
+                    except Exception as embed_error:
+                        logger.warning(f"Chunk {chunk.chunk_id} similarity hesaplama hatası: {embed_error}")
                         chunk.relevance_score = 0.0
                 else:
                     chunk.relevance_score = 0.0
@@ -749,6 +840,11 @@ Action: final_answer
     def solve_question(self, user_question: str) -> Dict[str, Any]:
         """Ana problem çözme fonksiyonu - ReAct pattern ile Chunk-based arama"""
         
+        # Her soru için cache'i temizle
+        self.successful_findings = []
+        self.context_memory = ""
+        self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        
         logger.info(f"Soru çözülüyor: {user_question}")
         
         # Agent state'i başlat
@@ -773,7 +869,8 @@ Action: final_answer
             if state.discovered_chunks:
                 context_info = f"\n\nMevcut Durum:\n- {len(state.discovered_chunks)} chunk keşfedildi\n- En yüksek relevance: {max([c.relevance_score for c in state.discovered_chunks]):.3f}\n- Toplanan dokümalar: {list(set([c.document_name for c in state.discovered_chunks]))}"
             
-            prompt = f"{current_observation}{context_info}\n\nBu duruma göre next action'ını belirle:"
+            # Context memory ve mevcut durum bilgilerini birleştir
+            prompt = f"{self.context_memory}{current_observation}{context_info}\n\nBu duruma göre next action'ını belirle:"
             
             messages = [
                 SystemMessage(content=system_prompt),
@@ -788,6 +885,9 @@ Action: final_answer
                 response = self.llm.invoke(messages)
                 agent_response = response.content
                 
+                # Token kullanımını logla
+                self.log_token_usage(response, state.iteration_count)
+                
                 logger.info(f"Agent response: {agent_response[:200]}...")
                 
                 # Response'u parse et
@@ -797,21 +897,24 @@ Action: final_answer
                 
                 conversation_history.append(f"Thought: {thought}\nAction: {action}\nContent: {action_content}")
                 
-                # Action'ı uygula
-                if action == "final_answer":
-                    # Final answer için context ekle
-                    context = state.get_context_for_llm()
-                    final_answer = f"{action_content}\n\n### Kaynak Bilgileri:\n{context}"
-                    break
-                    
-                elif action == "entity_search":
+                # Action'ı uygula - final_answer kaldırıldı, sadece chunk/entity toplama
+                if action == "entity_search":
                     # Yeni entity-driven arama
                     chunks = self.entity_driven_search(action_content, state)
                     for chunk in chunks:
                         state.add_chunk(chunk)
                     
                     if chunks:
-                        current_observation = f"Entity-driven search: {len(chunks)} chunk bulundu. En yüksek relevance: {max([c.relevance_score for c in chunks]):.3f}. Toplam chunk: {len(state.discovered_chunks)}"
+                        best_relevance = max([c.relevance_score for c in chunks])
+                        current_observation = f"Entity-driven search: {len(chunks)} chunk bulundu. En yüksek relevance: {best_relevance:.3f}. Toplam chunk: {len(state.discovered_chunks)}"
+                        
+                        # Başarılı entity arama bulgusunu kaydet
+                        self.add_successful_finding(
+                            state.iteration_count,
+                            "entity_search",
+                            f"'{action_content}' için {len(chunks)} chunk bulundu. En iyi relevance: {best_relevance:.3f}",
+                            best_relevance
+                        )
                     else:
                         current_observation = f"'{action_content}' için entity bulunamadı. Farklı anahtar kelime dene."
                         
@@ -835,6 +938,16 @@ Action: final_answer
                                 state.add_chunk(chunk)
                             
                             current_observation = f"Cypher sorgusu başarılı. {len(result)} sonuç bulundu. {len(chunks)} yeni chunk keşfedildi. Toplam chunk: {len(state.discovered_chunks)}"
+                            
+                            # Başarılı cypher sorgu bulgusunu kaydet
+                            if chunks:
+                                avg_relevance = sum([c.relevance_score for c in chunks]) / len(chunks)
+                                self.add_successful_finding(
+                                    state.iteration_count,
+                                    "cypher_query", 
+                                    f"Cypher sorgusu: {len(result)} sonuç, {len(chunks)} chunk. Ortalama relevance: {avg_relevance:.3f}",
+                                    avg_relevance
+                                )
                         else:
                             current_observation = f"Cypher sorgusu başarılı ama entity bulunamadı. Sonuç: {result[:2]}"
                     else:
@@ -846,7 +959,16 @@ Action: final_answer
                         state.add_chunk(chunk)
                     
                     if chunks:
-                        current_observation = f"Vector search sonucu: {len(chunks)} chunk bulundu. En yüksek relevance: {max([c.relevance_score for c in chunks]):.3f}. Toplam chunk: {len(state.discovered_chunks)}"
+                        best_relevance = max([c.relevance_score for c in chunks])
+                        current_observation = f"Vector search sonucu: {len(chunks)} chunk bulundu. En yüksek relevance: {best_relevance:.3f}. Toplam chunk: {len(state.discovered_chunks)}"
+                        
+                        # Başarılı vector search bulgusunu kaydet
+                        self.add_successful_finding(
+                            state.iteration_count,
+                            "vector_search",
+                            f"'{action_content}' vector search: {len(chunks)} chunk. En iyi relevance: {best_relevance:.3f}",
+                            best_relevance
+                        )
                     else:
                         current_observation = "Vector search sonuç bulamadı."
                 
@@ -863,7 +985,7 @@ Action: final_answer
                         current_observation = f"Graph pattern search hatası: {e}"
                         
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: entity_search, cypher_query, vector_search, graph_pattern_search, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: entity_search, cypher_query, vector_search, graph_pattern_search"
                 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -872,21 +994,28 @@ Action: final_answer
             except Exception as e:
                 logger.error(f"İterasyon {state.iteration_count} hatası: {e}")
                 current_observation = f"Hata oluştu: {e}. Farklı bir yaklaşım dene."
+                
+            # Otomatik çıkış koşulları - yeterli chunk bulundu mu?
+            if len(state.discovered_chunks) >= 3:  # En az 3 chunk bulundu
+                logger.info(f"Yeterli chunk ({len(state.discovered_chunks)}) bulundu, arama sonlandırılıyor.")
+                break
         
-        # Sonuç döndür
-        if not final_answer:
-            context = state.get_context_for_llm()
-            if context:
-                final_answer = f"Mevcut bilgilerle tam bir cevap veremiyorum ama bulduğum bilgiler:\n\n{context}"
-            else:
-                final_answer = "Maalesef sorunuza cevap bulamadım. Lütfen sorunuzu farklı şekilde ifade edin."
+        # Token kullanımını logla
+        logger.info(f"TOPLAM TOKEN KULLANIMI - Input: {self.token_usage['input_tokens']}, Output: {self.token_usage['output_tokens']}, Total: {self.token_usage['total_tokens']}")
         
+        # Final answer kaldırıldı - sadece chunk ve entity verilerini döndür
         return {
-            "answer": final_answer,
             "iterations": state.iteration_count,
             "conversation_history": conversation_history,
             "discovered_chunks": len(state.discovered_chunks),
             "discovered_entities": len(state.discovered_entities),
+            "entity_details": [
+                {
+                    "id": e.get('id', ''),
+                    "type": e.get('type', ''),
+                    "labels": e.get('labels', [])
+                } for e in state.discovered_entities[:10]  # En iyi 10 entity
+            ],
             "chunk_details": [
                 {
                     "document": c.document_name,
@@ -895,8 +1024,116 @@ Action: final_answer
                     "preview": c.text[:100] + "..."
                 } for c in sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)[:5]
             ],
-            "schema_info": schema
+            "schema_info": schema,
+            "token_usage": self.token_usage.copy(),
+            "successful_findings": self.successful_findings.copy(),
+            "context_memory": self.context_memory,
+            "llm_prompt_structure": self.create_llm_prompt_structure(state, user_question)
         }
+            
+    def create_llm_prompt_structure(self, state: AgentState, user_question: str) -> str:
+        """Agent'ın bulduğu bilgileri LLM prompt yapısı olarak oluştur"""
+        
+        prompt_structure = f"""# INTELLIGENT AGENT KNOWLEDGE EXTRACTION REPORT
+
+## 🔍 USER QUESTION
+{user_question}
+
+## 📊 SEARCH RESULTS SUMMARY
+- **Total Iterations**: {state.iteration_count}
+- **Chunks Discovered**: {len(state.discovered_chunks)}
+- **Entities Found**: {len(state.discovered_entities)}
+- **Token Usage**: Input: {self.token_usage['input_tokens']}, Output: {self.token_usage['output_tokens']}
+
+## 🎯 SUCCESSFUL FINDINGS PER ITERATION
+"""
+        for i, finding in enumerate(self.successful_findings, 1):
+            prompt_structure += f"""
+### Iteration {finding['iteration']} - {finding['action'].upper()}
+- **Action**: {finding['action']}
+- **Finding**: {finding['finding']}
+- **Relevance Score**: {finding['relevance_score']:.3f}
+- **Timestamp**: {finding['timestamp']}
+"""
+
+        # En yüksek relevance'a sahip chunk'ları listele
+        top_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)[:10]
+        
+        prompt_structure += """
+## 📄 TOP RELEVANT CHUNKS
+
+"""
+        for i, chunk in enumerate(top_chunks, 1):
+            prompt_structure += f"""
+### Chunk {i} (Relevance: {chunk.relevance_score:.3f})
+- **Document**: {chunk.document_name}
+- **Page**: {chunk.page_number}
+- **Text Preview**: {chunk.text[:200]}...
+
+"""
+
+        # Entity bilgilerini ekle
+        if state.discovered_entities:
+            prompt_structure += """
+## 🏷️ DISCOVERED ENTITIES
+
+"""
+            for i, entity in enumerate(state.discovered_entities[:20], 1):
+                prompt_structure += f"""
+### Entity {i}
+{entity}
+
+"""
+
+        # Context memory ekle
+        prompt_structure += f"""
+## 🧠 CONTEXT MEMORY
+{self.context_memory}
+
+## 📋 FINAL KNOWLEDGE BASE
+"""
+        
+        # En iyi chunk'ların tam text'lerini ekle
+        for i, chunk in enumerate(top_chunks[:5], 1):
+            prompt_structure += f"""
+### Knowledge Piece {i} (Score: {chunk.relevance_score:.3f})
+**Source**: {chunk.document_name}, Page {chunk.page_number}
+**Content**: {chunk.text}
+
+---
+"""
+
+        prompt_structure += """
+## 🤖 LLM PROMPT TEMPLATE
+
+Yukarıdaki bilgileri kullanarak aşağıdaki prompt template'i doldurabilirsiniz:
+
+```
+Sistem: Sen expert bir bilgi analisti olarak görev yapıyorsun.
+
+Kullanıcı Sorusu: {user_question}
+
+Mevcut Bilgi Kaynakları:
+{chunk_information}
+
+Entity Bilgileri:
+{entity_information}
+
+Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap ver.
+```
+
+## 📈 SEARCH STRATEGY ANALYSIS
+"""
+        
+        # Kullanılan stratejileri analiz et
+        strategies_used = set([f['action'] for f in self.successful_findings])
+        prompt_structure += f"""
+**Strategies Used**: {', '.join(strategies_used)}
+**Most Effective Strategy**: {max(self.successful_findings, key=lambda x: x['relevance_score'])['action'] if self.successful_findings else 'None'}
+**Best Relevance Score**: {max([f['relevance_score'] for f in self.successful_findings]) if self.successful_findings else 0:.3f}
+"""
+
+        return prompt_structure
             
     def create_enhanced_system_prompt(self, schema: Dict[str, Any]) -> str:
         """Gelişmiş system prompt'u schema bilgileriyle oluştur"""
@@ -982,11 +1219,6 @@ Kullanıcı sorusuna göre mevcut schema'yı analiz ederek en uygun entity'leri 
 - Doğrudan text-based arama yap
 - Örnek: "2020 yılı poliçe bilgileri"
 
-### final_answer
-- Yeterli bilgi toplandığında sonucu ver
-- Kaynak chunk'ları belirt
-- Güven seviyeni belirt
-
 ## ÖRNek BİLGİ ARAŞTIRMA AKIŞI:
 
 **Soru: "2020 yılında kaç adet X türü Y var?"**
@@ -1003,7 +1235,7 @@ Kullanıcı sorusuna göre mevcut schema'yı analiz ederek en uygun entity'leri 
 5. **Chunk Analysis**: 
    - Bulunan entity'lerden chunk'lara git
    - Chunk text'lerinde sayısal veri ara
-6. **Result**: Kesin sayı ver
+6. **3-5 chunk toplandığında dur**
 
 ## ACTION FORMAT:
 Observation: Mevcut durumu gözlemle
@@ -1013,12 +1245,14 @@ Query: MATCH (pt:PolicyType) RETURN count(DISTINCT pt.id) as policy_type_count
 
 VEYA
 
-Observation: Vector search sonuçlarını değerlendir
-Thought: Chunk'larda yeterli bilgi var mı kontrol et
-Action: final_answer
-Answer: Topladığım bilgilere göre cevap
+Observation: Vector search sonuçlarını değerlendir  
+Thought: Yeterli chunk var mı kontrol et
+Action: vector_search
+Content: 2020 poliçe sayısı
 
 KURALLAR:
+- Sadece chunk ve entity topla, cevap verme
+- 3-5 chunk bulunduğunda dur
 - Her adımda "Bu bilgi soruyla ilgili mi?" diye sorgula
 - Schema'daki TÜM node türlerini sistematik olarak dene
 - Relationship'leri aktif kullan (bağlantıları takip et)
@@ -1060,7 +1294,6 @@ def test_agent():
         
         result = agent.solve_question(question)
         
-        print(f"CEVAP: {result['answer'][:500]}...")
         print(f"İTERASYON: {result['iterations']}")
         print(f"CHUNK SAYISI: {result['discovered_chunks']}")
         print(f"ENTITY SAYISI: {result['discovered_entities']}")
