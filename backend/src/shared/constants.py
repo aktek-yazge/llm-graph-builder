@@ -337,7 +337,11 @@ Yapay Zeka Yanıtı: "Bu bilgi şu anda elimde yok. Başka bir konuda yardımcı
 Not: Bu sistem yalnızca kendi iç bilgisini kullanarak yanıt üretmez. Yanıtlarını, kullanıcının mevcut ve önceki girdilerinde sağlanan bilgilerden ve bağlamdan oluşturur.
 """
 
-QUESTION_TRANSFORM_TEMPLATE = "Aşağıdaki konuşmaya göre, konuşmayla ilgili bilgi almak için arama yapılacak bir sorgu üret. Sadece sorguyu yaz, başka hiçbir şey yazma." 
+QUESTION_TRANSFORM_TEMPLATE = """Sen bir soru dönüştürücüsün. Kullanıcının son sorusunu, önceki soru-cevap bağlamını dikkate alarak daha net ve aranabilir bir sorguya çevir.
+
+ÖNEMLI KURALLAR:
+1. Sadece SON soruyu dönüştür, tüm geçmişi tek soru haline getirme
+Belirsiz zamir içeren soruları önceki sorunun context'iyle birleştir. Sadece dönüştürülmüş soruyu yaz, başka açıklama yapma.""" 
 
 # Günlük konuşmaları tespit etmek için template
 CASUAL_CONVERSATION_DETECTION_TEMPLATE = """

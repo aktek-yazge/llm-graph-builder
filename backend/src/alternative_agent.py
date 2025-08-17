@@ -31,6 +31,16 @@ class SimpleFilters:
     name: Optional[str] = None
     year: Optional[str] = None
     policy_type: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON serialization için dict'e çevir ve unicode normalize et"""
+        from src.utf8_utils import normalize_unicode_text
+        
+        return {
+            'name': normalize_unicode_text(self.name) if self.name else None,
+            'year': normalize_unicode_text(self.year) if self.year else None,
+            'policy_type': normalize_unicode_text(self.policy_type) if self.policy_type else None
+        }
 
 
 class AlternativeAgent:
@@ -80,8 +90,19 @@ class AlternativeAgent:
 ÖNEMLİ KURALLAR:
 - name alanı: Sadece kişinin adını yaz, "hanım", "bey" gibi unvanları dahil etme
 - year alanı: 4 haneli yıl numarası (string olarak)
-- policy_type alanı: D4, D7, DASK gibi poliçe tipi kodları
-- Eğer bir bilgi soruda yoksa o alanı null yap""")
+- policy_type alanı: Poliçe tipi kodları ve poliçe türleri:
+  * Kodlar: D4, D7, DASK gibi
+  * Türler: konut, trafik, kasko, dask, yangın gibi poliçe türleri
+- Eğer bir bilgi soruda yoksa o alanı null yap
+
+POLIÇE TİPİ ÖRNEKLERİ:
+- "konut poliçesi" → "konut"
+- "trafik poliçesi" → "trafik" 
+- "kasko poliçesi" → "kasko"
+- "DASK poliçesi" → "DASK"
+- "D4 konut" → "D4"
+- "yangın sigortası" → "yangın"
+""")
         human = HumanMessage(content=(
             "Soru: " + question + "\n\n" +
             "Karar verme kriterleri: eğer soru belge içi metin detayları (taksit detayı, sözleşme metni, ifadeler) istiyorsa use_vector:true;" 
@@ -113,7 +134,7 @@ class AlternativeAgent:
         name = None
         year = None
         policy_type = None
-        q = question
+        q = question.lower()
 
         # Yıl çıkarımı
         y = re.search(r"\b(19|20)\d{2}\b", q)
@@ -121,20 +142,38 @@ class AlternativeAgent:
             year = y.group(0)
 
         # Basit: 'Hanım', 'Bey' gibi ekleri kullanarak isim yakala (örn. 'Ayça hanım')
-        m = re.search(r"([A-ZÇĞİÖŞÜa-zçğıöşü]+)\s+(hanım|bey|hanim|beyefendi)", q)
+        m = re.search(r"([A-ZÇĞİÖŞÜa-zçğıöşü]+)\s+(hanım|bey|hanim|beyefendi)", question)
         if m:
-            name = m.group(1)
+            name = normalize_unicode_text(m.group(1))
 
-        # Poliçe tipi genelde format D4, D7 veya isim (DASK gibi)
-        pt = re.search(r"\b([A-ZÇĞİÖŞÜ0-9]{1,6})\b", q)
-        if pt and pt.group(1).upper().startswith('D'):
-            policy_type = pt.group(1).upper()
+        # Poliçe tipi çıkarımı - genişletilmiş
+        # 1) Kod formatları: D4, D7, DASK gibi
+        pt_code = re.search(r"\b([A-ZÇĞİÖŞÜ0-9]{1,6})\b", question)
+        if pt_code and (pt_code.group(1).upper().startswith('D') or pt_code.group(1).upper() == 'DASK'):
+            policy_type = pt_code.group(1).upper()
+        
+        # 2) Poliçe türleri: konut, trafik, kasko, yangın, dask vb.
+        policy_types = {
+            'konut': 'konut',
+            'trafik': 'trafik', 
+            'kasko': 'kasko',
+            'dask': 'DASK',
+            'yangın': 'yangın',
+            'yangin': 'yangın',
+            'depo': 'depo',
+            'koleksiyon': 'koleksiyon'
+        }
+        
+        for keyword, ptype in policy_types.items():
+            if keyword in q:
+                policy_type = ptype
+                break
 
         return SimpleFilters(name=name, year=year, policy_type=policy_type)
 
     # -------------------- Graph interactions --------------------
-    def count_documents(self, filters: SimpleFilters) -> Optional[int]:
-        """Document node'larını fileName alanındaki filtrelere göre sayar. CHUNK araması yapmaz."""
+    def count_and_list_documents(self, filters: SimpleFilters) -> Dict[str, Any]:
+        """Document node'larını fileName alanındaki filtrelere göre sayar ve listeler. CHUNK araması yapmaz."""
         try:
             # WHERE koşullarını filtrelere göre dinamik olarak oluştur
             where_conditions = []
@@ -153,11 +192,11 @@ class AlternativeAgent:
             if where_conditions:
                 where_clause = "WHERE " + " AND ".join(where_conditions)
 
-            # Sadeleştirilmiş count sorgusu
+            # Count ve dosya listesi sorgusu
             cypher = f"""
             MATCH (d:Document)
             {where_clause}
-            RETURN count(DISTINCT d) as count
+            RETURN count(DISTINCT d) as count, collect(DISTINCT d.fileName) as documents
             """
 
             # Parametreleri hazırla - sadece mevcut filtreleri ekle
@@ -169,22 +208,31 @@ class AlternativeAgent:
             if filters.policy_type:
                 params['policy_type'] = str(filters.policy_type)
 
-            logger.info(f"Count query params: {params}")
-            logger.info(f"Count query cypher:\n{cypher}")
+            logger.info(f"Count and list query params: {params}")
+            logger.info(f"Count and list query cypher:\n{cypher}")
             
             # Execute query
             res = self.graph.query(cypher, params)
             if res and isinstance(res, list) and len(res) > 0:
                 row = res[0]
-                count = row.get('count') if isinstance(row, dict) else None
+                count = row.get('count') if isinstance(row, dict) else 0
+                documents = row.get('documents', []) if isinstance(row, dict) else []
+                
                 try:
-                    return int(count)
+                    count_int = int(count) if count is not None else 0
+                    doc_list = [doc for doc in documents if doc] if documents else []
+                    
+                    return {
+                        'count': count_int,
+                        'documents': doc_list
+                    }
                 except Exception:
-                    return None
-            return None
+                    return {'count': 0, 'documents': []}
+            return {'count': 0, 'documents': []}
+            
         except Exception as e:
-            logger.error(f"Count query failed: {e}")
-            return None
+            logger.error(f"Count and list query failed: {e}")
+            return {'count': 0, 'documents': []}
 
     # -------------------- Vector search (chunk) --------------------
     def vector_search_chunks(self, user_query: str, filters: SimpleFilters, limit: int = 10) -> List[Dict[str, Any]]:
@@ -211,7 +259,8 @@ class AlternativeAgent:
             filter_query = f"""
             MATCH (node:Chunk)-[:PART_OF]->(d:Document)
             {where_clause}
-            AND node.embedding IS NOT NULL
+            AND node.embedding IS NOT NULL 
+            AND size(node.embedding) > 0
             RETURN node.chunkId as chunk_id,
                    node.text as text,
                    node.embedding as embedding,
@@ -230,6 +279,7 @@ class AlternativeAgent:
 
             logger.info(f"Step 1 - Getting filtered chunks with embeddings")
             logger.info(f"Step 1 - Filter params: {params}")
+            logger.info(f"Step 1 - Neo4j query: {filter_query}")
             
             filter_res = self.graph.query(filter_query, params)
             
@@ -239,6 +289,88 @@ class AlternativeAgent:
             
             total_chunks = len(filter_res)
             logger.info(f"Step 1 - Found {total_chunks} chunks with embeddings matching filters")
+            
+            # İlk birkaç chunk'ın detaylarını logla
+            for i, chunk in enumerate(filter_res[:3]):
+                chunk_id = chunk.get('chunk_id', 'unknown')
+                doc_name = chunk.get('document_name', 'unknown')
+                has_embedding = chunk.get('embedding') is not None
+                emb_length = len(chunk.get('embedding', [])) if chunk.get('embedding') else 0
+                emb_type = type(chunk.get('embedding', None)).__name__
+                logger.info(f"Step 1 - Sample chunk {i+1}: ID={chunk_id}, Doc={doc_name}, HasEmb={has_embedding}, EmbLen={emb_length}, Type={emb_type}")
+                print(f"Step 1 - Sample chunk {i+1}: ID={chunk_id}, Doc={doc_name}, HasEmb={has_embedding}, EmbLen={emb_length}, Type={emb_type}")
+                
+            # Eğer tüm chunk'lar embedding'siz geliyorsa, database'de gerçekten embedding var mı kontrol et
+            if filter_res and not any(chunk.get('embedding') for chunk in filter_res):
+                logger.warning("All chunks have no embeddings despite Neo4j filter. Checking database status...")
+                print("WARNING: All chunks have no embeddings despite Neo4j filter!")
+                
+                # Database'de gerçekten embedding'li chunk var mı kontrol et
+                emb_check_query = """
+                MATCH (c:Chunk) 
+                WHERE c.embedding IS NOT NULL AND size(c.embedding) > 0
+                RETURN count(c) as emb_count
+                """
+                emb_check_result = self.graph.query(emb_check_query)
+                emb_count = emb_check_result[0]['emb_count'] if emb_check_result else 0
+                logger.info(f"Database has {emb_count} chunks with valid embeddings")
+                print(f"Database has {emb_count} chunks with valid embeddings")
+                
+                # FALLBACK: Embedding olmayan chunk'ları da dahil et
+                logger.info("Attempting fallback: getting chunks without embedding filter")
+                print("FALLBACK: Getting chunks without embedding requirement...")
+                
+                fallback_query = f"""
+                MATCH (node:Chunk)-[:PART_OF]->(d:Document)
+                {where_clause}
+                AND node.text IS NOT NULL
+                RETURN node.chunkId as chunk_id,
+                       node.text as text,
+                       d.fileName as document_name,
+                       node.page_number as page
+                LIMIT 20
+                """
+                
+                fallback_res = self.graph.query(fallback_query, params)
+                if fallback_res:
+                    logger.info(f"Fallback found {len(fallback_res)} chunks without embedding filter")
+                    print(f"Fallback found {len(fallback_res)} chunks without embedding filter")
+                    
+                    # Text-based relevance scoring (basit keyword matching)
+                    normalized_query = normalize_unicode_text(user_query).lower()
+                    query_keywords = set(normalized_query.split())
+                    
+                    chunk_scores = []
+                    for chunk in fallback_res:
+                        text = chunk.get('text', '').lower()
+                        text_keywords = set(text.split())
+                        
+                        # Basit keyword overlap score
+                        overlap = len(query_keywords.intersection(text_keywords))
+                        score = overlap / len(query_keywords) if query_keywords else 0
+                        
+                        chunk_scores.append({
+                            'chunk_id': chunk['chunk_id'],
+                            'text': chunk['text'] if chunk['text'] else '',
+                            'document': chunk['document_name'],
+                            'page': chunk['page'],
+                            'score': float(score)
+                        })
+                    
+                    # Score'a göre sırala
+                    chunk_scores.sort(key=lambda x: x['score'], reverse=True)
+                    results = chunk_scores[:limit]
+                    
+                    logger.info(f"Fallback text matching returned {len(results)} chunks")
+                    print(f"Fallback text matching returned {len(results)} chunks")
+                    if results:
+                        logger.info(f"Top fallback score: {results[0]['score']:.3f}")
+                        print(f"Top fallback score: {results[0]['score']:.3f}")
+                    
+                    return results
+                else:
+                    logger.warning("Fallback also returned no results")
+                    print("Fallback also returned no results")
 
             # 2. AŞAMA: Manual vector similarity hesaplama (sadece filtrelenmiş chunk'lar için)
             normalized = normalize_unicode_text(user_query)
@@ -246,22 +378,34 @@ class AlternativeAgent:
 
             # Her chunk için similarity hesapla
             chunk_similarities = []
+            chunks_with_embedding = 0
+            chunks_without_embedding = 0
+            
             for chunk in filter_res:
                 try:
-                    chunk_emb = chunk['embedding']
+                    chunk_emb = chunk.get('embedding')
+                    if chunk_emb is None or len(chunk_emb) == 0:
+                        chunks_without_embedding += 1
+                        logger.debug(f"Chunk {chunk.get('chunk_id')} has no embedding, skipping")
+                        continue
+                    
+                    chunks_with_embedding += 1
                     # Cosine similarity hesapla
                     similarity = self._cosine_similarity(q_emb, chunk_emb)
                     
                     chunk_similarities.append({
                         'chunk_id': chunk['chunk_id'],
-                        'text': chunk['text'][:800] if chunk['text'] else '',
+                        'text': chunk['text'] if chunk['text'] else '',  # Tam text'i al, kırpma
                         'document': chunk['document_name'],
                         'page': chunk['page'],
                         'score': float(similarity)
                     })
                 except Exception as e:
+                    chunks_without_embedding += 1
                     logger.warning(f"Failed to calculate similarity for chunk {chunk.get('chunk_id')}: {e}")
                     continue
+            
+            logger.info(f"Step 2 - Processed {chunks_with_embedding} chunks with embeddings, {chunks_without_embedding} chunks without embeddings")
 
             # Similarity'e göre sırala ve limit uygula
             chunk_similarities.sort(key=lambda x: x['score'], reverse=True)
@@ -295,28 +439,34 @@ class AlternativeAgent:
         return dot_product / (norm_v1 * norm_v2)
 
     # -------------------- Response formatting --------------------
-    def format_count_prompt(self, count: Optional[int], filters: SimpleFilters, raw_question: str) -> str:
-        """Belirlenmiş şablonda cevap döndürür (count-case)."""
-        f_name = filters.name or "-"
-        f_year = filters.year or "-"
-        f_policy = filters.policy_type or "-"
+    def format_count_prompt(self, count_result: Dict[str, Any], filters: SimpleFilters, raw_question: str) -> str:
+        """Count sorgusu için temiz ve doğrudan cevap formatı"""
+        f_name = filters.name or "belirtilmemiş"
+        f_year = filters.year or "belirtilmemiş"
+        f_policy = filters.policy_type or "belirtilmemiş"
+        
+        count = count_result.get('count', 0) if isinstance(count_result, dict) else (count_result if isinstance(count_result, int) else 0)
+        documents = count_result.get('documents', []) if isinstance(count_result, dict) else []
 
-        answer = (
-            f"Soru: {raw_question}\n\n"
-            f"Bulunan filtreler:\n- İsim: {f_name}\n- Yıl: {f_year}\n- Poliçe tipi: {f_policy}\n\n"
-        )
+        # Temiz ve doğrudan cevap formatı
+        answer = f"**Sorgu Sonucu:**\n\n"
+        answer += f"**Arama Kriterleri:**\n"
+        answer += f"• Kişi: {f_name}\n"
+        answer += f"• Yıl: {f_year}\n"
+        answer += f"• Poliçe Tipi: {f_policy}\n\n"
 
-        if count is None:
-            answer += "Sorgu çalıştırıldı fakat sonucu almak mümkün olmadı veya sonuç boş. Lütfen bağlantıları kontrol edin."
+        if count == 0:
+            answer += "❌ Bu kriterlere uygun hiçbir poliçe bulunamadı.\n"
         else:
-            answer += f"Graph sorgusu ile bulunan toplam Document/Policy sayısı: {count}\n"
-
-        # belirli bir prompt template ile daha zenginleştir
-        answer += "\nCevabı alttaki template formatında döndürdüm.\n\n"
-        answer += (
-            "PROMPT_TEMPLATE:\n---\nSistem: Uzman bir veri analisti olarak cevap ver.\n"
-            "Soru: {user_question}\nGraph sonucu: {count}\nFiltreler: {filters}\n---\n"
-        ).format(user_question=raw_question, count=count or 0, filters={'name': f_name, 'year': f_year, 'policy_type': f_policy})
+            answer += f"✅ **Toplam {count} adet poliçe bulundu.**\n\n"
+            
+            # TÜM dosyaları listele (limit yok)
+            if documents:
+                answer += "**Bulunan Poliçeler:**\n"
+                for i, doc in enumerate(documents, 1):
+                    # Dosya adını daha temiz hale getir
+                    clean_doc_name = doc.replace('.pdf', '').replace('Ayça Dinçkök ', '')
+                    answer += f"{i}. {clean_doc_name}\n"
 
         return answer
 
@@ -426,11 +576,7 @@ class AlternativeAgent:
         
         logger.info(f"Merged text length: {len(result)}")
         
-        # Uzunluğu kontrol et, çok uzunsa kırp
-        if len(result) > 2000:
-            result = result[:2000] + "... [metin kesildi]"
-            logger.info("Text truncated to 2000 characters")
-            
+        # Metin kesme işlemi kaldırıldı - tam içerik döndürülüyor
         return result
 
     # -------------------- Ana akış --------------------
@@ -450,13 +596,24 @@ class AlternativeAgent:
             filters = SimpleFilters()
             if isinstance(llm_decision, dict):
                 f = llm_decision.get('filters', {}) or {}
-                filters = SimpleFilters(name=f.get('name'), year=f.get('year'), policy_type=f.get('policy_type'))
+                name = normalize_unicode_text(f.get('name')) if f.get('name') else None
+                year = f.get('year')
+                policy_type = f.get('policy_type')
+                filters = SimpleFilters(name=name, year=year, policy_type=policy_type)
             else:
                 filters = self.extract_filters_heuristic(question)
 
-            count = self.count_documents(filters)
-            text = self.format_count_prompt(count, filters, question)
-            return {'mode': 'count', 'response_text': text, 'meta': {'count': count, 'filters': filters}}
+            count_result = self.count_and_list_documents(filters)
+            text = self.format_count_prompt(count_result, filters, question)
+            return {
+                'mode': 'count', 
+                'response_text': text, 
+                'meta': {
+                    'count': count_result.get('count', 0),
+                    'documents': count_result.get('documents', []),
+                    'filters': filters.to_dict()
+                }
+            }
 
         # 2) Diğer durumlarda LLM'e sor: vector arama yapmalı mı?
         decision = self.ask_llm_for_decision(question)
@@ -464,7 +621,10 @@ class AlternativeAgent:
         filters = SimpleFilters()
         if isinstance(decision, dict):
             f = decision.get('filters', {}) or {}
-            filters = SimpleFilters(name=f.get('name'), year=f.get('year'), policy_type=f.get('policy_type'))
+            name = normalize_unicode_text(f.get('name')) if f.get('name') else None
+            year = f.get('year')
+            policy_type = f.get('policy_type')
+            filters = SimpleFilters(name=name, year=year, policy_type=policy_type)
         else:
             filters = self.extract_filters_heuristic(question)
 
@@ -483,30 +643,43 @@ class AlternativeAgent:
 
             chunks = self.vector_search_chunks(query_text, filters, limit=10)
             text = self.format_chunk_response(chunks, filters, question)
-            return {'mode': 'vector', 'response_text': text, 'meta': {'chunks': chunks, 'filters': filters, 'decision_reason': decision.get('reason')}}
+            return {'mode': 'vector', 'response_text': text, 'meta': {'chunks': chunks, 'filters': filters.to_dict(), 'decision_reason': decision.get('reason')}}
 
         # 3) Eğer LLM vector demediyse, fallback olarak graph query ile belge listesi veya sayma yap
         logger.info("LLM chose not to use vector. Falling back to graph aggregate/list query.")
         filters = filters or self.extract_filters_heuristic(question)
-        count = self.count_documents(filters)
-        text = self.format_count_prompt(count, filters, question)
-        return {'mode': 'cypher_fallback', 'response_text': text, 'meta': {'count': count, 'filters': filters, 'decision': decision}}
+        count_result = self.count_and_list_documents(filters)
+        text = self.format_count_prompt(count_result, filters, question)
+        return {
+            'mode': 'cypher_fallback', 
+            'response_text': text, 
+            'meta': {
+                'count': count_result.get('count', 0),
+                'documents': count_result.get('documents', []),
+                'filters': filters.to_dict(), 
+                'decision': decision
+            }
+        }
 
 
 def test_alternative_agent():
     # Basit test fonksiyonu (lokal Neo4j config'ine bağlıdır)
+    # Endpoint ile aynı parametreleri kullan (sanitize=False artık)
     graph = Neo4jGraph(
         url="bolt://localhost:7687",
         username="neo4j",
-        password="qwerty5555"
+        password="qwerty5555",
+        database="neo4j",
+        sanitize=False,
+        refresh_schema=False
     )
 
     agent = AlternativeAgent(graph)
 
     qs = [
-        "Ayça hanımın 2020 yılında kaç adet poliçesi var?",
+        # "Ayça hanımın 2020 yılında kaç adet poliçesi var?",
         "Ayça hanım 2020 D4 poliçesi taksitleri neler?",
-        "2020 yılında kaç DASK poliçesi var?"
+        # "2020 yılında kaç DASK poliçesi var?"
     ]
 
     for q in qs:

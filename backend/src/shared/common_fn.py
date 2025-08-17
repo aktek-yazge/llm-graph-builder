@@ -74,9 +74,9 @@ def create_graph_database_connection(uri, userName, password, database):
   
   if enable_user_agent:
     driver_config['user_agent'] = os.environ.get('NEO4J_USER_AGENT')
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True, driver_config=driver_config)  
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=False, driver_config=driver_config)  
   else:
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=True, driver_config=driver_config)    
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=False, driver_config=driver_config)    
   return graph
 
 
