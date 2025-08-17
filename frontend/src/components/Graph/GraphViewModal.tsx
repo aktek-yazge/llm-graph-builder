@@ -61,6 +61,8 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
   const [graphType, setGraphType] = useState<GraphType[]>([]);
   const [disableRefresh, setDisableRefresh] = useState<boolean>(false);
   const [selected, setSelected] = useState<{ type: EntityType; id: string } | undefined>(undefined);
+  // Persist only node clicks for neighbour filtering; hover should not affect filtering
+  const [clickedSelected, setClickedSelected] = useState<{ type: EntityType; id: string } | undefined>(undefined);
   const [showOnlySelected, setShowOnlySelected] = useState<boolean>(false);
   const [mode, setMode] = useState<boolean>(false);
   const graphQueryAbortControllerRef = useRef<AbortController>();
@@ -147,10 +149,10 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
 
   // Filter function: when showOnlySelected is true, show only the selected node and its immediate neighbours
   const applySelectedFilter = useCallback(() => {
-    if (!selected || selected.type !== 'node') {
+    if (!clickedSelected || clickedSelected.type !== 'node') {
       return;
     }
-    const selId = selected.id;
+    const selId = clickedSelected.id;
 
     // collect node ids: selected + neighbours
     const neighbourIds = new Set<string>();
@@ -174,7 +176,7 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
 
     setNode(filteredNodes);
     setRelationship(filteredRels);
-  }, [selected, allNodes, allRelationships]);
+  }, [clickedSelected, allNodes, allRelationships]);
 
   // keep UI in sync when toggle or selection changes
   useEffect(() => {
@@ -185,7 +187,7 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
       setNode(allNodes);
       setRelationship(allRelationships);
     }
-  }, [showOnlySelected, selected, allNodes, allRelationships]);
+  }, [showOnlySelected, clickedSelected, allNodes, allRelationships, applySelectedFilter]);
 
   // Api call to get the nodes and relations
   const graphApi = async (mode?: string) => {
@@ -254,22 +256,44 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
         if (selected?.id !== clickedNode.id || selected?.type !== 'node') {
           setSelected({ type: 'node', id: clickedNode.id });
         }
+        // Persist clicked node for neighbour filtering
+        setClickedSelected({ type: 'node', id: clickedNode.id });
       },
       onRelationshipClick: (clickedRelationship: Relationship) => {
         if (selected?.id !== clickedRelationship.id || selected?.type !== 'relationship') {
           setSelected({ type: 'relationship', id: clickedRelationship.id });
         }
       },
+      onHover: (hoveredElement: any) => {
+        // If hover leaves (no element), revert to last clicked node selection if available
+        if (!hoveredElement) {
+          if (clickedSelected) {
+            setSelected(clickedSelected);
+          } else {
+            setSelected(undefined);
+          }
+          return;
+        }
+        // Show element info on hover - check if it's a node or relationship
+        if ('labels' in hoveredElement) {
+          // It's a node
+          setSelected({ type: 'node', id: hoveredElement.id });
+        } else {
+          // It's a relationship
+          setSelected({ type: 'relationship', id: hoveredElement.id });
+        }
+      },
       onCanvasClick: () => {
         if (selected !== undefined) {
           setSelected(undefined);
         }
+        // Do not clear clickedSelected on canvas click, so filter remains until user clicks another node
       },
       onPan: true,
       onZoom: true,
       onDrag: true,
     }),
-    [selected]
+    [selected, clickedSelected]
   );
 
   const initGraph = (
