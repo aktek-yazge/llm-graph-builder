@@ -37,6 +37,7 @@ from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
 from src.custom_neo4j_vector import CustomNeo4jVector
 from src.intelligent_agent import IntelligentAgent
+from src.alternative_agent import AlternativeAgent
 load_dotenv() 
 
 # Neo4j ve langchain loglama seviyelerini ayarla
@@ -372,11 +373,14 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     
     return content, result, total_tokens, formatted_docs
 
-def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None):
+def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None, alternative_agent: AlternativeAgent = None):
 
     start_time = time.time()
     agent_token_usage = None  # Agent token kullanımını saklamak için
     agent_result = None  # Agent sonuçlarını saklamak için
+    
+    # Import HumanMessage at function level to avoid scope issues
+    from langchain_core.messages import HumanMessage
     
     try:
         # Son mesajı (kullanıcı sorusu) al
@@ -385,11 +389,251 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
         print(f"Original User Question: {user_question}")
         print(f"Message Count: {len(messages)}")
         print("==============================================")
+        # Debug: Log tüm mesajları ve sadece HumanMessage'ları (transform için kullanılacak)
+        # ÖNEMLI: Mesaj dizisinde eksik HumanMessage'lar olabilir. Frontend'den gelen mesaj history'si
+        # tam değilse, session history'den önceki kullanıcı mesajlarını almanın yollarını araştırmalıyız.
+        
+        # Use a robust extractor: messages may be HumanMessage, dict, or objects with .content/.role
+        from types import SimpleNamespace
+        human_messages = []
+        for m in messages:
+            try:
+                if isinstance(m, HumanMessage):
+                    human_messages.append(m)
+                    continue
+                # object with content and optional role
+                content = getattr(m, 'content', None)
+                role = getattr(m, 'role', None) or getattr(m, 'type', None)
+                if content and (role is None or str(role).lower() in ('user', 'human')):
+                    human_messages.append(m)
+                    continue
+                # dict-like message
+                if isinstance(m, dict):
+                    content = m.get('content') or m.get('text') or m.get('message')
+                    role = m.get('role') or m.get('type') or m.get('sender')
+                    if content and (role is None or str(role).lower() in ('user', 'human')):
+                        human_messages.append(SimpleNamespace(content=content))
+                        continue
+            except Exception:
+                # ignore unparsable message types
+                continue
+        
+        logging.info(f"DEBUG: Full messages count: {len(messages)}")
+        for i, msg in enumerate(messages):
+            logging.info(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
+            print(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
+
+        logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
+        for i, msg in enumerate(human_messages):
+            logging.info(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
+            print(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
+            
+        # UYARI: Eğer human_messages sadece 1 mesaj içeriyorsa (son soru), önceki context kayıp!
+        if len(human_messages) <= 1:
+            logging.warning(f"WARNING: Only {len(human_messages)} human message(s) found in history!")
+            logging.warning("This means previous user questions are missing from the message history.")
+            logging.warning("Context transformation may be incomplete. Check frontend message passing.")
+            print(f"WARNING: Only {len(human_messages)} human message(s) found - previous context may be missing!")
+            print("Frontend should send complete conversation history including all user messages.")
         
         handler = CustomCallback()
 
+        # Eğer bir AlternativeAgent verilmişse, onu kullanarak dokümanları oluştur
+        if alternative_agent:
+            # Alternative Agent'tan sonuç al
+            user_question = messages[-1].content if messages else ""
+            
+            # Eğer message history varsa (birden fazla mesaj), QUESTION_TRANSFORM uygula
+            transformed_question = user_question  # Default: original soru
+            
+            # Let the LLM decide whether to transform the question. Use the last N human messages as context.
+            transformed_question = user_question  # default
+            try:
+                from src.shared.constants import QUESTION_TRANSFORM_TEMPLATE
+                from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+                from langchain_core.output_parsers import StrOutputParser
+                from src.llm import get_llm
+
+                # Debug: Tüm mesajları tiplerle birlikte logla
+                logging.info(f"DEBUG: Total messages in history: {len(messages)}")
+                for i, msg in enumerate(messages):
+                    msg_type = type(msg).__name__
+                    logging.info(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
+                    print(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
+
+                # SADECE kullanıcı mesajlarını filtrele (HumanMessage)
+                # Re-run robust extractor in case message shapes differ here
+                from types import SimpleNamespace
+                human_messages = []
+                for m in messages:
+                    try:
+                        if isinstance(m, HumanMessage):
+                            human_messages.append(m)
+                            continue
+                        content = getattr(m, 'content', None)
+                        role = getattr(m, 'role', None) or getattr(m, 'type', None)
+                        if content and (role is None or str(role).lower() in ('user', 'human')):
+                            human_messages.append(m)
+                            continue
+                        if isinstance(m, dict):
+                            content = m.get('content') or m.get('text') or m.get('message')
+                            role = m.get('role') or m.get('type') or m.get('sender')
+                            if content and (role is None or str(role).lower() in ('user', 'human')):
+                                human_messages.append(SimpleNamespace(content=content))
+                                continue
+                    except Exception:
+                        continue
+                logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
+
+                # En son N kullanıcı mesajını al (transformation için) - daha fazla bağlam için 10 kullan
+                transform_window = 10
+                last_human_messages = human_messages[-transform_window:] if len(human_messages) >= transform_window else human_messages
+
+                logging.info(f"DEBUG: Using {len(last_human_messages)} messages for transform (window={transform_window}):")
+                for i, msg in enumerate(last_human_messages):
+                    logging.info(f"DEBUG: Transform input {i+1}: {msg.content}")
+                    print(f"DEBUG: Transform input {i+1}: {msg.content}")
+
+                # LLM ve transform prompt hazırla
+                llm, _ = get_llm("openai_gpt_4.1")  # Model parametresi ekle
+                query_transform_prompt = ChatPromptTemplate.from_messages([
+                    ("system", QUESTION_TRANSFORM_TEMPLATE),
+                    MessagesPlaceholder(variable_name="messages")
+                ])
+                output_parser = StrOutputParser()
+                transform_chain = query_transform_prompt | llm | output_parser
+
+                # Transform'a gönderilecek mesajları format et ve logla
+                messages_for_llm = []
+                for i, msg in enumerate(last_human_messages):
+                    formatted_msg = f"Mesaj {i+1}: {msg.content}"
+                    messages_for_llm.append(formatted_msg)
+                    logging.info(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
+                    print(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
+
+                # Final prompt'u manuel olarak oluştur ve logla (sadece debug amaçlı)
+                combined_messages = "\n".join(messages_for_llm)
+                final_prompt = f"{QUESTION_TRANSFORM_TEMPLATE}\n\nMesajlar:\n{combined_messages}"
+                logging.info(f"DEBUG: Final combined prompt that will be sent to LLM:")
+                logging.info(f"DEBUG: {final_prompt}")
+                print(f"DEBUG: Final combined prompt that will be sent to LLM:")
+                print(f"DEBUG: {final_prompt}")
+
+                # Transform işlemini yap - LLM'e bırakıyoruz; model gereksizse orijinali dönmelidir
+                transformed_question = transform_chain.invoke({"messages": last_human_messages})
+                transformed_question = transformed_question.strip()
+
+                logging.info(f"AlternativeAgent TRANSFORM: Original: {user_question}")
+                logging.info(f"AlternativeAgent TRANSFORM: Transformed: {transformed_question}")
+                logging.info(f"AlternativeAgent TRANSFORM: Human message count: {len(last_human_messages)}")
+                print(f"=== ALTERNATIVE AGENT QUESTION TRANSFORM ===")
+                print(f"Original: {user_question}")
+                print(f"Transformed: {transformed_question}")
+                print(f"Last {len(last_human_messages)} human messages used (LLM responses excluded)")
+                print("===============================================")
+
+            except Exception as e:
+                logging.error(f"AlternativeAgent transform failed: {e}")
+                print(f"AlternativeAgent transform error: {e}")
+                transformed_question = user_question
+            
+            # Transform edilmiş soruyu AlternativeAgent'a gönder
+            alternative_result = alternative_agent.answer_question(transformed_question)
+
+            # Alternative Agent response parsing
+            if alternative_result and alternative_result.get('mode') == 'vector':
+                logging.info(f"AlternativeAgent mode: {alternative_result['mode']}")
+                print(f"AlternativeAgent mode: {alternative_result['mode']}")
+                
+                # AlternativeAgent'in tam sayfa formatını kullan (response_text)
+                # Bu test'teki gibi tam sayfa içeriklerini içerir
+                full_page_content = alternative_result.get('response_text', '')
+                
+                # Simple wrapper for expected document shape - tam sayfa içeriği ile
+                class SimpleDoc:
+                    def __init__(self, page_content, metadata, state=None):
+                        self.page_content = page_content
+                        self.metadata = metadata
+                        self.state = state or {}
+
+                docs = []
+                chunks = alternative_result.get('meta', {}).get('chunks', [])
+                
+                # Eğer chunks varsa, tam sayfa içeriğini tek bir document olarak döndür
+                if chunks:
+                    # İlk chunk'tan document adını al
+                    first_chunk = chunks[0]
+                    doc_name = first_chunk.get('document', 'unknown')
+                    
+                    # Ortalama score hesapla
+                    avg_score = sum(chunk.get('score', 0.0) for chunk in chunks) / len(chunks) if chunks else 0.0
+                    
+                    metadata = {
+                        'source': doc_name,
+                        'chunkdetails': [{
+                            'id': f"{doc_name}::full_page_content",
+                            'score': avg_score
+                        }],
+                        'alternative_agent_mode': alternative_result['mode'],
+                        'alternative_agent_filters': alternative_result.get('meta', {}).get('filters'),
+                        'total_chunks_found': len(chunks),
+                        'chunk_sources': list(set(chunk.get('document', '') for chunk in chunks))
+                    }
+
+                    state = {'query_similarity_score': avg_score}
+                    # Tam sayfa içeriğini (response_text) page_content olarak kullan
+                    docs.append(SimpleDoc(page_content=full_page_content, metadata=metadata, state=state))
+
+                final_question = transformed_question
+                logging.info(f"AlternativeAgent vector search returned {len(docs)} documents (full page format)")
+                print(f"AlternativeAgent vector search returned {len(docs)} documents (full page format)")
+                
+                # Alternative agent'in sonucunu agent_result'a ata (vector mode)
+                agent_result = alternative_result
+                
+            else:
+                # Count mode veya fallback - tam sayfa formatını kullan
+                full_page_content = alternative_result.get('response_text', '')
+                
+                logging.info(f"AlternativeAgent mode: {alternative_result.get('mode', 'unknown')} - no vector search")
+                print(f"AlternativeAgent mode: {alternative_result.get('mode', 'unknown')} - no vector search")
+                
+                # Simple wrapper for expected document shape
+                class SimpleDoc:
+                    def __init__(self, page_content, metadata, state=None):
+                        self.page_content = page_content
+                        self.metadata = metadata
+                        self.state = state or {}
+                
+                # Count/fallback mode için de response_text içeriğini document olarak döndür
+                docs = []
+                if full_page_content.strip():  # Eğer içerik varsa
+                    mode = alternative_result.get('mode', 'unknown')
+                    metadata = {
+                        'source': f'AlternativeAgent_{mode}_Result',
+                        'chunkdetails': [{
+                            'id': f'alternative_agent::{mode}',
+                            'score': 1.0  # Count/fallback için sabit score
+                        }],
+                        'alternative_agent_mode': mode,
+                        'alternative_agent_filters': alternative_result.get('meta', {}).get('filters'),
+                        'document_count': alternative_result.get('meta', {}).get('count', 0),
+                        'documents_found': alternative_result.get('meta', {}).get('documents', [])
+                    }
+                    
+                    state = {'query_similarity_score': 1.0}
+                    docs.append(SimpleDoc(page_content=full_page_content, metadata=metadata, state=state))
+                    
+                    logging.info(f"AlternativeAgent {mode} mode returned full content document")
+                    print(f"AlternativeAgent {mode} mode returned full content document")
+                
+                final_question = transformed_question
+                
+                # Alternative agent'in cevabını metadata olarak sakla (count/fallback mode)
+                agent_result = alternative_result
+                
         # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
-        if intelligent_agent:
+        elif intelligent_agent:
             # Agent'tan sonuç al
             user_question = messages[-1].content if messages else ""
             agent_result = intelligent_agent.solve_question(user_question)
@@ -459,19 +703,19 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
             # Eğer agent hiçbir chunk dönmediyse, fallback ile retriever çağrısı yap
             if not docs:
                 docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
-                transformed_question = handler.transformed_question
+                final_question = handler.transformed_question
             else:
-                transformed_question = user_question
+                final_question = user_question
         else:
             docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
-            transformed_question = handler.transformed_question
+            final_question = handler.transformed_question
         
         print(f"========== DOCUMENT RETRIEVAL SONUÇLARI ==========")
-        if transformed_question:
-            print(f"Transformed Question: {transformed_question}")
-            logging.info(f"Transformed question : {transformed_question}")
+        # Transform edilen soruyu sadece loglara yaz, print'e çıkarma
+        if final_question:
+            logging.info(f"Transformed question : {final_question}")
         else:
-            print(f"Transformed Question: {user_question} (no transformation)")
+            logging.info(f"Original question used (no transformation): {user_question}")
             
         print(f"Retrieved Documents Count: {len(docs) if docs else 0}")
         
@@ -495,10 +739,10 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
         print("============================================")
         logging.error(error_message)
         docs = None
-        transformed_question = None
+        final_question = None
 
     
-    return docs, transformed_question, agent_token_usage, agent_result
+    return docs, final_question, agent_token_usage, agent_result
 
 def create_document_retriever_chain(llm, retriever):
     try:
@@ -710,7 +954,7 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
     
     return llm, doc_retriever, model_name
 
-def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None):
+def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None, alternative_agent=None):
     agent_token_usage = None  # Agent token kullanımını saklamak için
     agent_result = None  # Agent sonuçlarını saklamak için
     
@@ -723,6 +967,13 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 intelligent_agent = IntelligentAgent(graph)
             except Exception:
                 intelligent_agent = None
+        
+        # Eğer alternative_agent parametre olarak gelmemişse, oluştur
+        if alternative_agent is None:
+            try:
+                alternative_agent = AlternativeAgent(graph)
+            except Exception:
+                alternative_agent = None
         
         # Günlük konuşma tespiti yap
         if is_casual_conversation(question, llm):
@@ -752,10 +1003,51 @@ def process_chat_response(messages, history, question, model, graph, document_na
             
         else:
             # Normal işlem: document retrieval yap
-            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent)  
+            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent)  
+
+            # AlternativeAgent count mode sonuçlarını kontrol et
+            alternative_context = ""
+            if (agent_result and isinstance(agent_result, dict) and 
+                agent_result.get('mode') in ['count', 'cypher_fallback'] and 
+                agent_result.get('response_text')):
+                
+                # AlternativeAgent'in cevabını context olarak kullan
+                alternative_context = f"AlternativeAgent Sonucu:\n{agent_result.get('response_text', '')}\n\n"
+                logging.info(f"AlternativeAgent {agent_result.get('mode')} sonucu context olarak eklendi")
+                
+                # Docs boşsa bile RAG chain'e geçir
+                if not docs:
+                    # Boş docs ile devam et, context alternative_context'den gelecek
+                    pass
 
             if docs:
                 content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
+                
+                # AlternativeAgent context'ini formatted_docs'a ekle
+                if alternative_context:
+                    formatted_docs = alternative_context + formatted_docs
+                    
+            elif alternative_context:
+                # Docs yok ama AlternativeAgent sonucu var, RAG chain'e context olarak ver
+                rag_chain = get_rag_chain(llm=llm)
+                
+                ai_response = rag_chain.invoke({
+                    "messages": messages[:-1],
+                    "context": alternative_context,
+                    "input": question
+                })
+                
+                content = ai_response.content
+                total_tokens = get_total_tokens(ai_response, llm)
+                formatted_docs = alternative_context
+                
+                # Boş result yapısı ama agent bilgileriyle
+                result = {
+                    'sources': [], 
+                    'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
+                    'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}
+                }
+                
             else:
                 content = "Sorunuza cevap verebilecek ilgili doküman bulamadım."
                 result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}}
@@ -764,6 +1056,9 @@ def process_chat_response(messages, history, question, model, graph, document_na
         
         ai_response = AIMessage(content=content)
         messages.append(ai_response)
+        
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response)
 
         summarization_thread = threading.Thread(target=summarize_and_log, args=(history, messages, llm))
         summarization_thread.start()
@@ -795,20 +1090,39 @@ def process_chat_response(messages, history, question, model, graph, document_na
             response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
             logging.info(f"Response Agent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
         
-        # IntelligentAgent chunk ve entity bilgilerini ekle
+        # IntelligentAgent ve AlternativeAgent bilgilerini ekle
         if agent_result:
-            response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
-            response_info["agent_entity_details"] = agent_result.get('entity_details', [])
-            response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
-            response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
-            response_info["agent_iterations"] = agent_result.get('iterations', 0)
+            # Hem IntelligentAgent hem de AlternativeAgent için uyumlu bilgiler
+            if agent_result.get('mode') in ['count', 'cypher_fallback', 'vector']:
+                # AlternativeAgent sonucu
+                response_info["alternative_agent_mode"] = agent_result.get('mode')
+                response_info["alternative_agent_meta"] = agent_result.get('meta', {})
+                response_info["alternative_agent_response"] = agent_result.get('response_text', '')
+                
+                # AlternativeAgent'tan gelen chunk bilgileri varsa ekle
+                if agent_result.get('meta', {}).get('chunks'):
+                    response_info["agent_chunk_details"] = agent_result.get('meta', {}).get('chunks', [])
+                
+                # AlternativeAgent entities (eğer varsa)
+                if agent_result.get('meta', {}).get('filters'):
+                    response_info["alternative_agent_filters"] = agent_result.get('meta', {}).get('filters')
+                
+                logging.info(f"AlternativeAgent Found - Mode: {agent_result.get('mode')}, Meta: {len(str(agent_result.get('meta', {})))}")
+                
+            else:
+                # IntelligentAgent sonucu
+                response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+                response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+                response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+                response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+                response_info["agent_iterations"] = agent_result.get('iterations', 0)
+                
+                logging.info(f"IntelligentAgent Found - Entities: {agent_result.get('discovered_entities', 0)}, Chunks: {agent_result.get('discovered_chunks', 0)}, Iterations: {agent_result.get('iterations', 0)}")
             
             # Agent entity detaylarını entities formatına çevir
             if agent_result.get('entity_details', []):
                 entity_ids = [entity['id'] for entity in agent_result.get('entity_details', [])]
                 response_info["entities"] = entity_ids
-            
-            logging.info(f"Agent Found - Entities: {agent_result.get('discovered_entities', 0)}, Chunks: {agent_result.get('discovered_chunks', 0)}, Iterations: {agent_result.get('iterations', 0)}")
         
         return {
             "session_id": "",  
@@ -859,9 +1173,33 @@ def summarize_and_log(history, stored_messages, llm):
         summary_message = summarization_chain.invoke({"chat_history": stored_messages})
 
         with threading.Lock():
+            # ÖNEMLI: History'yi tamamen temizlemek yerine, sadece AIMessage'ları özetleyelim
+            # HumanMessage'ları koruyarak context transformation'ın çalışmasını sağlayalım
+            
+            # Mevcut HumanMessage'ları sakla
+            from langchain_core.messages import HumanMessage, AIMessage
+            human_messages = [msg for msg in history.messages if isinstance(msg, HumanMessage)]
+            
+            # History'yi temizle
             history.clear()
-            history.add_user_message("Şu ana kadarki konuşma özetimiz")
-            history.add_message(summary_message)
+            
+            # HumanMessage'ları geri ekle
+            for human_msg in human_messages:
+                history.add_message(human_msg)
+            
+            # Özet AIMessage'ı ekle
+            try:
+                # summary_message may be a string or an object with .content
+                if hasattr(summary_message, 'content') and getattr(summary_message, 'content'):
+                    ai_content = summary_message.content
+                else:
+                    ai_content = str(summary_message)
+
+                ai_msg = AIMessage(content=ai_content)
+                history.add_message(ai_msg)
+            except Exception:
+                # Fallback: if constructing AIMessage fails, store raw summary_message
+                history.add_message(summary_message)
 
         history_summarized_time = time.time() - start_time
         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
@@ -1010,7 +1348,7 @@ def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
 
     return chat_mode_settings
     
-def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
+def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None, alternative_agent=None):
     logging.info(f"Chat Mode: {mode}")
 
     history = create_neo4j_chat_message_history(graph, session_id, write_access)
@@ -1018,6 +1356,9 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
 
     user_question = HumanMessage(content=question)
     messages.append(user_question)
+    
+    # ÖNEMLI: HumanMessage'ı session history'sine kaydet
+    history.add_message(user_question)
 
     if mode == CHAT_GRAPH_MODE:
         result = process_graph_response(model, graph, question, messages, history)
@@ -1041,17 +1382,18 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
               "user": "chatbot"
             }
         else:
-            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent)
+            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent)
 
     result["session_id"] = session_id
     
     return result
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None, alternative_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
     """
+    logging.info(f"🔴 QA_RAG_stream CALLED - Session: {session_id}, Question: {question[:50]}...")
     logging.info(f"Streaming Chat Mode: {mode}")
     
     try:
@@ -1060,6 +1402,11 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
 
         user_question = HumanMessage(content=question)
         messages.append(user_question)
+        
+        # ÖNEMLI: HumanMessage'ı session history'sine kaydet
+        logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
+        history.add_message(user_question)
+        logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         if mode == CHAT_GRAPH_MODE:
             async for chunk in process_graph_response_stream(model, graph, question, messages, history):
@@ -1088,7 +1435,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 return
                 
             async for chunk in process_chat_response_stream(
-                messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent
+                messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent
             ):
                 yield chunk
                 
@@ -1102,7 +1449,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
             "user": "chatbot"
         }
 
-async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=None):
+async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=None, alternative_agent=None):
     """
     Streaming chat response işleme fonksiyonu
     LLM'den gelen her token'i anında frontend'e gönderir
@@ -1154,9 +1501,34 @@ async def process_chat_response_stream(messages, history, question, model, graph
             except Exception:
                 intelligent_agent = None
 
+            # Instantiate alternative agent for streaming path as well
+            alternative_agent = None
+            try:
+                alternative_agent = AlternativeAgent(graph)
+            except Exception:
+                alternative_agent = None
+
             docs, transformed_question, agent_token_usage, agent_result = await asyncio.get_event_loop().run_in_executor(
-                None, retrieve_documents, doc_retriever, messages, intelligent_agent
+                None, retrieve_documents, doc_retriever, messages, intelligent_agent, alternative_agent
             )
+            
+            # AlternativeAgent'tan gelen sonuçları kontrol et ve formatted_docs'a ekle
+            alternative_context = ""
+            if (agent_result and isinstance(agent_result, dict) and 
+                agent_result.get('mode') in ['count', 'cypher_fallback'] and 
+                agent_result.get('response_text')):
+                
+                yield {
+                    "type": "status",
+                    "session_id": session_id,
+                    "message": f"AlternativeAgent {agent_result.get('mode')} sonuçları alındı...",
+                    "user": "chatbot"
+                }
+                
+                # AlternativeAgent'in cevabını context olarak kullan
+                alternative_context = f"AlternativeAgent Sonucu:\n{agent_result.get('response_text', '')}\n\n"
+                # Docs'u boş bırak çünkü AlternativeAgent direkt cevap verdi
+                docs = []
             
             if docs:
                 yield {
@@ -1188,6 +1560,16 @@ async def process_chat_response_stream(messages, history, question, model, graph
                     sources_and_chunks = get_sources_and_chunks(sources, docs)
                     sources = sources_and_chunks['sources']
                     nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
+            else:
+                # Docs yoksa (AlternativeAgent count mode durumu) boş formatted_docs başlat
+                formatted_docs = ""
+            
+            # AlternativeAgent context'ini formatted_docs'a ekle
+            if alternative_context:
+                formatted_docs = alternative_context + formatted_docs
+                print(f"========== ALTERNATIVE AGENT CONTEXT ADDED ==========")
+                print(f"Alternative Context: {alternative_context[:200]}...")
+                print("====================================================")
         
         # Streaming response başlat
         yield {
@@ -1228,6 +1610,9 @@ async def process_chat_response_stream(messages, history, question, model, graph
         ai_response = AIMessage(content=full_response)
         messages.append(ai_response)
         
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response)
+        
         # Background summarization başlat
         summarization_future = asyncio.get_event_loop().run_in_executor(
             None, summarize_and_log, history, messages, llm
@@ -1265,13 +1650,30 @@ async def process_chat_response_stream(messages, history, question, model, graph
             response_info["agent_output_tokens"] = agent_token_usage.get('output_tokens', 0)
             response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
         
-        # IntelligentAgent chunk ve entity bilgilerini ekle
+        # IntelligentAgent ve AlternativeAgent bilgilerini ekle
         if agent_result:
-            response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
-            response_info["agent_entity_details"] = agent_result.get('entity_details', [])
-            response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
-            response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
-            response_info["agent_iterations"] = agent_result.get('iterations', 0)
+            # Hem IntelligentAgent hem de AlternativeAgent için uyumlu bilgiler
+            if agent_result.get('mode') in ['count', 'cypher_fallback', 'vector']:
+                # AlternativeAgent sonucu
+                response_info["alternative_agent_mode"] = agent_result.get('mode')
+                response_info["alternative_agent_meta"] = agent_result.get('meta', {})
+                response_info["alternative_agent_response"] = agent_result.get('response_text', '')
+                
+                # AlternativeAgent'tan gelen chunk bilgileri varsa ekle
+                if agent_result.get('meta', {}).get('chunks'):
+                    response_info["agent_chunk_details"] = agent_result.get('meta', {}).get('chunks', [])
+                
+                # AlternativeAgent entities (eğer varsa)
+                if agent_result.get('meta', {}).get('filters'):
+                    response_info["alternative_agent_filters"] = agent_result.get('meta', {}).get('filters')
+                
+            else:
+                # IntelligentAgent sonucu
+                response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+                response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+                response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+                response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+                response_info["agent_iterations"] = agent_result.get('iterations', 0)
             
             # Agent entity detaylarını entities formatına çevir
             if agent_result.get('entity_details', []):
@@ -1354,6 +1756,9 @@ async def process_graph_response_stream(model, graph, question, messages, histor
         # Messages'a ekle
         ai_response = AIMessage(content=ai_response_content)
         messages.append(ai_response)
+        
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response)
         
         # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
