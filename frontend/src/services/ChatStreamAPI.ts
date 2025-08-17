@@ -21,6 +21,23 @@ export interface ChatStreamMessage {
     model?: string;
     nodedetails?: any;
     total_tokens?: number;
+    agent_input_tokens?: number;
+    agent_output_tokens?: number;
+    agent_total_tokens?: number;
+    agent_chunk_details?: Array<{
+      document: string;
+      page: number;
+      relevance: number;
+      preview: string;
+    }>;
+    agent_entity_details?: Array<{
+      id: string;
+      type: string;
+      labels: string[];
+    }>;
+    agent_discovered_entities?: number;
+    agent_discovered_chunks?: number;
+    agent_iterations?: number;
     response_time?: number;
     mode?: string;
     entities?: any;

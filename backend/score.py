@@ -1175,7 +1175,24 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         
         graph_DB_dataAccess = graphDBdataAccess(graph)
         write_access = graph_DB_dataAccess.check_account_access(database=database)
-        result = await asyncio.to_thread(QA_RAG,graph=graph,model=model,question=question,document_names=document_names,session_id=session_id,mode=mode,write_access=write_access)
+        # Try to instantiate IntelligentAgent and pass it to QA_RAG (fallback to None on failure)
+        intelligent_agent = None
+        try:
+            intelligent_agent = IntelligentAgent(graph)
+        except Exception:
+            intelligent_agent = None
+
+        result = await asyncio.to_thread(
+            QA_RAG,
+            graph=graph,
+            model=model,
+            question=question,
+            document_names=document_names,
+            session_id=session_id,
+            mode=mode,
+            write_access=write_access,
+            intelligent_agent=intelligent_agent,
+        )
 
         total_call_time = time.time() - qa_rag_start_time
         logging.info(f"Total Response time is  {total_call_time:.2f} seconds")
@@ -1237,6 +1254,13 @@ async def chat_bot_stream(
             final_result = None
             total_tokens = 0
             
+            # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
+            intelligent_agent = None
+            try:
+                intelligent_agent = IntelligentAgent(graph)
+            except Exception:
+                intelligent_agent = None
+
             async for chunk in QA_RAG_stream(
                 graph=graph,
                 model=model,
@@ -1244,7 +1268,8 @@ async def chat_bot_stream(
                 document_names=document_names,
                 session_id=session_id,
                 mode=mode,
-                write_access=write_access
+                write_access=write_access,
+                intelligent_agent=intelligent_agent,
             ):
                 # Client disconnect kontrolü
                 if await request.is_disconnected():

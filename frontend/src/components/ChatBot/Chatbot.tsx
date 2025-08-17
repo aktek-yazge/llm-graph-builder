@@ -72,6 +72,27 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const [modelModal, setModelModal] = useState<string>('');
   const [responseTime, setResponseTime] = useState<number>(0);
   const [tokensUsed, setTokensUsed] = useState<number>(0);
+  const [agentInputTokens, setAgentInputTokens] = useState<number>(0);
+  const [agentOutputTokens, setAgentOutputTokens] = useState<number>(0);
+  const [agentTotalTokens, setAgentTotalTokens] = useState<number>(0);
+  const [agentChunkDetails, setAgentChunkDetails] = useState<
+    Array<{
+      document: string;
+      page: number;
+      relevance: number;
+      preview: string;
+    }>
+  >([]);
+  const [agentEntityDetails, setAgentEntityDetails] = useState<
+    Array<{
+      id: string;
+      type: string;
+      labels: string[];
+    }>
+  >([]);
+  const [agentDiscoveredEntities, setAgentDiscoveredEntities] = useState<number>(0);
+  const [agentDiscoveredChunks, setAgentDiscoveredChunks] = useState<number>(0);
+  const [agentIterations, setAgentIterations] = useState<number>(0);
   const [cypherQuery, setcypherQuery] = useState<string>('');
   const [chatsMode, setChatsMode] = useState<string>(chatModeLables['graph+vector+fulltext']);
   const [graphEntitites, setgraphEntitites] = useState<any[]>([]);
@@ -281,6 +302,14 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               sources: message.info?.sources || [],
               model: message.info?.model || '',
               total_tokens: message.info?.total_tokens || 0,
+              agent_input_tokens: message.info?.agent_input_tokens || 0,
+              agent_output_tokens: message.info?.agent_output_tokens || 0,
+              agent_total_tokens: message.info?.agent_total_tokens || 0,
+              agent_chunk_details: message.info?.agent_chunk_details || [],
+              agent_entity_details: message.info?.agent_entity_details || [],
+              agent_discovered_entities: message.info?.agent_discovered_entities || 0,
+              agent_discovered_chunks: message.info?.agent_discovered_chunks || 0,
+              agent_iterations: message.info?.agent_iterations || 0,
               response_time: message.info?.response_time || 0,
               cypher_query: message.info?.cypher_query || '',
               graphonly_entities: message.info?.context || [],
@@ -446,6 +475,13 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               sources: response.info.sources,
               model: response.info.model,
               total_tokens: response.info.total_tokens,
+              agent_input_tokens: response.info.agent_input_tokens || 0,
+              agent_output_tokens: response.info.agent_output_tokens || 0,
+              agent_total_tokens: response.info.agent_total_tokens || 0,
+              agent_chunk_details: response.info.agent_chunk_details || [],
+              agent_discovered_entities: response.info.agent_discovered_entities || 0,
+              agent_discovered_chunks: response.info.agent_discovered_chunks || 0,
+              agent_iterations: response.info.agent_iterations || 0,
               response_time: response.info.response_time,
               cypher_query: response.info.cypher_query,
               graphonly_entities: response.info.context ?? [],
@@ -586,6 +622,14 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     setSourcesModal(currentMode.sources ?? []);
     setResponseTime(currentMode.response_time ?? 0);
     setTokensUsed(currentMode.total_tokens ?? 0);
+    setAgentInputTokens(currentMode.agent_input_tokens ?? 0);
+    setAgentOutputTokens(currentMode.agent_output_tokens ?? 0);
+    setAgentTotalTokens(currentMode.agent_total_tokens ?? 0);
+    setAgentChunkDetails(currentMode.agent_chunk_details ?? []);
+    setAgentEntityDetails(currentMode.agent_entity_details ?? []);
+    setAgentDiscoveredEntities(currentMode.agent_discovered_entities ?? 0);
+    setAgentDiscoveredChunks(currentMode.agent_discovered_chunks ?? 0);
+    setAgentIterations(currentMode.agent_iterations ?? 0);
     setcypherQuery(currentMode.cypher_query ?? '');
     setShowInfoModal(true);
     setChatsMode(chat.currentMode ?? '');
@@ -872,6 +916,14 @@ const Chatbot: FC<ChatbotProps> = (props) => {
             entities_ids={entitiesModal}
             response_time={responseTime}
             total_tokens={tokensUsed}
+            agent_input_tokens={agentInputTokens}
+            agent_output_tokens={agentOutputTokens}
+            agent_total_tokens={agentTotalTokens}
+            agent_chunk_details={agentChunkDetails}
+            agent_entity_details={agentEntityDetails}
+            agent_discovered_entities={agentDiscoveredEntities}
+            agent_discovered_chunks={agentDiscoveredChunks}
+            agent_iterations={agentIterations}
             mode={chatsMode}
             cypher_query={cypherQuery}
             graphonly_entities={graphEntitites}
