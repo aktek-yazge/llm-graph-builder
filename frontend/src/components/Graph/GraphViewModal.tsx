@@ -63,6 +63,8 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
   const [selected, setSelected] = useState<{ type: EntityType; id: string } | undefined>(undefined);
   // Persist only node clicks for neighbour filtering; hover should not affect filtering
   const [clickedSelected, setClickedSelected] = useState<{ type: EntityType; id: string } | undefined>(undefined);
+  // Baseline panel selection when not hovering (undefined => ResultOverview)
+  const [panelBase, setPanelBase] = useState<{ type: EntityType; id: string } | undefined>(undefined);
   const [showOnlySelected, setShowOnlySelected] = useState<boolean>(false);
   const [mode, setMode] = useState<boolean>(false);
   const graphQueryAbortControllerRef = useRef<AbortController>();
@@ -181,9 +183,13 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
   // keep UI in sync when toggle or selection changes
   useEffect(() => {
     if (showOnlySelected) {
-      applySelectedFilter();
+      if (clickedSelected && clickedSelected.type === 'node') {
+        applySelectedFilter();
+      } else {
+        setNode(allNodes);
+        setRelationship(allRelationships);
+      }
     } else {
-      // restore full graph
       setNode(allNodes);
       setRelationship(allRelationships);
     }
@@ -258,6 +264,8 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
         }
         // Persist clicked node for neighbour filtering
         setClickedSelected({ type: 'node', id: clickedNode.id });
+        // baseline panel becomes clicked node when not hovering
+        setPanelBase({ type: 'node', id: clickedNode.id });
       },
       onRelationshipClick: (clickedRelationship: Relationship) => {
         if (selected?.id !== clickedRelationship.id || selected?.type !== 'relationship') {
@@ -265,13 +273,9 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
         }
       },
       onHover: (hoveredElement: any) => {
-        // If hover leaves (no element), revert to last clicked node selection if available
+        // If hover leaves (no element), revert to baseline (panelBase)
         if (!hoveredElement) {
-          if (clickedSelected) {
-            setSelected(clickedSelected);
-          } else {
-            setSelected(undefined);
-          }
+          setSelected(panelBase);
           return;
         }
         // Show element info on hover - check if it's a node or relationship
@@ -287,13 +291,14 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
         if (selected !== undefined) {
           setSelected(undefined);
         }
-        // Do not clear clickedSelected on canvas click, so filter remains until user clicks another node
+        // Keep clickedSelected (to preserve filtered subset) but baseline resets to ResultOverview
+        setPanelBase(undefined);
       },
       onPan: true,
       onZoom: true,
       onDrag: true,
     }),
-    [selected, clickedSelected]
+    [selected, clickedSelected, panelBase]
   );
 
   const initGraph = (
