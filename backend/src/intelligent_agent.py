@@ -57,36 +57,6 @@ class AgentState:
         existing_ids = [c.chunk_id for c in self.discovered_chunks]
         if chunk_info.chunk_id not in existing_ids:
             self.discovered_chunks.append(chunk_info)
-            
-    def get_context_for_llm(self) -> str:
-        """LLM için kontekst metni oluştur"""
-        context_parts = []
-        
-        # Chunk bilgilerini relevance score'a göre sırala
-        sorted_chunks = sorted(self.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
-        
-        for chunk in sorted_chunks[:10]:  # En iyi 10 chunk'ı al
-            context_parts.append(f"""
-### Belge: {chunk.document_name}
-**Sayfa:** {chunk.page_number}
-**Chunk ID:** {chunk.chunk_id}
-**Relevance Score:** {chunk.relevance_score:.3f}
-
-**İçerik:**
-{chunk.text[:1000]}...
-
-**En İlgili Bölümler:**
-""")
-            for i, (split_text, score) in enumerate(zip(chunk.split_texts[:3], chunk.split_scores[:3])):
-                context_parts.append(f"- ({score:.3f}) {split_text[:200]}...")
-        
-        # Entity bilgileri ekle
-        if self.discovered_entities:
-            context_parts.append("\n### Keşfedilen Varlıklar:")
-            for entity in self.discovered_entities[:20]:
-                context_parts.append(f"- {entity}")
-                
-        return "\n".join(context_parts)
 
 class IntelligentAgent:
     """
@@ -175,73 +145,6 @@ class IntelligentAgent:
                 "node_properties": {},
                 "sample_relationships": []
             }
-    
-    def create_system_prompt(self, schema: Dict[str, Any]) -> str:
-        """System prompt'u schema bilgileriyle oluştur"""
-        
-        schema_text = f"""
-## Neo4j Veritabanı Schema Bilgileri
-
-### Mevcut Node Labels:
-{', '.join(schema['node_labels'])}
-
-### Mevcut Relationship Types:
-{', '.join(schema['relationship_types'])}
-
-### Node Properties (örnek):
-"""
-        
-        for label, props in schema['node_properties'].items():
-            schema_text += f"\n- {label}: {', '.join(props)}"
-        
-        schema_text += "\n\n### Örnek İlişkiler:\n"
-        for rel in schema['sample_relationships']:
-            schema_text += f"- ({rel['from_label']})-[:{rel['rel_type']}]->({rel['to_label']})\n"
-        
-        system_prompt = f"""Sen bir Neo4j veritabanında bilgi arayan AKILLI BİLGİ MADENCİSİ'sin.
-
-{schema_text}
-
-## ANA STRATEJI: ENTITY-DRIVEN SEARCH
-
-### İLK ADIM: Entity Search (ZORUNLU)
-Kullanıcı sorusundan anahtar kelime çıkar ve:
-Action: entity_search
-[anahtar kelime]
-
-ÖRNEK:
-- "Ayça hanımın poliçeleri" → Action: entity_search, Ayça
-- "2020 yılı poliçeleri" → Action: entity_search, 2020
-- "DASK sigortası" → Action: entity_search, DASK
-
-### BACKUP STRATEJİLER:
-Sadece entity_search boş sonuç verirse:
-
-**Sayısal Sorgular:**
-Action: cypher_query
-MATCH (p:Policy) RETURN count(*)
-
-**Vector Search:**
-Action: vector_search
-[semantic arama metni]
-
-## FORMAT (ZORUNLU):
-Observation: [durum]
-Thought: [düşünce]
-Action: entity_search
-[tek anahtar kelime]
-
-## KURALLAR:
-1. İLK ACTION MUTLAKA entity_search OLMALI
-2. Yeterli chunk bulunduğunda (3-5 chunk) durmaya odaklan
-3. Sadece chunk ve entity toplama yap, cevap verme
-2. Tek seferde tek anahtar kelime kullan
-3. Boş sonuç alırsan farklı kelime dene
-4. Maksimum 5 iterasyon
-
-Şimdi MUTLAKA entity_search ile başla!"""
-
-        return system_prompt
     
     def execute_cypher_query(self, query: str) -> Tuple[bool, Any]:
         """Cypher sorgusunu çalıştır"""
@@ -1282,9 +1185,9 @@ def test_agent():
     # Test soruları
     test_questions = [
         "Ayça hanımın 2020 yılında kaç adet poliçesi var?",
-        "Sistemde hangi poliçe türleri mevcut?",
-        "DASK poliçeleri hakkında ne tür bilgiler var?",
-        "Galata Residence ile ilgili hangi bilgiler mevcut?"
+        # "Sistemde hangi poliçe türleri mevcut?",
+        # "DASK poliçeleri hakkında ne tür bilgiler var?",
+        # "Galata Residence ile ilgili hangi bilgiler mevcut?"
     ]
     
     for question in test_questions:
