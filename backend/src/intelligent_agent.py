@@ -313,10 +313,13 @@ Action: final_answer
                 RETURN e.id as id, e.entity_type as type, labels(e) as labels
                 LIMIT 20
                 """,
-                # Tüm property'lerde arama
+                # Sadece string property'lerde arama (embedding array'lerini hariç tut)
                 f"""
                 MATCH (e:__Entity__)
-                WHERE any(prop IN keys(e) WHERE apoc.text.clean(toString(e[prop])) CONTAINS apoc.text.clean('{search_term}'))
+                WHERE any(prop IN keys(e) WHERE 
+                    prop <> 'embedding' AND 
+                    e[prop] IS NOT NULL AND 
+                    apoc.text.clean(toString(e[prop])) CONTAINS apoc.text.clean('{search_term}'))
                 RETURN e.id as id, e.entity_type as type, labels(e) as labels
                 LIMIT 20
                 """
@@ -463,13 +466,13 @@ Action: final_answer
             if not entity_ids:
                 return []
                 
-            # Entity'lere bağlı chunk'ları bul
+            # Önce HAS_ENTITY relationship'ini dene
             chunk_query = """
-            MATCH (e)-[:HAS_ENTITY]-(c:Chunk)
+            MATCH (e:__Entity__)-[:HAS_ENTITY]-(c:Chunk)
             WHERE e.id IN $entity_ids
             OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
             RETURN DISTINCT 
-                c.id as chunk_id,
+                c.chunkId as chunk_id,
                 c.text as text,
                 c.page_number as page_number,
                 d.fileName as document_name,
@@ -481,6 +484,30 @@ Action: final_answer
                 'entity_ids': entity_ids,
                 'limit': state.max_chunks_limit
             })
+            
+            # Eğer HAS_ENTITY ile sonuç bulunamazsa, alternatif relationship'leri dene
+            if not result:
+                logger.info("HAS_ENTITY relationship bulunamadı, alternatif arama yapılıyor...")
+                
+                # Alternatif: Entity ismini chunk text'inde ara
+                fallback_query = """
+                UNWIND $entity_ids as entity_id
+                MATCH (c:Chunk)
+                WHERE c.text CONTAINS entity_id
+                OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
+                RETURN DISTINCT 
+                    c.chunkId as chunk_id,
+                    c.text as text,
+                    c.page_number as page_number,
+                    d.fileName as document_name,
+                    d as document_metadata
+                LIMIT $limit
+                """
+                
+                result = self.graph.query(fallback_query, {
+                    'entity_ids': entity_ids,
+                    'limit': state.max_chunks_limit
+                })
             
             chunks = []
             for row in result:
@@ -514,7 +541,7 @@ Action: final_answer
             OPTIONAL MATCH (entity)-[:HAS_ENTITY]-(c:Chunk)
             OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
             RETURN DISTINCT 
-                c.id as chunk_id,
+                c.chunkId as chunk_id,
                 c.text as text,
                 c.page_number as page_number,
                 d.fileName as document_name,
@@ -550,9 +577,9 @@ Action: final_answer
             if not chunk_info.text:
                 return chunk_info
                 
-            # Chunk'ın Neo4j'deki embedding'ini al
+            # Chunk'ın Neo4j'deki embedding'ini al (chunkId field kullan)
             chunk_embedding_query = """
-            MATCH (c:Chunk {id: $chunk_id})
+            MATCH (c:Chunk {chunkId: $chunk_id})
             RETURN c.embedding as embedding
             """
             
@@ -631,7 +658,7 @@ Action: final_answer
             YIELD node, score
             OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
             RETURN 
-                node.id as chunk_id,
+                node.chunkId as chunk_id,
                 node.text as text, 
                 node.page_number as page_number,
                 node.embedding as chunk_embedding,
