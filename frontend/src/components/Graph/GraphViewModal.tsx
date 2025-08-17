@@ -1,4 +1,4 @@
-import { Banner, Dialog, Flex, IconButtonArray, LoadingSpinner, useDebounceValue } from '@neo4j-ndl/react';
+import { Banner, Dialog, Flex, IconButtonArray, LoadingSpinner, useDebounceValue, Checkbox } from '@neo4j-ndl/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BasicNode,
@@ -61,6 +61,7 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
   const [graphType, setGraphType] = useState<GraphType[]>([]);
   const [disableRefresh, setDisableRefresh] = useState<boolean>(false);
   const [selected, setSelected] = useState<{ type: EntityType; id: string } | undefined>(undefined);
+  const [showOnlySelected, setShowOnlySelected] = useState<boolean>(false);
   const [mode, setMode] = useState<boolean>(false);
   const graphQueryAbortControllerRef = useRef<AbortController>();
   const [openGraphView, setOpenGraphView] = useState<boolean>(false);
@@ -138,9 +139,53 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
       }
       return nodeRelationshipData;
     } catch (error: any) {
-      console.log(error);
+      // capture error state instead of console.log to satisfy lint rules
+      setStatus('danger');
+      setStatusMessage(error?.message ?? String(error));
     }
   }, [viewPoint, selectedRows, graphQuery, inspectedName, userCredentials]);
+
+  // Filter function: when showOnlySelected is true, show only the selected node and its immediate neighbours
+  const applySelectedFilter = useCallback(() => {
+    if (!selected || selected.type !== 'node') {
+      return;
+    }
+    const selId = selected.id;
+
+    // collect node ids: selected + neighbours
+    const neighbourIds = new Set<string>();
+    neighbourIds.add(selId);
+    allRelationships.forEach((rel) => {
+      const { from, to } = rel as any;
+      if (from === selId) {
+        neighbourIds.add(to);
+      }
+      if (to === selId) {
+        neighbourIds.add(from);
+      }
+    });
+
+    const filteredNodes = allNodes.filter((n) => neighbourIds.has(n.id));
+    const filteredRels = allRelationships.filter((rel) => {
+      const { from, to } = rel as any;
+      // keep only relationships that connect the selected node to neighbours
+      return (from === selId && neighbourIds.has(to)) || (to === selId && neighbourIds.has(from));
+    });
+
+    setNode(filteredNodes);
+    setRelationship(filteredRels);
+  }, [selected, allNodes, allRelationships]);
+
+  // keep UI in sync when toggle or selection changes
+  useEffect(() => {
+    if (showOnlySelected) {
+      applySelectedFilter();
+    } else {
+      // restore full graph
+      setNode(allNodes);
+      setRelationship(allRelationships);
+    }
+  }, [showOnlySelected, selected, allNodes, allRelationships]);
 
   // Api call to get the nodes and relations
   const graphApi = async (mode?: string) => {
@@ -359,7 +404,7 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
     setSelected(undefined);
   };
 
-  const handleSchemaView = async (rawNodes: any[], rawRelationships: any[]) => {
+  const handleSchemaView = (rawNodes: any[], rawRelationships: any[]) => {
     const { nodes, relationships } = extractGraphSchemaFromRawData(rawNodes, rawRelationships);
     setSchemaNodes(nodes as any);
     setSchemaRels(relationships as any);
@@ -393,14 +438,34 @@ const GraphViewModal: React.FunctionComponent<GraphViewModalProps> = ({
             </div>
           )}
           <Flex className='w-full' alignItems='center' flexDirection='row' justifyContent='space-between'>
-            {checkBoxView && (
-              <CheckboxSelection
-                graphType={graphType}
-                loading={loading}
-                handleChange={handleCheckboxChange}
-                {...getCheckboxConditions(allNodes)}
-              />
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {checkBoxView && (
+                <CheckboxSelection
+                  graphType={graphType}
+                  loading={loading}
+                  handleChange={handleCheckboxChange}
+                  {...getCheckboxConditions(allNodes)}
+                />
+              )}
+              {/* Show only selected node toggle */}
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <label style={{ marginRight: 8 }}>{'Show selected + neighbours'}</label>
+                <Checkbox
+                  ariaLabel='show-only-selected'
+                  isChecked={showOnlySelected}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                    const isChecked = e.target.checked;
+                    setShowOnlySelected(isChecked);
+                    // when turning on but no selection, do nothing until a node is selected
+                    if (!isChecked && allNodes.length > 0) {
+                      // restore full graph
+                      setNode(allNodes);
+                      setRelationship(allRelationships);
+                    }
+                  }}
+                />
+              </div>
+            </div>
             {/* <SchemaDropdown isDisabled={!selectedNodes.length || !selectedRels.length} onSchemaSelect={handleSchemaSelect} /> */}
           </Flex>
         </Dialog.Header>
