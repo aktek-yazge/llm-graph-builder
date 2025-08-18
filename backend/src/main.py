@@ -978,79 +978,95 @@ async def processing_source(
                     f"{int(processing_source_func)/node_count}/s"
                 )
 
-            # Otomatik post-processing (eğer extract başarılı ve kurallar verilmiş ise)
-            if (job_status == "Completed" and enable_post_processing and post_processing_rules):
+            # Otomatik cleanup ve post-processing (eğer extract başarılı ise)
+            if job_status == "Completed":
                 try:
-                    logging.info(f"Extract sonrası otomatik post-processing başlıyor: {file_name}")
+                    # 1. Policy Node Cleanup - Orphan Policy node'larını temizle
+                    logging.info(f"Policy node cleanup başlıyor: {file_name}")
+                    from src.policy_cleanup import cleanup_policy_nodes_to_document
                     
-                    # Post-processing kurallarını parse et
-                    if isinstance(post_processing_rules, str):
-                        import json
-                        rules_list = json.loads(post_processing_rules)
+                    cleanup_result = cleanup_policy_nodes_to_document(graph, file_name)
+                    if cleanup_result['policy_nodes_found'] > 0:
+                        logging.info(f"Policy cleanup tamamlandı: {cleanup_result['policy_nodes_deleted']} node silindi, {cleanup_result['relationships_moved']} ilişki taşındı")
                     else:
-                        rules_list = post_processing_rules
-                    
-                    logging.info(f"Post-processing kuralları: {rules_list}")
-                    
-                    # Post-processing'i çalıştır - sadece bu dosya için
-                    from src.llm import apply_dynamic_entity_post_processing
-                    
-                    # Neo4j'deki gerçek dosya adını al (Unicode escape karakterleri ile)
-                    real_file_name_query = """
-                    MATCH (d:Document) 
-                    WHERE d.fileName = $fileName OR d.fileName CONTAINS $fileNamePart
-                    RETURN d.fileName as realFileName
-                    LIMIT 1
-                    """
-                    # Dosya adının bir kısmını al (ilk 20 karakter gibi)
-                    file_name_part = file_name[:20] if len(file_name) > 20 else file_name
-                    real_file_result = execute_graph_query(graph, real_file_name_query, 
-                                                         params={"fileName": file_name, "fileNamePart": file_name_part})
-                    
-                    if real_file_result and real_file_result[0].get('realFileName'):
-                        real_file_name = real_file_result[0]['realFileName']
-                        logging.info(f"Post-processing için gerçek dosya adı: {real_file_name}")
-                        target_files = [real_file_name]
-                    else:
-                        logging.warning(f"Gerçek dosya adı bulunamadı, orijinal kullanılıyor: {file_name}")
-                        target_files = [file_name]
-                    
-                    post_processing_start_time = time.time()
-                    post_processing_result = apply_dynamic_entity_post_processing(
-                        graph, 
-                        rules_list, 
-                        target_file_names=target_files
-                    )
-                    post_processing_end_time = time.time()
-                    
-                    logging.info(f"Extract sonrası post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
-                    logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
-                    
-                    # Node count'ları tekrar say (post-processing sonrasında)
-                    graphDb_data_Access = graphDBdataAccess(graph)
-                    final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-                    if final_count_response:
-                        final_node_count = int(final_count_response[file_name].get('nodeCount', node_count))
-                        final_rel_count = int(final_count_response[file_name].get('relationshipCount', rel_count))
+                        logging.info(f"Policy cleanup: Temizlenecek Policy node bulunamadı")
                         
-                        # Response'u güncelle
-                        response["nodeCount"] = final_node_count
-                        response["relationshipCount"] = final_rel_count
+                except Exception as cleanup_error:
+                    logging.error(f"Policy cleanup hatası: {cleanup_error}")
+                
+                # 2. Post-processing (eğer kurallar verilmiş ise)
+                if enable_post_processing and post_processing_rules:
+                    try:
+                        logging.info(f"Extract sonrası otomatik post-processing başlıyor: {file_name}")
                         
-                        logging.info(f"Post-processing sonrası güncel sayılar - Nodes: {final_node_count}, Relationships: {final_rel_count}")
-                    
-                    # Post-processing bilgilerini uri_latency'ye ekle
-                    uri_latency["post_processing_enabled"] = "true"
-                    uri_latency["post_processing_time"] = f"{post_processing_end_time - post_processing_start_time:.2f}"
-                    uri_latency["post_processing_created_rels"] = str(post_processing_result.get('total_created_relationships', 0))
-                    uri_latency["post_processing_rules_count"] = str(len(rules_list))
-                    
-                except Exception as post_processing_error:
-                    logging.error(f"Extract sonrası post-processing hatası: {post_processing_error}")
-                    uri_latency["post_processing_enabled"] = "true"
-                    uri_latency["post_processing_error"] = str(post_processing_error)
-            else:
-                uri_latency["post_processing_enabled"] = "false"
+                        # Post-processing kurallarını parse et
+                        if isinstance(post_processing_rules, str):
+                            import json
+                            rules_list = json.loads(post_processing_rules)
+                        else:
+                            rules_list = post_processing_rules
+                        
+                        logging.info(f"Post-processing kuralları: {rules_list}")
+                        
+                        # Post-processing'i çalıştır - sadece bu dosya için
+                        from src.llm import apply_dynamic_entity_post_processing
+                        
+                        # Neo4j'deki gerçek dosya adını al (Unicode escape karakterleri ile)
+                        real_file_name_query = """
+                        MATCH (d:Document) 
+                        WHERE d.fileName = $fileName OR d.fileName CONTAINS $fileNamePart
+                        RETURN d.fileName as realFileName
+                        LIMIT 1
+                        """
+                        # Dosya adının bir kısmını al (ilk 20 karakter gibi)
+                        file_name_part = file_name[:20] if len(file_name) > 20 else file_name
+                        real_file_result = execute_graph_query(graph, real_file_name_query, 
+                                                             params={"fileName": file_name, "fileNamePart": file_name_part})
+                        
+                        if real_file_result and real_file_result[0].get('realFileName'):
+                            real_file_name = real_file_result[0]['realFileName']
+                            logging.info(f"Post-processing için gerçek dosya adı: {real_file_name}")
+                            target_files = [real_file_name]
+                        else:
+                            logging.warning(f"Gerçek dosya adı bulunamadı, orijinal kullanılıyor: {file_name}")
+                            target_files = [file_name]
+                        
+                        post_processing_start_time = time.time()
+                        post_processing_result = apply_dynamic_entity_post_processing(
+                            graph, 
+                            rules_list, 
+                            target_file_names=target_files
+                        )
+                        post_processing_end_time = time.time()
+                        
+                        logging.info(f"Extract sonrası post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
+                        logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
+                        
+                        # Node count'ları tekrar say (post-processing sonrasında)
+                        graphDb_data_Access = graphDBdataAccess(graph)
+                        final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                        if final_count_response:
+                            final_node_count = int(final_count_response[file_name].get('nodeCount', node_count))
+                            final_rel_count = int(final_count_response[file_name].get('relationshipCount', rel_count))
+                            
+                            # Response'u güncelle
+                            response["nodeCount"] = final_node_count
+                            response["relationshipCount"] = final_rel_count
+                            
+                            logging.info(f"Post-processing sonrası güncel sayılar - Nodes: {final_node_count}, Relationships: {final_rel_count}")
+                        
+                        # Post-processing bilgilerini uri_latency'ye ekle
+                        uri_latency["post_processing_enabled"] = "true"
+                        uri_latency["post_processing_time"] = f"{post_processing_end_time - post_processing_start_time:.2f}"
+                        uri_latency["post_processing_created_rels"] = str(post_processing_result.get('total_created_relationships', 0))
+                        uri_latency["post_processing_rules_count"] = str(len(rules_list))
+                        
+                    except Exception as post_processing_error:
+                        logging.error(f"Extract sonrası post-processing hatası: {post_processing_error}")
+                        uri_latency["post_processing_enabled"] = "true"
+                        uri_latency["post_processing_error"] = str(post_processing_error)
+                else:
+                    uri_latency["post_processing_enabled"] = "false"
 
             response["fileName"] = file_name
             response["nodeCount"] = node_count

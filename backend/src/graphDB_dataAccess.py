@@ -103,6 +103,12 @@ class graphDBdataAccess:
                 
                 if result and result[0]['count'] > 0:
                     logging.info(f"Document node zaten mevcut: {file_name}")
+                    # Var olan node'ın özelliklerini güncelle (sadece gerekli alanları)
+                    update_query = """
+                    MATCH (d:Document {fileName: $file_name})
+                    SET d.updatedAt = datetime()
+                    """
+                    self.execute_query(update_query, {"file_name": file_name})
                     return
                 
                 # Minimal Document node oluştur

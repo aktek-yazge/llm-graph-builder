@@ -28,7 +28,13 @@ class EntityPostProcessor:
         self.forbidden_entity_types = [
             "Document", "Policy", "Form", "Container", 
             "Existing Insurance Policy", "Konut Poliçesi",
-            "DASK Poliçesi", "Kasko Poliçesi", "Trafik Poliçesi"
+            "DASK Poliçesi", "Kasko Poliçesi", "Trafik Poliçesi",
+            "Sigorta Poliçesi", "Insurance Policy", "Poliçe",
+            "Sigorta", "Insurance", "Belge", "Döküman"
+        ]
+        self.forbidden_entity_patterns = [
+            "poliçe", "policy", "sigorta", "insurance", 
+            "belge", "document", "döküman", "form"
         ]
         self.allowed_entity_types = [
             "Person", "Company", "PolicyNumber", "Address", 
@@ -88,19 +94,41 @@ class EntityPostProcessor:
         filtered_nodes = []
         
         for node in nodes:
-            # Yasaklı türleri kontrol et
-            if any(forbidden in node.type for forbidden in self.forbidden_entity_types):
-                logging.warning(f"Yasaklı entity filtrelendi: {node.type} - {node.id}")
-                continue
-                
-            # Yasaklı ID'leri kontrol et  
-            if any(forbidden in node.id for forbidden in self.forbidden_entity_types):
-                logging.warning(f"Yasaklı ID filtrelendi: {node.id}")
-                continue
-                
-            filtered_nodes.append(node)
+            is_forbidden = False
             
-        logging.info(f"Entity filtreleme: {len(nodes)} -> {len(filtered_nodes)}")
+            # Yasaklı türleri kontrol et (tam eşleşme)
+            if any(forbidden == node.type for forbidden in self.forbidden_entity_types):
+                logging.warning(f"Yasaklı entity türü filtrelendi: {node.type} - {node.id}")
+                is_forbidden = True
+                
+            # Yasaklı türleri kontrol et (içerik eşleşmesi)
+            if not is_forbidden:
+                for forbidden in self.forbidden_entity_types:
+                    if forbidden.lower() in node.type.lower():
+                        logging.warning(f"Yasaklı entity türü (içerik) filtrelendi: {node.type} - {node.id}")
+                        is_forbidden = True
+                        break
+                
+            # Yasaklı ID'leri kontrol et
+            if not is_forbidden:
+                for forbidden in self.forbidden_entity_types:
+                    if forbidden.lower() in node.id.lower():
+                        logging.warning(f"Yasaklı ID filtrelendi: {node.id}")
+                        is_forbidden = True
+                        break
+                        
+            # Pattern bazlı kontrol
+            if not is_forbidden:
+                for pattern in self.forbidden_entity_patterns:
+                    if pattern.lower() in node.type.lower() or pattern.lower() in node.id.lower():
+                        logging.warning(f"Yasaklı pattern filtrelendi: {node.type} - {node.id} (pattern: {pattern})")
+                        is_forbidden = True
+                        break
+                        
+            if not is_forbidden:
+                filtered_nodes.append(node)
+            
+        logging.info(f"Entity filtreleme: {len(nodes)} -> {len(filtered_nodes)} ({len(nodes) - len(filtered_nodes)} filtrelendi)")
         return filtered_nodes
     
     def _correct_relationships(self, relationships, nodes, file_name: str):
