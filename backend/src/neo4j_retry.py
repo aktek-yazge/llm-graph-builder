@@ -9,7 +9,9 @@ from neo4j.exceptions import (
     TransientError, 
     IncompleteCommit,
     SessionExpired,
-    ConnectionUnavailable
+    DatabaseUnavailable,
+    ReadServiceUnavailable,
+    WriteServiceUnavailable
 )
 
 def retry_neo4j_operation(operation: Callable, max_retries: int = 3, delay: float = 1.0) -> Any:
@@ -34,7 +36,8 @@ def retry_neo4j_operation(operation: Callable, max_retries: int = 3, delay: floa
             return operation()
         
         except (ServiceUnavailable, TransientError, IncompleteCommit, 
-                SessionExpired, ConnectionUnavailable, OSError) as e:
+                SessionExpired, DatabaseUnavailable, ReadServiceUnavailable,
+                WriteServiceUnavailable, OSError) as e:
             last_exception = e
             
             if attempt < max_retries:
