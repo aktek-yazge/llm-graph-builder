@@ -379,20 +379,50 @@ class graphDBdataAccess:
                 else:
                     return {'message':"Connection Successful","gds_status": gds_status,"write_access":write_access}
 
-    def execute_query(self, query, param=None,max_retries=3, delay=2):
+    def execute_query(self, query, param=None, max_retries=3, delay=2):
+        """
+        Neo4j query'sini timeout ve connection hatalarına karşı retry mekanizması ile çalıştırır
+        """
+        import time
+        from neo4j.exceptions import SessionExpired, ServiceUnavailable, TransientError
+        
         retries = 0
         while retries < max_retries:
             try:
-                return self.graph.query(query, param,session_params={"database":self.graph._database})
+                return self.graph.query(query, param, session_params={"database": self.graph._database})
+            except (SessionExpired, ServiceUnavailable) as e:
+                retries += 1
+                if retries >= max_retries:
+                    logging.error(f"Neo4j bağlantı hatası - {max_retries} deneme sonrası başarısız: {str(e)}")
+                    raise e
+                logging.warning(f"Neo4j bağlantı hatası (deneme {retries}/{max_retries}): {str(e)}")
+                logging.info(f"{delay} saniye bekleniyor...")
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
             except TransientError as e:
                 if "DeadlockDetected" in str(e):
                     retries += 1
+                    if retries >= max_retries:
+                        logging.error(f"Deadlock hatası - {max_retries} deneme sonrası başarısız: {str(e)}")
+                        raise e
                     logging.info(f"Deadlock detected. Retrying {retries}/{max_retries} in {delay} seconds...")
-                    time.sleep(delay)  # Wait before retrying
+                    time.sleep(delay)
                 else:
-                    raise 
-        logging.error("Failed to execute query after maximum retries due to persistent deadlocks.")
-        raise RuntimeError("Query execution failed after multiple retries due to deadlock.")
+                    # Diğer TransientError'lar için de retry yap
+                    retries += 1
+                    if retries >= max_retries:
+                        logging.error(f"Transient error - {max_retries} deneme sonrası başarısız: {str(e)}")
+                        raise e
+                    logging.warning(f"Transient error (deneme {retries}/{max_retries}): {str(e)}")
+                    time.sleep(delay)
+            except Exception as e:
+                # Retry edilemez hatalar
+                logging.error(f"Neo4j query hatası (retry edilemez): {str(e)}")
+                raise e
+        
+        # Eğer buraya geldiysek, tüm retry'lar tükendi
+        logging.error("Neo4j query failed after maximum retries.")
+        raise RuntimeError("Query execution failed after multiple retries.")
 
     def get_current_status_document_node(self, file_name):
         query = """

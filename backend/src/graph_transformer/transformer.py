@@ -75,6 +75,8 @@ system_prompt = (
     "## 1. Overview\n"
     "You are a top-tier algorithm designed for extracting information in structured "
     "formats to build a knowledge graph.\n"
+    "CRITICAL: Focus ONLY on business-essential entities. Do NOT extract financial amounts, "
+    "reference numbers, detailed legal text, or administrative details.\n"
     "Try to capture as much information from the text as possible without "
     "sacrificing accuracy. Do not add any information that is not explicitly "
     "mentioned in the text.\n"
@@ -85,7 +87,7 @@ system_prompt = (
     "- **Consistency**: Ensure you use available types for node labels.\n"
     "Ensure you use basic or elementary types for node labels.\n"
     "- For example, when you identify an entity representing a person, "
-    "always label it as **'person'**. Avoid using more specific terms "
+    "always label it as **'Person'**. Avoid using more specific terms "
     "like 'mathematician' or 'scientist'."
     "- **Node IDs**: Never utilize integers as node IDs. Node IDs should be "
     "names or human-readable identifiers found in the text.\n"
@@ -103,7 +105,19 @@ system_prompt = (
     'knowledge graph. In this example, use "John Doe" as the entity ID.\n'
     "Remember, the knowledge graph should be coherent and easily understandable, "
     "so maintaining consistency in entity references is crucial.\n"
-    "## 4. Strict Compliance\n"
+    "## 4. Business Focus for Insurance Documents\n"
+    "When processing insurance documents, ONLY extract entities that provide business value:\n"
+    "- Customer/Person names\n"
+    "- Agent names\n"
+    "- Insurance Company names\n"
+    "- Policy types (Kasko, Trafik, Konut, DASK, etc.)\n"
+    "- Years from any dates (as PolicyYear entities)\n"
+    "- High-level coverage types\n"
+    "- Asset types (Bina, Araç, etc.)\n"
+    "- Address information\n"
+    "NEVER extract: monetary amounts, policy numbers, legal clauses, technical jargon, "
+    "detailed administrative information, or specific financial calculations.\n"
+    "## 5. Strict Compliance\n"
     "Adhere to the rules strictly. Non-compliance will result in termination."
 )
 
@@ -285,6 +299,11 @@ def create_unstructured_prompt(
         '"head_type", "relation", "tail", and "tail_type". The "head" '
         "key must contain the text of the extracted entity with one of the types "
         "from the provided list in the user prompt.",
+        "CRITICAL FOR INSURANCE DOCUMENTS: Extract ONLY business-essential entities. "
+        "DO NOT extract monetary amounts, policy numbers, legal clauses, technical jargon, "
+        "administrative details, or specific financial calculations. Focus on entities "
+        "that provide business query value like customer names, agent names, policy types, "
+        "years, coverage types, asset types, and addresses.",
         f'The "head_type" key must contain the type of the extracted head entity, '
         f"which MUST be one of these ALLOWED types: {node_labels_str}. "
         f"DO NOT use any other node types!"
@@ -310,7 +329,7 @@ def create_unstructured_prompt(
         if relationship_type == "tuple"
         else "",
         "Attempt to extract as many entities and relations as you can, BUT ONLY those that "
-        "match the allowed types. Maintain "
+        "match the allowed types AND provide business value. Maintain "
         "Entity Consistency: When extracting entities, it's vital to ensure "
         'consistency. If an entity, such as "John Doe", is mentioned multiple '
         "times in the text but is referred to by different names or pronouns "
@@ -321,6 +340,7 @@ def create_unstructured_prompt(
         "IMPORTANT NOTES:\n"
         "- Don't add any explanation and text.\n"
         "- Focus ONLY on the allowed node and relationship types.\n"
+        "- For insurance documents, prioritize business-essential entities over technical details.\n"
         "- It's better to extract fewer, correct entities than incorrect ones.\n"
         "- Ignore entities and relationships that don't match the allowed types.",
         additional_instructions,
