@@ -63,20 +63,39 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
 def create_graph_database_connection(uri, userName, password, database):
   enable_user_agent = os.environ.get("ENABLE_USER_AGENT", "False").lower() in ("true", "1", "yes")
   
-  # UTF-8 desteği için driver config
+  # Environment'tan timeout ve connection ayarlarını al
+  connection_timeout = int(os.environ.get("NEO4J_CONNECTION_TIMEOUT", "30"))
+  read_timeout = int(os.environ.get("NEO4J_READ_TIMEOUT", "120"))
+  write_timeout = int(os.environ.get("NEO4J_WRITE_TIMEOUT", "120"))
+  max_connection_lifetime = int(os.environ.get("NEO4J_MAX_CONNECTION_LIFETIME", "300"))
+  max_connection_pool_size = int(os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", "50"))
+  connection_acquisition_timeout = int(os.environ.get("NEO4J_CONNECTION_ACQUISITION_TIMEOUT", "60"))
+  
+  # SSL kullanımını devre dışı bırak - her zaman encrypted=False
+  use_ssl = False
+  
+  # Driver config - SSL tamamen devre dışı
   driver_config = {
-    'encrypted': False,  # Eğer SSL kullanmıyorsanız
-    'trust': 'TRUST_ALL_CERTIFICATES',  # Geliştirme ortamı için
-    'max_connection_lifetime': 3600,
-    'max_connection_pool_size': 50,
-    'connection_acquisition_timeout': 60
+    'encrypted': False,
+    'trust': 'TRUST_ALL_CERTIFICATES',
+    'max_connection_lifetime': max_connection_lifetime,
+    'max_connection_pool_size': max_connection_pool_size,
+    'connection_acquisition_timeout': connection_acquisition_timeout,
+    'connection_timeout': connection_timeout
   }
+  
+  logging.info(f"Neo4j bağlantısı kuruluyor: {uri} (SSL: DISABLED)")
+  logging.info(f"Connection config: timeout={connection_timeout}s, pool_size={max_connection_pool_size}")
   
   if enable_user_agent:
     driver_config['user_agent'] = os.environ.get('NEO4J_USER_AGENT')
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=False, driver_config=driver_config)  
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, 
+                      refresh_schema=False, sanitize=False, driver_config=driver_config,
+                      timeout=read_timeout)  
   else:
-    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, refresh_schema=False, sanitize=False, driver_config=driver_config)    
+    graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, 
+                      refresh_schema=False, sanitize=False, driver_config=driver_config,
+                      timeout=read_timeout)    
   return graph
 
 

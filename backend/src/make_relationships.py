@@ -448,38 +448,8 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
         logging.error(f"Error creating person-policy connections: {e}")
         results['person_policy_connections'] = 0
     
-    # 2. Aynı poliçe türüne ait document'ları birbirine bağla
-    policy_query = """
-    // PolicyType veya benzer insurance entity'lere göre bağla
-    MATCH (policy_entity)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
-    MATCH (policy_entity)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
-    WHERE d1 <> d2 
-    AND (policy_entity:PolicyType OR policy_entity.id =~ '(?i).*(poliçe|policy|sigorta).*')
-    """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
-    
-    WITH d1, d2, policy_entity, count(*) AS shared_chunks
-    WHERE shared_chunks >= 1
-    
-    MERGE (d1)-[r:SAME_POLICY_TYPE]->(d2)
-    ON CREATE SET 
-        r.policy_type = policy_entity.id,
-        r.shared_chunks = shared_chunks,
-        r.created_at = datetime()
-    ON MATCH SET 
-        r.shared_chunks = shared_chunks,
-        r.updated_at = datetime()
-    
-    RETURN count(DISTINCT r) AS connections_created
-    """
-    
-    try:
-        params = {"target_document": target_document} if target_document else {}
-        result = execute_graph_query(graph, policy_query, params=params)
-        results['policy_connections'] = result[0]['connections_created'] if result else 0
-        logging.info(f"Created {results['policy_connections']} policy-type-based document connections")
-    except Exception as e:
-        logging.error(f"Error creating policy-type-based document connections: {e}")
-        results['policy_connections'] = 0
+    # 2. Poliçe türü bağlantısı iptal edildi - SAME_POLICY_TYPE relationship kaldırıldı
+    results['policy_connections'] = 0
     
     # 3. Aynı şirkete ait document'ları birbirine bağla
     company_query = """
