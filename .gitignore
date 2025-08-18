@@ -177,4 +177,4 @@ startupfrontend.sh
 *.zip
 dinkal
 .vscode
-*.json
+/backend/envName
