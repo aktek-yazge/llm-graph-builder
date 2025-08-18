@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from langchain_neo4j import Neo4jVector
 from langchain_neo4j import Neo4jChatMessageHistory
 from langchain_neo4j import GraphCypherQAChain
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableBranch
 from langchain.retrievers import ContextualCompressionRetriever
@@ -37,6 +37,9 @@ from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
 from src.custom_neo4j_vector import CustomNeo4jVector
 load_dotenv() 
+
+from typing import Dict, List
+import base64
 
 # Neo4j ve langchain loglama seviyelerini ayarla
 # DEBUG seviyesi çok ayrıntılı log üretir, gerekirse açabilirsiniz
@@ -719,6 +722,44 @@ def process_chat_response(messages, history, question, model, graph, document_na
             "user": "chatbot"
         }
 
+# def summarize_and_log(history, stored_messages, llm):
+#     logging.info("Starting summarization in a separate thread.")
+#     if not stored_messages:
+#         logging.info("No messages to summarize.")
+#         return False
+
+#     try:
+#         start_time = time.time()
+#         logging.info(f"stored_messages length: {len(stored_messages)}")
+#         logging.info(f"stored_messages: {stored_messages}")
+
+#         summarization_prompt = ChatPromptTemplate.from_messages(
+#             [
+#                 MessagesPlaceholder(variable_name="chat_history"),
+#                 (
+#                     "human",
+#                     "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+#                 ),
+#             ]
+#         )
+#         summarization_chain = summarization_prompt | llm
+
+#         summary_message = summarization_chain.invoke({"chat_history": stored_messages})
+
+#         with threading.Lock():
+#             history.clear()
+#             history.add_user_message("Şu ana kadarki konuşma özetimiz")
+#             history.add_message(summary_message)
+
+#         history_summarized_time = time.time() - start_time
+#         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
+
+#         return True
+
+#     except Exception as e:
+#         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
+#         return False 
+
 def summarize_and_log(history, stored_messages, llm):
     logging.info("Starting summarization in a separate thread.")
     if not stored_messages:
@@ -727,24 +768,46 @@ def summarize_and_log(history, stored_messages, llm):
 
     try:
         start_time = time.time()
+        total_len = len(stored_messages)
+        keep_last = 15
+        logging.info(f"stored_messages length: {len(stored_messages)}")
+        logging.info(f"stored_messages: {stored_messages}")
 
-        summarization_prompt = ChatPromptTemplate.from_messages(
-            [
-                MessagesPlaceholder(variable_name="chat_history"),
-                (
-                    "human",
-                    "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
-                ),
+        # Hazırlanacak mesajları önceden belirle
+        messages_to_add = []
+        
+        if total_len > keep_last:
+            # 1. Yavaş olan özetleme işlemini kilidin DIŞINDA yap
+            to_summarize = stored_messages[: total_len - keep_last]
+            remaining = stored_messages[total_len - keep_last :]
+
+            summarization_prompt = ChatPromptTemplate.from_messages(
+                [
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    (
+                        "human",
+                        "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+                    ),
+                ]
+            )
+            summarization_chain = summarization_prompt | llm
+            summary_message = summarization_chain.invoke({"chat_history": to_summarize})
+
+            # Eklenecek mesaj listesini hazırla
+            messages_to_add = [
+                summary_message,
+                *remaining
             ]
-        )
-        summarization_chain = summarization_prompt | llm
-
-        summary_message = summarization_chain.invoke({"chat_history": stored_messages})
+        else:
+            # Özetlemeye gerek yoksa tüm mesajları kullan
+            messages_to_add = stored_messages
 
         with threading.Lock():
             history.clear()
             history.add_user_message("Şu ana kadarki konuşma özetimiz")
-            history.add_message(summary_message)
+            for msg in messages_to_add:
+                history.add_message(msg)
+            # history.add_message(summary_message)
 
         history_summarized_time = time.time() - start_time
         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
@@ -754,7 +817,88 @@ def summarize_and_log(history, stored_messages, llm):
     except Exception as e:
         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
         return False 
+
+# def summarize_and_log(history, stored_messages, llm):
+#     logging.info("Starting summarization in a separate thread.")
+#     if not stored_messages:
+#         logging.info("No messages to summarize.")
+#         return False
+
+#     try:
+#         start_time = time.time()
+#         logging.info(f"stored_messages: {stored_messages}")
+
+#         with threading.Lock():
+#             history.clear()
+#             for msg in stored_messages:
+#                 history.add_message(msg)
+
+#         history_summarized_time = time.time() - start_time
+#         logging.info(f"stored_messages length: {len(stored_messages)}")
+#         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
+
+#         return True
+
+#     except Exception as e:
+#         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
+#         return False 
+
+# def summarize_and_log(history, stored_messages, llm, keep_last: int = 15):
+#     logging.info("Starting summarization in a separate thread.")
+#     if not stored_messages:
+#         logging.info("No messages to summarize.")
+#         return False
     
+#     try:
+#         start_time = time.time()
+#         total_len = len(stored_messages)
+#         logging.info(f"stored_messages length: {total_len}")
+#         logging.info(f"stored_messages: {stored_messages}")
+
+#         # Hazırlanacak mesajları önceden belirle
+#         messages_to_add = []
+        
+#         if total_len > keep_last:
+#             # 1. Yavaş olan özetleme işlemini kilidin DIŞINDA yap
+#             to_summarize = stored_messages[: total_len - keep_last]
+#             remaining = stored_messages[total_len - keep_last :]
+
+#             summarization_prompt = ChatPromptTemplate.from_messages(
+#                 [
+#                     MessagesPlaceholder(variable_name="chat_history"),
+#                     (
+#                         "human",
+#                         "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+#                     ),
+#                 ]
+#             )
+#             summarization_chain = summarization_prompt | llm
+#             summary_message = summarization_chain.invoke({"chat_history": to_summarize})
+
+#             # Eklenecek mesaj listesini hazırla
+#             messages_to_add = [
+#                 summary_message,
+#                 *remaining
+#             ]
+#         else:
+#             # Özetlemeye gerek yoksa tüm mesajları kullan
+#             messages_to_add = stored_messages
+
+#         # 2. Hızlı olan veritabanı işlemlerini (clear + add) kilit bloğu İÇİNDE atomik olarak yap
+#         with threading.Lock():
+#             history.clear()
+#             history.add_user_message("Şu ana kadarki konuşma geçmişi")
+#             history.add_messages(messages_to_add)
+
+#         history_processed_time = time.time() - start_time
+#         logging.info(f"Chat History processed in {history_processed_time:.2f} seconds")
+#         return True
+
+#     except Exception as e:
+#         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
+#         return False
+
+
 def create_graph_chain(model, graph):
     try:
         logging.info(f"Graph QA Chain using LLM model: {model}")
@@ -931,47 +1075,47 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
     return result
 
 
-async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]]) -> str:
-    """
-    Base64 görselleri GPT-4o ile yorumlar ve tek string döner.
-    """
-    vision_llm = ChatOpenAI(
-        model="gpt-4o",  # veya gpt-4o-mini
-        temperature=0,
-        streaming=False
-    )
-    # print("analyze_files_with_llm files: ", files)
-    all_descriptions = []
+# async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]]) -> str:
+#     """
+#     Base64 görselleri GPT-4o ile yorumlar ve tek string döner.
+#     """
+#     vision_llm = ChatOpenAI(
+#         model="gpt-4o",  # veya gpt-4o-mini
+#         temperature=0,
+#         streaming=False
+#     )
+#     # print("analyze_files_with_llm files: ", files)
+#     all_descriptions = []
 
-    for category, file_list in files.items():
-        for file_info in file_list:
-            base64_str = file_info["base64"]
+#     for category, file_list in files.items():
+#         for file_info in file_list:
+#             base64_str = file_info["base64"]
 
-            # Eğer "data:image/png;base64," gibi prefix varsa temizle
-            if "," not in base64_str:
-                base64_str = "data:image/png;base64," + base64_str
+#             # Eğer "data:image/png;base64," gibi prefix varsa temizle
+#             if "," not in base64_str:
+#                 base64_str = "data:image/png;base64," + base64_str
 
-            try:
-                resp = vision_llm.invoke([
-                    HumanMessage(content=[
-                        {"type": "text", "text": f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": base64_str
-                            }
-                        }
-                    ])
-                ])
+#             try:
+#                 resp = vision_llm.invoke([
+#                     HumanMessage(content=[
+#                         {"type": "text", "text": f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."},
+#                         {
+#                             "type": "image_url",
+#                             "image_url": {
+#                                 "url": base64_str
+#                             }
+#                         }
+#                     ])
+#                 ])
 
-                description = resp.content.strip()
-                all_descriptions.append(f"[{file_info['fileName']}]: {description}")
+#                 description = resp.content.strip()
+#                 all_descriptions.append(f"[{file_info['fileName']}]: {description}")
 
-            except Exception as e:
-                logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
-                all_descriptions.append(f"[{file_info['fileName']}]: Analiz başarısız.")
+#             except Exception as e:
+#                 logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
+#                 all_descriptions.append(f"[{file_info['fileName']}]: Analiz başarısız.")
 
-    return "\n".join(all_descriptions)
+#     return "\n".join(all_descriptions)
 
 # async def analyze_files_together(files: Dict[str, List[Dict[str, str]]]) -> str:
 #     """
@@ -998,135 +1142,58 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]]) -> str:
 #     return resp.content.strip()
 
 
-# async def analyze_single_file(vision_llm, file_info: Dict[str, str]) -> str:
-#     """
-#     Tek bir görseli GPT-4o ile analiz eder ve string döner.
-#     """
-#     base64_str = file_info["base64"]
-#     if "," not in base64_str:
-#         base64_str = "data:image/png;base64," + base64_str
-
-#     try:
-#         resp = await vision_llm.ainvoke([   # <-- async versiyon
-#             HumanMessage(content=[
-#                 {"type": "text", "text": f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."},
-#                 {
-#                     "type": "image_url",
-#                     "image_url": {
-#                         "url": base64_str
-#                     }
-#                 }
-#             ])
-#         ])
-#         description = resp.content.strip()
-#         return f"[{file_info['fileName']}]: {description}"
-#     except Exception as e:
-#         logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
-#         return f"[{file_info['fileName']}]: Analiz başarısız."
-
-# async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model) -> str:
-#     """
-#     Tüm görselleri paralel olarak analiz eder ve tek string döner.
-#     """
-#     try:
-#         vision_llm = ChatOpenAI(
-#             model="gpt-4.1",
-#             # temperature=0,
-#             streaming=False
-#         )
-
-#         tasks = [
-#             analyze_single_file(vision_llm, file_info)
-#             for category, file_list in files.items()
-#             for file_info in file_list
-#         ]
-
-#         results = await asyncio.gather(*tasks)
-
-#         ai_response_content = "\n".join(results)
-
-#         resp = vision_llm.invoke([   # <-- async versiyon
-#             HumanMessage(content=[
-#                 {"type": "text", "text": "Bu bir belgenin içeriğidir. Belgenin içerigi hakkında kullanıcıya özet ver."},
-#                 {
-#                     "type": "text",
-#                     "text": f"{ai_response_content}"
-#                 }
-#             ])
-#         ])
-
-#         ai_response_content2 = resp.content.strip()
-
-#         words = ai_response_content2.split()
-#         streamed_content = ""
-
-#         for i, word in enumerate(words):
-#             streamed_content += word + " "
-            
-#             yield {
-#                 "type": "message_chunk",
-#                 "content": word + " ",
-#                 "full_message": streamed_content.strip(),
-#                 "is_complete": i == len(words) - 1,
-#                 "user": "chatbot"
-#             }
-            
-#             # Gerçekçi streaming efekti
-#             await asyncio.sleep(0.05)
-
-#         ai_response = AIMessage(content=ai_response_content)
-#         messages.append(ai_response)
-
-#         ai_response2 = AIMessage(content=ai_response_content2)
-#         messages.append(ai_response2)
-
-#         qa_llm,model_name = get_llm(model)
-
-#         # Background summarization
-#         summarization_future = asyncio.get_event_loop().run_in_executor(
-#             None, summarize_and_log, history, messages, qa_llm
-#         )
-#         logging.info(f"Graph summarization task started: {summarization_future}")
-
-#         # return "\n".join(results)
-
-#     except Exception as e:
-#         logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
-#         yield {
-#             "type": "error",
-#             # "session_id": session_id,
-#             "message": "Bir hata oluştu",
-#             "error": str(e),
-#             "user": "chatbot"
-#         }
-
-async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model, question):
+async def analyze_single_file(vision_llm, file_info: Dict[str, str]) -> str:
     """
-    Tüm görselleri tek seferde LLM'e gönderir ve özet döner.
+    Tek bir görseli GPT-4o ile analiz eder ve string döner.
+    """
+    base64_str = file_info["base64"]
+    if "," not in base64_str:
+        base64_str = "data:image/png;base64," + base64_str
+
+    try:
+        logging.info(f"{file_info['fileName']} belgesinin detayı çıkartılıyor.")
+        # Prompt Template
+        analyze_prompt = ChatPromptTemplate.from_messages([
+            HumanMessage(content=f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."),
+            HumanMessagePromptTemplate.from_template(
+                [{'image_url': {"url": base64_str}}]
+            )
+            # (
+            #     "human",
+            #     f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."
+            # ),
+            # (
+            #     "human",
+            #     {"type": "image_url", "image_url": {"url": base64_str}}
+            # )
+        ])
+
+        chain = analyze_prompt | vision_llm
+
+        resp = await chain.ainvoke({})
+
+        total_tokens = get_total_tokens(resp, vision_llm)
+        logging.info(f"{file_info['fileName']} için total_tokens {total_tokens}")
+
+        description = resp.content.strip()
+        return f"[{file_info['fileName']}]: {description}"
+
+    except Exception as e:
+        logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
+        return f"[{file_info['fileName']}]: Analiz başarısız."
+
+async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, question, history, messages) -> str:
+    """
+    Tüm görselleri paralel olarak analiz eder ve tek string döner.
     """
     try:
-        vision_llm = ChatOpenAI(
-            model="gpt-4.1",
-            streaming=False
-        )
+        start_time = time.time()
+        qa_llm, model_name = get_llm(model)
 
-        # Tek HumanMessage için içerik listesi
-        content_list = [{"type": "text", "text": "Aşağıdaki görsellerin içeriğini detaylıca açıkla:"}]
-
-        for category, file_list in files.items():
-            for file_info in file_list:
-                base64_str = file_info["base64"]
-                if "," not in base64_str:
-                    base64_str = "data:image/png;base64," + base64_str
-
-                content_list.append({
-                    "type": "text",
-                    "text": f"Görsel adı: {file_info['fileName']}"
-                })
-                content_list.append({
-                    "type": "image_url",
-                    "image_url": {"url": base64_str}
-                })
+        # vision_llm = ChatOpenAI(
+        #     model="gpt-4.1",
+        #     streaming=False
+        # )
 
         yield {
             "type": "message_chunk",
@@ -1136,27 +1203,38 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], message
             "user": "chatbot"
         }
 
-        # Tek istekte tüm görselleri gönder
-        resp = await vision_llm.ainvoke([
-            HumanMessage(content=content_list)
+        # Paralel analiz
+        tasks = [
+            analyze_single_file(qa_llm, file_info)
+            for category, file_list in files.items()
+            for file_info in file_list
+        ]
+        results = await asyncio.gather(*tasks)
+        ai_response_content = "\n".join(results)
+
+        # Prompt Template ile özet/cevap üretme
+        analyze_prompt = ChatPromptTemplate.from_messages([
+            (
+                "human",
+                question if question else "Bu bir belgenin içeriğidir. Belgenin içerigi hakkında kullanıcıya özet ver."
+            ),
+            ("human", ai_response_content)
         ])
 
-        ai_response_content = resp.content.strip()
+        chain = analyze_prompt | qa_llm
+        resp = await chain.ainvoke({})
 
-        # Şimdi özetleme
-        resp_summary = vision_llm.invoke([
-            HumanMessage(content=[
-                {"type": "text", "text": question + "Markdown formatında." if question else "Bu görseller bir belgenin parçalarıdır. Belgeyi özetle. Markdown formatında."},
-                {"type": "text", "text": ai_response_content}
-            ])
-        ])
-        ai_response_content2 = resp_summary.content.strip()
+        total_tokens = get_total_tokens(resp, qa_llm)
+        # logging.info(f"{file_info['fileName']} için total_tokens {total_tokens}")
 
-        # Streaming simülasyonu
+        ai_response_content2 = resp.content.strip()
+
+        # Streaming efekti
         words = ai_response_content2.split()
         streamed_content = ""
         for i, word in enumerate(words):
             streamed_content += word + " "
+            
             yield {
                 "type": "message_chunk",
                 "content": word + " ",
@@ -1166,16 +1244,21 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], message
             }
             await asyncio.sleep(0.05)
 
-        # Mesaj geçmişine ekle
-        messages.append(AIMessage(content=ai_response_content))
-        # messages.append(AIMessage(content=ai_response_content2))
+        # Mesajları history'e kaydet
+        ai_response = AIMessage(content=ai_response_content)
+        messages.append(ai_response)
 
-        # Arka planda graph summarization
-        qa_llm, model_name = get_llm(model)
+        ai_response2 = AIMessage(content=ai_response_content2)
+        messages.append(ai_response2)
+
+        # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
             None, summarize_and_log, history, messages, qa_llm
         )
-        logging.info(f"Graph summarization task started: {summarization_future}")
+        logging.info(f"Summarization task started: {summarization_future}")
+
+        analyze_files_with_llm_time = time.time() - start_time
+        logging.info(f"Files analyzed processed in {analyze_files_with_llm_time:.2f} seconds")
 
     except Exception as e:
         logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
@@ -1185,6 +1268,92 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], message
             "error": str(e),
             "user": "chatbot"
         }
+
+# async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model, question):
+#     """
+#     Tüm görselleri tek seferde LLM'e gönderir ve özet döner.
+#     """
+#     try:
+#         vision_llm = ChatOpenAI(
+#             model="gpt-4.1",
+#             streaming=False
+#         )
+
+#         # Tek HumanMessage için içerik listesi
+#         content_list = [{"type": "text", "text": "Aşağıdaki görsellerin içeriğinin tamamını text olarak ver:"}]
+
+#         for category, file_list in files.items():
+#             for file_info in file_list:
+#                 base64_str = file_info["base64"]
+#                 if "," not in base64_str:
+#                     base64_str = "data:image/png;base64," + base64_str
+
+#                 content_list.append({
+#                     "type": "text",
+#                     "text": f"Görsel adı: {file_info['fileName']}"
+#                 })
+#                 content_list.append({
+#                     "type": "image_url",
+#                     "image_url": {"url": base64_str}
+#                 })
+
+#         yield {
+#             "type": "message_chunk",
+#             "content": "Belge analiz ediliyor..\n" + " ",
+#             "full_message": "Belge analiz ediliyor..",
+#             "is_complete": False,
+#             "user": "chatbot"
+#         }
+
+#         # Tek istekte tüm görselleri gönder
+#         resp = await vision_llm.ainvoke([
+#             HumanMessage(content=content_list)
+#         ])
+
+#         ai_response_content = resp.content.strip()
+
+#         # Şimdi özetleme
+#         resp_summary = vision_llm.invoke([
+#             HumanMessage(content=[
+#                 {"type": "text", "text": question if question else "Bu görseller bir belgenin parçalarıdır. Belgeyi özetle."},
+#                 {"type": "text", "text": ai_response_content}
+#             ])
+#         ])
+#         ai_response_content2 = resp_summary.content.strip()
+
+#         # Streaming simülasyonu
+#         words = ai_response_content2.split()
+#         streamed_content = ""
+#         for i, word in enumerate(words):
+#             streamed_content += word + " "
+#             yield {
+#                 "type": "message_chunk",
+#                 "content": word + " ",
+#                 "full_message": streamed_content.strip(),
+#                 "is_complete": i == len(words) - 1,
+#                 "user": "chatbot"
+#             }
+#             await asyncio.sleep(0.05)
+
+#         # Mesaj geçmişine ekle
+#         messages.append(AIMessage(content=ai_response_content))
+#         messages.append(AIMessage(content=ai_response_content2))
+
+#         # Arka planda graph summarization
+#         qa_llm, model_name = get_llm(model)
+#         summarization_future = asyncio.get_event_loop().run_in_executor(
+#             None, summarize_and_log, history, messages, qa_llm
+#         )
+#         logging.info(f"Graph summarization task started: {summarization_future}")
+
+#     except Exception as e:
+#         logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
+#         yield {
+#             "type": "error",
+#             "message": "Bir hata oluştu",
+#             "error": str(e),
+#             "user": "chatbot"
+#         }
 
 async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True):
     """
@@ -1197,14 +1366,16 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         history = create_neo4j_chat_message_history(graph, session_id, write_access)
         messages = history.messages
 
-        print("history: ", history)
-        print("messages: ", messages)
+        # print("history: ", history)
+        # print("messages: ", messages)
+        # print("files: ", files)
 
-        user_question = HumanMessage(content=question)
-        messages.append(user_question)
+        if question != '':
+            user_question = HumanMessage(content=question)
+            messages.append(user_question)
 
         # Files parse + görsel analizi
-        image_analysis_text = ""
+        # image_analysis_text = ""
         if files:
             try:
                 files_data = json.loads(files) if isinstance(files, str) else files
@@ -1212,7 +1383,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 # image_analysis_text = await analyze_files_together(files_data)
                 # image_analysis_text = await analyze_files_with_llm(files_data, messages, history)
 
-                async for chunk in analyze_files_with_llm(files_data, messages, history, model, question):
+                async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
                     yield chunk
 
                 # if image_analysis_text:

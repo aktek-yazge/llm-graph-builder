@@ -178,3 +178,4 @@ startupfrontend.sh
 dinkal
 .vscode
 /backend/envName
+/backend/temp
