@@ -41,7 +41,6 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
                     MERGE (c)-[:HAS_ENTITY]->(n)
                 """
         execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
-        execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
 
     
 def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
@@ -81,7 +80,6 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
         MERGE (c)-[:PART_OF]->(d)
     """       
     execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
-    execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
     
 def create_relation_between_chunks(graph, file_name, chunks: List[Document])->list:
     logging.info("creating FIRST_CHUNK and NEXT_CHUNK relationships between chunks")
@@ -98,7 +96,10 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         # UTF-8 ve Unicode normalization for consistent hashing
         content = normalize_unicode_text(chunk.page_content)
         
-        page_content_sha1 = hashlib.sha1(content.encode('utf-8'))
+        # Chunk ID'yi dosya adı + içerik hash'i ile oluştur
+        # Bu şekilde farklı dosyalardaki aynı içerikler farklı ID'lere sahip olur
+        content_with_filename = f"{file_name}:::{content}"
+        page_content_sha1 = hashlib.sha1(content_with_filename.encode('utf-8'))
         previous_chunk_id = current_chunk_id
         current_chunk_id = page_content_sha1.hexdigest()
         position = i + 1 
@@ -162,7 +163,6 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         MERGE (c)-[:PART_OF]->(d)
     """
     execute_graph_query(graph,query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
-    execute_graph_query(graph,query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
     
     query_to_create_FIRST_relation = """ 
         UNWIND $relationships AS relationship
@@ -171,7 +171,6 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         FOREACH(r IN CASE WHEN relationship.type = 'FIRST_CHUNK' THEN [1] ELSE [] END |
                 MERGE (d)-[:FIRST_CHUNK]->(c))
         """
-    execute_graph_query(graph,query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
     execute_graph_query(graph,query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
     
     query_to_create_NEXT_CHUNK_relation = """ 
