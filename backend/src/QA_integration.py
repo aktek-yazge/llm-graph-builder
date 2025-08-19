@@ -2620,6 +2620,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         # print("messages: ", messages)
         # print("files: ", files)
 
+        user_question = None
         if question != '':
             user_question = HumanMessage(content=question)
             messages.append(user_question)
@@ -2653,9 +2654,9 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 logging.exception(f"Files parse/analyze error: {str(e)}")
         
         # ÖNEMLI: HumanMessage'ı session history'sine kaydet
-        # logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
-        # history.add_message(user_question)
-        # logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
+        logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
+        history.add_message(user_question)
+        logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         if mode == CHAT_GRAPH_MODE:
             async for chunk in process_graph_response_stream(model, graph, question, messages, history):
