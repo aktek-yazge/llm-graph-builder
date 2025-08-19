@@ -2444,33 +2444,30 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         start_time = time.time()
         qa_llm, model_name = get_llm(model)
 
-        # Question boş mu dolu mu kontrol et
-        if question and question.strip():
-            # Question varsa LLM ile analiz yap
-            yield {
-                "type": "message_chunk",
-                "content": "Belgeler LLM ile analiz ediliyor..\n",
-                "full_message": "Belgeler LLM ile analiz ediliyor..",
-                "is_complete": False,
-                "user": "chatbot"
-            }
+        yield {
+            "type": "message_chunk",
+            "content": "Belgeler LLM ile analiz ediliyor..\n",
+            "full_message": "Belgeler LLM ile analiz ediliyor..",
+            "is_complete": False,
+            "user": "chatbot"
+        }
 
-            # LLM ile analiz et
-            analyze_prompt = ChatPromptTemplate.from_messages([
-                ("human", question),
-                ("human", f"Belgeler:\n\n{markdown_content}")
-            ])
+        # LLM ile analiz et
+        analyze_prompt = ChatPromptTemplate.from_messages([
+            (
+                "human",
+                question if question else "Bu belgeler hakkında kullanıcıya kapsamlı bir özet ve analiz ver."
+            ),
+            ("human", f"Belgeler:\n\n{markdown_content}")
+        ])
 
-            chain = analyze_prompt | qa_llm
-            resp = await chain.ainvoke({})
+        chain = analyze_prompt | qa_llm
+        resp = await chain.ainvoke({})
 
-            total_tokens = get_total_tokens(resp, qa_llm)
-            logging.info(f"LLM analizi için total_tokens: {total_tokens}")
+        total_tokens = get_total_tokens(resp, qa_llm)
+        logging.info(f"LLM analizi için total_tokens: {total_tokens}")
 
-            ai_response_content = resp.content.strip()
-        else:
-            # Question boşsa kullanıcıya ne sormak istediğini sor
-            ai_response_content = "Belge başarıyla yüklendi. Bu belge hakkında ne öğrenmek istersiniz?"
+        ai_response_content = resp.content.strip()
 
         # Streaming efekti - newline karakterlerini koruyarak
         # Metni kelimeler ve newline karakterlerine göre böl
@@ -2561,14 +2558,13 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
             "user": "chatbot"
         }
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None, alternative_agent=None):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
     """
-    logging.info(f"🔴 QA_RAG_stream CALLED - Session: {session_id}, Question: {question[:50]}...")
     logging.info(f"Streaming Chat Mode: {mode}")
-    
+    # print("QA_RAG_stream files: ", files)
     try:
         history = create_neo4j_chat_message_history(graph, session_id, write_access)
         messages = history.messages
@@ -2586,10 +2582,10 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         if files:
             try:
                 files_data = json.loads(files) if isinstance(files, str) else files
-
+                
                 # Environment variable ile analiz metodunu belirle
                 # USE_DOCLING=true ise Docling, yoksa LLM görsel analizi kullan
-                use_docling = os.getenv('USE_DOCLING', 'true').lower() == 'true'
+                use_docling = os.getenv('USE_DOCLING', 'false').lower() == 'true'
                 
                 if use_docling:
                     logging.info("Docling ile belge analizi yapılıyor...")
@@ -2610,7 +2606,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 logging.exception(f"Files parse/analyze error: {str(e)}")
         else:
             if mode == CHAT_GRAPH_MODE:
-                async for chunk in process_graph_response_stream(model, graph, question, messages, history):
+                async for chunk in process_graph_response_stream(model, graph, question, messages, history, files):
                     yield chunk
             else:
                 chat_mode_settings = get_chat_mode_settings(mode=mode)
@@ -2636,7 +2632,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                     return
                     
                 async for chunk in process_chat_response_stream(
-                    messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent
+                    messages, history, question, model, graph, document_names, chat_mode_settings, session_id
                 ):
                     yield chunk
                 
