@@ -2558,7 +2558,7 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
             "user": "chatbot"
         }
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None, alternative_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
