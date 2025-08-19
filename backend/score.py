@@ -1447,12 +1447,12 @@ async def chat_bot_stream(
             logging.info("files handle_attachments error.")
             # return {"error": "Invalid JSON in 'files'"}
     print("chat_bot_stream downloadedFiles: ", downloadedFiles)
-    files_data: Dict[str, List[Dict[str, str]]] = {}
-    if downloadedFiles:
-        try:
-            files_data = convert_result_to_base64(downloadedFiles)
-        except json.JSONDecodeError:
-            logging.info("files convert_result_to_base64 error.")
+    # files_data: Dict[str, List[Dict[str, str]]] = {}
+    # if downloadedFiles:
+    #     try:
+    #         files_data = convert_result_to_base64(downloadedFiles)
+    #     except json.JSONDecodeError:
+    #         logging.info("files convert_result_to_base64 error.")
             # return {"error": "Invalid JSON in 'files'"}
     
     
@@ -1503,7 +1503,7 @@ async def chat_bot_stream(
                 write_access=write_access,
                 # intelligent_agent=intelligent_agent,
                 alternative_agent=alternative_agent,
-                files=files_data
+                files=downloadedFiles
             ):
                 # Client disconnect kontrolü
                 if await request.is_disconnected():
