@@ -2579,7 +2579,8 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
             ai_response_final = AIMessage(content=response_message)
             messages.append(ai_response_final)
             
-            qa_llm = create_graph_chain(model, graph)
+            # Background summarization için LLM al
+            qa_llm, _ = get_llm(model)
             
             # Background summarization
             summarization_future = asyncio.get_event_loop().run_in_executor(
@@ -2620,9 +2621,14 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         # print("messages: ", messages)
         # print("files: ", files)
 
-        if question != '':
+        user_question = None
+        if question and question.strip() != '':
             user_question = HumanMessage(content=question)
             messages.append(user_question)
+            # ÖNEMLI: HumanMessage'ı session history'sine kaydet
+            logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
+            history.add_message(user_question)
+            logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         # Files parse + görsel analizi
         # image_analysis_text = ""
@@ -2643,19 +2649,12 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                     async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
                         yield chunk
 
-                # if image_analysis_text:
-                #     logging.info("Görsel analiz sonuçları bağlama eklendi.")
-                #     # Soruya ek bağlam olarak görsel açıklamalarını ekle
-                #     messages.append(
-                #         HumanMessage(content=f"Görsellerin analizi:\n{image_analysis_text}")
-                #     )
+                # Files analizi tamamlandıktan sonra return - gereksiz processing'i engelle  
+                return
+                
             except Exception as e:
                 logging.exception(f"Files parse/analyze error: {str(e)}")
-        
-        # ÖNEMLI: HumanMessage'ı session history'sine kaydet
-        logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
-        history.add_message(HumanMessage(content=question))
-        logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
+                return
 
         if mode == CHAT_GRAPH_MODE:
             async for chunk in process_graph_response_stream(model, graph, question, messages, history):
