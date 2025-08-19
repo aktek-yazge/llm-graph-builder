@@ -46,7 +46,10 @@ from src.custom_neo4j_vector import CustomNeo4jVector
 from src.intelligent_agent import IntelligentAgent
 from src.alternative_agent import AlternativeAgent
 from src.neo4j_retry import retry_neo4j_operation
-load_dotenv() 
+load_dotenv()
+
+from typing import Dict, List
+import base64
 
 # Neo4j ve langchain loglama seviyelerini ayarla
 # DEBUG seviyesi çok ayrıntılı log üretir, gerekirse açabilirsiniz
