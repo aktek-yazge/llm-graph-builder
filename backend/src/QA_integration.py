@@ -1347,6 +1347,261 @@ def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
         raise
 
     return chat_mode_settings
+
+async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]]) -> str:
+    """
+    Base64 görselleri GPT-4o ile yorumlar ve tek string döner.
+    """
+    vision_llm = ChatOpenAI(
+        model="gpt-4o",  # veya gpt-4o-mini
+        temperature=0,
+        streaming=False
+    )
+    # print("analyze_files_with_llm files: ", files)
+    all_descriptions = []
+
+    for category, file_list in files.items():
+        for file_info in file_list:
+            base64_str = file_info["base64"]
+
+            # Eğer "data:image/png;base64," gibi prefix varsa temizle
+            if "," not in base64_str:
+                base64_str = "data:image/png;base64," + base64_str
+
+            try:
+                resp = vision_llm.invoke([
+                    HumanMessage(content=[
+                        {"type": "text", "text": f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": base64_str
+                            }
+                        }
+                    ])
+                ])
+
+                description = resp.content.strip()
+                all_descriptions.append(f"[{file_info['fileName']}]: {description}")
+
+            except Exception as e:
+                logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
+                all_descriptions.append(f"[{file_info['fileName']}]: Analiz başarısız.")
+
+    return "\n".join(all_descriptions)
+
+# async def analyze_files_together(files: Dict[str, List[Dict[str, str]]]) -> str:
+#     """
+#     Tüm görselleri tek bir GPT-4o çağrısıyla analiz eder.
+#     """
+#     vision_llm = ChatOpenAI(
+#         model="gpt-4o",
+#         temperature=0,
+#         streaming=False
+#     )
+
+#     # Tüm görselleri tek prompt içinde birleştir
+#     prompt_lines = []
+#     for category, file_list in files.items():
+#         for file_info in file_list:
+#             base64_str = file_info["base64"]
+#             if "," not in base64_str:
+#                 base64_str = "data:image/png;base64," + base64_str
+#             prompt_lines.append(f"{file_info['fileName']}: {base64_str}")
+
+#     prompt_text = "Aşağıdaki tüm görselleri detaylı olarak inceleyip metin olarak açıkla:\n\n" + "\n\n".join(prompt_lines)
+
+#     resp = vision_llm.invoke([HumanMessage(content=prompt_text)])
+#     return resp.content.strip()
+
+
+# async def analyze_single_file(vision_llm, file_info: Dict[str, str]) -> str:
+#     """
+#     Tek bir görseli GPT-4o ile analiz eder ve string döner.
+#     """
+#     base64_str = file_info["base64"]
+#     if "," not in base64_str:
+#         base64_str = "data:image/png;base64," + base64_str
+
+#     try:
+#         resp = await vision_llm.ainvoke([   # <-- async versiyon
+#             HumanMessage(content=[
+#                 {"type": "text", "text": f"'{file_info['fileName']}' adlı görselin içeriğini detaylı olarak açıkla."},
+#                 {
+#                     "type": "image_url",
+#                     "image_url": {
+#                         "url": base64_str
+#                     }
+#                 }
+#             ])
+#         ])
+#         description = resp.content.strip()
+#         return f"[{file_info['fileName']}]: {description}"
+#     except Exception as e:
+#         logging.exception(f"Görsel analizi başarısız ({file_info['fileName']}): {str(e)}")
+#         return f"[{file_info['fileName']}]: Analiz başarısız."
+
+# async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model) -> str:
+#     """
+#     Tüm görselleri paralel olarak analiz eder ve tek string döner.
+#     """
+#     try:
+#         vision_llm = ChatOpenAI(
+#             model="gpt-4.1",
+#             # temperature=0,
+#             streaming=False
+#         )
+
+#         tasks = [
+#             analyze_single_file(vision_llm, file_info)
+#             for category, file_list in files.items()
+#             for file_info in file_list
+#         ]
+
+#         results = await asyncio.gather(*tasks)
+
+#         ai_response_content = "\n".join(results)
+
+#         resp = vision_llm.invoke([   # <-- async versiyon
+#             HumanMessage(content=[
+#                 {"type": "text", "text": "Bu bir belgenin içeriğidir. Belgenin içerigi hakkında kullanıcıya özet ver."},
+#                 {
+#                     "type": "text",
+#                     "text": f"{ai_response_content}"
+#                 }
+#             ])
+#         ])
+
+#         ai_response_content2 = resp.content.strip()
+
+#         words = ai_response_content2.split()
+#         streamed_content = ""
+
+#         for i, word in enumerate(words):
+#             streamed_content += word + " "
+            
+#             yield {
+#                 "type": "message_chunk",
+#                 "content": word + " ",
+#                 "full_message": streamed_content.strip(),
+#                 "is_complete": i == len(words) - 1,
+#                 "user": "chatbot"
+#             }
+            
+#             # Gerçekçi streaming efekti
+#             await asyncio.sleep(0.05)
+
+#         ai_response = AIMessage(content=ai_response_content)
+#         messages.append(ai_response)
+
+#         ai_response2 = AIMessage(content=ai_response_content2)
+#         messages.append(ai_response2)
+
+#         qa_llm,model_name = get_llm(model)
+
+#         # Background summarization
+#         summarization_future = asyncio.get_event_loop().run_in_executor(
+#             None, summarize_and_log, history, messages, qa_llm
+#         )
+#         logging.info(f"Graph summarization task started: {summarization_future}")
+
+#         # return "\n".join(results)
+
+#     except Exception as e:
+#         logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
+#         yield {
+#             "type": "error",
+#             # "session_id": session_id,
+#             "message": "Bir hata oluştu",
+#             "error": str(e),
+#             "user": "chatbot"
+#         }
+
+async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model, question):
+    """
+    Tüm görselleri tek seferde LLM'e gönderir ve özet döner.
+    """
+    try:
+        vision_llm = ChatOpenAI(
+            model="gpt-4.1",
+            streaming=False
+        )
+
+        # Tek HumanMessage için içerik listesi
+        content_list = [{"type": "text", "text": "Aşağıdaki görsellerin içeriğini detaylıca açıkla:"}]
+
+        for category, file_list in files.items():
+            for file_info in file_list:
+                base64_str = file_info["base64"]
+                if "," not in base64_str:
+                    base64_str = "data:image/png;base64," + base64_str
+
+                content_list.append({
+                    "type": "text",
+                    "text": f"Görsel adı: {file_info['fileName']}"
+                })
+                content_list.append({
+                    "type": "image_url",
+                    "image_url": {"url": base64_str}
+                })
+
+        yield {
+            "type": "message_chunk",
+            "content": "Belge analiz ediliyor..\n" + " ",
+            "full_message": "Belge analiz ediliyor..",
+            "is_complete": False,
+            "user": "chatbot"
+        }
+
+        # Tek istekte tüm görselleri gönder
+        resp = await vision_llm.ainvoke([
+            HumanMessage(content=content_list)
+        ])
+
+        ai_response_content = resp.content.strip()
+
+        # Şimdi özetleme
+        resp_summary = vision_llm.invoke([
+            HumanMessage(content=[
+                {"type": "text", "text": question + "Markdown formatında." if question else "Bu görseller bir belgenin parçalarıdır. Belgeyi özetle. Markdown formatında."},
+                {"type": "text", "text": ai_response_content}
+            ])
+        ])
+        ai_response_content2 = resp_summary.content.strip()
+
+        # Streaming simülasyonu
+        words = ai_response_content2.split()
+        streamed_content = ""
+        for i, word in enumerate(words):
+            streamed_content += word + " "
+            yield {
+                "type": "message_chunk",
+                "content": word + " ",
+                "full_message": streamed_content.strip(),
+                "is_complete": i == len(words) - 1,
+                "user": "chatbot"
+            }
+            await asyncio.sleep(0.05)
+
+        # Mesaj geçmişine ekle
+        messages.append(AIMessage(content=ai_response_content))
+        # messages.append(AIMessage(content=ai_response_content2))
+
+        # Arka planda graph summarization
+        qa_llm, model_name = get_llm(model)
+        summarization_future = asyncio.get_event_loop().run_in_executor(
+            None, summarize_and_log, history, messages, qa_llm
+        )
+        logging.info(f"Graph summarization task started: {summarization_future}")
+
+    except Exception as e:
+        logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
+        yield {
+            "type": "error",
+            "message": "Bir hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
     
 def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None, alternative_agent=None):
     logging.info(f"Chat Mode: {mode}")
