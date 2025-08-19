@@ -1174,7 +1174,7 @@ def summarize_and_log(history, stored_messages, llm):
     try:
         start_time = time.time()
         total_len = len(stored_messages)
-        keep_last = 15
+        keep_last = 7  # 8 mesajdan sonra özetleme yap (7 mesaj tut)
         logging.info(f"stored_messages length: {len(stored_messages)}")
         logging.info(f"stored_messages: {stored_messages}")
 
