@@ -4,9 +4,15 @@ import time
 import logging
 import asyncio
 import threading
+import tempfile
+import base64
+import requests
 from datetime import datetime
 from typing import Any
 from dotenv import load_dotenv
+import requests
+import tempfile
+import os
 
 from langchain_neo4j import Neo4jVector
 from langchain_neo4j import Neo4jChatMessageHistory
@@ -1800,6 +1806,235 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
     
     return result
 
+def convert_files_to_markdown(files: Dict[str, List[Dict[str, str]]]) -> str:
+    """
+    Dosyaları URL'den indirip Docling ile markdown formatına çevirir.
+    Çıktısı belgelerin markdown formatında sayfalar arası page_break ile birleştirilmiş hali.
+    """
+    try:
+        from langchain_docling import DoclingLoader
+        from langchain_docling.loader import ExportType
+        from docling_core.types.doc import DocItemLabel
+        from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+        from urllib.parse import urlparse
+
+        all_documents_content = []
+
+        for category, file_list in files.items():
+            for file_info in file_list:
+                try:
+                    file_name = file_info["fileName"]
+                    file_url = file_info.get("url") or file_info.get("fileUrl") or file_info.get("file_url")
+                    
+                    if not file_url:
+                        error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya URL'si bulunamadı.\n\n"
+                        all_documents_content.append(error_content)
+                        continue
+                    
+                    logging.info(f"{file_name} belgesi URL'den indiriliyor: {file_url}")
+                    
+                    # URL'den dosyayı indir
+                    response = requests.get(file_url, timeout=30)
+                    response.raise_for_status()
+                    
+                    # Dosya uzantısını URL'den veya dosya adından al
+                    parsed_url = urlparse(file_url)
+                    if parsed_url.path:
+                        file_extension = os.path.splitext(parsed_url.path)[1].lower()
+                    else:
+                        file_extension = os.path.splitext(file_name)[1].lower()
+                    
+                    if not file_extension:
+                        # Content-Type'dan uzantı tahmin et
+                        content_type = response.headers.get('content-type', '').lower()
+                        if 'pdf' in content_type:
+                            file_extension = '.pdf'
+                        elif 'word' in content_type or 'docx' in content_type:
+                            file_extension = '.docx'
+                        elif 'excel' in content_type or 'xlsx' in content_type:
+                            file_extension = '.xlsx'
+                        else:
+                            file_extension = '.pdf'  # Default to PDF
+                    
+                    # Geçici dosya oluştur
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+                        temp_file.write(response.content)
+                        temp_file_path = temp_file.name
+                    
+                    try:
+                        logging.info(f"{file_name} belgesi Docling ile işleniyor.")
+                        
+                        # Docling ile belgeyi yükle
+                        labels = [
+                            label
+                            for label in DEFAULT_EXPORT_LABELS
+                            if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
+                        ]
+                        
+                        loader = DoclingLoader(
+                            file_path=temp_file_path,
+                            export_type=ExportType.MARKDOWN,
+                            md_export_kwargs={
+                                "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
+                                "labels": labels,
+                            },
+                        )
+                        
+                        # Belgeyi yükle
+                        documents = loader.load()
+                        
+                        # Sayfa numaralarını ekleyerek içeriği birleştir
+                        document_content = f"## Belge: {file_name}\n**URL:** {file_url}\n\n"
+                        
+                        for doc in documents:
+                            content = doc.page_content
+                            
+                            # Page break'leri sayfa numarası ile değiştir
+                            pages = content.split("--- PAGE_BREAK ---")
+                            
+                            formatted_pages = []
+                            for page_num, page_content in enumerate(pages, 1):
+                                if page_content.strip():  # Boş sayfaları atla
+                                    formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
+                                    formatted_pages.append(formatted_page)
+                            
+                            document_content += "\n".join(formatted_pages)
+                        
+                        all_documents_content.append(document_content)
+                        
+                        logging.info(f"{file_name} belgesi başarıyla işlendi. Sayfa sayısı: {len(pages)}")
+                        
+                    finally:
+                        # Geçici dosyayı sil
+                        os.unlink(temp_file_path)
+                        
+                except requests.RequestException as e:
+                    logging.exception(f"Dosya indirme hatası ({file_name}): {str(e)}")
+                    error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya indirilemedi: {str(e)}\n\n"
+                    all_documents_content.append(error_content)
+                except Exception as e:
+                    logging.exception(f"Belge işleme hatası ({file_name}): {str(e)}")
+                    error_content = f"## Belge: {file_name}\n\n**[HATA]** Belge işlenirken hata oluştu: {str(e)}\n\n"
+                    all_documents_content.append(error_content)
+
+        # Tüm belgeleri birleştir
+        combined_content = "\n\n=== BELGE ARASI AYIRICI ===\n\n".join(all_documents_content)
+        return combined_content
+
+    except Exception as e:
+        logging.exception(f"Error in convert_files_to_markdown: {str(e)}")
+        return f"**[HATA]** Belgeler markdown'a çevrilirken hata oluştu: {str(e)}"
+
+
+async def analyze_markdown_with_llm(markdown_content: str, model, question, history, messages):
+    """
+    Markdown içeriğini LLM ile analiz eder ve streaming response döner.
+    """
+    try:
+        start_time = time.time()
+        qa_llm, model_name = get_llm(model)
+
+        yield {
+            "type": "message_chunk",
+            "content": "Belgeler LLM ile analiz ediliyor..\n",
+            "full_message": "Belgeler LLM ile analiz ediliyor..",
+            "is_complete": False,
+            "user": "chatbot"
+        }
+
+        # LLM ile analiz et
+        analyze_prompt = ChatPromptTemplate.from_messages([
+            (
+                "human",
+                question if question else "Bu belgeler hakkında kullanıcıya kapsamlı bir özet ve analiz ver."
+            ),
+            ("human", f"Belgeler:\n\n{markdown_content}")
+        ])
+
+        chain = analyze_prompt | qa_llm
+        resp = await chain.ainvoke({})
+
+        total_tokens = get_total_tokens(resp, qa_llm)
+        logging.info(f"LLM analizi için total_tokens: {total_tokens}")
+
+        ai_response_content = resp.content.strip()
+
+        # Streaming efekti
+        words = ai_response_content.split()
+        streamed_content = ""
+        for i, word in enumerate(words):
+            streamed_content += word + " "
+            
+            yield {
+                "type": "message_chunk",
+                "content": word + " ",
+                "full_message": streamed_content.strip(),
+                "is_complete": i == len(words) - 1,
+                "user": "chatbot"
+            }
+            await asyncio.sleep(0.03)
+
+        # Mesajları history'e kaydet
+        ai_response_raw = AIMessage(content=markdown_content)
+        messages.append(ai_response_raw)
+
+        ai_response_final = AIMessage(content=ai_response_content)
+        messages.append(ai_response_final)
+
+        # Background summarization
+        summarization_future = asyncio.get_event_loop().run_in_executor(
+            None, summarize_and_log, history, messages, qa_llm
+        )
+        logging.info(f"LLM summarization task started: {summarization_future}")
+
+        analyze_time = time.time() - start_time
+        logging.info(f"LLM analysis completed in {analyze_time:.2f} seconds")
+
+    except Exception as e:
+        logging.exception(f"Error in analyze_markdown_with_llm: {str(e)}")
+        yield {
+            "type": "error",
+            "message": "LLM analizi sırasında hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
+
+
+async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], model, question, history, messages):
+    """
+    Dosyaları Docling ile okuyup analiz eder ve streaming response döner.
+    Çıktısı belgenin markdown formatında sayfalar arası page_break ile birleştirilmiş hali.
+    """
+    try:
+        start_time = time.time()
+
+        yield {
+            "type": "message_chunk",
+            "content": "Belgeler URL'den indiriliyor ve Docling ile işleniyor..\n",
+            "full_message": "Belgeler URL'den indiriliyor ve Docling ile işleniyor..",
+            "is_complete": False,
+            "user": "chatbot"
+        }
+
+        # 1. Adım: Dosyaları markdown'a çevir
+        markdown_content = convert_files_to_markdown(files)
+        
+        # 2. Adım: Markdown içeriği LLM ile analiz et
+        async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
+            yield chunk
+
+        analyze_time = time.time() - start_time
+        logging.info(f"Docling files analyzed in {analyze_time:.2f} seconds")
+
+    except Exception as e:
+        logging.exception(f"Error in analyze_files_with_docling: {str(e)}")
+        yield {
+            "type": "error",
+            "message": "Docling belge analizi sırasında hata oluştu",
+            "error": str(e),
+            "user": "chatbot"
+        }
+
 async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None, alternative_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
@@ -1825,12 +2060,19 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         if files:
             try:
                 files_data = json.loads(files) if isinstance(files, str) else files
-                # image_analysis_text = await analyze_files_with_llm(files_data)
-                # image_analysis_text = await analyze_files_together(files_data)
-                # image_analysis_text = await analyze_files_with_llm(files_data, messages, history)
 
-                async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
-                    yield chunk
+                # Environment variable ile analiz metodunu belirle
+                # USE_DOCLING=true ise Docling, yoksa LLM görsel analizi kullan
+                use_docling = os.getenv('USE_DOCLING', 'false').lower() == 'true'
+                
+                if use_docling:
+                    logging.info("Docling ile belge analizi yapılıyor...")
+                    async for chunk in analyze_files_with_docling(files_data, model, question, history, messages):
+                        yield chunk
+                else:
+                    logging.info("LLM ile görsel analizi yapılıyor...")
+                    async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
+                        yield chunk
 
                 # if image_analysis_text:
                 #     logging.info("Görsel analiz sonuçları bağlama eklendi.")
