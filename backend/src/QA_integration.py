@@ -1177,7 +1177,6 @@ def summarize_and_log(history, stored_messages, llm):
         keep_last = 15
         logging.info(f"stored_messages length: {len(stored_messages)}")
         logging.info(f"stored_messages: {stored_messages}")
-        print(history)
 
         # Hazırlanacak mesajları önceden belirle
         messages_to_add = []
@@ -2457,7 +2456,7 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         analyze_prompt = ChatPromptTemplate.from_messages([
             (
                 "human",
-                question if question else "Bu belgeler hakkında kullanıcıya kapsamlı bir özet ve analiz ver."
+                question if question else "Kullanıcıya bu belgeler hakkında ne ögrenmek istedigini sor."
             ),
             ("human", f"Belgeler:\n\n{markdown_content}")
         ])
@@ -2543,56 +2542,9 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
         # 1. Adım: Dosyaları markdown'a çevir
         markdown_content = await convert_files_to_markdown(files, model)
         
-        # 2. Adım: Question kontrolü
-        if not question or question.strip() == "":
-            # Question boş ise kullanıcıya soru sor
-            response_message = "Belgeniz başarıyla yüklendi. Ne öğrenmek istersiniz?"
-            
-            # Streaming efekti ile mesajı gönder
-            tokens = re.findall(r'\S+|\n+', response_message)
-            streamed_content = ""
-            
-            for i, token in enumerate(tokens):
-                if token.startswith('\n'):
-                    streamed_content += token
-                    yield {
-                        "type": "message_chunk",
-                        "content": token,
-                        "full_message": streamed_content,
-                        "is_complete": i == len(tokens) - 1,
-                        "user": "chatbot"
-                    }
-                else:
-                    streamed_content += token + " "
-                    yield {
-                        "type": "message_chunk", 
-                        "content": token + " ",
-                        "full_message": streamed_content.rstrip(),
-                        "is_complete": i == len(tokens) - 1,
-                        "user": "chatbot"
-                    }
-                await asyncio.sleep(0.03)
-            
-            # Markdown içeriğini history'e kaydet (gelecekteki sorular için)
-            ai_response_markdown = AIMessage(content=markdown_content)
-            messages.append(ai_response_markdown)
-            
-            ai_response_final = AIMessage(content=response_message)
-            messages.append(ai_response_final)
-            
-            # Background summarization için LLM al
-            qa_llm, _ = get_llm(model)
-            
-            # Background summarization
-            summarization_future = asyncio.get_event_loop().run_in_executor(
-                None, summarize_and_log, history, messages, qa_llm
-            )
-            logging.info(f"LLM summarization task started: {summarization_future}")
-            
-        else:
-            # Question dolu ise markdown içeriği LLM ile analiz et
-            async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
-                yield chunk
+        # 2. Adım: Markdown içeriği LLM ile analiz et
+        async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
+            yield chunk
 
         analyze_time = time.time() - start_time
         logging.info(f"Docling files analyzed in {analyze_time:.2f} seconds")
@@ -2619,17 +2571,12 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         messages = history.messages
 
         # print("history: ", history)
-        print("messages: ", messages)
+        # print("messages: ", messages)
         # print("files: ", files)
 
-        user_question = None
-        if question and question.strip() != '':
+        if question != '':
             user_question = HumanMessage(content=question)
             messages.append(user_question)
-            # ÖNEMLI: HumanMessage'ı session history'sine kaydet
-            logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
-            history.add_message(user_question)
-            logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         # Files parse + görsel analizi
         # image_analysis_text = ""
@@ -2650,12 +2597,19 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                     async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
                         yield chunk
 
-                # Files analizi tamamlandıktan sonra return - gereksiz processing'i engelle  
-                return
-                
+                # if image_analysis_text:
+                #     logging.info("Görsel analiz sonuçları bağlama eklendi.")
+                #     # Soruya ek bağlam olarak görsel açıklamalarını ekle
+                #     messages.append(
+                #         HumanMessage(content=f"Görsellerin analizi:\n{image_analysis_text}")
+                #     )
             except Exception as e:
                 logging.exception(f"Files parse/analyze error: {str(e)}")
-                return
+        
+        # ÖNEMLI: HumanMessage'ı session history'sine kaydet
+        # logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
+        # history.add_message(user_question)
+        # logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         if mode == CHAT_GRAPH_MODE:
             async for chunk in process_graph_response_stream(model, graph, question, messages, history):
