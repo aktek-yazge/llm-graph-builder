@@ -1211,6 +1211,7 @@ def summarize_and_log(history, stored_messages, llm):
             def safe_history_update():
                 """Neo4j işlemlerini güvenli şekilde yap"""
                 retry_neo4j_operation(lambda: history.clear())
+                print("messages_to_add: ", messages_to_add)
                 for msg in messages_to_add:
                     retry_neo4j_operation(lambda: history.add_message(msg))
             
