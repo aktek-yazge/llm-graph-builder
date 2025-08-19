@@ -1177,6 +1177,7 @@ def summarize_and_log(history, stored_messages, llm):
         keep_last = 15
         logging.info(f"stored_messages length: {len(stored_messages)}")
         logging.info(f"stored_messages: {stored_messages}")
+        print(history)
 
         # Hazırlanacak mesajları önceden belirle
         messages_to_add = []
