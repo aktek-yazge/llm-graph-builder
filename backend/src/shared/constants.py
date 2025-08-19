@@ -1224,70 +1224,31 @@ This advanced system cleans complex knowledge graph structures extracted from in
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """**CRITICAL SYSTEM RULE - NEVER CREATE DOCUMENT NODES:**
-Document nodes ALREADY EXIST in the system and are created by the backend code during file upload.
-ABSOLUTELY NEVER create, extract, or mention Document nodes in your response.
-NEVER extract "Document" as any entity type under ANY circumstances.
-The system will automatically handle Document nodes - your job is to extract OTHER entities only.
+ADDITIONAL_INSTRUCTIONS = """ULTRA KISITLI ÇIKARMA - SADECE BU 4 TİP:
 
-**CRITICAL SYSTEM RULE - NEVER CREATE POLICY NODES:**
-Policy nodes are ALREADY CREATED by the backend code when processing insurance documents.
-ABSOLUTELY NEVER create, extract, or mention Policy nodes in your response.
-NEVER extract "Policy", "InsurancePolicy", "Poliçe" as entity types under ANY circumstances.
-The system automatically creates Policy nodes from document filenames and handles Policy-Document relationships.
-Focus on extracting OTHER entities like Customers, Agents, Assets, Coverage details, etc.
+ÇIKAR (TOPLAM 4 ENTITY MAKSIMUM):
+1. Person (Müşteri adı soyadı)
+2. Company (Sigorta şirketi adı)  
+3. PolicyType (Sadece: Kasko, Trafik, Konut, DASK)
+4. PolicyYear (Sadece poliçe başlangıç yılı)
 
-**MANDATORY RESTRICTION - FOCUS ONLY ON ESSENTIAL BUSINESS ENTITIES:**
-Extract ONLY the following types of entities that are essential for business queries:
-- Customer/Person names (Müşteri/Kişi isimleri)
-- Agent names (Acente isimleri) 
-- Insurance Company names (Sigorta Şirketi isimleri)
-- PolicyType (Poliçe Tipi: Kasko, Trafik, Konut, DASK, etc.)
-- PolicyNumber (Poliçe Numarası - MANDATORY business identifier)
-- PolicyYear (Poliçe Yılı - MANDATORY from all dates)
-- Coverage types (Teminat türleri - only high-level coverage names)
-- Asset types (Varlık türleri: Bina, Araç, etc.)
-- Address information (Adres bilgileri)
+YASAKLI - HİÇBİR ŞEKILDE ÇIKARMA:
+- Coverage, Clause, Exclusion, CoverageLimit 
+- Premium, Discount, Risk, Asset, Building
+- Address, PhoneNumber, Email
+- StartDate, EndDate, PolicyNumber
+- Para miktarları, limitler, istisnalar
+- Yasal maddeler, klauzullar
 
-**STRICTLY FORBIDDEN - DO NOT EXTRACT:**
-- Monetary amounts, premiums, prices, financial values
-- Administrative reference numbers, document IDs (but DO extract policy numbers)
-- Detailed clauses, legal text, terms and conditions
-- Technical insurance jargon and detailed legal language
-- Dates as entities (extract only YEAR component as PolicyYear)
-- Coverage limits, deductibles, specific amounts
-- Detailed contact information beyond basic phone/email
-- Administrative details, signatures, approval processes
+İLİŞKİ KURALLARI (TOPLAM 2 İLİŞKİ MAKSIMUM):
+- Person -> PolicyType 
+- Company -> PolicyType
 
-**MANDATORY POLICYYEAR EXTRACTION RULE:**
-For POLICY-RELATED dates only (policy start date, policy end date, policy issue date, policy expiration date), you MUST ALWAYS extract the YEAR component as a separate PolicyYear entity.
-
-Examples:
-- If policy start date is "13.02.2023", extract PolicyYear entity with id="2023"
-- If policy end date is "31.12.2023", extract PolicyYear entity with id="2023"
-- If policy period is "2023-2024", extract both "2023" and "2024" as separate PolicyYear entities
-
-**DO NOT extract years from:**
-- Birth dates (doğum tarihi)
-- Purchase dates (satın alma tarihi)
-- Registration dates (tescil tarihi)
-- Other non-policy related dates
-
-**FOCUS ON BUSINESS QUERY VALUE:**
-Think like a person who would query a knowledge graph about insurance policies. They want to find:
-- Which customers have which types of policies?
-- Which agent handled which policies?
-- What types of coverage are common?
-- Which assets are covered?
-- What years are policies from?
-
-They DON'T need:
-- Detailed financial calculations
-- Legal clause specifics
-- Administrative reference numbers
-- Technical insurance terminology
-
-Extract ONLY atomic entities as individual nodes that provide business value for queries.
+SIKI KURALLAR:
+- Chunk başına MAX 3 entity
+- Chunk başına MAX 2 relationship  
+- Detaya girme, temelde kal
+- Fazla node çıkarma
 
 """
 

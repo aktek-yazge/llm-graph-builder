@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, Union, cast
 
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
@@ -52,22 +53,6 @@ examples = [
         "tail": "Microsoft",
         "tail_type": "Company",
     },
-    {
-        "text": "Microsoft Word is a lightweight app that accessible offline",
-        "head": "Microsoft Word",
-        "head_type": "Product",
-        "relation": "HAS_CHARACTERISTIC",
-        "tail": "lightweight app",
-        "tail_type": "Characteristic",
-    },
-    {
-        "text": "Microsoft Word is a lightweight app that accessible offline",
-        "head": "Microsoft Word",
-        "head_type": "Product",
-        "relation": "HAS_CHARACTERISTIC",
-        "tail": "accessible offline",
-        "tail_type": "Characteristic",
-    },
 ]
 
 system_prompt = (
@@ -77,8 +62,9 @@ system_prompt = (
     "formats to build a knowledge graph.\n"
     "CRITICAL: Focus ONLY on business-essential entities. Do NOT extract financial amounts, "
     "reference numbers, detailed legal text, or administrative details.\n"
-    "Try to capture as much information from the text as possible without "
-    "sacrificing accuracy. Do not add any information that is not explicitly "
+    "Extract only the most important and relevant information that provides significant "
+    "business value. Prioritize quality over quantity. LIMIT: Extract maximum 3-5 relationships per document chunk. "
+    "Do not add any information that is not explicitly "
     "mentioned in the text.\n"
     "- **Nodes** represent entities and concepts.\n"
     "- The aim is to achieve simplicity and clarity in the knowledge graph, making it\n"
@@ -106,19 +92,17 @@ system_prompt = (
     "Remember, the knowledge graph should be coherent and easily understandable, "
     "so maintaining consistency in entity references is crucial.\n"
     "## 4. Business Focus for Insurance Documents\n"
-    "When processing insurance documents, ONLY extract entities that provide business value:\n"
-    "- Customer/Person names\n"
-    "- Agent names\n"
-    "- Insurance Company names\n"
-    "- Policy types (Kasko, Trafik, Konut, DASK, etc.)\n"
-    "- Years from any dates (as PolicyYear entities)\n"
-    "- High-level coverage types\n"
-    "- Asset types (Bina, Araç, etc.)\n"
-    "- Address information\n"
+    "When processing insurance documents, ONLY extract the most critical relationships:\n"
+    "- Customer HAS_POLICY with Policy type\n"
+    "- Agent MANAGES Customer\n"
+    "- Policy COVERS Asset\n"
+    "- Customer LIVES_AT Address\n"
+    "- Policy VALID_IN PolicyYear\n"
+    "LIMIT: Extract MAXIMUM 3 relationships per document. Focus on the most business-critical connections only.\n"
     "NEVER extract: monetary amounts, policy numbers, legal clauses, technical jargon, "
     "detailed administrative information, or specific financial calculations.\n"
     "## 5. Strict Compliance\n"
-    "Adhere to the rules strictly. Non-compliance will result in termination."
+    "Adhere to the rules strictly. Extract fewer, high-quality relationships rather than many low-value ones."
 )
 
 
@@ -170,9 +154,12 @@ def get_default_prompt(
         enhanced_system_prompt += "\n" + "\n".join(constraints_parts)
         enhanced_system_prompt += (
             "\n\n## CRITICAL INSTRUCTION:\n"
-            "Focus ONLY on extracting entities and relationships that match the allowed types above. "
+            "STRICT LIMIT: Extract MAXIMUM 3 relationships per document chunk. "
+            "Focus ONLY on extracting the most important entities and relationships that match the allowed types above. "
+            "Prioritize quality over quantity - extract only high-value, business-essential entities. "
             "Do NOT extract anything that doesn't fit the allowed node types and relationship types. "
-            "It's better to extract fewer, correct entities than to extract incorrect ones."
+            "Avoid redundant, minor, or trivial entities. Choose only the 3 most critical relationships. "
+            "It's better to extract fewer, correct entities than to extract many incorrect ones."
         )
     
     return ChatPromptTemplate.from_messages(
@@ -182,7 +169,8 @@ def get_default_prompt(
                 "human",
                 additional_instructions
                 + " IMPORTANT: Focus ONLY on the allowed node types and relationship types specified above. "
-                + "Do not extract entities or relationships that don't match the allowed types. "
+                + "STRICT LIMIT: Extract maximum 3 relationships per document chunk. "
+                + "Prioritize quality over quantity. Do not extract entities or relationships that don't match the allowed types. "
                 + "Tip: Make sure to answer in the correct format and do "
                 "not include any explanations. "
                 "Use the given format to extract information from the "
@@ -298,12 +286,13 @@ def create_unstructured_prompt(
         'with JSON objects. Each object should have the keys: "head", '
         '"head_type", "relation", "tail", and "tail_type". The "head" '
         "key must contain the text of the extracted entity with one of the types "
-        "from the provided list in the user prompt.",
-        "CRITICAL FOR INSURANCE DOCUMENTS: Extract ONLY business-essential entities. "
+        "from the provided list in the user prompt. "
+        "CRITICAL LIMIT: Extract MAXIMUM 3 relationships per document chunk.",
+        "CRITICAL FOR INSURANCE DOCUMENTS: Extract ONLY the 3 most business-essential relationships. "
+        "Focus on high-level connections like Customer-Policy, Agent-Customer, Policy-Asset. "
         "DO NOT extract monetary amounts, policy numbers, legal clauses, technical jargon, "
-        "administrative details, or specific financial calculations. Focus on entities "
-        "that provide business query value like customer names, agent names, policy types, "
-        "years, coverage types, asset types, and addresses.",
+        "administrative details, or specific financial calculations. "
+        "STRICT PRIORITY: Customer relationships, Policy coverage, Agent assignments only.",
         f'The "head_type" key must contain the type of the extracted head entity, '
         f"which MUST be one of these ALLOWED types: {node_labels_str}. "
         f"DO NOT use any other node types!"
@@ -328,8 +317,9 @@ def create_unstructured_prompt(
         f"REJECT any relationships that don't match this schema!"
         if relationship_type == "tuple"
         else "",
-        "Attempt to extract as many entities and relations as you can, BUT ONLY those that "
-        "match the allowed types AND provide business value. Maintain "
+        "Extract ONLY the 3 most critical business relationships. "
+        "Focus on quality over quantity - choose only the highest-value connections. "
+        "Avoid extracting redundant or minor entities. Maintain "
         "Entity Consistency: When extracting entities, it's vital to ensure "
         'consistency. If an entity, such as "John Doe", is mentioned multiple '
         "times in the text but is referred to by different names or pronouns "
@@ -341,8 +331,11 @@ def create_unstructured_prompt(
         "- Don't add any explanation and text.\n"
         "- Focus ONLY on the allowed node and relationship types.\n"
         "- For insurance documents, prioritize business-essential entities over technical details.\n"
-        "- It's better to extract fewer, correct entities than incorrect ones.\n"
-        "- Ignore entities and relationships that don't match the allowed types.",
+        "- CRITICAL: Extract MAXIMUM 3 relationships - quality over quantity.\n"
+        "- It's better to extract fewer, correct entities than many incorrect ones.\n"
+        "- Ignore entities and relationships that don't match the allowed types.\n"
+        "- Avoid extracting redundant, minor, or trivial entities.\n"
+        "- STRICT LIMIT: Maximum 3 relationships per document chunk.",
         additional_instructions,
     ]
     system_prompt = "\n".join(filter(None, base_string_parts))
@@ -375,10 +368,11 @@ def create_unstructured_prompt(
         "entities and relationships."
         "{examples}\n",
         "IMPORTANT REMINDER: Focus ONLY on the allowed types above. "
+        "Extract MAXIMUM 3 relationships that provide the highest business value. "
         "Ignore any entities or relationships that don't match the allowed types.",
         additional_instructions,
         "For the following text, extract entities and relations as "
-        "in the provided example, but ONLY use the allowed types specified above."
+        "in the provided example, but ONLY use the allowed types specified above and limit to maximum 3 relationships."
         "{format_instructions}\nText: {input}",
     ]
     human_prompt_string = "\n".join(filter(None, human_string_parts))
@@ -979,7 +973,54 @@ class LLMGraphTransformer:
         except Exception as prompt_log_error:
             print(f"Prompt loglama hatası: {prompt_log_error}")
         
+        # LOG: LLM çağrısı ve token kullanımı
+        import time
+        start_time = time.time()
         raw_schema = self.chain.invoke({"input": text}, config=config)
+        end_time = time.time()
+        
+        # Token kullanımını logla
+        try:
+            prompt_length = len(text)
+            response_length = 0
+            
+            # Token usage bilgisini al
+            if hasattr(raw_schema, 'usage_metadata') and raw_schema.usage_metadata:
+                usage = raw_schema.usage_metadata
+                input_tokens = usage.get('input_tokens', 0)
+                output_tokens = usage.get('output_tokens', 0) 
+                total_tokens = usage.get('total_tokens', 0)
+                
+                logging.info(f"🔢 LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+                logging.info(f"⏱️ LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+            elif hasattr(raw_schema, 'response_metadata') and 'token_usage' in raw_schema.response_metadata:
+                usage = raw_schema.response_metadata['token_usage']
+                input_tokens = usage.get('prompt_tokens', 0)
+                output_tokens = usage.get('completion_tokens', 0)
+                total_tokens = usage.get('total_tokens', 0)
+                
+                logging.info(f"🔢 LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+                logging.info(f"⏱️ LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+            else:
+                # Manuel token tahmini (yaklaşık)
+                if hasattr(raw_schema, 'content'):
+                    response_length = len(raw_schema.content)
+                else:
+                    response_length = len(str(raw_schema))
+                
+                estimated_input_tokens = int(prompt_length / 4)  # ~4 karakter = 1 token
+                estimated_output_tokens = int(response_length / 4)
+                estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
+                
+                logging.info(f"🔢 LLM Token Tahmini - Input: ~{estimated_input_tokens}, Output: ~{estimated_output_tokens}, Total: ~{estimated_total_tokens}")
+                logging.info(f"📏 Prompt uzunluğu: {prompt_length} karakter, Response uzunluğu: {response_length} karakter")
+                logging.info(f"⏱️ LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+        except Exception as token_log_error:
+            logging.error(f"Token loglama hatası: {token_log_error}")
+        
         
         # LOG: LLM'den dönen raw sonuç
         print(f"📥 LLM'den dönen raw sonuç tipi: {type(raw_schema)}")
@@ -1148,7 +1189,54 @@ class LLMGraphTransformer:
         print(f"🔗 FULL Allowed relationships: {self.allowed_relationships}")
         print(f"🔧 Relationship type: {self._relationship_type}")
         
+        # LOG: Async LLM çağrısı ve token kullanımı
+        import time
+        start_time = time.time()
         raw_schema = await self.chain.ainvoke({"input": text}, config=config)
+        end_time = time.time()
+        
+        # Token kullanımını logla
+        try:
+            prompt_length = len(text)
+            response_length = 0
+            
+            # Token usage bilgisini al
+            if hasattr(raw_schema, 'usage_metadata') and raw_schema.usage_metadata:
+                usage = raw_schema.usage_metadata
+                input_tokens = usage.get('input_tokens', 0)
+                output_tokens = usage.get('output_tokens', 0) 
+                total_tokens = usage.get('total_tokens', 0)
+                
+                logging.info(f"🔢 ASYNC LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+            elif hasattr(raw_schema, 'response_metadata') and 'token_usage' in raw_schema.response_metadata:
+                usage = raw_schema.response_metadata['token_usage']
+                input_tokens = usage.get('prompt_tokens', 0)
+                output_tokens = usage.get('completion_tokens', 0)
+                total_tokens = usage.get('total_tokens', 0)
+                
+                logging.info(f"🔢 ASYNC LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+            else:
+                # Manuel token tahmini (yaklaşık)
+                if hasattr(raw_schema, 'content'):
+                    response_length = len(raw_schema.content)
+                else:
+                    response_length = len(str(raw_schema))
+                
+                estimated_input_tokens = int(prompt_length / 4)  # ~4 karakter = 1 token
+                estimated_output_tokens = int(response_length / 4)
+                estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
+                
+                logging.info(f"🔢 ASYNC LLM Token Tahmini - Input: ~{estimated_input_tokens}, Output: ~{estimated_output_tokens}, Total: ~{estimated_total_tokens}")
+                logging.info(f"📏 ASYNC Prompt uzunluğu: {prompt_length} karakter, Response uzunluğu: {response_length} karakter")
+                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
+                
+        except Exception as token_log_error:
+            logging.error(f"Async token loglama hatası: {token_log_error}")
+        
         
         # LOG: LLM'den dönen raw sonuç
         print(f"📥 LLM'den dönen raw sonuç tipi: {type(raw_schema)}")

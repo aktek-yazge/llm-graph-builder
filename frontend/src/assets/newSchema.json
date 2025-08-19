@@ -167,21 +167,15 @@
   {
     "schema": "insurance-policies",
     "triplet": [
-      "Customer-OWNS->Policy",
-      "Policy-FOR_YEAR->PolicyYear",
-      "Policy-OF_TYPE->PolicyType",
-      "Policy-HAS_COVERAGE->Coverage",
-      "Policy-HANDLED_BY->Agent",
-      "Policy-COVERS->Asset",
-      "Policy-HAS_NUMBER->PolicyNumber",
-      "Policy-ISSUED_BY->InsuranceCompany",
-      "Customer-LIVES_AT->Address",
-      "Customer-HAS_PHONE->PhoneNumber",
-      "Customer-HAS_EMAIL->Email",
-      "Policy-STARTS_ON->StartDate",
-      "Policy-ENDS_ON->EndDate",
-      "Coverage-HAS_LIMIT->CoverageLimit",
-      "Asset-LOCATED_AT->Address"
+      "Person-HAS_POLICY->PolicyType",
+      "Person-LIVES_AT->Address",
+      "Person-HAS_PHONE->PhoneNumber",
+      "Person-HAS_EMAIL->Email",
+      "Person-INSURED_BY->Company",
+      "Company-PROVIDES->PolicyType",
+      "Company-LOCATED_AT->Address",
+      "Company-HAS_PHONE->PhoneNumber",
+      "Company-HAS_EMAIL->Email"
     ]
   }
 ]
