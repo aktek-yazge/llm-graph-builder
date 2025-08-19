@@ -1,4 +1,5 @@
 import logging
+import time
 from langchain.docstore.document import Document
 import os
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
@@ -56,8 +57,8 @@ def get_llm(model: str):
         elif "openai" in model:
             model_name, api_key = env_value.split(",")
             logging.info(f"OpenAI model kontrolü: model={model}, model_name={model_name}")
-            if "o3-mini" in model:
-                logging.info("O3-mini tespit edildi, temperature parametresi olmadan LLM oluşturuluyor")
+            if "o3-mini" in model or "gpt-5-mini" in model:
+                logging.info(f"{model_name} tespit edildi, temperature parametresi olmadan LLM oluşturuluyor")
                 llm= ChatOpenAI(
                 api_key=api_key,
                 model=model_name)
@@ -195,8 +196,9 @@ async def get_graph_document_list(
             node_properties = False
             relationship_properties = False
         else:
-            node_properties = ["description"]
-            relationship_properties = ["description"]
+            # Sadeleştirilmiş - description property'si de çıkarma
+            node_properties = False  # ["description"] yerine False
+            relationship_properties = False  # ["description"] yerine False
         TOOL_SUPPORTED_MODELS = {"qwen3", "deepseek"} 
         model_name = get_llm_model_name(llm)
         ignore_tool_usage = not any(pattern in model_name for pattern in TOOL_SUPPORTED_MODELS)
@@ -212,10 +214,31 @@ async def get_graph_document_list(
             additional_instructions=ADDITIONAL_INSTRUCTIONS+ (additional_instructions if additional_instructions else "")
         )
     
+    # Token kullanımı izleme için
+    total_chunks = len(combined_chunk_document_list)
+    logging.info(f"📊 Graph extraction başlıyor - Toplam chunk sayısı: {total_chunks}")
+    
+    start_time = time.time()
     if isinstance(llm,DiffbotGraphTransformer):
         graph_document_list = llm_transformer.convert_to_graph_documents(combined_chunk_document_list)
     else:
         graph_document_list = await llm_transformer.aconvert_to_graph_documents(combined_chunk_document_list)
+    end_time = time.time()
+    
+    # Toplam işlem süresi ve sonuçları logla
+    total_processing_time = end_time - start_time
+    total_nodes = sum(len(doc.nodes) for doc in graph_document_list)
+    total_relationships = sum(len(doc.relationships) for doc in graph_document_list)
+    
+    logging.info(f"📊 Graph extraction tamamlandı:")
+    logging.info(f"  ⏱️ Toplam süre: {total_processing_time:.2f} saniye")
+    logging.info(f"  📄 İşlenen chunk sayısı: {total_chunks}")
+    logging.info(f"  🎯 Çıkarılan node sayısı: {total_nodes}")
+    logging.info(f"  🔗 Çıkarılan relationship sayısı: {total_relationships}")
+    logging.info(f"  ⚡ Chunk başına ortalama süre: {total_processing_time/total_chunks:.2f} saniye")
+    logging.info(f"  📈 Node/chunk oranı: {total_nodes/total_chunks:.1f}")
+    logging.info(f"  📈 Relationship/chunk oranı: {total_relationships/total_chunks:.1f}")
+    
     return graph_document_list
 
 async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
@@ -252,42 +275,35 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
        logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
     
-       # allowedNodes işleme - TEMPORARILY DISABLED FOR POLICY EXTRACTION
-       logging.info("=== allowedNodes İŞLEME BAŞLIYOR (DEVRE DIŞI) ===")
-       # if allowedNodes:
-       #     allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
-       #     logging.info(f"Split edilmiş node sayısı: {len(allowed_nodes)}")
-       #     logging.info(f"İşlenmiş allowed_nodes (ilk 10): {allowed_nodes[:10]}")
-       #     logging.info(f"İşlenmiş allowed_nodes (tümü): {allowed_nodes}")
-       # else:
-       #     allowed_nodes = []
-       #     logging.info("allowedNodes boş, empty list atandı")
-       
-       # Policy için özel node türleri kullan
-       allowed_nodes = []  # LLM'e serbest bırak
-       logging.info("Policy extraction için allowedNodes kısıtlaması kaldırıldı")
+       # allowedNodes işleme - AKTIF
+       logging.info("=== allowedNodes İŞLEME BAŞLIYOR ===")
+       if allowedNodes:
+           allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
+           logging.info(f"Split edilmiş node sayısı: {len(allowed_nodes)}")
+           logging.info(f"İşlenmiş allowed_nodes (ilk 10): {allowed_nodes[:10]}")
+           logging.info(f"İşlenmiş allowed_nodes (tümü): {allowed_nodes}")
+       else:
+           allowed_nodes = []
+           logging.info("allowedNodes boş, empty list atandı")
     
-       # allowedRelationship işleme - TEMPORARILY DISABLED FOR POLICY EXTRACTION
-       logging.info("=== allowedRelationship İŞLEME BAŞLIYOR (DEVRE DIŞI) ===")
+       # allowedRelationship işleme - AKTIF
+       logging.info("=== allowedRelationship İŞLEME BAŞLIYOR ===")
        allowed_relationships = []
-       # if allowedRelationship:
-       #     items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
-       #     if len(items) % 3 != 0:
-       #         raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
-       #     for i in range(0, len(items), 3):
-       #         source, relation, target = items[i:i + 3]
-       #         if source not in allowed_nodes or target not in allowed_nodes:
-       #             raise LLMGraphBuilderException(
-       #                 f"Invalid relationship ({source}, {relation}, {target}): "
-       #                 f"source or target not in allowedNodes"
-       #             )
-       #         allowed_relationships.append((source, relation, target))
-       #     logging.info(f"Allowed relationships: {allowed_relationships}")
-       # else:
-       #     logging.info("No allowed relationships provided")
-       
-       # Policy için relationship kısıtlaması kaldırıldı
-       logging.info("Policy extraction için allowedRelationship kısıtlaması kaldırıldı")
+       if allowedRelationship:
+           items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
+           if len(items) % 3 != 0:
+               raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
+           for i in range(0, len(items), 3):
+               source, relation, target = items[i:i + 3]
+               if source not in allowed_nodes or target not in allowed_nodes:
+                   raise LLMGraphBuilderException(
+                       f"Invalid relationship ({source}, {relation}, {target}): "
+                       f"source or target not in allowedNodes"
+                   )
+               allowed_relationships.append((source, relation, target))
+           logging.info(f"Allowed relationships: {allowed_relationships}")
+       else:
+           logging.info("No allowed relationships provided")
 
        graph_document_list = await get_graph_document_list(
            llm,

@@ -1040,7 +1040,19 @@ async def processing_source(
                 except Exception as cleanup_error:
                     logging.error(f"Policy cleanup hatası: {cleanup_error}")
                 
-                # 2. Post-processing (eğer kurallar verilmiş ise)
+                # 2. Cross-chunk similarity relationships
+                # try:
+                #     logging.info(f"Cross-chunk similarity relationships başlıyor: {file_name}")
+                #     cross_chunk_start_time = time.time()
+                #     create_cross_chunk_relations(graph, file_name)
+                #     cross_chunk_end_time = time.time()
+                #     logging.info(f"Cross-chunk relationships tamamlandı: {cross_chunk_end_time - cross_chunk_start_time:.2f} saniye")
+                #     uri_latency["cross_chunk_rel_post"] = f"{cross_chunk_end_time - cross_chunk_start_time:.2f}"
+                # except Exception as cross_chunk_error:
+                #     logging.error(f"Cross-chunk relationship hatası: {cross_chunk_error}")
+                #     uri_latency["cross_chunk_rel_post"] = "FAILED"
+                
+                # 3. Post-processing (eğer kurallar verilmiş ise)
                 if enable_post_processing and post_processing_rules:
                     try:
                         logging.info(f"Extract sonrası otomatik post-processing başlıyor: {file_name}")
@@ -1113,6 +1125,9 @@ async def processing_source(
                         uri_latency["post_processing_error"] = str(post_processing_error)
                 else:
                     uri_latency["post_processing_enabled"] = "false"
+                
+                # Cross-chunk relationships her zaman post-processing aşamasında yapıldı
+                logging.info(f"Post-processing tamamlandı - Cross-chunk relationships dahil edildi")
 
             response["fileName"] = file_name
             response["nodeCount"] = node_count
@@ -1152,7 +1167,7 @@ async def processing_chunks(
 ):
   latency = {}
   successful_steps = 0
-  total_steps = 7
+  total_steps = 6
 
   # (re)open driver if closed
   if graph is None or graph._driver._closed:
@@ -1164,10 +1179,10 @@ async def processing_chunks(
     create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
     latency["update_embedding"] = f"{time.time() - t0:.2f}"
     successful_steps += 1
-    logging.info(f"Step 1/7 başarılı: Chunk embeddings oluşturuldu")
+    logging.info(f"Step 1/6 başarılı: Chunk embeddings oluşturuldu")
   except Exception as e:
     latency["update_embedding"] = "FAILED"
-    logging.error(f"Step 1/7 başarısız: Chunk embeddings oluşturulamadı - {e}")
+    logging.error(f"Step 1/6 başarısız: Chunk embeddings oluşturulamadı - {e}")
 
   # 2. ask LLM for sub-graph per chunk
   try:
@@ -1184,10 +1199,10 @@ async def processing_chunks(
     )
     latency["entity_extraction"] = f"{time.time() - t1:.2f}"
     successful_steps += 1
-    logging.info(f"Step 2/7 başarılı: LLM'den entity'ler çıkarıldı")
+    logging.info(f"Step 2/6 başarılı: LLM'den entity'ler çıkarıldı")
   except Exception as e:
     latency["entity_extraction"] = "FAILED"
-    logging.error(f"Step 2/7 başarısız: LLM entity extraction hatası - {e}")
+    logging.error(f"Step 2/6 başarısız: LLM entity extraction hatası - {e}")
     # LLM hatası kritik - boş graph_documents ile devam et
     graph_documents = []
 
@@ -1195,9 +1210,9 @@ async def processing_chunks(
   try:
     cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
     successful_steps += 1
-    logging.info(f"Step 3/7 başarılı: Entity'ler normalize edildi")
+    logging.info(f"Step 3/6 başarılı: Entity'ler normalize edildi")
   except Exception as e:
-    logging.error(f"Step 3/7 başarısız: Entity normalization hatası - {e}")
+    logging.error(f"Step 3/6 başarısız: Entity normalization hatası - {e}")
     cleaned = []
 
   # 4. save nodes & rels into Neo4j
@@ -1206,10 +1221,10 @@ async def processing_chunks(
     save_graphDocuments_in_neo4j(graph, cleaned)
     latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
     successful_steps += 1
-    logging.info(f"Step 4/7 başarılı: Entity'ler Neo4j'ye kaydedildi")
+    logging.info(f"Step 4/6 başarılı: Entity'ler Neo4j'ye kaydedildi")
   except Exception as e:
     latency["save_graphDocuments"] = "FAILED"
-    logging.error(f"Step 4/7 başarısız: Neo4j'ye kaydetme hatası - {e}")
+    logging.error(f"Step 4/6 başarısız: Neo4j'ye kaydetme hatası - {e}")
 
   # 5. relate each chunk to its extracted entities
   try:
@@ -1218,34 +1233,23 @@ async def processing_chunks(
     merge_relationship_between_chunk_and_entites(graph, pairs)
     latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
     successful_steps += 1
-    logging.info(f"Step 5/7 başarılı: Chunk-Entity ilişkileri oluşturuldu")
+    logging.info(f"Step 5/6 başarılı: Chunk-Entity ilişkileri oluşturuldu")
   except Exception as e:
     latency["chunk_entity_rel"] = "FAILED"
-    logging.error(f"Step 5/7 başarısız: Chunk-Entity ilişki hatası - {e}")
+    logging.error(f"Step 5/6 başarısız: Chunk-Entity ilişki hatası - {e}")
 
-  # 6. cross-chunk SIMILAR relationships
+  # 6. Create document metadata entities
   try:
-    t4 = time.time()
-    create_cross_chunk_relations(graph, file_name)
-    latency["cross_chunk_rel"] = f"{time.time() - t4:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 6/7 başarılı: Cross-chunk ilişkileri oluşturuldu")
-  except Exception as e:
-    latency["cross_chunk_rel"] = "FAILED"
-    logging.error(f"Step 6/7 başarısız: Cross-chunk ilişki hatası - {e}")
-  
-  # 7. Create document metadata entities
-  try:
-    t6 = time.time()
+    t5 = time.time()
     create_document_metadata_entities(graph, file_name)
-    latency["doc_metadata_entities"] = f"{time.time() - t6:.2f}"
+    latency["doc_metadata_entities"] = f"{time.time() - t5:.2f}"
     successful_steps += 1
-    logging.info(f"Step 7/7 başarılı: Document metadata entity'leri oluşturuldu")
+    logging.info(f"Step 6/6 başarılı: Document metadata entity'leri oluşturuldu")
   except Exception as e:
     latency["doc_metadata_entities"] = "FAILED"
-    logging.error(f"Step 7/7 başarısız: Document metadata entity hatası - {e}")
+    logging.error(f"Step 6/6 başarısız: Document metadata entity hatası - {e}")
 
-  # 8. update overall node/relationship counts (her zaman çalıştır)
+  # 7. update overall node/relationship counts (her zaman çalıştır)
   try:
     graphDb = graphDBdataAccess(graph)
     counts = graphDb.update_node_relationship_count(file_name)

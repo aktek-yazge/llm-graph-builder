@@ -239,6 +239,14 @@ class graphDBdataAccess:
             param= {"props":params}
             
             logging.info(f'Base Param value 1 : {param}')
+            
+            # Token kullanımı için özel loglama
+            if 'total_tokens' in params:
+                logging.info(f"📊 Document {params.get('fileName', 'unknown')} için token kullanımı güncellendi:")
+                logging.info(f"  🔢 Toplam token: {params.get('total_tokens', 0)}")
+                logging.info(f"  📥 Input token: {params.get('input_tokens', 0)}")
+                logging.info(f"  📤 Output token: {params.get('output_tokens', 0)}")
+            
             query = "MERGE(d:Document {fileName :$props.fileName}) SET d += $props"
             logging.info("Update source node properties")
             self.graph.query(query,param,session_params={"database":self.graph._database})
@@ -949,3 +957,44 @@ class graphDBdataAccess:
                 """
         param = {"file_name" : file_name}
         return self.execute_query(query, param)
+
+    def update_token_usage(self, file_name: str, total_tokens: int, input_tokens: int = 0, output_tokens: int = 0, processing_time: float = 0):
+        """
+        Document node'a token kullanım bilgilerini kaydet
+        """
+        try:
+            logging.info(f"Token kullanım bilgileri kaydediliyor - Dosya: {file_name}")
+            
+            query = """
+                MATCH (d:Document {fileName: $file_name})
+                SET 
+                    d.total_tokens = $total_tokens,
+                    d.input_tokens = $input_tokens,
+                    d.output_tokens = $output_tokens,
+                    d.token_processing_time = $processing_time,
+                    d.tokens_per_second = CASE 
+                        WHEN $processing_time > 0 THEN toFloat($total_tokens) / $processing_time 
+                        ELSE 0 
+                    END,
+                    d.token_updated_at = datetime()
+                RETURN d.total_tokens as updated_tokens
+            """
+            
+            result = self.execute_query(query, {
+                "file_name": file_name,
+                "total_tokens": total_tokens,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "processing_time": processing_time
+            })
+            
+            if result:
+                logging.info(f"✅ Token bilgileri başarıyla kaydedildi: {total_tokens} token")
+                logging.info(f"📊 Token detayları - Input: {input_tokens}, Output: {output_tokens}")
+                if processing_time > 0:
+                    logging.info(f"⚡ Token/saniye: {total_tokens/processing_time:.1f}")
+            else:
+                logging.warning(f"⚠️ Token bilgileri kaydedilemedi: {file_name}")
+                
+        except Exception as e:
+            logging.error(f"Token bilgisi kaydetme hatası ({file_name}): {e}")
