@@ -1182,27 +1182,46 @@ def summarize_and_log(history, stored_messages, llm):
         messages_to_add = []
         
         if total_len > keep_last:
-            # 1. Yavaş olan özetleme işlemini kilidin DIŞINDA yap
-            to_summarize = stored_messages[: total_len - keep_last]
+            # Belge içeriği olan mesajları koru (uzun content'li AIMessage'lar)
+            document_messages = []
+            regular_messages = []
+            
+            for msg in stored_messages[: total_len - keep_last]:
+                # AIMessage ve content'i 1000 karakterden uzunsa belge içeriği olabilir
+                if hasattr(msg, 'content') and len(str(msg.content)) > 1000:
+                    document_messages.append(msg)
+                    logging.info(f"Belge içeriği korunuyor: {len(str(msg.content))} karakter")
+                else:
+                    regular_messages.append(msg)
+            
             remaining = stored_messages[total_len - keep_last :]
+            
+            # Sadece normal mesajları özetle, belge mesajlarını koru
+            if regular_messages:
+                summarization_prompt = ChatPromptTemplate.from_messages(
+                    [
+                        MessagesPlaceholder(variable_name="chat_history"),
+                        (
+                            "human",
+                            "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+                        ),
+                    ]
+                )
+                summarization_chain = summarization_prompt | llm
+                summary_message = summarization_chain.invoke({"chat_history": regular_messages})
 
-            summarization_prompt = ChatPromptTemplate.from_messages(
-                [
-                    MessagesPlaceholder(variable_name="chat_history"),
-                    (
-                        "human",
-                        "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
-                    ),
+                # Eklenecek mesaj listesini hazırla: özet + belge içerikleri + son mesajlar
+                messages_to_add = [
+                    summary_message,
+                    *document_messages,  # Belge içeriklerini koru
+                    *remaining
                 ]
-            )
-            summarization_chain = summarization_prompt | llm
-            summary_message = summarization_chain.invoke({"chat_history": to_summarize})
-
-            # Eklenecek mesaj listesini hazırla
-            messages_to_add = [
-                summary_message,
-                *remaining
-            ]
+            else:
+                # Sadece belge mesajları varsa onları koru
+                messages_to_add = [
+                    *document_messages,
+                    *remaining
+                ]
         else:
             # Özetlemeye gerek yoksa tüm mesajları kullan
             messages_to_add = stored_messages
