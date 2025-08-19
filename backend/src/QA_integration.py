@@ -2523,7 +2523,7 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         }
 
 
-async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], model, question, history, messages):
+async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], model, question, history, messages, graph):
     """
     Dosyaları Docling ile okuyup analiz eder ve streaming response döner.
     Çıktısı belgenin markdown formatında sayfalar arası page_break ile birleştirilmiş hali.
@@ -2579,6 +2579,14 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
             ai_response_final = AIMessage(content=response_message)
             messages.append(ai_response_final)
             
+            qa_llm = create_graph_chain(model, graph)
+            
+            # Background summarization
+            summarization_future = asyncio.get_event_loop().run_in_executor(
+                None, summarize_and_log, history, messages, qa_llm
+            )
+            logging.info(f"LLM summarization task started: {summarization_future}")
+            
         else:
             # Question dolu ise markdown içeriği LLM ile analiz et
             async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
@@ -2628,7 +2636,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 
                 if use_docling:
                     logging.info("Docling ile belge analizi yapılıyor...")
-                    async for chunk in analyze_files_with_docling(files_data, model, question, history, messages):
+                    async for chunk in analyze_files_with_docling(files_data, model, question, history, messages, graph):
                         yield chunk
                 else:
                     logging.info("LLM ile görsel analizi yapılıyor...")
