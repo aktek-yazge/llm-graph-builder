@@ -7,6 +7,7 @@ import threading
 import tempfile
 import base64
 import requests
+import re
 from datetime import datetime
 from typing import Any
 from dotenv import load_dotenv
