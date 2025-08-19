@@ -1211,7 +1211,6 @@ def summarize_and_log(history, stored_messages, llm):
             def safe_history_update():
                 """Neo4j işlemlerini güvenli şekilde yap"""
                 retry_neo4j_operation(lambda: history.clear())
-                print("messages_to_add: ", messages_to_add)
                 for msg in messages_to_add:
                     retry_neo4j_operation(lambda: history.add_message(msg))
             
@@ -2524,7 +2523,7 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         }
 
 
-async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], model, question, history, messages, graph):
+async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], model, question, history, messages):
     """
     Dosyaları Docling ile okuyup analiz eder ve streaming response döner.
     Çıktısı belgenin markdown formatında sayfalar arası page_break ile birleştirilmiş hali.
@@ -2643,7 +2642,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                 
                 if use_docling:
                     logging.info("Docling ile belge analizi yapılıyor...")
-                    async for chunk in analyze_files_with_docling(files_data, model, question, history, messages, graph):
+                    async for chunk in analyze_files_with_docling(files_data, model, question, history, messages):
                         yield chunk
                 else:
                     logging.info("LLM ile görsel analizi yapılıyor...")
