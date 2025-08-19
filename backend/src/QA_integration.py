@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from langchain_neo4j import Neo4jVector
 from langchain_neo4j import Neo4jChatMessageHistory
 from langchain_neo4j import GraphCypherQAChain
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableBranch
 from langchain.retrievers import ContextualCompressionRetriever
@@ -1149,7 +1149,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
             },
             "user": "chatbot"
         }
-
+        
 def summarize_and_log(history, stored_messages, llm):
     logging.info("Starting summarization in a separate thread.")
     if not stored_messages:
@@ -1158,48 +1158,46 @@ def summarize_and_log(history, stored_messages, llm):
 
     try:
         start_time = time.time()
+        total_len = len(stored_messages)
+        keep_last = 15
+        logging.info(f"stored_messages length: {len(stored_messages)}")
+        logging.info(f"stored_messages: {stored_messages}")
 
-        summarization_prompt = ChatPromptTemplate.from_messages(
-            [
-                MessagesPlaceholder(variable_name="chat_history"),
-                (
-                    "human",
-                    "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
-                ),
+        # Hazırlanacak mesajları önceden belirle
+        messages_to_add = []
+        
+        if total_len > keep_last:
+            # 1. Yavaş olan özetleme işlemini kilidin DIŞINDA yap
+            to_summarize = stored_messages[: total_len - keep_last]
+            remaining = stored_messages[total_len - keep_last :]
+
+            summarization_prompt = ChatPromptTemplate.from_messages(
+                [
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    (
+                        "human",
+                        "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+                    ),
+                ]
+            )
+            summarization_chain = summarization_prompt | llm
+            summary_message = summarization_chain.invoke({"chat_history": to_summarize})
+
+            # Eklenecek mesaj listesini hazırla
+            messages_to_add = [
+                summary_message,
+                *remaining
             ]
-        )
-        summarization_chain = summarization_prompt | llm
-
-        summary_message = summarization_chain.invoke({"chat_history": stored_messages})
+        else:
+            # Özetlemeye gerek yoksa tüm mesajları kullan
+            messages_to_add = stored_messages
 
         with threading.Lock():
-            # ÖNEMLI: History'yi tamamen temizlemek yerine, sadece AIMessage'ları özetleyelim
-            # HumanMessage'ları koruyarak context transformation'ın çalışmasını sağlayalım
-            
-            # Mevcut HumanMessage'ları sakla
-            from langchain_core.messages import HumanMessage, AIMessage
-            human_messages = [msg for msg in history.messages if isinstance(msg, HumanMessage)]
-            
-            # History'yi temizle
             history.clear()
-            
-            # HumanMessage'ları geri ekle
-            for human_msg in human_messages:
-                history.add_message(human_msg)
-            
-            # Özet AIMessage'ı ekle
-            try:
-                # summary_message may be a string or an object with .content
-                if hasattr(summary_message, 'content') and getattr(summary_message, 'content'):
-                    ai_content = summary_message.content
-                else:
-                    ai_content = str(summary_message)
-
-                ai_msg = AIMessage(content=ai_content)
-                history.add_message(ai_msg)
-            except Exception:
-                # Fallback: if constructing AIMessage fails, store raw summary_message
-                history.add_message(summary_message)
+            history.add_user_message("Şu ana kadarki konuşma özetimiz")
+            for msg in messages_to_add:
+                history.add_message(msg)
+            # history.add_message(summary_message)
 
         history_summarized_time = time.time() - start_time
         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
@@ -1209,6 +1207,66 @@ def summarize_and_log(history, stored_messages, llm):
     except Exception as e:
         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
         return False 
+
+# def summarize_and_log(history, stored_messages, llm):
+#     logging.info("Starting summarization in a separate thread.")
+#     if not stored_messages:
+#         logging.info("No messages to summarize.")
+#         return False
+
+#     try:
+#         start_time = time.time()
+
+#         summarization_prompt = ChatPromptTemplate.from_messages(
+#             [
+#                 MessagesPlaceholder(variable_name="chat_history"),
+#                 (
+#                     "human",
+#                     "Yukarıdaki chat mesajlarını temel noktalara ve gelecekteki konuşmalar için faydalı olabilecek ilgili detaylara odaklanarak kısa bir özet halinde özetleyin. Tüm giriş ve gereksiz bilgileri hariç tutun."
+#                 ),
+#             ]
+#         )
+#         summarization_chain = summarization_prompt | llm
+
+#         summary_message = summarization_chain.invoke({"chat_history": stored_messages})
+
+#         with threading.Lock():
+#             # ÖNEMLI: History'yi tamamen temizlemek yerine, sadece AIMessage'ları özetleyelim
+#             # HumanMessage'ları koruyarak context transformation'ın çalışmasını sağlayalım
+            
+#             # Mevcut HumanMessage'ları sakla
+#             from langchain_core.messages import HumanMessage, AIMessage
+#             human_messages = [msg for msg in history.messages if isinstance(msg, HumanMessage)]
+            
+#             # History'yi temizle
+#             history.clear()
+            
+#             # HumanMessage'ları geri ekle
+#             for human_msg in human_messages:
+#                 history.add_message(human_msg)
+            
+#             # Özet AIMessage'ı ekle
+#             try:
+#                 # summary_message may be a string or an object with .content
+#                 if hasattr(summary_message, 'content') and getattr(summary_message, 'content'):
+#                     ai_content = summary_message.content
+#                 else:
+#                     ai_content = str(summary_message)
+
+#                 ai_msg = AIMessage(content=ai_content)
+#                 history.add_message(ai_msg)
+#             except Exception:
+#                 # Fallback: if constructing AIMessage fails, store raw summary_message
+#                 history.add_message(summary_message)
+
+#         history_summarized_time = time.time() - start_time
+#         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
+
+#         return True
+
+#     except Exception as e:
+#         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
+#         return False 
     
 def create_graph_chain(model, graph):
     try:
