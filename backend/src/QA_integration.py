@@ -1697,33 +1697,18 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
 #             "user": "chatbot"
 #         }
 
-async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], messages, history, model, question):
+async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, question, history, messages):
     """
-    Tüm görselleri tek seferde LLM'e gönderir ve özet döner.
+    Tüm görselleri paralel olarak analiz eder ve tek string döner.
     """
     try:
-        vision_llm = ChatOpenAI(
-            model="gpt-4.1",
-            streaming=False
-        )
+        start_time = time.time()
+        qa_llm, model_name = get_llm(model)
 
-        # Tek HumanMessage için içerik listesi
-        content_list = [{"type": "text", "text": "Aşağıdaki görsellerin içeriğini detaylıca açıkla:"}]
-
-        for category, file_list in files.items():
-            for file_info in file_list:
-                base64_str = file_info["base64"]
-                if "," not in base64_str:
-                    base64_str = "data:image/png;base64," + base64_str
-
-                content_list.append({
-                    "type": "text",
-                    "text": f"Görsel adı: {file_info['fileName']}"
-                })
-                content_list.append({
-                    "type": "image_url",
-                    "image_url": {"url": base64_str}
-                })
+        # vision_llm = ChatOpenAI(
+        #     model="gpt-4.1",
+        #     streaming=False
+        # )
 
         yield {
             "type": "message_chunk",
@@ -1733,46 +1718,75 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], message
             "user": "chatbot"
         }
 
-        # Tek istekte tüm görselleri gönder
-        resp = await vision_llm.ainvoke([
-            HumanMessage(content=content_list)
+        # Paralel analiz
+        tasks = [
+            analyze_single_file(qa_llm, file_info)
+            for category, file_list in files.items()
+            for file_info in file_list
+        ]
+        results = await asyncio.gather(*tasks)
+        ai_response_content = "\n".join(results)
+
+        # Prompt Template ile özet/cevap üretme
+        analyze_prompt = ChatPromptTemplate.from_messages([
+            (
+                "human",
+                question if question else "Bu bir belgenin içeriğidir. Belgenin içerigi hakkında kullanıcıya özet ver."
+            ),
+            ("human", ai_response_content)
         ])
 
-        ai_response_content = resp.content.strip()
+        chain = analyze_prompt | qa_llm
+        resp = await chain.ainvoke({})
 
-        # Şimdi özetleme
-        resp_summary = vision_llm.invoke([
-            HumanMessage(content=[
-                {"type": "text", "text": question + "Markdown formatında." if question else "Bu görseller bir belgenin parçalarıdır. Belgeyi özetle. Markdown formatında."},
-                {"type": "text", "text": ai_response_content}
-            ])
-        ])
-        ai_response_content2 = resp_summary.content.strip()
+        total_tokens = get_total_tokens(resp, qa_llm)
+        # logging.info(f"{file_info['fileName']} için total_tokens {total_tokens}")
 
-        # Streaming simülasyonu
-        words = ai_response_content2.split()
+        ai_response_content2 = resp.content.strip()
+
+        # Streaming efekti - newline karakterlerini koruyarak
+        # Metni kelimeler ve newline karakterlerine göre böl
+        tokens = re.findall(r'\S+|\n+', ai_response_content2)
         streamed_content = ""
-        for i, word in enumerate(words):
-            streamed_content += word + " "
-            yield {
-                "type": "message_chunk",
-                "content": word + " ",
-                "full_message": streamed_content.strip(),
-                "is_complete": i == len(words) - 1,
-                "user": "chatbot"
-            }
+        
+        for i, token in enumerate(tokens):
+            if token.startswith('\n'):
+                # Newline karakterleri için
+                streamed_content += token
+                yield {
+                    "type": "message_chunk",
+                    "content": token,
+                    "full_message": streamed_content,
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
+            else:
+                # Normal kelimeler için
+                streamed_content += token + " "
+                yield {
+                    "type": "message_chunk",
+                    "content": token + " ",
+                    "full_message": streamed_content.rstrip(),
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
             await asyncio.sleep(0.05)
 
-        # Mesaj geçmişine ekle
-        messages.append(AIMessage(content=ai_response_content))
-        # messages.append(AIMessage(content=ai_response_content2))
+        # Mesajları history'e kaydet
+        ai_response = AIMessage(content=ai_response_content)
+        messages.append(ai_response)
 
-        # Arka planda graph summarization
-        qa_llm, model_name = get_llm(model)
+        ai_response2 = AIMessage(content=ai_response_content2)
+        messages.append(ai_response2)
+
+        # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
             None, summarize_and_log, history, messages, qa_llm
         )
-        logging.info(f"Graph summarization task started: {summarization_future}")
+        logging.info(f"Summarization task started: {summarization_future}")
+
+        analyze_files_with_llm_time = time.time() - start_time
+        logging.info(f"Files analyzed processed in {analyze_files_with_llm_time:.2f} seconds")
 
     except Exception as e:
         logging.exception(f"Error in analyze_files_with_llm: {str(e)}")
