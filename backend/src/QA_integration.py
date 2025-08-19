@@ -2613,37 +2613,37 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         # logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
         # history.add_message(user_question)
         # logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
-
-        if mode == CHAT_GRAPH_MODE:
-            async for chunk in process_graph_response_stream(model, graph, question, messages, history):
-                yield chunk
         else:
-            chat_mode_settings = get_chat_mode_settings(mode=mode)
-            document_names = list(map(str.strip, json.loads(document_names)))
-            
-            if document_names and not chat_mode_settings["document_filter"]:
-                yield {
-                    "type": "error",
-                    "session_id": session_id,
-                    "message": "Lütfen bu sohbet modunu kullanmadan önce tablodaki tüm dokümanların seçimini kaldırın.",
-                    "info": {
-                        "sources": [],
-                        "model": "",
-                        "nodedetails": [],
-                        "total_tokens": 0,
-                        "response_time": 0,
-                        "mode": chat_mode_settings["mode"],
-                        "entities": [],
-                        "metric_details": [],
-                    },
-                    "user": "chatbot"
-                }
-                return
+            if mode == CHAT_GRAPH_MODE:
+                async for chunk in process_graph_response_stream(model, graph, question, messages, history):
+                    yield chunk
+            else:
+                chat_mode_settings = get_chat_mode_settings(mode=mode)
+                document_names = list(map(str.strip, json.loads(document_names)))
                 
-            async for chunk in process_chat_response_stream(
-                messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent
-            ):
-                yield chunk
+                if document_names and not chat_mode_settings["document_filter"]:
+                    yield {
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "Lütfen bu sohbet modunu kullanmadan önce tablodaki tüm dokümanların seçimini kaldırın.",
+                        "info": {
+                            "sources": [],
+                            "model": "",
+                            "nodedetails": [],
+                            "total_tokens": 0,
+                            "response_time": 0,
+                            "mode": chat_mode_settings["mode"],
+                            "entities": [],
+                            "metric_details": [],
+                        },
+                        "user": "chatbot"
+                    }
+                    return
+                    
+                async for chunk in process_chat_response_stream(
+                    messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent
+                ):
+                    yield chunk
                 
     except Exception as e:
         logging.exception(f"Error in QA_RAG_stream: {str(e)}")
