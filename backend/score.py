@@ -57,6 +57,9 @@ from docling_core.types.doc import ImageRefMode, DocItemLabel
 from docling_core.types.doc.document import  DEFAULT_EXPORT_LABELS
 load_dotenv(override=True)
 
+from pathlib import Path
+from typing import Dict, List
+
 logger = CustomLogger()
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
 MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
@@ -173,6 +176,38 @@ class CustomGZipMiddleware:
             compresslevel=self.compresslevel
         )
         await gzip_middleware(scope, receive, send)
+        
+
+def convert_result_to_base64(
+    result: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    TypeScript convertResultToBase64 fonksiyonunun Python versiyonu.
+    result: {
+        "attachmentName": [
+            {"fileName": "example.png", "path": "/path/to/example.png"}
+        ]
+    }
+    return: {
+        "attachmentName": [
+            {"fileName": "example.png", "base64": "iVBORw0KGgoAAAANSUhEUg..."}
+        ]
+    }
+    """
+    base64_result: Dict[str, List[Dict[str, str]]] = {}
+
+    for attachment_name, images in result.items():
+        base64_result[attachment_name] = []
+        for image in images:
+            file_name = image["fileName"]
+            path = Path(image["path"])
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            encoded = base64.b64encode(file_bytes).decode("utf-8")
+            base64_result[attachment_name].append({"fileName": file_name, "base64": encoded})
+
+    return base64_result
+
 
 class UTF8JSONResponse:
     """UTF-8 JSON Response Middleware"""
@@ -1234,12 +1269,31 @@ async def chat_bot_stream(
     document_names: str = Form(None),
     session_id: str = Form(None),
     mode: str = Form(None),
-    email: str = Form(None)
+    email: str = Form(None),
+    files: Optional[str] = Form(None)
 ):
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile 
     token-by-token chat cevapları gönderir.
     """
+    
+    # print("chat_bot_stream files: ", files)
+    
+    if files:
+        try:
+            filesJson = json.loads(files)
+        except json.JSONDecodeError:
+            logging.info("files JSON parse error.")
+            # return {"error": "Invalid JSON in 'files'"}
+
+    files_data: Dict[str, List[Dict[str, str]]] = {}
+    if filesJson:
+        try:
+            files_data = convert_result_to_base64(filesJson)
+        except json.JSONDecodeError:
+            logging.info("files JSON parse error.")
+            # return {"error": "Invalid JSON in 'files'"}
+    
     
     async def generate_real_streaming_response():
         try:
@@ -1288,6 +1342,7 @@ async def chat_bot_stream(
                 write_access=write_access,
                 # intelligent_agent=intelligent_agent,
                 alternative_agent=alternative_agent,
+                files=files_data
             ):
                 # Client disconnect kontrolü
                 if await request.is_disconnected():
