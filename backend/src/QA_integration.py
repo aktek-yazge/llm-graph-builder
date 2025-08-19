@@ -2542,9 +2542,47 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
         # 1. Adım: Dosyaları markdown'a çevir
         markdown_content = await convert_files_to_markdown(files, model)
         
-        # 2. Adım: Markdown içeriği LLM ile analiz et
-        async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
-            yield chunk
+        # 2. Adım: Question kontrolü
+        if not question or question.strip() == "":
+            # Question boş ise kullanıcıya soru sor
+            response_message = "Belgeniz başarıyla yüklendi. Ne öğrenmek istersiniz?"
+            
+            # Streaming efekti ile mesajı gönder
+            tokens = re.findall(r'\S+|\n+', response_message)
+            streamed_content = ""
+            
+            for i, token in enumerate(tokens):
+                if token.startswith('\n'):
+                    streamed_content += token
+                    yield {
+                        "type": "message_chunk",
+                        "content": token,
+                        "full_message": streamed_content,
+                        "is_complete": i == len(tokens) - 1,
+                        "user": "chatbot"
+                    }
+                else:
+                    streamed_content += token + " "
+                    yield {
+                        "type": "message_chunk", 
+                        "content": token + " ",
+                        "full_message": streamed_content.rstrip(),
+                        "is_complete": i == len(tokens) - 1,
+                        "user": "chatbot"
+                    }
+                await asyncio.sleep(0.03)
+            
+            # Markdown içeriğini history'e kaydet (gelecekteki sorular için)
+            ai_response_markdown = AIMessage(content=markdown_content)
+            messages.append(ai_response_markdown)
+            
+            ai_response_final = AIMessage(content=response_message)
+            messages.append(ai_response_final)
+            
+        else:
+            # Question dolu ise markdown içeriği LLM ile analiz et
+            async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
+                yield chunk
 
         analyze_time = time.time() - start_time
         logging.info(f"Docling files analyzed in {analyze_time:.2f} seconds")
