@@ -38,6 +38,7 @@ from src.shared.constants import *
 from src.custom_neo4j_vector import CustomNeo4jVector
 from src.intelligent_agent import IntelligentAgent
 from src.alternative_agent import AlternativeAgent
+from src.neo4j_retry import retry_neo4j_operation
 load_dotenv() 
 
 # Neo4j ve langchain loglama seviyelerini ayarla
@@ -162,7 +163,11 @@ def clear_chat_history(graph, session_id,local=False):
         else:
             history = get_history_by_session_id(session_id)
         
-        history.clear()
+        # Neo4j işlemini retry ile koru
+        if not local:
+            retry_neo4j_operation(lambda: history.clear())
+        else:
+            history.clear()
 
         return {
             "session_id": session_id, 
@@ -1193,11 +1198,19 @@ def summarize_and_log(history, stored_messages, llm):
             messages_to_add = stored_messages
 
         with threading.Lock():
-            history.clear()
-            history.add_user_message("Şu ana kadarki konuşma özetimiz")
-            for msg in messages_to_add:
-                history.add_message(msg)
-            # history.add_message(summary_message)
+            def safe_history_update():
+                """Neo4j işlemlerini güvenli şekilde yap"""
+                retry_neo4j_operation(lambda: history.clear())
+                for msg in messages_to_add:
+                    retry_neo4j_operation(lambda: history.add_message(msg))
+            
+            # Neo4j işlemlerini retry ile koru
+            try:
+                safe_history_update()
+            except Exception as neo4j_error:
+                logging.error(f"Neo4j connection error in summarization: {neo4j_error}")
+                # Neo4j hatası durumunda sessizce devam et, chat devam etsin
+                return False
 
         history_summarized_time = time.time() - start_time
         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
@@ -1447,7 +1460,7 @@ async def analyze_single_file(vision_llm, file_info: Dict[str, str]) -> str:
         return f"[{file_info['fileName']}]: Analiz başarısız."
 
 
-async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, question, history, messages) -> str:
+async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, question, history, messages):
     """
     Tüm görselleri paralel olarak analiz eder ve tek string döner.
     """
@@ -1787,7 +1800,7 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
     
     return result
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None, alternative_agent=None):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None, alternative_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
@@ -1799,8 +1812,34 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         history = create_neo4j_chat_message_history(graph, session_id, write_access)
         messages = history.messages
 
-        user_question = HumanMessage(content=question)
-        messages.append(user_question)
+        # print("history: ", history)
+        # print("messages: ", messages)
+        # print("files: ", files)
+
+        if question != '':
+            user_question = HumanMessage(content=question)
+            messages.append(user_question)
+
+        # Files parse + görsel analizi
+        # image_analysis_text = ""
+        if files:
+            try:
+                files_data = json.loads(files) if isinstance(files, str) else files
+                # image_analysis_text = await analyze_files_with_llm(files_data)
+                # image_analysis_text = await analyze_files_together(files_data)
+                # image_analysis_text = await analyze_files_with_llm(files_data, messages, history)
+
+                async for chunk in analyze_files_with_llm(files_data, model, question, history, messages):
+                    yield chunk
+
+                # if image_analysis_text:
+                #     logging.info("Görsel analiz sonuçları bağlama eklendi.")
+                #     # Soruya ek bağlam olarak görsel açıklamalarını ekle
+                #     messages.append(
+                #         HumanMessage(content=f"Görsellerin analizi:\n{image_analysis_text}")
+                #     )
+            except Exception as e:
+                logging.exception(f"Files parse/analyze error: {str(e)}")
         
         # ÖNEMLI: HumanMessage'ı session history'sine kaydet
         logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")

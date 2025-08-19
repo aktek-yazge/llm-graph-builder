@@ -59,6 +59,11 @@ load_dotenv(override=True)
 
 from pathlib import Path
 from typing import Dict, List
+import requests
+import shutil
+import subprocess
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_path
 
 logger = CustomLogger()
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
@@ -207,6 +212,102 @@ def convert_result_to_base64(
             base64_result[attachment_name].append({"fileName": file_name, "base64": encoded})
 
     return base64_result
+
+# Klasör ayarları
+TEMP_FOLDER = os.getenv("FILE_TEMP_FOLDER", "./temp/temp/")
+PDF_TEMP_FOLDER = os.getenv("PDF_CONVERT_TEMP_FOLDER", "./temp/pdf_temp/")
+IMAGE_OUTPUT_FOLDER = os.getenv("IMAGE_OUTPUT_FOLDER", "./temp/images/")
+
+def ensure_folders():
+    for folder in [TEMP_FOLDER, PDF_TEMP_FOLDER, IMAGE_OUTPUT_FOLDER]:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+
+def download_file(url: str, output_path: str) -> str:
+    response = requests.get(url, stream=True)
+    with open(output_path, "wb") as f:
+        shutil.copyfileobj(response.raw, f)
+    return output_path
+
+def convert_to_pdf(file_path: str, filename: str) -> str:
+    """ LibreOffice kullanarak dosyayı PDF'e çevirir """
+    output_path = os.path.join(PDF_TEMP_FOLDER, filename + ".pdf")
+    subprocess.run([
+        "libreoffice", "--headless", "--convert-to", "pdf", 
+        "--outdir", PDF_TEMP_FOLDER, file_path
+    ], check=True)
+    return output_path
+
+def get_pdf_page_count(pdf_path: str) -> int:
+    reader = PdfReader(pdf_path)
+    return len(reader.pages)
+
+def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
+    """ PDF sayfalarını PNG'e çevirir """
+    images = convert_from_path(
+        pdf_path,
+        dpi=200,
+        output_folder=IMAGE_OUTPUT_FOLDER,
+        output_file=output_base_name,
+        fmt="png",
+        size=(1200, 1600)
+    )
+    image_paths = []
+    for i, img in enumerate(images, start=1):
+        output_path = os.path.join(IMAGE_OUTPUT_FOLDER, f"{output_base_name}_sayfa{i}.png")
+        img.save(output_path, "PNG")
+        image_paths.append(output_path)
+    return image_paths
+
+def handle_attachments(
+    attachments: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    attachments: {
+        "filename.docx": [
+            {"fileName": "filename.docx", "downloadUrl": "http://...", "fileType": "docx"}
+        ]
+    }
+
+    return: {
+        "filename.docx": [
+            {"fileName": "filename_1.png", "path": "./images/filename_1.png"}
+        ]
+    }
+    """
+
+    ensure_folders()
+    result: Dict[str, List[Dict[str, str]]] = {}
+
+    for attachment_name, items in attachments.items():
+        for attachment in items:
+            file_name = attachment["fileName"]
+            file_type = attachment["fileType"].lower()
+            download_url = attachment["downloadUrl"]
+
+            filename_without_ext = Path(file_name).stem
+            temp_file_path = os.path.join(TEMP_FOLDER, file_name)
+
+            # 1. Dosyayı indir
+            download_file(download_url, temp_file_path)
+
+            # 2. PDF değilse dönüştür
+            if file_type != "pdf":
+                pdf_path = convert_to_pdf(temp_file_path, filename_without_ext)
+            else:
+                pdf_path = temp_file_path
+
+            # 3. PDF sayfalarını resme çevir
+            images = pdf_to_images(pdf_path, filename_without_ext)
+
+            # 4. Çıktı hazırlama
+            images_info = [{"fileName": Path(p).name, "path": p} for p in images]
+
+            # 🔧 fix: aynı attachment için tek key altında topla
+            if attachment_name not in result:
+                result[attachment_name] = []
+            result[attachment_name].extend(images_info)
+
+    return result
 
 
 class UTF8JSONResponse:
@@ -1279,19 +1380,28 @@ async def chat_bot_stream(
     
     # print("chat_bot_stream files: ", files)
     
+    filesJson = None
+    downloadedFiles = None
     if files:
         try:
             filesJson = json.loads(files)
         except json.JSONDecodeError:
             logging.info("files JSON parse error.")
             # return {"error": "Invalid JSON in 'files'"}
-
-    files_data: Dict[str, List[Dict[str, str]]] = {}
+    print("chat_bot_stream filesJson: ", filesJson)
     if filesJson:
         try:
-            files_data = convert_result_to_base64(filesJson)
+            downloadedFiles = handle_attachments(filesJson)
         except json.JSONDecodeError:
-            logging.info("files JSON parse error.")
+            logging.info("files handle_attachments error.")
+            # return {"error": "Invalid JSON in 'files'"}
+    print("chat_bot_stream downloadedFiles: ", downloadedFiles)
+    files_data: Dict[str, List[Dict[str, str]]] = {}
+    if downloadedFiles:
+        try:
+            files_data = convert_result_to_base64(downloadedFiles)
+        except json.JSONDecodeError:
+            logging.info("files convert_result_to_base64 error.")
             # return {"error": "Invalid JSON in 'files'"}
     
     
