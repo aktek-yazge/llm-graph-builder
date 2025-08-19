@@ -1169,7 +1169,7 @@ def summarize_and_log(history, stored_messages, llm):
     logging.info("Starting summarization in a separate thread.")
     if not stored_messages:
         logging.info("No messages to summarize.")
-        return False
+        return stored_messages  # Boş liste geri döndür
 
     try:
         start_time = time.time()
@@ -1220,16 +1220,17 @@ def summarize_and_log(history, stored_messages, llm):
             except Exception as neo4j_error:
                 logging.error(f"Neo4j connection error in summarization: {neo4j_error}")
                 # Neo4j hatası durumunda sessizce devam et, chat devam etsin
-                return False
+                return stored_messages  # Orijinal mesajları geri döndür
 
         history_summarized_time = time.time() - start_time
         logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
 
-        return True
+        # ÖNEMLI: Özetlenmiş mesajları geri döndür
+        return messages_to_add
 
     except Exception as e:
         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
-        return False 
+        return stored_messages  # Hata durumunda orijinal mesajları geri döndür 
 
 # def summarize_and_log(history, stored_messages, llm):
 #     logging.info("Starting summarization in a separate thread.")
