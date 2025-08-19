@@ -1547,9 +1547,13 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
         # Mesajları history'e kaydet
         ai_response = AIMessage(content=ai_response_content)
         messages.append(ai_response)
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response)
 
         ai_response2 = AIMessage(content=ai_response_content2)
         messages.append(ai_response2)
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response2)
 
         # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
@@ -2503,9 +2507,13 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         # Mesajları history'e kaydet
         ai_response_raw = AIMessage(content=markdown_content)
         messages.append(ai_response_raw)
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response_raw)
 
         ai_response_final = AIMessage(content=ai_response_content)
         messages.append(ai_response_final)
+        # ÖNEMLI: AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response_final)
 
         # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
@@ -2580,6 +2588,8 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         if question != '':
             user_question = HumanMessage(content=question)
             messages.append(user_question)
+            # ÖNEMLI: HumanMessage'ı session history'sine kaydet
+            history.add_message(user_question)
 
         # Files parse + görsel analizi
         # image_analysis_text = ""
