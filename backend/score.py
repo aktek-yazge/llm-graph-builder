@@ -258,6 +258,57 @@ def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
         image_paths.append(output_path)
     return image_paths
 
+# def handle_attachments(
+#     attachments: Dict[str, List[Dict[str, str]]]
+# ) -> Dict[str, List[Dict[str, str]]]:
+#     """
+#     attachments: {
+#         "filename.docx": [
+#             {"fileName": "filename.docx", "downloadUrl": "http://...", "fileType": "docx"}
+#         ]
+#     }
+
+#     return: {
+#         "filename.docx": [
+#             {"fileName": "filename_1.png", "path": "./images/filename_1.png"}
+#         ]
+#     }
+#     """
+
+#     ensure_folders()
+#     result: Dict[str, List[Dict[str, str]]] = {}
+
+#     for attachment_name, items in attachments.items():
+#         for attachment in items:
+#             file_name = attachment["fileName"]
+#             file_type = attachment["fileType"].lower()
+#             download_url = attachment["downloadUrl"]
+
+#             filename_without_ext = Path(file_name).stem
+#             temp_file_path = os.path.join(TEMP_FOLDER, file_name)
+
+#             # 1. Dosyayı indir
+#             download_file(download_url, temp_file_path)
+
+#             # 2. PDF değilse dönüştür
+#             if file_type != "pdf":
+#                 pdf_path = convert_to_pdf(temp_file_path, filename_without_ext)
+#             else:
+#                 pdf_path = temp_file_path
+
+#             # 3. PDF sayfalarını resme çevir
+#             images = pdf_to_images(pdf_path, filename_without_ext)
+
+#             # 4. Çıktı hazırlama
+#             images_info = [{"fileName": Path(p).name, "path": p} for p in images]
+
+#             # 🔧 fix: aynı attachment için tek key altında topla
+#             if attachment_name not in result:
+#                 result[attachment_name] = []
+#             result[attachment_name].extend(images_info)
+
+#     return result
+
 def handle_attachments(
     attachments: Dict[str, List[Dict[str, str]]]
 ) -> Dict[str, List[Dict[str, str]]]:
@@ -297,10 +348,10 @@ def handle_attachments(
                 pdf_path = temp_file_path
 
             # 3. PDF sayfalarını resme çevir
-            images = pdf_to_images(pdf_path, filename_without_ext)
+            # images = pdf_to_images(pdf_path, filename_without_ext)
 
             # 4. Çıktı hazırlama
-            images_info = [{"fileName": Path(p).name, "path": p} for p in images]
+            images_info = [{"fileName": filename_without_ext, "path": pdf_path}]
 
             # 🔧 fix: aynı attachment için tek key altında topla
             if attachment_name not in result:
