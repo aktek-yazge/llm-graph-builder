@@ -2444,30 +2444,33 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
         start_time = time.time()
         qa_llm, model_name = get_llm(model)
 
-        yield {
-            "type": "message_chunk",
-            "content": "Belgeler LLM ile analiz ediliyor..\n",
-            "full_message": "Belgeler LLM ile analiz ediliyor..",
-            "is_complete": False,
-            "user": "chatbot"
-        }
+        # Question boş mu dolu mu kontrol et
+        if question and question.strip():
+            # Question varsa LLM ile analiz yap
+            yield {
+                "type": "message_chunk",
+                "content": "Belgeler LLM ile analiz ediliyor..\n",
+                "full_message": "Belgeler LLM ile analiz ediliyor..",
+                "is_complete": False,
+                "user": "chatbot"
+            }
 
-        # LLM ile analiz et
-        analyze_prompt = ChatPromptTemplate.from_messages([
-            (
-                "human",
-                question if question else "Kullanıcıya bu belgeler hakkında ne ögrenmek istedigini sor."
-            ),
-            ("human", f"Belgeler:\n\n{markdown_content}")
-        ])
+            # LLM ile analiz et
+            analyze_prompt = ChatPromptTemplate.from_messages([
+                ("human", question),
+                ("human", f"Belgeler:\n\n{markdown_content}")
+            ])
 
-        chain = analyze_prompt | qa_llm
-        resp = await chain.ainvoke({})
+            chain = analyze_prompt | qa_llm
+            resp = await chain.ainvoke({})
 
-        total_tokens = get_total_tokens(resp, qa_llm)
-        logging.info(f"LLM analizi için total_tokens: {total_tokens}")
+            total_tokens = get_total_tokens(resp, qa_llm)
+            logging.info(f"LLM analizi için total_tokens: {total_tokens}")
 
-        ai_response_content = resp.content.strip()
+            ai_response_content = resp.content.strip()
+        else:
+            # Question boşsa kullanıcıya ne sormak istediğini sor
+            ai_response_content = "Belge başarıyla yüklendi. Bu belge hakkında ne öğrenmek istersiniz?"
 
         # Streaming efekti - newline karakterlerini koruyarak
         # Metni kelimeler ve newline karakterlerine göre böl
