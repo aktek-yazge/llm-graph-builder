@@ -3022,19 +3022,31 @@ async def process_graph_response_stream(model, graph, question, messages, histor
         }
         
         # Graph response'u streaming olarak gönder (simüle streaming)
-        words = ai_response_content.split()
+        # Metni kelimeler ve newline karakterlerine göre böl
+        tokens = re.findall(r'\S+|\n+', ai_response_content)
         streamed_content = ""
         
-        for i, word in enumerate(words):
-            streamed_content += word + " "
-            
-            yield {
-                "type": "message_chunk",
-                "content": word + " ",
-                "full_message": streamed_content.strip(),
-                "is_complete": i == len(words) - 1,
-                "user": "chatbot"
-            }
+        for i, token in enumerate(tokens):
+            if token.startswith('\n'):
+                # Newline karakterleri için
+                streamed_content += token
+                yield {
+                    "type": "message_chunk",
+                    "content": token,
+                    "full_message": streamed_content,
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
+            else:
+                # Normal kelimeler için
+                streamed_content += token + " "
+                yield {
+                    "type": "message_chunk",
+                    "content": token + " ",
+                    "full_message": streamed_content.rstrip(),
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
             
             # Gerçekçi streaming efekti
             await asyncio.sleep(0.05)
