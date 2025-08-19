@@ -2586,7 +2586,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
 
                 # Environment variable ile analiz metodunu belirle
                 # USE_DOCLING=true ise Docling, yoksa LLM görsel analizi kullan
-                use_docling = os.getenv('USE_DOCLING', 'false').lower() == 'true'
+                use_docling = os.getenv('USE_DOCLING', 'true').lower() == 'true'
                 
                 if use_docling:
                     logging.info("Docling ile belge analizi yapılıyor...")
