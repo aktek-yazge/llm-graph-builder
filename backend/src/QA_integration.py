@@ -2620,7 +2620,6 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         # print("messages: ", messages)
         # print("files: ", files)
 
-        user_question = None
         if question != '':
             user_question = HumanMessage(content=question)
             messages.append(user_question)
@@ -2655,7 +2654,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
         
         # ÖNEMLI: HumanMessage'ı session history'sine kaydet
         logging.info(f"🔴 SAVING HumanMessage to session: {question[:50]}...")
-        history.add_message(user_question)
+        history.add_message(HumanMessage(content=question))
         logging.info(f"🔴 HumanMessage SAVED. Total messages in session: {len(history.messages)}")
 
         if mode == CHAT_GRAPH_MODE:
