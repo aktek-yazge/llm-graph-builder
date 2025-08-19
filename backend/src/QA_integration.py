@@ -1176,12 +1176,6 @@ def summarize_and_log(history, stored_messages, llm):
         total_len = len(stored_messages)
         keep_last = 15
         logging.info(f"stored_messages length: {len(stored_messages)}")
-        
-        # SADECE 15'ten fazla mesaj varsa özetleme yap
-        if total_len <= keep_last:
-            logging.info(f"Message count ({total_len}) is not exceeding limit ({keep_last}). No summarization needed.")
-            return False
-
         logging.info(f"stored_messages: {stored_messages}")
 
         # Hazırlanacak mesajları önceden belirle
@@ -1209,26 +1203,29 @@ def summarize_and_log(history, stored_messages, llm):
                 summary_message,
                 *remaining
             ]
+        else:
+            # Özetlemeye gerek yoksa tüm mesajları kullan
+            messages_to_add = stored_messages
 
-            with threading.Lock():
-                def safe_history_update():
-                    """Neo4j işlemlerini güvenli şekilde yap"""
-                    retry_neo4j_operation(lambda: history.clear())
-                    for msg in messages_to_add:
-                        retry_neo4j_operation(lambda: history.add_message(msg))
-                
-                # Neo4j işlemlerini retry ile koru
-                try:
-                    safe_history_update()
-                except Exception as neo4j_error:
-                    logging.error(f"Neo4j connection error in summarization: {neo4j_error}")
-                    # Neo4j hatası durumunda sessizce devam et, chat devam etsin
-                    return False
+        with threading.Lock():
+            def safe_history_update():
+                """Neo4j işlemlerini güvenli şekilde yap"""
+                retry_neo4j_operation(lambda: history.clear())
+                for msg in messages_to_add:
+                    retry_neo4j_operation(lambda: history.add_message(msg))
+            
+            # Neo4j işlemlerini retry ile koru
+            try:
+                safe_history_update()
+            except Exception as neo4j_error:
+                logging.error(f"Neo4j connection error in summarization: {neo4j_error}")
+                # Neo4j hatası durumunda sessizce devam et, chat devam etsin
+                return False
 
-            history_summarized_time = time.time() - start_time
-            logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
+        history_summarized_time = time.time() - start_time
+        logging.info(f"Chat History summarized in {history_summarized_time:.2f} seconds")
 
-            return True
+        return True
 
     except Exception as e:
         logging.error(f"An error occurred while summarizing messages: {e}", exc_info=True)
