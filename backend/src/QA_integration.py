@@ -7,12 +7,10 @@ import threading
 import tempfile
 import base64
 import requests
+import re
 from datetime import datetime
 from typing import Any
 from dotenv import load_dotenv
-import requests
-import tempfile
-import os
 
 from langchain_neo4j import Neo4jVector
 from langchain_neo4j import Neo4jChatMessageHistory
@@ -1248,19 +1246,32 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
 
         ai_response_content2 = resp.content.strip()
 
-        # Streaming efekti
-        words = ai_response_content2.split()
+        # Streaming efekti - newline karakterlerini koruyarak
+        # Metni kelimeler ve newline karakterlerine göre böl
+        tokens = re.findall(r'\S+|\n+', ai_response_content2)
         streamed_content = ""
-        for i, word in enumerate(words):
-            streamed_content += word + " "
-            
-            yield {
-                "type": "message_chunk",
-                "content": word + " ",
-                "full_message": streamed_content.strip(),
-                "is_complete": i == len(words) - 1,
-                "user": "chatbot"
-            }
+        
+        for i, token in enumerate(tokens):
+            if token.startswith('\n'):
+                # Newline karakterleri için
+                streamed_content += token
+                yield {
+                    "type": "message_chunk",
+                    "content": token,
+                    "full_message": streamed_content,
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
+            else:
+                # Normal kelimeler için
+                streamed_content += token + " "
+                yield {
+                    "type": "message_chunk",
+                    "content": token + " ",
+                    "full_message": streamed_content.rstrip(),
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
             await asyncio.sleep(0.05)
 
         # Mesajları history'e kaydet
@@ -1374,17 +1385,29 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
 #             "user": "chatbot"
 #         }
 
-def convert_files_to_markdown(files: Dict[str, List[Dict[str, str]]]) -> str:
+async def convert_files_to_markdown(files: Dict[str, List[Dict[str, str]]], model=None) -> str:
     """
-    Dosyaları URL'den indirip Docling ile markdown formatına çevirir.
+    Dosyaları Docling ile markdown formatına çevirir. Hata durumunda PDF sayfalarını PNG'ye çevirip 
+    analyze_single_file fonksiyonu ile LLM vision analizi yapar.
     Çıktısı belgelerin markdown formatında sayfalar arası page_break ile birleştirilmiş hali.
+    
+    files dict formatı:
+    - "path" alanı varsa: local dosya path'i kullanılır
+    - "url" alanı varsa: URL'den dosya indirilir (eski davranış)
     """
     try:
+        import tempfile
+        import requests
+        import base64
+        import re
+        import subprocess
+        from pathlib import Path
         from langchain_docling import DoclingLoader
         from langchain_docling.loader import ExportType
         from docling_core.types.doc import DocItemLabel
         from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
         from urllib.parse import urlparse
+        from pdf2image import convert_from_path
 
         all_documents_content = []
 
@@ -1392,102 +1415,669 @@ def convert_files_to_markdown(files: Dict[str, List[Dict[str, str]]]) -> str:
             for file_info in file_list:
                 try:
                     file_name = file_info["fileName"]
+                    file_path = file_info.get("path") or file_info.get("filePath") or file_info.get("file_path")
                     file_url = file_info.get("url") or file_info.get("fileUrl") or file_info.get("file_url")
                     
-                    if not file_url:
-                        error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya URL'si bulunamadı.\n\n"
-                        all_documents_content.append(error_content)
-                        continue
+                    # Local path varsa onu kullan, yoksa URL'den indir
+                    if file_path:
+                        # Local dosya işlemi
+                        if not os.path.exists(file_path):
+                            error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya bulunamadı: {file_path}\n\n"
+                            all_documents_content.append(error_content)
+                            continue
+                        
+                        logging.info(f"{file_name} belgesi local path'den okunuyor: {file_path}")
+                        
+                        try:
+                            # Docling ile belgeyi yükle
+                            labels = [
+                                label
+                                for label in DEFAULT_EXPORT_LABELS
+                                if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
+                            ]
+                            
+                            loader = DoclingLoader(
+                                file_path=file_path,
+                                export_type=ExportType.MARKDOWN,
+                                md_export_kwargs={
+                                    "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
+                                    "labels": labels,
+                                },
+                            )
+                            
+                            # Timeout ile belgeyi yükle
+                            import concurrent.futures
+                            
+                            def load_document_with_timeout():
+                                return loader.load()
+                            
+                            # 60 saniye timeout ile executor kullan
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(load_document_with_timeout)
+                                try:
+                                    documents = future.result(timeout=180)  # 2 dakikaya çıkardık
+                                except concurrent.futures.TimeoutError:
+                                    raise TimeoutError(f"Docling processing timeout for {file_name}")
+                            
+                            # Sayfa numaralarını ekleyerek içeriği birleştir
+                            document_content = f"## Belge: {file_name}\n**Path:** {file_path}\n**İşlem:** Docling markdown extraction\n\n"
+                            
+                            for doc in documents:
+                                content = doc.page_content
+                                
+                                # Page break'leri sayfa numarası ile değiştir
+                                pages = content.split("--- PAGE_BREAK ---")
+                                
+                                formatted_pages = []
+                                for page_num, page_content in enumerate(pages, 1):
+                                    if page_content.strip():  # Boş sayfaları atla
+                                        formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
+                                        formatted_pages.append(formatted_page)
+                                
+                                document_content += "\n".join(formatted_pages)
+                            
+                            all_documents_content.append(document_content)
+                            
+                            logging.info(f"{file_name} belgesi Docling ile başarıyla işlendi. Sayfa sayısı: {len(pages)}")
+                            
+                        except Exception as docling_error:
+                            # Docling hatası durumunda önce LibreOffice ile yeniden oluşturmayı dene
+                            logging.warning(f"{file_name} belgesi için Docling hatası: {str(docling_error)}")
+                            
+                            # Dosya uzantısını kontrol et
+                            file_extension = Path(file_path).suffix.lower()
+                            
+                            # LibreOffice ile yeniden oluşturma deneme
+                            libreoffice_success = False
+                            converted_pdf_path = None
+                            
+                            try:
+                                logging.info(f"{file_name} dosyası LibreOffice ile yeniden oluşturuluyor...")
+                                
+                                # Geçici PDF klasörü oluştur
+                                temp_pdf_dir = os.path.join(tempfile.gettempdir(), "llm_graph_pdf_temp")
+                                os.makedirs(temp_pdf_dir, exist_ok=True)
+                                
+                                filename_without_ext = Path(file_name).stem
+                                safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                pdf_output_path = os.path.join(temp_pdf_dir, safe_filename + "_libreoffice.pdf")
+                                
+                                # LibreOffice convert komutu
+                                subprocess.run([
+                                    "libreoffice", "--headless", "--convert-to", "pdf", 
+                                    "--outdir", temp_pdf_dir, file_path
+                                ], check=True, timeout=60)
+                                
+                                # Dönüştürülen PDF dosyası path'ini kontrol et
+                                converted_pdf_path = pdf_output_path
+                                if not os.path.exists(pdf_output_path):
+                                    # LibreOffice bazen farklı isimle kaydediyor, kontrol et
+                                    original_filename = Path(file_path).stem
+                                    alternative_pdf_path = os.path.join(temp_pdf_dir, original_filename + ".pdf")
+                                    if os.path.exists(alternative_pdf_path):
+                                        converted_pdf_path = alternative_pdf_path
+                                    else:
+                                        raise FileNotFoundError(f"PDF dönüştürme başarısız: {pdf_output_path}")
+                                
+                                logging.info(f"{file_name} başarıyla LibreOffice ile PDF'e dönüştürüldü: {converted_pdf_path}")
+                                
+                                # LibreOffice ile oluşan PDF'i Docling ile tekrar dene
+                                logging.info(f"{file_name} belgesi LibreOffice PDF'i ile Docling yeniden deneniyor...")
+                                
+                                # Dosya sisteminin stabilize olması için kısa bir bekleme
+                                import time
+                                time.sleep(1)
+                                
+                                try:
+                                    # Daha basit bir Docling konfigürasyonu kullan
+                                    simple_labels = [
+                                        DocItemLabel.TEXT,
+                                        DocItemLabel.TITLE,
+                                        DocItemLabel.SECTION_HEADER
+                                    ]
+                                    
+                                    loader_retry = DoclingLoader(
+                                        file_path=converted_pdf_path,
+                                        export_type=ExportType.MARKDOWN,
+                                        md_export_kwargs={
+                                            "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
+                                            "labels": simple_labels,  # Sadece temel etiketler
+                                        },
+                                    )
+                                    
+                                    # Timeout ile belgeyi yükle
+                                    def load_document_with_timeout_retry():
+                                        return loader_retry.load()
+                                    
+                                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                                        future = executor.submit(load_document_with_timeout_retry)
+                                        try:
+                                            documents_retry = future.result(timeout=180)  # 3 dakikaya çıkardık
+                                        except concurrent.futures.TimeoutError:
+                                            raise TimeoutError(f"Docling processing timeout for LibreOffice PDF: {file_name}")
+                                    
+                                    # Sayfa numaralarını ekleyerek içeriği birleştir
+                                    document_content = f"## Belge: {file_name}\n**Path:** {file_path}\n**İşlem:** LibreOffice + Docling markdown extraction\n**İlk Docling Hatası:** {str(docling_error)}\n\n"
+                                    
+                                    for doc in documents_retry:
+                                        content = doc.page_content
+                                        
+                                        # Page break'leri sayfa numarası ile değiştir
+                                        pages = content.split("--- PAGE_BREAK ---")
+                                        
+                                        formatted_pages = []
+                                        for page_num, page_content in enumerate(pages, 1):
+                                            if page_content.strip():  # Boş sayfaları atla
+                                                formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
+                                                formatted_pages.append(formatted_page)
+                                        
+                                        document_content += "\n".join(formatted_pages)
+                                    
+                                    all_documents_content.append(document_content)
+                                    libreoffice_success = True
+                                    
+                                    logging.info(f"{file_name} belgesi LibreOffice + Docling ile başarıyla işlendi. Sayfa sayısı: {len(pages)}")
+                                    
+                                except Exception as docling_retry_error:
+                                    logging.warning(f"{file_name} belgesi LibreOffice PDF'i ile Docling yeniden denemesi başarısız: {str(docling_retry_error)}")
+                                    # Bu durumda analyze_single_file'a geçeceğiz
+                                    pass
+                                    
+                            except subprocess.TimeoutExpired:
+                                logging.warning(f"LibreOffice dönüştürme timeout: {file_name}")
+                            except subprocess.CalledProcessError as e:
+                                logging.warning(f"LibreOffice dönüştürme hatası: {e}")
+                            except Exception as convert_error:
+                                logging.warning(f"LibreOffice PDF dönüştürme hatası: {str(convert_error)}")
+                            
+                            # LibreOffice + Docling başarısız olduysa analyze_single_file ile LLM analizi yap
+                            if not libreoffice_success:
+                                logging.info(f"{file_name} belgesi için LLM analizi deneniyor...")
+                                
+                                try:
+                                    # PDF değilse önce PDF'e dönüştür
+                                    if file_extension != '.pdf':
+                                        logging.info(f"{file_name} dosyası LLM analizi için PDF'e dönüştürülüyor...")
+                                        try:
+                                            # LibreOffice ile PDF'e dönüştür (eğer daha önce başarısızsa tekrar dene)
+                                            if converted_pdf_path and os.path.exists(converted_pdf_path):
+                                                # Zaten LibreOffice'ten PDF var, onu kullan
+                                                pdf_file_path = converted_pdf_path
+                                            else:
+                                                # Yeniden LibreOffice ile PDF'e dönüştür
+                                                temp_pdf_dir = os.path.join(tempfile.gettempdir(), "llm_graph_pdf_temp")
+                                                os.makedirs(temp_pdf_dir, exist_ok=True)
+                                                
+                                                filename_without_ext = Path(file_name).stem
+                                                safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                                pdf_output_path = os.path.join(temp_pdf_dir, safe_filename + ".pdf")
+                                                
+                                                # LibreOffice convert komutu
+                                                subprocess.run([
+                                                    "libreoffice", "--headless", "--convert-to", "pdf", 
+                                                    "--outdir", temp_pdf_dir, file_path
+                                                ], check=True, timeout=60)
+                                                
+                                                # Dönüştürülen PDF dosyası path'ini güncelle
+                                                converted_pdf_path = pdf_output_path
+                                                if not os.path.exists(pdf_output_path):
+                                                    # LibreOffice bazen farklı isimle kaydediyor, kontrol et
+                                                    original_filename = Path(file_path).stem
+                                                    alternative_pdf_path = os.path.join(temp_pdf_dir, original_filename + ".pdf")
+                                                    if os.path.exists(alternative_pdf_path):
+                                                        converted_pdf_path = alternative_pdf_path
+                                                    else:
+                                                        raise FileNotFoundError(f"PDF dönüştürme başarısız: {pdf_output_path}")
+                                                
+                                                logging.info(f"{file_name} başarıyla PDF'e dönüştürüldü: {converted_pdf_path}")
+                                                pdf_file_path = converted_pdf_path
+                                            
+                                        except subprocess.TimeoutExpired:
+                                            raise Exception(f"LibreOffice dönüştürme timeout: {file_name}")
+                                        except subprocess.CalledProcessError as e:
+                                            raise Exception(f"LibreOffice dönüştürme hatası: {e}")
+                                        except Exception as convert_error:
+                                            raise Exception(f"PDF dönüştürme hatası: {str(convert_error)}")
+                                    else:
+                                        # Zaten PDF
+                                        pdf_file_path = file_path
+                                    
+                                    # PDF sayfalarını PNG'ye çevir (score.py'deki yaklaşım)
+                                    # Geçici klasörler oluştur
+                                    temp_image_dir = os.path.join(tempfile.gettempdir(), "llm_graph_images")
+                                    os.makedirs(temp_image_dir, exist_ok=True)
+                                    
+                                    # PDF sayfalarını PNG'ye çevir
+                                    filename_without_ext = Path(file_name).stem
+                                    safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                    
+                                    images = convert_from_path(
+                                        pdf_file_path,
+                                        dpi=200,
+                                        output_folder=temp_image_dir,
+                                        output_file=safe_filename,
+                                        fmt="png",
+                                        size=(1200, 1600)
+                                    )
+                                    
+                                    # Her sayfa için ayrı ayrı LLM analizi yap
+                                    analysis_results = []
+
+                                    # LLM modeli al
+                                    if model:
+                                        vision_llm, _ = get_llm(model)
+                                    else:
+                                        # Default model kullan
+                                        vision_llm, _ = get_llm("gpt-4o")
+                                    
+                                    for i, img in enumerate(images, start=1):
+                                        try:
+                                            # PNG dosyasını kaydet
+                                            image_path = os.path.join(temp_image_dir, f"{safe_filename}_sayfa{i}.png")
+                                            img.save(image_path, "PNG")
+                                            
+                                            # PNG'yi base64'e çevir
+                                            with open(image_path, "rb") as f:
+                                                image_bytes = f.read()
+                                            encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+                                            
+                                            # analyze_single_file için gerekli format (PNG için)
+                                            file_info_for_analysis = {
+                                                "fileName": f"{file_name} - Sayfa {i}",
+                                                "base64": f"data:image/png;base64,{encoded_image}"
+                                            }
+                                            
+                                            
+                                            # analyze_single_file fonksiyonu ile analiz et
+                                            page_analysis = await analyze_single_file(vision_llm, file_info_for_analysis)
+                                            analysis_results.append(f"**[Sayfa {i}]**\n\n{page_analysis}\n")
+                                            
+                                            # Geçici resim dosyasını temizle
+                                            try:
+                                                os.unlink(image_path)
+                                            except:
+                                                pass
+                                                
+                                        except Exception as page_error:
+                                            logging.warning(f"Sayfa {i} analizi başarısız: {str(page_error)}")
+                                            analysis_results.append(f"**[Sayfa {i}]**\n\n**[HATA]** Bu sayfa analiz edilemedi: {str(page_error)}\n")
+                                    
+                                    # Geçici PDF dosyasını temizle (eğer dönüştürme yapıldıysa)
+                                    if file_extension != '.pdf' and 'pdf_file_path' in locals() and pdf_file_path != file_path:
+                                        try:
+                                            os.unlink(pdf_file_path)
+                                        except:
+                                            pass
+                                    
+                                    # Tüm sayfa analizlerini birleştir
+                                    combined_analysis = "\n".join(analysis_results)
+                                    
+                                    # Sonucu markdown formatında ekle
+                                    document_content = f"## Belge: {file_name}\n**Path:** {file_path}\n**İşlem:** LLM vision analizi (LibreOffice + Docling başarısız)\n**İlk Docling Hatası:** {str(docling_error)}\n**Toplam Sayfa:** {len(images)}\n\n"
+                                    document_content += f"**[LLM Vision Analizi]**\n\n{combined_analysis}\n"
+                                    
+                                    all_documents_content.append(document_content)
+                                    logging.info(f"{file_name} belgesi LLM vision analizi ile başarıyla işlendi. Sayfa sayısı: {len(images)}")
+                                    
+                                except Exception as llm_error:
+                                    logging.exception(f"LLM vision analizi ile {file_name} belgesi işlenemedi: {str(llm_error)}")
+                                    error_content = f"## Belge: {file_name}\n**Path:** {file_path}\n\n**[HATA]** Tüm yöntemler başarısız oldu.\n\n**İlk Docling Hatası:** {str(docling_error)}\n**LLM Hatası:** {str(llm_error)}\n\n"
+                                    all_documents_content.append(error_content)
+                            
+                            # LibreOffice ile oluşturulan geçici PDF dosyasını temizle
+                            if converted_pdf_path and os.path.exists(converted_pdf_path):
+                                try:
+                                    os.unlink(converted_pdf_path)
+                                except:
+                                    pass
+                        
+                    elif file_url:
+                        # URL işlemi
+                        logging.info(f"{file_name} belgesi URL'den indiriliyor: {file_url}")
+                        
+                        try:
+                            # URL'den dosyayı indir
+                            response = requests.get(file_url, timeout=30)
+                            response.raise_for_status()
+                            
+                            # Geçici dosya oluştur
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                                temp_file.write(response.content)
+                                temp_file_path = temp_file.name
+                            
+                            try:
+                                # Docling ile belgeyi yükle
+                                labels = [
+                                    label
+                                    for label in DEFAULT_EXPORT_LABELS
+                                    if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
+                                ]
+                                
+                                loader = DoclingLoader(
+                                    file_path=temp_file_path,
+                                    export_type=ExportType.MARKDOWN,
+                                    md_export_kwargs={
+                                        "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
+                                        "labels": labels,
+                                    },
+                                )
+                                
+                                # Timeout ile belgeyi yükle
+                                import concurrent.futures
+                                
+                                def load_document_with_timeout():
+                                    return loader.load()
+                                
+                                # 60 saniye timeout ile executor kullan
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = executor.submit(load_document_with_timeout)
+                                    try:
+                                        documents = future.result(timeout=180)  # 2 dakikaya çıkardık
+                                    except concurrent.futures.TimeoutError:
+                                        raise TimeoutError(f"Docling processing timeout for {file_name}")
+                                
+                                # Sayfa numaralarını ekleyerek içeriği birleştir
+                                document_content = f"## Belge: {file_name}\n**URL:** {file_url}\n**İşlem:** Docling markdown extraction\n\n"
+                                
+                                for doc in documents:
+                                    content = doc.page_content
+                                    
+                                    # Page break'leri sayfa numarası ile değiştir
+                                    pages = content.split("--- PAGE_BREAK ---")
+                                    
+                                    formatted_pages = []
+                                    for page_num, page_content in enumerate(pages, 1):
+                                        if page_content.strip():  # Boş sayfaları atla
+                                            formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
+                                            formatted_pages.append(formatted_page)
+                                    
+                                    document_content += "\n".join(formatted_pages)
+                                
+                                all_documents_content.append(document_content)
+                                
+                                logging.info(f"{file_name} belgesi URL'den Docling ile başarıyla işlendi. Sayfa sayısı: {len(pages)}")
+                            
+                            except Exception as docling_error:
+                                # Docling hatası durumunda önce LibreOffice ile yeniden oluşturmayı dene
+                                logging.warning(f"{file_name} belgesi için Docling hatası: {str(docling_error)}")
+                                
+                                # LibreOffice ile yeniden oluşturma deneme
+                                libreoffice_success = False
+                                converted_pdf_path_url = None
+                                
+                                try:
+                                    logging.info(f"{file_name} (URL'den indirilen) dosyası LibreOffice ile yeniden oluşturuluyor...")
+                                    
+                                    # Geçici PDF klasörü oluştur
+                                    temp_pdf_dir = os.path.join(tempfile.gettempdir(), "llm_graph_pdf_temp")
+                                    os.makedirs(temp_pdf_dir, exist_ok=True)
+                                    
+                                    filename_without_ext = Path(file_name).stem
+                                    safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                    pdf_output_path = os.path.join(temp_pdf_dir, safe_filename + "_libreoffice.pdf")
+                                    
+                                    # LibreOffice convert komutu
+                                    subprocess.run([
+                                        "libreoffice", "--headless", "--convert-to", "pdf", 
+                                        "--outdir", temp_pdf_dir, temp_file_path
+                                    ], check=True, timeout=60)
+                                    
+                                    # Dönüştürülen PDF dosyası path'ini kontrol et
+                                    converted_pdf_path_url = pdf_output_path
+                                    if not os.path.exists(pdf_output_path):
+                                        # LibreOffice bazen farklı isimle kaydediyor, kontrol et
+                                        original_filename = Path(temp_file_path).stem
+                                        alternative_pdf_path = os.path.join(temp_pdf_dir, original_filename + ".pdf")
+                                        if os.path.exists(alternative_pdf_path):
+                                            converted_pdf_path_url = alternative_pdf_path
+                                        else:
+                                            raise FileNotFoundError(f"PDF dönüştürme başarısız: {pdf_output_path}")
+                                    
+                                    logging.info(f"{file_name} başarıyla LibreOffice ile PDF'e dönüştürüldü: {converted_pdf_path_url}")
+                                    
+                                    # LibreOffice ile oluşan PDF'i Docling ile tekrar dene
+                                    logging.info(f"{file_name} belgesi LibreOffice PDF'i ile Docling yeniden deneniyor...")
+                                    
+                                    # Dosya sisteminin stabilize olması için kısa bir bekleme
+                                    import time
+                                    time.sleep(1)
+                                    
+                                    try:
+                                        # Daha basit bir Docling konfigürasyonu kullan
+                                        simple_labels = [
+                                            DocItemLabel.TEXT,
+                                            DocItemLabel.TITLE,
+                                            DocItemLabel.SECTION_HEADER
+                                        ]
+                                        
+                                        loader_retry = DoclingLoader(
+                                            file_path=converted_pdf_path_url,
+                                            export_type=ExportType.MARKDOWN,
+                                            md_export_kwargs={
+                                                "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
+                                                "labels": simple_labels,  # Sadece temel etiketler
+                                            },
+                                        )
+                                        
+                                        # Timeout ile belgeyi yükle
+                                        def load_document_with_timeout_retry():
+                                            return loader_retry.load()
+                                        
+                                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                                            future = executor.submit(load_document_with_timeout_retry)
+                                            try:
+                                                documents_retry = future.result(timeout=180)  # 3 dakikaya çıkardık
+                                            except concurrent.futures.TimeoutError:
+                                                raise TimeoutError(f"Docling processing timeout for LibreOffice PDF: {file_name}")
+                                        
+                                        # Sayfa numaralarını ekleyerek içeriği birleştir
+                                        document_content = f"## Belge: {file_name}\n**URL:** {file_url}\n**İşlem:** LibreOffice + Docling markdown extraction\n**İlk Docling Hatası:** {str(docling_error)}\n\n"
+                                        
+                                        for doc in documents_retry:
+                                            content = doc.page_content
+                                            
+                                            # Page break'leri sayfa numarası ile değiştir
+                                            pages = content.split("--- PAGE_BREAK ---")
+                                            
+                                            formatted_pages = []
+                                            for page_num, page_content in enumerate(pages, 1):
+                                                if page_content.strip():  # Boş sayfaları atla
+                                                    formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
+                                                    formatted_pages.append(formatted_page)
+                                            
+                                            document_content += "\n".join(formatted_pages)
+                                        
+                                        all_documents_content.append(document_content)
+                                        libreoffice_success = True
+                                        
+                                        logging.info(f"{file_name} belgesi LibreOffice + Docling ile başarıyla işlendi. Sayfa sayısı: {len(pages)}")
+                                        
+                                    except Exception as docling_retry_error:
+                                        logging.warning(f"{file_name} belgesi LibreOffice PDF'i ile Docling yeniden denemesi başarısız: {str(docling_retry_error)}")
+                                        # Bu durumda analyze_single_file'a geçeceğiz
+                                        pass
+                                        
+                                except subprocess.TimeoutExpired:
+                                    logging.warning(f"LibreOffice dönüştürme timeout: {file_name}")
+                                except subprocess.CalledProcessError as e:
+                                    logging.warning(f"LibreOffice dönüştürme hatası: {e}")
+                                except Exception as convert_error:
+                                    logging.warning(f"LibreOffice PDF dönüştürme hatası: {str(convert_error)}")
+                                
+                                # LibreOffice + Docling başarısız olduysa analyze_single_file ile LLM analizi yap
+                                if not libreoffice_success:
+                                    logging.info(f"{file_name} belgesi için LLM analizi deneniyor...")
+                                    
+                                    try:
+                                        # İndirilen dosyanın uzantısını kontrol et
+                                        temp_file_extension = Path(temp_file_path).suffix.lower()
+                                        
+                                        # PDF değilse önce PDF'e dönüştür (score.py mantığı)
+                                        if temp_file_extension != '.pdf':
+                                            logging.info(f"{file_name} (URL'den indirilen) dosyası PDF'e dönüştürülüyor...")
+                                            try:
+                                                # LibreOffice ile PDF'e dönüştür (eğer daha önce başarısızsa tekrar dene)
+                                                if converted_pdf_path_url and os.path.exists(converted_pdf_path_url):
+                                                    # Zaten LibreOffice'ten PDF var, onu kullan
+                                                    pdf_file_path_url = converted_pdf_path_url
+                                                else:
+                                                    # Yeniden LibreOffice ile PDF'e dönüştür
+                                                    temp_pdf_dir = os.path.join(tempfile.gettempdir(), "llm_graph_pdf_temp")
+                                                    os.makedirs(temp_pdf_dir, exist_ok=True)
+                                                    
+                                                    filename_without_ext = Path(file_name).stem
+                                                    safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                                    pdf_output_path = os.path.join(temp_pdf_dir, safe_filename + ".pdf")
+                                                    
+                                                    # LibreOffice convert komutu
+                                                    subprocess.run([
+                                                        "libreoffice", "--headless", "--convert-to", "pdf", 
+                                                        "--outdir", temp_pdf_dir, temp_file_path
+                                                    ], check=True, timeout=60)
+                                                    
+                                                    # Dönüştürülen PDF dosyası path'ini güncelle
+                                                    converted_pdf_path_url = pdf_output_path
+                                                    if not os.path.exists(pdf_output_path):
+                                                        # LibreOffice bazen farklı isimle kaydediyor, kontrol et
+                                                        original_filename = Path(temp_file_path).stem
+                                                        alternative_pdf_path = os.path.join(temp_pdf_dir, original_filename + ".pdf")
+                                                        if os.path.exists(alternative_pdf_path):
+                                                            converted_pdf_path_url = alternative_pdf_path
+                                                        else:
+                                                            raise FileNotFoundError(f"PDF dönüştürme başarısız: {pdf_output_path}")
+                                                    
+                                                    logging.info(f"{file_name} başarıyla PDF'e dönüştürüldü: {converted_pdf_path_url}")
+                                                    pdf_file_path_url = converted_pdf_path_url
+                                                
+                                            except subprocess.TimeoutExpired:
+                                                raise Exception(f"LibreOffice dönüştürme timeout: {file_name}")
+                                            except subprocess.CalledProcessError as e:
+                                                raise Exception(f"LibreOffice dönüştürme hatası: {e}")
+                                            except Exception as convert_error:
+                                                raise Exception(f"PDF dönüştürme hatası: {str(convert_error)}")
+                                        else:
+                                            # Zaten PDF
+                                            pdf_file_path_url = temp_file_path
+                                        
+                                        # PDF sayfalarını PNG'ye çevir (score.py'deki yaklaşım)
+                                        # Geçici klasörler oluştur
+                                        temp_image_dir = os.path.join(tempfile.gettempdir(), "llm_graph_images")
+                                        os.makedirs(temp_image_dir, exist_ok=True)
+                                        
+                                        # PDF sayfalarını PNG'ye çevir
+                                        filename_without_ext = Path(file_name).stem
+                                        safe_filename = re.sub(r'[^\w\-_\.]', '_', filename_without_ext)
+                                        
+                                        images = convert_from_path(
+                                            pdf_file_path_url,
+                                            dpi=200,
+                                            output_folder=temp_image_dir,
+                                            output_file=safe_filename,
+                                            fmt="png",
+                                            size=(1200, 1600)
+                                        )
+                                        
+                                        # Her sayfa için ayrı ayrı LLM analizi yap
+                                        analysis_results = []
+                                        
+                                        for i, img in enumerate(images, start=1):
+                                            try:
+                                                # PNG dosyasını kaydet
+                                                image_path = os.path.join(temp_image_dir, f"{safe_filename}_sayfa{i}.png")
+                                                img.save(image_path, "PNG")
+                                                
+                                                # PNG'yi base64'e çevir
+                                                with open(image_path, "rb") as f:
+                                                    image_bytes = f.read()
+                                                encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+                                                
+                                                # analyze_single_file için gerekli format (PNG için)
+                                                file_info_for_analysis = {
+                                                    "fileName": f"{file_name} - Sayfa {i}",
+                                                    "base64": f"data:image/png;base64,{encoded_image}"
+                                                }
+                                                
+                                                # LLM modeli al
+                                                if model:
+                                                    vision_llm, _ = get_llm(model)
+                                                else:
+                                                    # Default model kullan
+                                                    vision_llm, _ = get_llm("gpt-4o")
+                                                
+                                                # analyze_single_file fonksiyonu ile analiz et
+                                                page_analysis = await analyze_single_file(vision_llm, file_info_for_analysis)
+                                                analysis_results.append(f"**[Sayfa {i}]**\n\n{page_analysis}\n")
+                                                
+                                                # Geçici resim dosyasını temizle
+                                                try:
+                                                    os.unlink(image_path)
+                                                except:
+                                                    pass
+                                                    
+                                            except Exception as page_error:
+                                                logging.warning(f"Sayfa {i} analizi başarısız: {str(page_error)}")
+                                                analysis_results.append(f"**[Sayfa {i}]**\n\n**[HATA]** Bu sayfa analiz edilemedi: {str(page_error)}\n")
+                                        
+                                        # Geçici PDF dosyasını temizle (eğer dönüştürme yapıldıysa)
+                                        if temp_file_extension != '.pdf' and 'pdf_file_path_url' in locals() and pdf_file_path_url != temp_file_path:
+                                            try:
+                                                os.unlink(pdf_file_path_url)
+                                            except:
+                                                pass
+                                        
+                                        # Tüm sayfa analizlerini birleştir
+                                        combined_analysis = "\n".join(analysis_results)
+                                        
+                                        # Sonucu markdown formatında ekle
+                                        document_content = f"## Belge: {file_name}\n**URL:** {file_url}\n**İşlem:** LLM vision analizi (LibreOffice + Docling başarısız)\n**İlk Docling Hatası:** {str(docling_error)}\n**Toplam Sayfa:** {len(images)}\n\n"
+                                        document_content += f"**[LLM Vision Analizi]**\n\n{combined_analysis}\n"
+                                        
+                                        all_documents_content.append(document_content)
+                                        logging.info(f"{file_name} belgesi LLM vision analizi ile başarıyla işlendi. Sayfa sayısı: {len(images)}")
+                                        
+                                    except Exception as llm_error:
+                                        logging.exception(f"LLM vision analizi ile {file_name} belgesi işlenemedi: {str(llm_error)}")
+                                        error_content = f"## Belge: {file_name}\n**URL:** {file_url}\n\n**[HATA]** Tüm yöntemler başarısız oldu.\n\n**İlk Docling Hatası:** {str(docling_error)}\n**LLM Hatası:** {str(llm_error)}\n\n"
+                                        all_documents_content.append(error_content)
+                                
+                                # LibreOffice ile oluşturulan geçici PDF dosyasını temizle
+                                if converted_pdf_path_url and os.path.exists(converted_pdf_path_url):
+                                    try:
+                                        os.unlink(converted_pdf_path_url)
+                                    except:
+                                        pass
+                            
+                            finally:
+                                # Geçici dosyayı temizle
+                                try:
+                                    os.unlink(temp_file_path)
+                                except:
+                                    pass
+                        
+                        except requests.RequestException as url_error:
+                            logging.exception(f"URL indirme hatası ({file_name}): {str(url_error)}")
+                            error_content = f"## Belge: {file_name}\n**URL:** {file_url}\n\n**[HATA]** URL'den dosya indirilemedi: {str(url_error)}\n\n"
+                            all_documents_content.append(error_content)
                     
-                    logging.info(f"{file_name} belgesi URL'den indiriliyor: {file_url}")
-                    
-                    # URL'den dosyayı indir
-                    response = requests.get(file_url, timeout=30)
-                    response.raise_for_status()
-                    
-                    # Dosya uzantısını URL'den veya dosya adından al
-                    parsed_url = urlparse(file_url)
-                    if parsed_url.path:
-                        file_extension = os.path.splitext(parsed_url.path)[1].lower()
                     else:
-                        file_extension = os.path.splitext(file_name)[1].lower()
-                    
-                    if not file_extension:
-                        # Content-Type'dan uzantı tahmin et
-                        content_type = response.headers.get('content-type', '').lower()
-                        if 'pdf' in content_type:
-                            file_extension = '.pdf'
-                        elif 'word' in content_type or 'docx' in content_type:
-                            file_extension = '.docx'
-                        elif 'excel' in content_type or 'xlsx' in content_type:
-                            file_extension = '.xlsx'
-                        else:
-                            file_extension = '.pdf'  # Default to PDF
-                    
-                    # Geçici dosya oluştur
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-                        temp_file.write(response.content)
-                        temp_file_path = temp_file.name
-                    
-                    try:
-                        logging.info(f"{file_name} belgesi Docling ile işleniyor.")
+                        # Ne path ne de URL var
+                        error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya path'i veya URL'si bulunamadı.\n\n"
+                        all_documents_content.append(error_content)
                         
-                        # Docling ile belgeyi yükle
-                        labels = [
-                            label
-                            for label in DEFAULT_EXPORT_LABELS
-                            if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
-                        ]
-                        
-                        loader = DoclingLoader(
-                            file_path=temp_file_path,
-                            export_type=ExportType.MARKDOWN,
-                            md_export_kwargs={
-                                "page_break_placeholder": "\n\n--- PAGE_BREAK ---\n\n",
-                                "labels": labels,
-                            },
-                        )
-                        
-                        # Belgeyi yükle
-                        documents = loader.load()
-                        
-                        # Sayfa numaralarını ekleyerek içeriği birleştir
-                        document_content = f"## Belge: {file_name}\n**URL:** {file_url}\n\n"
-                        
-                        for doc in documents:
-                            content = doc.page_content
-                            
-                            # Page break'leri sayfa numarası ile değiştir
-                            pages = content.split("--- PAGE_BREAK ---")
-                            
-                            formatted_pages = []
-                            for page_num, page_content in enumerate(pages, 1):
-                                if page_content.strip():  # Boş sayfaları atla
-                                    formatted_page = f"**[Sayfa {page_num}]**\n\n{page_content.strip()}\n\n"
-                                    formatted_pages.append(formatted_page)
-                            
-                            document_content += "\n".join(formatted_pages)
-                        
-                        all_documents_content.append(document_content)
-                        
-                        logging.info(f"{file_name} belgesi başarıyla işlendi. Sayfa sayısı: {len(pages)}")
-                        
-                    finally:
-                        # Geçici dosyayı sil
-                        os.unlink(temp_file_path)
-                        
-                except requests.RequestException as e:
-                    logging.exception(f"Dosya indirme hatası ({file_name}): {str(e)}")
-                    error_content = f"## Belge: {file_name}\n\n**[HATA]** Dosya indirilemedi: {str(e)}\n\n"
-                    all_documents_content.append(error_content)
                 except Exception as e:
-                    logging.exception(f"Belge işleme hatası ({file_name}): {str(e)}")
-                    error_content = f"## Belge: {file_name}\n\n**[HATA]** Belge işlenirken hata oluştu: {str(e)}\n\n"
+                    logging.exception(f"Genel dosya işleme hatası ({file_info.get('fileName', 'bilinmeyen')}): {str(e)}")
+                    error_content = f"## Belge: {file_info.get('fileName', 'bilinmeyen')}\n\n**[HATA]** Genel dosya işleme hatası: {str(e)}\n\n"
                     all_documents_content.append(error_content)
 
         # Tüm belgeleri birleştir
-        combined_content = "\n\n=== BELGE ARASI AYIRICI ===\n\n".join(all_documents_content)
-        return combined_content
+        combined_content = "\n\n---\n\n".join(all_documents_content)
+        
+        # Belge sayısı bilgisini ekle
+        total_docs = sum(len(file_list) for file_list in files.values())
+        result = f"**Toplam {total_docs} belge işlendi:**\n\n{combined_content}"
+        
+        logging.info(f"convert_files_to_markdown tamamlandı. Toplam belge sayısı: {total_docs}")
+        return result
 
     except Exception as e:
         logging.exception(f"Error in convert_files_to_markdown: {str(e)}")
@@ -1527,19 +2117,32 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
 
         ai_response_content = resp.content.strip()
 
-        # Streaming efekti
-        words = ai_response_content.split()
+        # Streaming efekti - newline karakterlerini koruyarak
+        # Metni kelimeler ve newline karakterlerine göre böl
+        tokens = re.findall(r'\S+|\n+', ai_response_content)
         streamed_content = ""
-        for i, word in enumerate(words):
-            streamed_content += word + " "
-            
-            yield {
-                "type": "message_chunk",
-                "content": word + " ",
-                "full_message": streamed_content.strip(),
-                "is_complete": i == len(words) - 1,
-                "user": "chatbot"
-            }
+        
+        for i, token in enumerate(tokens):
+            if token.startswith('\n'):
+                # Newline karakterleri için
+                streamed_content += token
+                yield {
+                    "type": "message_chunk",
+                    "content": token,
+                    "full_message": streamed_content,
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
+            else:
+                # Normal kelimeler için
+                streamed_content += token + " "
+                yield {
+                    "type": "message_chunk",
+                    "content": token + " ",
+                    "full_message": streamed_content.rstrip(),
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
             await asyncio.sleep(0.03)
 
         # Mesajları history'e kaydet
@@ -1578,14 +2181,14 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
 
         yield {
             "type": "message_chunk",
-            "content": "Belgeler URL'den indiriliyor ve Docling ile işleniyor..\n",
-            "full_message": "Belgeler URL'den indiriliyor ve Docling ile işleniyor..",
+            "content": "Belgeler Docling ile işleniyor (local/URL)...\n",
+            "full_message": "Belgeler Docling ile işleniyor (local/URL)...",
             "is_complete": False,
             "user": "chatbot"
         }
 
         # 1. Adım: Dosyaları markdown'a çevir
-        markdown_content = convert_files_to_markdown(files)
+        markdown_content = await convert_files_to_markdown(files, model)
         
         # 2. Adım: Markdown içeriği LLM ile analiz et
         async for chunk in analyze_markdown_with_llm(markdown_content, model, question, history, messages):
@@ -1961,19 +2564,31 @@ async def process_graph_response_stream(model, graph, question, messages, histor
         }
         
         # Graph response'u streaming olarak gönder (simüle streaming)
-        words = ai_response_content.split()
+        # Metni kelimeler ve newline karakterlerine göre böl
+        tokens = re.findall(r'\S+|\n+', ai_response_content)
         streamed_content = ""
         
-        for i, word in enumerate(words):
-            streamed_content += word + " "
-            
-            yield {
-                "type": "message_chunk",
-                "content": word + " ",
-                "full_message": streamed_content.strip(),
-                "is_complete": i == len(words) - 1,
-                "user": "chatbot"
-            }
+        for i, token in enumerate(tokens):
+            if token.startswith('\n'):
+                # Newline karakterleri için
+                streamed_content += token
+                yield {
+                    "type": "message_chunk",
+                    "content": token,
+                    "full_message": streamed_content,
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
+            else:
+                # Normal kelimeler için
+                streamed_content += token + " "
+                yield {
+                    "type": "message_chunk",
+                    "content": token + " ",
+                    "full_message": streamed_content.rstrip(),
+                    "is_complete": i == len(tokens) - 1,
+                    "user": "chatbot"
+                }
             
             # Gerçekçi streaming efekti
             await asyncio.sleep(0.05)
