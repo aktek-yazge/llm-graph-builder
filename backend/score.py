@@ -1442,10 +1442,14 @@ async def chat_bot_stream(
     print("chat_bot_stream filesJson: ", filesJson)
     if filesJson:
         try:
-            downloadedFiles = handle_attachments(filesJson)
+            # handle_attachments can be slow (downloads, conversions). Run in thread to avoid blocking event loop.
+            downloadedFiles = await asyncio.to_thread(handle_attachments, filesJson)
         except json.JSONDecodeError:
             logging.info("files handle_attachments error.")
             # return {"error": "Invalid JSON in 'files'"}
+        except Exception as e:
+            logging.exception(f"handle_attachments hatası: {e}")
+            downloadedFiles = None
     print("chat_bot_stream downloadedFiles: ", downloadedFiles)
     # files_data: Dict[str, List[Dict[str, str]]] = {}
     # if downloadedFiles:
