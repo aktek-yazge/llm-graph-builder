@@ -1,10 +1,15 @@
 import { eventResponsetypes, UserCredentials } from '../types';
 import { url } from '../utils/Utils';
+import { normalizeFileName } from '../utils/utf8';
+
 export function triggerStatusUpdateAPI(
   name: string,
   userCredentials: UserCredentials,
   datahandler: (i: eventResponsetypes) => void
 ) {
+  // Normalize filename for consistent API calls
+  const normalizedName = normalizeFileName(name) || name;
+
   const params = new URLSearchParams();
   if (userCredentials.uri) {
     params.append('uri', userCredentials.uri);
@@ -20,8 +25,8 @@ export function triggerStatusUpdateAPI(
   }
   const queryString = params.toString();
   const requestUrl = queryString
-    ? `${url()}/update_extract_status/${name}?${queryString}`
-    : `${url()}/update_extract_status/${name}`;
+    ? `${url()}/update_extract_status/${normalizedName}?${queryString}`
+    : `${url()}/update_extract_status/${normalizedName}`;
   const eventSource = new EventSource(requestUrl);
   eventSource.onmessage = (event) => {
     const eventResponse = JSON.parse(event.data);

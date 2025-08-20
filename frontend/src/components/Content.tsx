@@ -249,7 +249,7 @@ const Content: React.FC<ContentProps> = ({
       });
       if (fileItem.name != undefined && userCredentials != null) {
         const { name } = fileItem;
-        triggerStatusUpdateAPI(name as string, userCredentials, updateStatusForLargeFiles);
+        triggerStatusUpdateAPI(normalizeFileName(name) as string, userCredentials, updateStatusForLargeFiles);
       }
 
       const apiResponse = await extractAPI(
@@ -259,7 +259,7 @@ const Content: React.FC<ContentProps> = ({
         fileItem.sourceUrl,
         localStorage.getItem('accesskey'),
         atob(localStorage.getItem('secretkey') ?? ''),
-        fileItem.name ?? '',
+        normalizeFileName(fileItem.name) ?? '', // UTF-8 normalize file name before sending to backend
         fileItem.gcsBucket ?? '',
         fileItem.gcsBucketFolder ?? '',
         selectedNodes.map((l) => l.value),

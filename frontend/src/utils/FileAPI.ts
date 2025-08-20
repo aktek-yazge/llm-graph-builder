@@ -2,6 +2,7 @@ import { Method } from 'axios';
 import { url } from './Utils';
 import { ExtractParams, UploadParams } from '../types';
 import { apiCall } from '../services/CommonAPI';
+import { normalizeFileName } from './utf8';
 
 // Upload Call
 export const uploadAPI = async (
@@ -13,7 +14,13 @@ export const uploadAPI = async (
 ): Promise<any> => {
   const urlUpload = `${url()}/upload`;
   const method: Method = 'post';
-  const additionalParams: UploadParams = { file, model, chunkNumber, totalChunks, originalname };
+  const additionalParams: UploadParams = {
+    file,
+    model,
+    chunkNumber,
+    totalChunks,
+    originalname: normalizeFileName(originalname) || originalname, // Normalize filename before upload
+  };
   const response = await apiCall(urlUpload, method, additionalParams);
   return response;
 };

@@ -1,5 +1,7 @@
 import { PollingAPI_Response, statusupdate, UserCredentials } from '../types';
 import api from '../API/Index';
+import { normalizeFileName } from '../utils/utf8';
+
 export default async function subscribe(
   fileName: string,
   userCredentials: UserCredentials,
@@ -9,6 +11,10 @@ export default async function subscribe(
   const MAX_POLLING_ATTEMPTS = 10;
   let pollingAttempts = 0;
   let delay = 1000;
+
+  // Normalize filename for consistent API calls
+  const normalizedFileName = normalizeFileName(fileName) || fileName;
+
   // Build query parameters conditionally
   const queryParams = new URLSearchParams();
   if (userCredentials.uri) {
@@ -25,7 +31,9 @@ export default async function subscribe(
   }
   while (pollingAttempts < MAX_POLLING_ATTEMPTS) {
     let currentDelay = delay;
-    const response: PollingAPI_Response = await api.get(`/document_status/${fileName}?${queryParams.toString()}`);
+    const response: PollingAPI_Response = await api.get(
+      `/document_status/${normalizedFileName}?${queryParams.toString()}`
+    );
     if (response.data?.file_name?.status === 'Processing') {
       progressHandler(response.data);
       await new Promise((resolve) => setTimeout(resolve, currentDelay));
@@ -33,12 +41,15 @@ export default async function subscribe(
       pollingAttempts++;
     } else if (response.status !== 200) {
       throw new Error(
-        JSON.stringify({ fileName, message: `Failed To Process ${fileName} or LLM Unable To Parse Content` })
+        JSON.stringify({
+          fileName: normalizedFileName,
+          message: `Failed To Process ${normalizedFileName} or LLM Unable To Parse Content`,
+        })
       );
     } else {
       datahandler(response.data);
       return;
     }
   }
-  throw new Error(`Polling for ${fileName} timed out after ${MAX_POLLING_ATTEMPTS} attempts.`);
+  throw new Error(`Polling for ${normalizedFileName} timed out after ${MAX_POLLING_ATTEMPTS} attempts.`);
 }
