@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { url } from '../utils/Utils';
 import { UserCredentials } from '../types';
+import { normalizeFileName } from '../utils/utf8';
 
 const api = axios.create({
   baseURL: url(),
@@ -69,7 +70,8 @@ export const extractQABased = (data: {
 }) => {
   const formData = new FormData();
   formData.append('document_chunks', JSON.stringify(data.document_chunks));
-  formData.append('file_name', data.file_name);
+  // Normalize filename before sending to backend
+  formData.append('file_name', normalizeFileName(data.file_name) || data.file_name);
   formData.append('model', data.model);
 
   if (data.domain) {

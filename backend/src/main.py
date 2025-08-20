@@ -1448,17 +1448,21 @@ def upload_file(
 
     gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
     logging.info(f"gcs file cache: {gcs_file_cache}")
+    
+    # Normalize filename early to ensure consistency throughout upload process
+    normalized_filename = normalize_file_name(originalname.strip() if isinstance(originalname, str) else originalname)
+    logging.info(f"Upload: Original filename: '{originalname}' -> Normalized: '{normalized_filename}'")
 
     if gcs_file_cache == "True":
-        folder_name = create_gcs_bucket_folder_name_hashed(uri, originalname)
+        folder_name = create_gcs_bucket_folder_name_hashed(uri, normalized_filename)
         upload_file_to_gcs(
-            chunk, chunk_number, originalname, BUCKET_UPLOAD, folder_name
+            chunk, chunk_number, normalized_filename, BUCKET_UPLOAD, folder_name
         )
     else:
         if not os.path.exists(chunk_dir):
             os.mkdir(chunk_dir)
 
-        chunk_file_path = os.path.join(chunk_dir, f"{originalname}_part_{chunk_number}")
+        chunk_file_path = os.path.join(chunk_dir, f"{normalized_filename}_part_{chunk_number}")
         logging.info(f"Chunk File Path: {chunk_file_path}")
 
         with open(chunk_file_path, "wb") as chunk_file:
@@ -1468,19 +1472,17 @@ def upload_file(
         # If this is the last chunk, merge all chunks into a single file
         if gcs_file_cache == "True":
             file_size = merge_file_gcs(
-                BUCKET_UPLOAD, originalname, folder_name, int(total_chunks)
+                BUCKET_UPLOAD, normalized_filename, folder_name, int(total_chunks)
             )
         else:
             file_size = merge_chunks_local(
-                originalname, int(total_chunks), chunk_dir, merged_dir
+                normalized_filename, int(total_chunks), chunk_dir, merged_dir
             )
 
         logging.info("File merged successfully")
-        file_extension = originalname.split(".")[-1]
+        file_extension = normalized_filename.split(".")[-1]
         obj_source_node = sourceNode()
-        obj_source_node.file_name = normalize_file_name(
-            originalname.strip() if isinstance(originalname, str) else originalname
-        )
+        obj_source_node.file_name = normalized_filename  # Already normalized
         obj_source_node.file_type = file_extension
         obj_source_node.file_size = file_size
         obj_source_node.file_source = "local file"
@@ -1497,7 +1499,7 @@ def upload_file(
         graphDb_data_Access.create_source_node(obj_source_node)
         return {
             "file_size": file_size,
-            "file_name": originalname,
+            "file_name": normalized_filename,  # Return normalized filename
             "file_extension": file_extension,
             "message": f"Chunk {chunk_number}/{total_chunks} saved",
         }

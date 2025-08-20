@@ -84,8 +84,9 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
 def create_relation_between_chunks(graph, file_name, chunks: List[Document])->list:
     logging.info("creating FIRST_CHUNK and NEXT_CHUNK relationships between chunks")
     
-    # File name'i normalize et
+    # File name'i normalize et - Critical for consistency!
     file_name = normalize_file_name(file_name)
+    logging.debug(f"Normalized file name for chunks: {file_name}")
     
     current_chunk_id = ""
     lst_chunks_including_hash = []
@@ -119,7 +120,7 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
             "pg_content": chunk_document.page_content,
             "position": position,
             "length": chunk_document.metadata["length"],
-            "f_name": file_name,
+            "f_name": file_name,  # Normalized file name kullan
             "previous_id" : previous_chunk_id,
             "content_offset" : offset
         }

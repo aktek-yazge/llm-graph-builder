@@ -1,9 +1,11 @@
 import { CustomFile } from '../types';
 import api from '../API/Index';
+import { normalizeFileName } from '../utils/utf8';
 
 const deleteAPI = async (selectedFiles: CustomFile[], deleteEntities: boolean) => {
   try {
-    const filenames = selectedFiles.map((str) => str.name);
+    // Normalize all filenames before sending to backend
+    const filenames = selectedFiles.map((file) => normalizeFileName(file.name) || file.name);
     const source_types = selectedFiles.map((str) => str.fileSource);
     const formData = new FormData();
     formData.append('deleteEntities', JSON.stringify(deleteEntities));

@@ -60,12 +60,20 @@ class graphDBdataAccess:
         try:
             # Eğer string ise, minimal Document node oluştur
             if isinstance(obj_source_node_or_filename, str):
-                file_name = obj_source_node_or_filename
+                original_file_name = obj_source_node_or_filename
                 
-                # UTF-8 ve Unicode normalization
-                file_name = normalize_file_name(file_name)
+                # UTF-8 ve Unicode normalization - Critical for duplicate prevention
+                file_name = normalize_file_name(original_file_name)
                 
-                logging.info(f"Minimal Document node oluşturuluyor: {file_name}")
+                logging.info(f"Document node oluşturma: '{original_file_name}' -> '{file_name}'")
+                
+                # Unicode karakter detayları için debug
+                if original_file_name != file_name:
+                    logging.warning(f"Filename normalization değişikliği: ")
+                    logging.warning(f"  Original: {repr(original_file_name)}")
+                    logging.warning(f"  Normalized: {repr(file_name)}")
+                    logging.warning(f"  Original bytes: {original_file_name.encode('utf-8').hex()}")
+                    logging.warning(f"  Normalized bytes: {file_name.encode('utf-8').hex()}")
                 
                 # Dosya bilgilerini file_name'den çıkar
                 import os
@@ -97,22 +105,8 @@ class graphDBdataAccess:
                 except:
                     file_size = 0
                 
-                # Önce node'ın var olup olmadığını kontrol et
-                check_query = "MATCH (d:Document {fileName: $file_name}) RETURN count(d) as count"
-                result = self.execute_query(check_query, {"file_name": file_name})
-                
-                if result and result[0]['count'] > 0:
-                    logging.info(f"Document node zaten mevcut: {file_name}")
-                    # Var olan node'ın özelliklerini güncelle (sadece gerekli alanları)
-                    update_query = """
-                    MATCH (d:Document {fileName: $file_name})
-                    SET d.updatedAt = datetime()
-                    """
-                    self.execute_query(update_query, {"file_name": file_name})
-                    return
-                
-                # Minimal Document node oluştur
-                create_query = """
+                # Document node için güvenli MERGE - normalizasyonlu filename kullan
+                merge_query = """
                     MERGE(d:Document {fileName: $file_name}) 
                     ON CREATE SET 
                         d.status = 'New',
@@ -139,13 +133,20 @@ class graphDBdataAccess:
                         d.updatedAt = datetime(),
                         d.fileType = $file_type,
                         d.fileSize = $file_size
+                    RETURN d.fileName as fileName, d.status as status
                 """
-                self.graph.query(create_query, {
+                
+                result = self.graph.query(merge_query, {
                     "file_name": file_name, 
                     "file_type": file_type,
                     "file_size": file_size
                 }, session_params={"database": self.graph._database})
-                logging.info(f"Minimal Document node oluşturuldu: {file_name}")
+                
+                if result:
+                    status = result[0]['status'] if result else 'unknown'
+                    logging.info(f"Document node işlendi: {file_name} (status: {status})")
+                else:
+                    logging.info(f"Document node oluşturuldu: {file_name}")
                 
                 # Document yaratıldıktan sonra Policy node'unu da yarat ve bağla
                 self.create_policy_node_from_document(file_name)
@@ -154,7 +155,7 @@ class graphDBdataAccess:
             # sourceNode objesi ise, orijinal işlemi yap
             obj_source_node = obj_source_node_or_filename
             
-            # UTF-8 ve Unicode normalization for file_name
+            # UTF-8 ve Unicode normalization for file_name - Critical!
             obj_source_node.file_name = normalize_file_name(obj_source_node.file_name)
             
             job_status = "New"
