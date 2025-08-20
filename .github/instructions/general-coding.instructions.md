@@ -67,3 +67,5 @@ applyTo: '**'
 
 İstenmden test kodu oluşturmaya çalışma
 
+Mevcut kod tabanında ihtiyacın olan methodlar yer alabilir. Bunlar dikkate alınmalı ve yeni eklemeler ona göre yapılmalı
+
