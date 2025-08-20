@@ -347,7 +347,7 @@ def handle_attachments(
             else:
                 pdf_path = temp_file_path
 
-            # 3. PDF sayfalarını resme çevir
+            images = pdf_to_images(pdf_path, filename_without_ext)
             # images = pdf_to_images(pdf_path, filename_without_ext)
 
             # 4. Çıktı hazırlama
@@ -358,6 +358,88 @@ def handle_attachments(
                 result[attachment_name] = []
             result[attachment_name].extend(images_info)
 
+    ensure_folders()
+    result: Dict[str, List[Dict[str, str]]] = {}
+
+    for attachment_name, items in attachments.items():
+        for attachment in items:
+            try:
+                file_name = attachment.get("fileName") or attachment.get("filename")
+                file_type = (attachment.get("fileType") or attachment.get("file_type") or "").lower()
+                download_url = attachment.get("downloadUrl") or attachment.get("download_url") or attachment.get("downloadurl")
+
+                if not file_name:
+                    logging.warning(f"handle_attachments: fileName yok, atlanıyor: {attachment}")
+                    continue
+
+                filename_without_ext = Path(file_name).stem
+                temp_file_path = os.path.join(TEMP_FOLDER, sanitize_filename(file_name))
+
+                # 1. Dosyayı indir
+                if download_url:
+                    try:
+                        download_file(download_url, temp_file_path)
+                    except Exception as e:
+                        logging.exception(f"Dosya indirilemedi: {download_url} - {e}")
+                        continue
+                else:
+                    logging.warning(f"handle_attachments: download URL yok: {file_name}")
+                    continue
+
+                # 2. PDF değilse dönüştür
+                try:
+                    if file_type != "pdf":
+                        pdf_path = convert_to_pdf(temp_file_path, filename_without_ext)
+                    else:
+                        pdf_path = temp_file_path
+                except Exception as e:
+                    logging.exception(f"convert_to_pdf hatası ({file_name}): {e}")
+                    # varsa temp dosyayı temizle ve atla
+                    try:
+                        if os.path.exists(temp_file_path):
+                            os.unlink(temp_file_path)
+                    except:
+                        pass
+                    continue
+
+                # 3. PDF sayfalarını resme çevir
+                try:
+                    images = pdf_to_images(pdf_path, filename_without_ext)
+                except Exception as e:
+                    logging.exception(f"pdf_to_images hatası ({pdf_path}): {e}")
+                    # cleanup
+                    try:
+                        if file_type != 'pdf' and pdf_path and os.path.exists(pdf_path):
+                            os.unlink(pdf_path)
+                    except:
+                        pass
+                    continue
+
+                # 4. Çıktı hazırlama
+                images_info = [{"fileName": Path(p).name, "path": p} for p in images]
+
+                # aynı attachment için tek key altında topla
+                if attachment_name not in result:
+                    result[attachment_name] = []
+                result[attachment_name].extend(images_info)
+
+                # Temizlik: indirilen/oluşturulan geçici dosyaları kaldır
+                try:
+                    if file_type != 'pdf' and pdf_path and os.path.exists(pdf_path):
+                        os.unlink(pdf_path)
+                except:
+                    pass
+
+                try:
+                    if os.path.exists(temp_file_path) and temp_file_path.startswith(TEMP_FOLDER):
+                        os.unlink(temp_file_path)
+                except:
+                    pass
+
+            except Exception as e:
+                logging.exception(f"handle_attachments genel hata ({attachment}): {e}")
+
+    return result
     return result
 
 
@@ -1442,7 +1524,8 @@ async def chat_bot_stream(
     print("chat_bot_stream filesJson: ", filesJson)
     if filesJson:
         try:
-            downloadedFiles = handle_attachments(filesJson)
+            # handle_attachments can be slow (downloads, conversions). Run in thread to avoid blocking event loop.
+            downloadedFiles = await asyncio.to_thread(handle_attachments, filesJson)
         except json.JSONDecodeError:
             logging.info("files handle_attachments error.")
             # return {"error": "Invalid JSON in 'files'"}
