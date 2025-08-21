@@ -100,6 +100,13 @@ const Content: React.FC<ContentProps> = ({
     alertType: 'neutral',
     alertMessage: '',
   });
+
+  // Queue processing durumu için state - localStorage'dan initialize et
+  const [isQueueProcessingStopped, setIsQueueProcessingStopped] = useState<boolean>(() => {
+    const saved = localStorage.getItem('isQueueProcessingStopped');
+    return saved ? JSON.parse(saved) : false;
+  });
+
   const { setMessages } = useMessageContext();
   const {
     filesData,
@@ -160,12 +167,17 @@ const Content: React.FC<ContentProps> = ({
     if (afterFirstRender) {
       localStorage.setItem('processedCount', JSON.stringify({ db: userCredentials?.uri, count: processedCount }));
     }
-    if (processedCount == batchSize && !isReadOnlyUser) {
+    if (processedCount == batchSize && !isReadOnlyUser && !isQueueProcessingStopped) {
       handleGenerateGraph([], true);
     }
     // Post-processing artık sadece tüm dosyalar bittiğinde addFilesToQueue fonksiyonunda yapılıyor
     // İlk dosya bittiğinde post-processing yapmıyoruz çünkü duplicate çağrı oluyor
-  }, [processedCount, userCredentials, queue, isReadOnlyUser, isGdsActive]);
+  }, [processedCount, userCredentials, queue, isReadOnlyUser, isGdsActive, isQueueProcessingStopped]);
+
+  // Queue processing durumunu localStorage'a kaydet
+  useEffect(() => {
+    localStorage.setItem('isQueueProcessingStopped', JSON.stringify(isQueueProcessingStopped));
+  }, [isQueueProcessingStopped]);
 
   useEffect(() => {
     if (afterFirstRender) {
@@ -226,6 +238,7 @@ const Content: React.FC<ContentProps> = ({
 
   const extractHandler = async (fileItem: CustomFile, uid: string) => {
     queue.remove((item) => item.name === fileItem.name);
+
     try {
       setFilesData((prevfiles) =>
         prevfiles.map((curfile) => {
@@ -344,8 +357,14 @@ const Content: React.FC<ContentProps> = ({
     batch: CustomFile[],
     selectedFiles: CustomFile[],
     isSelectedFiles: boolean,
-    newCheck: boolean
+    newCheck: boolean,
+    skipQueueCheck: boolean = false
   ) => {
+    // Queue processing durdurulmuşsa ve bu manuel çağrı değilse işlem yapma
+    if (isQueueProcessingStopped && !skipQueueCheck) {
+      return [];
+    }
+
     const data = [];
     showNormalToast(`Processing ${batch.length} files at a time.`);
     for (let i = 0; i < batch.length; i++) {
@@ -427,11 +446,20 @@ const Content: React.FC<ContentProps> = ({
     }
   };
 
-  const scheduleBatchWiseProcess = (selectedRows: CustomFile[], isSelectedFiles: boolean) => {
+  const scheduleBatchWiseProcess = (
+    selectedRows: CustomFile[],
+    isSelectedFiles: boolean,
+    skipQueueCheck: boolean = false
+  ) => {
+    // Queue processing durdurulmuşsa ve bu manuel çağrı değilse işlem yapma
+    if (isQueueProcessingStopped && !skipQueueCheck) {
+      return [];
+    }
+
     let data = [];
     if (queue.size() > batchSize) {
       const batch = queue.items.slice(0, batchSize);
-      data = triggerBatchProcessing(batch, selectedRows as CustomFile[], isSelectedFiles, false);
+      data = triggerBatchProcessing(batch, selectedRows as CustomFile[], isSelectedFiles, false, skipQueueCheck);
     } else {
       let mergedfiles = [...selectedRows];
       let filesToProcess: CustomFile[] = [];
@@ -442,7 +470,13 @@ const Content: React.FC<ContentProps> = ({
       } else {
         filesToProcess = mergedfiles;
       }
-      data = triggerBatchProcessing(filesToProcess, selectedRows as CustomFile[], isSelectedFiles, false);
+      data = triggerBatchProcessing(
+        filesToProcess,
+        selectedRows as CustomFile[],
+        isSelectedFiles,
+        false,
+        skipQueueCheck
+      );
     }
     return data;
   };
@@ -460,14 +494,20 @@ const Content: React.FC<ContentProps> = ({
    * @param queueFiles - Whether to prioritize processing files from the queue. Defaults to false.
    */
   const handleGenerateGraph = (filesTobeProcessed: CustomFile[], queueFiles: boolean = false) => {
+    // Graph oluştur butonuna basıldığında queue processing'i tekrar etkinleştir
+    if (isQueueProcessingStopped) {
+      setIsQueueProcessingStopped(false);
+      showNormalToast('Queue processing resumed');
+    }
+
     let data = [];
     const processingFilesCount = filesData.filter((f) => f.status === 'Processing').length;
     if (filesTobeProcessed.length && !queueFiles && processingFilesCount < batchSize) {
       if (!queue.isEmpty()) {
-        data = scheduleBatchWiseProcess(filesTobeProcessed as CustomFile[], true);
+        data = scheduleBatchWiseProcess(filesTobeProcessed as CustomFile[], true, true);
       } else if (filesTobeProcessed.length > batchSize) {
         const filesToProcess = filesTobeProcessed?.slice(0, batchSize) as CustomFile[];
-        data = triggerBatchProcessing(filesToProcess, filesTobeProcessed as CustomFile[], true, false);
+        data = triggerBatchProcessing(filesToProcess, filesTobeProcessed as CustomFile[], true, false, true);
         const remainingFiles = [...(filesTobeProcessed as CustomFile[])].splice(batchSize);
         addFilesToQueue(remainingFiles);
       } else {
@@ -483,13 +523,13 @@ const Content: React.FC<ContentProps> = ({
           );
           addFilesToQueue(remainingFiles);
         }
-        data = triggerBatchProcessing(filesTobeSchedule, filesTobeProcessed, true, true);
+        data = triggerBatchProcessing(filesTobeSchedule, filesTobeProcessed, true, true, true);
       }
       Promise.allSettled(data).then((_) => {
         setIsExtractLoading(false);
       });
     } else if (queueFiles && !queue.isEmpty() && processingFilesCount < batchSize) {
-      data = scheduleBatchWiseProcess(queue.items, true);
+      data = scheduleBatchWiseProcess(queue.items, true, true);
       Promise.allSettled(data).then((_) => {
         setIsExtractLoading(false);
       });
@@ -499,15 +539,20 @@ const Content: React.FC<ContentProps> = ({
   };
 
   const processWaitingFilesOnRefresh = useCallback(() => {
+    // Queue processing durdurulmuşsa sayfa refresh'te de işlem yapma
+    if (isQueueProcessingStopped) {
+      return;
+    }
+
     let data = [];
     const processingFilesCount = filesData.filter((f) => f.status === 'Processing').length;
 
     if (!queue.isEmpty() && processingFilesCount < batchSize) {
       if (queue.size() > batchSize) {
         const batch = queue.items.slice(0, batchSize);
-        data = triggerBatchProcessing(batch, queue.items as CustomFile[], true, false);
+        data = triggerBatchProcessing(batch, queue.items as CustomFile[], true, false, false);
       } else {
-        data = triggerBatchProcessing(queue.items, queue.items as CustomFile[], true, false);
+        data = triggerBatchProcessing(queue.items, queue.items as CustomFile[], true, false, false);
       }
       Promise.allSettled(data).then((_) => {
         setIsExtractLoading(false);
@@ -518,7 +563,7 @@ const Content: React.FC<ContentProps> = ({
         .filter((f) => f.status === 'New' || f.status == 'Ready to Reprocess');
       addFilesToQueue(selectedNewFiles as CustomFile[]);
     }
-  }, [filesData, queue]);
+  }, [filesData, queue, isQueueProcessingStopped]);
 
   const handleOpenGraphClick = () => {
     const bloomUrl = process.env.VITE_BLOOM_URL;
@@ -970,6 +1015,7 @@ const Content: React.FC<ContentProps> = ({
           )}
           ref={childRef}
           handleGenerateGraph={processWaitingFilesOnRefresh}
+          setIsQueueProcessingStopped={setIsQueueProcessingStopped}
         ></FileTable>
 
         <Flex className={`p-2.5  mt-1.5 absolute bottom-0 w-full`} justifyContent='space-between' flexDirection={'row'}>
