@@ -73,7 +73,7 @@ import { normalizeFileName } from '../utils/utf8';
 let onlyfortheFirstRender = true;
 
 const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, ref) => {
-  const { connectionStatus, setConnectionStatus, onInspect, onRetry, onChunkView } = props;
+  const { connectionStatus, setConnectionStatus, onInspect, onRetry, onChunkView, setIsQueueProcessingStopped } = props;
   const { filesData, setFilesData, model, rowSelection, setRowSelection, setSelectedRows, setProcessedCount, queue } =
     useFileContext();
   const { userCredentials, isReadOnlyUser } = useCredentials();
@@ -819,7 +819,11 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         const waitingQueue: CustomFile[] = JSON.parse(
           localStorage.getItem('waitingQueue') ?? JSON.stringify({ queue: [] })
         ).queue;
-        if (waitingQueue.length) {
+
+        // Queue processing durumunu kontrol et
+        const isQueueProcessingStopped = JSON.parse(localStorage.getItem('isQueueProcessingStopped') ?? 'false');
+
+        if (waitingQueue.length && !isQueueProcessingStopped) {
           props.handleGenerateGraph();
         }
       }
@@ -861,6 +865,14 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           return prev + 1;
         });
         queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(fileName));
+
+        // Queue processing'i durdur
+        if (setIsQueueProcessingStopped) {
+          setIsQueueProcessingStopped(true);
+          showNormalToast('File processing cancelled. Queue processing stopped.');
+        } else {
+          showNormalToast('File processing cancelled');
+        }
       } else {
         let errorobj = { error: res.data.error, message: res.data.message, fileName };
         throw new Error(JSON.stringify(errorobj));

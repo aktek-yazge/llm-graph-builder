@@ -175,6 +175,7 @@ export interface FileTableProps {
   onChunkView: (name: string) => void;
   handleGenerateGraph: () => void;
   onRetry: (id: string) => void;
+  setIsQueueProcessingStopped?: Dispatch<SetStateAction<boolean>>;
 }
 
 export interface CustomModalProps {
