@@ -121,6 +121,11 @@ def get_llm(model: str):
                 extract_types=["entities", "facts"],
             )
         
+        elif "langextract" in model:
+            # LangExtract için özel durum - gerçek LLM değil
+            model_name = "langextract"
+            llm = "langextract"  # Placeholder, gerçek kullanımda farklı handle edilecek
+        
         else: 
             model_name, api_endpoint, api_key = env_value.split(",")
             llm = ChatOpenAI(
@@ -243,6 +248,22 @@ async def get_graph_document_list(
 
 async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
    try:
+       # LangExtract kontrolü - model "langextract" içeriyorsa LangExtract kullan
+       if "langextract" in model.lower():
+           from src.langextract_llm import get_graph_from_langextract
+           logging.info(f"🔄 LangExtract model tespit edildi: {model}")
+           return await get_graph_from_langextract(
+               model=model,
+               chunkId_chunkDoc_list=chunkId_chunkDoc_list,
+               allowedNodes=allowedNodes,
+               allowedRelationship=allowedRelationship,
+               chunks_to_combine=chunks_to_combine,
+               file_name=file_name,
+               additional_instructions=additional_instructions,
+               graph=graph
+           )
+       
+       # Normal LLM processing
        # Giriş parametrelerini logla
        logging.info(f"=== get_graph_from_llm BAŞLADI ===")
        logging.info(f"Model: {model}")

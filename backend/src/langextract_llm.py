@@ -1,0 +1,235 @@
+"""
+LangExtract entegrasyonu için backend modülü
+"""
+import logging
+import time
+from typing import List, Dict, Any, Tuple
+from langchain.docstore.document import Document
+from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+from langextract_graph_integration import LangExtractGraphExtractor
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+def get_combined_chunks_for_langextract(chunkId_chunkDoc_list, chunks_to_combine):
+    """
+    LangExtract için chunk'ları combine et
+    LangExtract tek string ile çalıştığı için chunk'ları birleştiriyoruz
+    """
+    combined_texts = []
+    
+    # chunks_to_combine kadar chunk'ı al ve birleştir
+    for i in range(0, len(chunkId_chunkDoc_list), chunks_to_combine):
+        chunk_group = chunkId_chunkDoc_list[i:i + chunks_to_combine]
+        
+        # Her chunk grubunu tek string'e birleştir
+        combined_text = ""
+        chunk_ids = []
+        
+        for chunk_data in chunk_group:
+            chunk_doc = chunk_data["chunk_doc"]
+            chunk_id = chunk_data["chunk_id"]
+            
+            # Chunk text'ini al
+            chunk_text = chunk_doc.page_content if hasattr(chunk_doc, 'page_content') else str(chunk_doc)
+            
+            combined_text += chunk_text + "\n\n"
+            chunk_ids.append(chunk_id)
+        
+        combined_texts.append({
+            "text": combined_text.strip(),
+            "chunk_ids": chunk_ids,
+            "chunk_count": len(chunk_group)
+        })
+    
+    return combined_texts
+
+async def get_graph_from_langextract(
+    model: str, 
+    chunkId_chunkDoc_list: List[Dict], 
+    allowedNodes: str, 
+    allowedRelationship: str, 
+    chunks_to_combine: int, 
+    file_name: str = None, 
+    additional_instructions: str = None, 
+    graph=None
+) -> List[Any]:
+    """
+    LangExtract kullanarak graph extraction yap
+    
+    Args:
+        model: Model adı (LangExtract için kullanılmaz ama uyumluluk için)
+        chunkId_chunkDoc_list: Chunk data listesi
+        allowedNodes: İzin verilen node tipleri (comma separated)
+        allowedRelationship: İzin verilen relationship'ler (comma separated triplets)
+        chunks_to_combine: Combine edilecek chunk sayısı
+        file_name: Dosya adı
+        additional_instructions: Ek talimatlar
+        graph: Graph instance (kullanılmaz)
+        
+    Returns:
+        List[GraphDocument]: LangChain formatında graph document'lar
+    """
+    try:
+        start_time = time.time()
+        
+        # Giriş parametrelerini logla
+        logging.info("=== get_graph_from_langextract BAŞLADI ===")
+        logging.info(f"Model: {model} (LangExtract kullanılacak)")
+        logging.info(f"File name: {file_name}")
+        logging.info(f"Chunks to combine: {chunks_to_combine}")
+        logging.info(f"Additional instructions var mı: {additional_instructions is not None}")
+        logging.info(f"Toplam chunk sayısı: {len(chunkId_chunkDoc_list)}")
+        
+        # Raw giriş değerlerini logla
+        logging.info(f"RAW allowedNodes: '{allowedNodes}'")
+        logging.info(f"RAW allowedRelationship: '{allowedRelationship}'")
+        
+        # Chunk'ları combine et
+        combined_chunks = get_combined_chunks_for_langextract(chunkId_chunkDoc_list, chunks_to_combine)
+        logging.info(f"Combined chunks oluşturuldu: {len(combined_chunks)} grup")
+        
+        # allowedNodes işleme
+        allowed_nodes = []
+        if allowedNodes:
+            allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
+            logging.info(f"İşlenmiş allowed_nodes: {allowed_nodes}")
+        
+        # allowedRelationship işleme 
+        allowed_relationships = []
+        if allowedRelationship:
+            items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
+            if len(items) % 3 != 0:
+                raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
+            
+            for i in range(0, len(items), 3):
+                source, relation, target = items[i:i + 3]
+                allowed_relationships.append((source, relation, target))
+            logging.info(f"İşlenmiş allowed_relationships: {allowed_relationships}")
+        
+        # LangExtract extractor oluştur
+        extractor = LangExtractGraphExtractor()
+        
+        # Her combined chunk için extraction yap
+        all_graph_documents = []
+        total_entities = 0
+        total_relationships = 0
+        
+        for i, chunk_data in enumerate(combined_chunks):
+            logging.info(f"İşleniyor chunk grubu {i+1}/{len(combined_chunks)}")
+            
+            # LangExtract ile extraction
+            result = await extractor.extract_graph(
+                text=chunk_data["text"],
+                allowed_nodes=allowed_nodes if allowed_nodes else None,
+                allowed_relationships=allowed_relationships if allowed_relationships else None
+            )
+            
+            # GraphExtractionResult'tan entities ve relationships al
+            entities = result.entities
+            relationships = result.relationships
+            
+            total_entities += len(entities)
+            total_relationships += len(relationships)
+            
+            # GraphDocument formatına çevir (mevcut sisteme uyumlu)
+            graph_doc = convert_langextract_to_graph_document(
+                entities=entities,
+                relationships=relationships,
+                chunk_ids=chunk_data["chunk_ids"],
+                source_text=chunk_data["text"][:200] + "..." if len(chunk_data["text"]) > 200 else chunk_data["text"]
+            )
+            
+            all_graph_documents.append(graph_doc)
+        
+        end_time = time.time()
+        total_time = end_time - start_time
+        
+        # Sonuçları logla
+        logging.info("📊 LangExtract extraction tamamlandı:")
+        logging.info(f"  ⏱️ Toplam süre: {total_time:.2f} saniye")
+        logging.info(f"  📄 İşlenen chunk grubu sayısı: {len(combined_chunks)}")
+        logging.info(f"  🎯 Çıkarılan entity sayısı: {total_entities}")
+        logging.info(f"  🔗 Çıkarılan relationship sayısı: {total_relationships}")
+        logging.info(f"  ⚡ Chunk grubu başına ortalama süre: {total_time/len(combined_chunks):.2f} saniye")
+        
+        return all_graph_documents
+        
+    except Exception as e:
+        logging.error(f"Error in get_graph_from_langextract: {e}", exc_info=True)
+        raise LLMGraphBuilderException(f"Error in getting graph from LangExtract: {e}")
+
+
+def convert_langextract_to_graph_document(entities, relationships, chunk_ids, source_text):
+    """
+    LangExtract çıktısını LangChain GraphDocument formatına çevir
+    """
+    try:
+        # Import GraphDocument ve Node/Relationship classları
+        from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
+        
+        # Node'ları oluştur
+        nodes = []
+        for entity in entities:
+            node = Node(
+                id=entity.id,
+                type=entity.label, 
+                properties=entity.properties
+            )
+            nodes.append(node)
+        
+        # Entity ID mapping oluştur (normalize edilmiş ID'ler için)
+        entity_id_mapping = {}
+        for entity in entities:
+            # Normalize edilmiş versiyonu da mapping'e ekle
+            normalized_id = entity.id.lower().replace(' ', '_').replace('ç', 'c').replace('ö', 'o').replace('ş', 's').replace('ı', 'i').replace('ü', 'u').replace('ğ', 'g')
+            entity_id_mapping[normalized_id] = entity.id
+            entity_id_mapping[entity.id] = entity.id  # Original ID de mapping'de olsun
+            
+            # Policy entities için "policy_" prefix'i ile de mapping ekle
+            if entity.label.lower() == 'policy':
+                policy_prefixed_id = f"policy_{normalized_id}"
+                entity_id_mapping[policy_prefixed_id] = entity.id
+        
+        logging.info(f"Entity ID mapping: {entity_id_mapping}")
+        
+        # Relationship'leri oluştur
+        rels = []
+        for rel in relationships:
+            # Source ve target ID'lerini mapping'den bul
+            actual_source_id = entity_id_mapping.get(rel.source_id, rel.source_id)
+            actual_target_id = entity_id_mapping.get(rel.target_id, rel.target_id)
+            
+            # Source ve target node'ları bul
+            source_node = next((n for n in nodes if n.id == actual_source_id), None)
+            target_node = next((n for n in nodes if n.id == actual_target_id), None)
+            
+            if source_node and target_node:
+                relationship = Relationship(
+                    source=source_node,
+                    target=target_node,
+                    type=rel.type,
+                    properties=rel.properties
+                )
+                rels.append(relationship)
+            else:
+                logging.warning(f"Relationship için node bulunamadı: {rel} (source_id={rel.source_id}, target_id={rel.target_id}, mapped_source={actual_source_id}, mapped_target={actual_target_id})")
+        
+        # Document oluştur
+        document = Document(
+            page_content=source_text,
+            metadata={"chunk_ids": chunk_ids}
+        )
+        
+        # GraphDocument oluştur
+        graph_document = GraphDocument(
+            nodes=nodes,
+            relationships=rels,
+            source=document
+        )
+        
+        return graph_document
+        
+    except Exception as e:
+        logging.error(f"Error converting LangExtract output to GraphDocument: {e}")
+        raise LLMGraphBuilderException(f"Error converting LangExtract output: {e}")
