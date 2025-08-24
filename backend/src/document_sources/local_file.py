@@ -311,7 +311,7 @@ def generate_page_images_with_pymupdf(file_path, output_dir="output"):
         output_path.mkdir(parents=True, exist_ok=True)
         
         start_time = time.time()
-        logging.info(f"Starting PyMuPDF page image generation for {file_path}")
+        logging.info(f"🖼️ [PyMuPDF] Starting page image generation for {file_path}")
         
         # PDF'i aç
         doc = fitz.open(str(file_path))
@@ -364,7 +364,7 @@ def generate_page_images_from_converter(converter, file_path, output_dir="output
         output_path.mkdir(parents=True, exist_ok=True)
         
         start_time = time.time()
-        logging.info(f"Starting page image generation for {file_path}")
+        logging.info(f"🖼️ [Docling] Starting page image generation for {file_path}")
         
         # Document'i convert et
         conv_res = converter.convert(file_path)
@@ -454,47 +454,56 @@ def load_document_content(file_path, generate_images=False, output_dir="output")
     encoding_flag = False
     generated_images = []
     
-    if file_extension == ".pdf":
-        # converter = DocumentConverter()
-        # loader = PyMuPDFLoader(file_path)
+    # Docling desteklenen formatlar: PDF, DOCX, PPTX, HTML, CSV, Markdown
+    docling_supported_formats = [".pdf", ".docx", ".pptx", ".html", ".csv", ".md"]
+    
+    if file_extension in docling_supported_formats:
+        logging.info(f"Using Docling for {file_extension} file processing (generate_images={generate_images})")
+        
+        # Common labels for all document types
         labels = [
             label
             for label in DEFAULT_EXPORT_LABELS
             if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
         ]
         
-        # Page image'ları generate etmek istiyorsak, custom converter oluştur
+        # Image generation için custom converter oluştur
         if generate_images:
-            # Pipeline options ile custom converter oluştur
-            pipeline_options = PdfPipelineOptions(
-                images_scale=IMAGE_RESOLUTION_SCALE,
-                generate_page_images=True,
-                generate_picture_images=True
-            )
-            
-            custom_converter = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-                }
-            )
-            
-            # DoclingLoader'a custom converter'ı geç
-            loader = DoclingLoader(
-                file_path=file_path,
-                converter=custom_converter,
-                export_type=ExportType.MARKDOWN,
-                md_export_kwargs={
-                    "page_break_placeholder": "[PAGE BREAK]",
-                    "labels": labels,
-                },
-            )
-            
-            # Page image'larını generate et
-            generated_images = generate_page_images_from_converter(
-                custom_converter, file_path, output_dir
-            )
+            # PDF için özel yaklaşım: sadece PyMuPDF kullan
+            if file_extension == ".pdf":
+                # PDF için standart DoclingLoader (image generation olmadan)
+                loader = DoclingLoader(
+                    file_path=file_path,
+                    export_type=ExportType.MARKDOWN,
+                    md_export_kwargs={
+                        "page_break_placeholder": "[PAGE BREAK]",
+                        "labels": labels,
+                    },
+                )
+                
+                # PDF için sadece PyMuPDF ile image generation yap
+                generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
+            else:
+                # Diğer formatlar için Docling converter ile image generation
+                custom_converter = DocumentConverter()
+                
+                # DoclingLoader'a custom converter'ı geç
+                loader = DoclingLoader(
+                    file_path=file_path,
+                    converter=custom_converter,
+                    export_type=ExportType.MARKDOWN,
+                    md_export_kwargs={
+                        "page_break_placeholder": "[PAGE BREAK]",
+                        "labels": labels,
+                    },
+                )
+                
+                # Diğer formatlar için Docling converter'dan image'ları extract et
+                generated_images = generate_page_images_from_converter(
+                    custom_converter, file_path, output_dir
+                )
         else:
-            # Standart DoclingLoader kullan
+            # Standart DoclingLoader kullan (image generation olmadan)
             loader = DoclingLoader(
                 file_path=file_path,
                 export_type=ExportType.MARKDOWN,
@@ -504,7 +513,6 @@ def load_document_content(file_path, generate_images=False, output_dir="output")
                 },
             )
         
-        # loader = DoclingLoader(file_path, export_type=ExportType.MARKDOWN)
         return loader, encoding_flag, generated_images
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)

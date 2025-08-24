@@ -1301,40 +1301,65 @@ async def processing_chunks(
 def get_chunkId_chunkDoc_list(
     graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition, page_images=None
 ):
+    # File name'i normalize et
+    file_name = normalize_file_name(file_name)
+    
     if not retry_condition:
         logging.info("Break down file into chunks")
         
-        # File name'i normalize et
-        file_name = normalize_file_name(file_name)
+        # İlk olarak chunk'ların zaten var olup olmadığını kontrol et
+        existing_chunks = execute_graph_query(
+            graph, QUERY_TO_GET_CHUNKS, params={"filename": file_name}
+        )
         
-        bad_chars = ['"', "\n", "'"]
-        for i in range(0, len(pages)):
-            text = pages[i].page_content
+        if existing_chunks and existing_chunks[0].get("text"):
+            logging.info(f"✅ Found {len(existing_chunks)} existing chunks for {file_name}")
             
-            # UTF-8 ve Unicode normalization
-            text = normalize_unicode_text(text)
+            # Mevcut chunk'ları kullan, sadece embedding'leri kontrol et ve ekle
+            chunkId_chunkDoc_list = []
+            for chunk in existing_chunks:
+                chunk_doc = Document(
+                    page_content=chunk["text"],
+                    metadata={"id": chunk["id"], "position": chunk["position"]},
+                )
+                chunkId_chunkDoc_list.append(
+                    {"chunk_id": chunk["id"], "chunk_doc": chunk_doc}
+                )
             
-            for j in bad_chars:
-                if j == "\n":
-                    text = text.replace(j, " ")
-                else:
-                    text = text.replace(j, "")
-            pages[i] = Document(page_content=str(text), metadata=pages[i].metadata)
+            # Embedding'leri kontrol et ve eksikleri ekle
+            create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
+            
+            return len(existing_chunks), chunkId_chunkDoc_list
+        else:
+            logging.info("No existing chunks found, creating new chunks from pages")
+            
+            # Bad characters'ı temizle
+            bad_chars = ['"', "\n", "'"]
+            for i in range(0, len(pages)):
+                text = pages[i].page_content
+                
+                # UTF-8 ve Unicode normalization
+                text = normalize_unicode_text(text)
+                
+                for j in bad_chars:
+                    if j == "\n":
+                        text = text.replace(j, " ")
+                    else:
+                        text = text.replace(j, "")
+                pages[i] = Document(page_content=str(text), metadata=pages[i].metadata)
 
-        # print("pages2:", pages)
-        create_chunks_obj = CreateChunksofDocument(pages, graph)
-        # Use RecursiveCharacterTextSplitter to split entire document (all pages)
-        try:
-            chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                chunk_size=int(token_chunk_size), chunk_overlap=int(chunk_overlap)
-            )
-        except Exception as e:
-            logging.warning(f"Recursive splitting failed ({e}), falling back to page-based chunks")
-            # fallback: use pages as chunks
-            chunks = pages
-        # print("chunks: ", chunks)
-        chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks, page_images)
-        return len(chunks), chunkId_chunkDoc_list
+            # Yeni chunk'ları oluştur
+            create_chunks_obj = CreateChunksofDocument(pages, graph)
+            try:
+                chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                    chunk_size=int(token_chunk_size), chunk_overlap=int(chunk_overlap)
+                )
+            except Exception as e:
+                logging.warning(f"Recursive splitting failed ({e}), falling back to page-based chunks")
+                chunks = pages
+            
+            chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks, page_images)
+            return len(chunks), chunkId_chunkDoc_list
 
     else:
         chunkId_chunkDoc_list = []
@@ -1567,31 +1592,46 @@ def upload_file(
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
         
-        # PDF sayfa resimlerini extract et ve S3'e upload et
+        # Desteklenen belge formatları için hem text hem image extraction (tek seferde)
         merged_file_path = os.path.join(merged_dir, originalname)
         doc_link = None
         page_images = []
+        pages = []
         
-        # PDF ise sayfa resimlerini extract et (GCS cache durumunda merged_file_path olmayabilir)
+        # Docling desteklenen formatlar: PDF, DOCX, PPTX, HTML, CSV, Markdown
         file_extension = originalname.split(".")[-1].lower()
-        if file_extension == "pdf" and os.path.exists(merged_file_path):
+        docling_supported_formats = ["pdf", "docx", "pptx", "html", "csv", "md"]
+        
+        if file_extension in docling_supported_formats and os.path.exists(merged_file_path):
                 try:
-                    logging.info(f"🖼️ Starting page image extraction for: {originalname}")
+                    logging.info(f"🖼️ Starting combined content & image extraction for {file_extension.upper()}: {originalname}")
                     
                     # Output klasör yapısını oluştur
                     document_dir, pdf_dir, images_dir = create_document_output_structure(
                         originalname, "output"
                     )
                     
-                    # PDF'i pdf klasörüne kopyala
-                    pdf_copy_path = os.path.join(pdf_dir, originalname)
-                    shutil.copy2(merged_file_path, pdf_copy_path)
-                    logging.info(f"📄 PDF copied to: {pdf_copy_path}")
+                    # Belgeyi ilgili klasöre kopyala
+                    doc_copy_path = os.path.join(pdf_dir, originalname)
+                    shutil.copy2(merged_file_path, doc_copy_path)
+                    logging.info(f"📄 Document copied to: {doc_copy_path}")
                     
-                    # Sayfa resimlerini extract et
-                    generated_images = generate_page_images_with_pymupdf(
-                        merged_file_path, images_dir
-                    )
+                    # Tek seferde hem text hem image extraction
+                    from src.document_sources.local_file import load_document_content
+                    
+                    if file_extension == "pdf":
+                        # PDF için: PyMuPDF image + DoclingLoader text (optimize edilmiş)
+                        generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
+                        loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
+                        pages = loader.load()
+                        logging.info(f"📖 PDF processed: PyMuPDF images + Docling text")
+                    else:
+                        # Diğer formatlar için: Docling hem text hem image (tek çağrı)
+                        loader, encoding_flag, generated_images = load_document_content(
+                            merged_file_path, generate_images=True, output_dir=images_dir
+                        )
+                        pages = loader.load()
+                        logging.info(f"📖 {file_extension.upper()} processed: Docling combined text+images")
                     
                     if generated_images:
                         logging.info(f"✅ Generated {len(generated_images)} page images")
@@ -1606,8 +1646,8 @@ def upload_file(
                             doc_name = Path(originalname).stem
                             s3_prefix = f"documents/{doc_name}"
                             
-                            # Tüm dosyaları (PDF + images) upload et
-                            all_files = [pdf_copy_path] + generated_images
+                            # Tüm dosyaları (document + images) upload et
+                            all_files = [doc_copy_path] + generated_images
                             uploaded_urls, failed_files = upload_files_to_s3(
                                 all_files,
                                 s3_bucket,
@@ -1646,9 +1686,10 @@ def upload_file(
                         logging.warning(f"⚠️ No page images generated for: {originalname}")
                         
                 except Exception as image_error:
-                    logging.error(f"❌ Page image extraction failed for {originalname}: {image_error}")
-                    # Continue with normal processing even if image extraction fails
+                    logging.error(f"❌ Combined content & image extraction failed for {originalname}: {image_error}")
+                    # Continue with normal processing even if extraction fails
         
+        # Source node oluştur
         file_extension = originalname.split(".")[-1]
         obj_source_node = sourceNode()
         obj_source_node.file_name = (
@@ -1675,8 +1716,52 @@ def upload_file(
             obj_source_node.page_images = page_images
             logging.info(f"🖼️ Added {len(page_images)} page_images to source node")
         
+        # Desteklenen belge formatları için chunk node'ları da oluştur (sadece pages varsa)
+        if file_extension.lower() in docling_supported_formats and pages:
+            try:
+                logging.info(f"🔄 Creating chunk nodes for: {originalname} (using already extracted pages)")
+                
+                # Zaten extract edilmiş pages'leri kullan (tekrar extract etme)
+                if pages:
+                    # Chunk'ları oluştur
+                    from src.create_chunks import CreateChunksofDocument
+                    create_chunks_obj = CreateChunksofDocument(pages, graph)
+                    
+                    # Varsayılan chunk parametreleri
+                    token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
+                    chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
+                    
+                    chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                        chunk_size=token_chunk_size, 
+                        chunk_overlap=chunk_overlap
+                    )
+                    
+                    if chunks:
+                        # Chunk node'ları veritabanına kaydet (embedding'siz)
+                        from src.make_relationships import create_chunks_for_upload
+                        
+                        created_chunks = create_chunks_for_upload(
+                            graph=graph,
+                            chunks=chunks, 
+                            file_name=originalname,
+                            page_images=page_images if page_images else []
+                        )
+                        
+                        # Source node'daki chunk sayısını güncelle
+                        obj_source_node.chunkNodeCount = len(created_chunks)
+                        
+                        logging.info(f"✅ Created {len(created_chunks)} chunk nodes for: {originalname}")
+                    else:
+                        logging.warning(f"⚠️ No chunks created for: {originalname}")
+                else:
+                    logging.warning(f"⚠️ No pages available for chunking: {originalname}")
+                    
+            except Exception as chunk_error:
+                logging.error(f"❌ Failed to create chunk nodes for {originalname}: {chunk_error}")
+                # Continue without chunk creation
+        
+        # Source node'u veritabanına kaydet
         graphDb_data_Access = graphDBdataAccess(graph)
-
         graphDb_data_Access.create_source_node(obj_source_node)
         logging.info(f"📋 Source node created in database for: {originalname}")
         
