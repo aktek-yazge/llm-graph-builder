@@ -19,6 +19,13 @@ const DropZone: FunctionComponent = () => {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
+    console.log(`📁 Files dropped: ${f.length} files`);
+    f.forEach((file, index) => {
+      console.log(
+        `📄 File ${index + 1}: ${file.name}, Size: ${file.size} bytes, Type: ${file.type}, Last Modified: ${file.lastModified ? new Date(file.lastModified).toISOString() : 'Unknown'}`
+      );
+    });
+
     setSelectedFiles(f.map((f) => f as File));
 
     if (f.length) {
@@ -84,14 +91,41 @@ const DropZone: FunctionComponent = () => {
   }, [selectedFiles]);
 
   const uploadFileInChunks = (file: File) => {
+    console.log(`🚀 Starting chunked upload for file: ${file.name}, Size: ${file.size} bytes`);
+
+    // Dosya boyutu kontrolü
+    if (file.size === 0) {
+      console.error(`❌ File ${file.name} has 0 bytes - cannot upload empty file`);
+      showErrorToast(`File ${file.name} appears to be empty and cannot be uploaded`);
+      return;
+    }
+
+    // Dosya tipini kontrol et
+    console.log(
+      `📋 File details - Name: ${file.name}, Type: ${file.type}, Size: ${file.size} bytes, Last Modified: ${file.lastModified ? new Date(file.lastModified).toISOString() : 'Unknown'}`
+    );
+
     const totalChunks = Math.ceil(file.size / chunkSize);
     const chunkProgressIncrement = 100 / totalChunks;
+    console.log(
+      `📊 Upload plan - Total chunks: ${totalChunks}, Chunk size: ${chunkSize}, Progress increment: ${chunkProgressIncrement}%`
+    );
     let chunkNumber = 1;
     let start = 0;
     let end = chunkSize;
     const uploadNextChunk = async () => {
       if (chunkNumber <= totalChunks) {
         const chunk = file.slice(start, end);
+        console.log(`📤 Preparing chunk ${chunkNumber}/${totalChunks} for file: ${file.name}`);
+        console.log(`📏 Chunk details - Start: ${start}, End: ${end}, Actual chunk size: ${chunk.size} bytes`);
+
+        // Chunk boyutu kontrolü
+        if (chunk.size === 0) {
+          console.error(`❌ Chunk ${chunkNumber}/${totalChunks} has 0 bytes for file: ${file.name}`);
+          showErrorToast(`Empty chunk detected for file ${file.name}`);
+          return;
+        }
+
         const formData = new FormData();
         formData.append('file', chunk);
         formData.append('chunkNumber', chunkNumber.toString());
@@ -114,11 +148,22 @@ const DropZone: FunctionComponent = () => {
           })
         );
         try {
+          console.log(
+            `📤 Uploading chunk ${chunkNumber}/${totalChunks} for file: ${file.name}, chunk size: ${chunk.size} bytes`
+          );
           const apiResponse = await uploadAPI(chunk, model, chunkNumber, totalChunks, file.name);
+          console.log(
+            `📥 Upload API response for chunk ${chunkNumber}/${totalChunks}:`,
+            JSON.stringify(apiResponse, null, 2)
+          );
+
           if (apiResponse?.status === 'Failed') {
+            console.error(`❌ Upload failed for chunk ${chunkNumber}/${totalChunks}:`, apiResponse);
             throw new Error(`message:${apiResponse.data.message},fileName:${apiResponse.data.file_name}`);
           } else {
+            console.log(`✅ Chunk ${chunkNumber}/${totalChunks} uploaded successfully for ${file.name}`);
             if (apiResponse.data) {
+              console.log(`📊 API response data received:`, apiResponse.data);
               setFilesData((prevfiles) =>
                 prevfiles.map((curfile) => {
                   if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
@@ -130,6 +175,8 @@ const DropZone: FunctionComponent = () => {
                   return curfile;
                 })
               );
+            } else {
+              console.warn(`⚠️ No data in API response for chunk ${chunkNumber}/${totalChunks}`);
             }
             setFilesData((prevfiles) =>
               prevfiles.map((curfile) => {
@@ -170,9 +217,14 @@ const DropZone: FunctionComponent = () => {
           );
         }
       } else {
+        console.log(
+          `🎉 All ${totalChunks} chunks uploaded successfully for ${file.name}. Total file size: ${file.size} bytes`
+        );
+        console.log(`📝 Setting file status to "New" for: ${file.name}`);
         setFilesData((prevfiles) =>
           prevfiles.map((curfile) => {
             if (normalizeFileName(curfile.name) === normalizeFileName(file.name)) {
+              console.log(`✅ File status updated to "New" for: ${curfile.name}`);
               return {
                 ...curfile,
                 status: 'New',
@@ -184,6 +236,7 @@ const DropZone: FunctionComponent = () => {
           })
         );
         setIsLoading(false);
+        console.log(`🔔 Showing success toast for: ${file.name}`);
         showSuccessToast(`${file.name} uploaded successfully`);
       }
     };

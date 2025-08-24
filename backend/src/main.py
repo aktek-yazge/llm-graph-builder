@@ -382,10 +382,17 @@ async def extract_graph_from_file_local_file(
                 PROJECT_ID, BUCKET_UPLOAD, folder_name, fileName
             )
         else:
-            file_name, pages, file_extension = get_documents_from_file_by_path(
-                merged_file_path, fileName
-            )
-            logging.info(f"Loaded {len(pages) if pages else 0} pages for file: {fileName}")
+            try:
+                file_name, pages, file_extension = get_documents_from_file_by_path(
+                    merged_file_path, fileName
+                )
+                logging.info(f"Loaded {len(pages) if pages else 0} pages for file: {fileName}")
+            except (FileNotFoundError, Exception) as e:
+                if "does not exist" in str(e):
+                    logging.warning(f"File {fileName} not found during processing - may have been deleted by another operation")
+                    raise LLMGraphBuilderException(f"File {fileName} is no longer available for processing")
+                else:
+                    raise e
         
         if pages == None or len(pages) == 0:
             logging.error(f"No pages found for file: {file_name}. File may be corrupted, empty, or unsupported format.")
@@ -1412,22 +1419,59 @@ def connection_check_and_get_vector_dimensions(graph, database):
 
 
 def merge_chunks_local(file_name, total_chunks, chunk_dir, merged_dir):
+    logging.info(f"🔗 Starting merge process for: {file_name}, Total chunks: {total_chunks}")
 
     if not os.path.exists(merged_dir):
         os.mkdir(merged_dir)
-    logging.info(f"Merged File Path: {merged_dir}")
+        logging.info(f"📂 Created merged directory: {merged_dir}")
+    
+    logging.info(f"📁 Merged File Directory: {merged_dir}")
     merged_file_path = os.path.join(merged_dir, file_name)
-    with open(merged_file_path, "wb") as write_stream:
-        for i in range(1, total_chunks + 1):
-            chunk_file_path = os.path.join(chunk_dir, f"{file_name}_part_{i}")
-            logging.info(f"Chunk File Path While Merging Parts:{chunk_file_path}")
-            with open(chunk_file_path, "rb") as chunk_file:
-                shutil.copyfileobj(chunk_file, write_stream)
-            os.unlink(chunk_file_path)  # Delete the individual chunk file after merging
-    logging.info("Chunks merged successfully and return file size")
+    logging.info(f"📄 Target merged file path: {merged_file_path}")
+    
+    try:
+        with open(merged_file_path, "wb") as write_stream:
+            total_bytes_written = 0
+            for i in range(1, total_chunks + 1):
+                chunk_file_path = os.path.join(chunk_dir, f"{file_name}_part_{i}")
+                logging.info(f"🔍 Processing chunk {i}: {chunk_file_path}")
+                
+                if not os.path.exists(chunk_file_path):
+                    logging.error(f"❌ Chunk file missing: {chunk_file_path}")
+                    raise FileNotFoundError(f"Chunk file {chunk_file_path} not found")
+                
+                chunk_size = os.path.getsize(chunk_file_path)
+                logging.info(f"📦 Chunk {i} size: {chunk_size} bytes")
+                
+                with open(chunk_file_path, "rb") as chunk_file:
+                    bytes_copied = shutil.copyfileobj(chunk_file, write_stream)
+                    total_bytes_written += chunk_size
+                    logging.info(f"✅ Chunk {i} merged successfully")
+                
+                os.unlink(chunk_file_path)  # Delete the individual chunk file after merging
+                logging.info(f"🗑️ Chunk file deleted: {chunk_file_path}")
+        
+        logging.info(f"✅ All chunks merged successfully. Total bytes written: {total_bytes_written}")
+        
+        if not os.path.exists(merged_file_path):
+            logging.error(f"❌ Merged file was not created: {merged_file_path}")
+            raise FileNotFoundError(f"Merged file was not created: {merged_file_path}")
 
-    file_size = os.path.getsize(merged_file_path)
-    return file_size
+        file_size = os.path.getsize(merged_file_path)
+        logging.info(f"📏 Final merged file size: {file_size} bytes")
+        
+        if file_size != total_bytes_written:
+            logging.warning(f"⚠️ Size mismatch - Expected: {total_bytes_written}, Actual: {file_size}")
+        
+        return file_size
+        
+    except Exception as e:
+        logging.error(f"❌ Error during merge process: {str(e)}")
+        # Cleanup any partial file
+        if os.path.exists(merged_file_path):
+            os.unlink(merged_file_path)
+            logging.info(f"🗑️ Cleaned up partial merged file: {merged_file_path}")
+        raise e
 
 
 def upload_file(
@@ -1441,26 +1485,47 @@ def upload_file(
     chunk_dir,
     merged_dir,
 ):
+    logging.info(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
+    
+    # Chunk boyutu kontrol et
+    if hasattr(chunk, 'size'):
+        chunk_size = chunk.size
+        logging.info(f"📏 Chunk size: {chunk_size} bytes")
+        if chunk_size == 0:
+            logging.warning(f"⚠️ Received empty chunk for {originalname}, chunk {chunk_number}/{total_chunks}")
+    else:
+        logging.info(f"📏 Chunk size information not available for {originalname}")
 
     gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
-    logging.info(f"gcs file cache: {gcs_file_cache}")
+    logging.info(f"☁️ GCS file cache: {gcs_file_cache}")
 
     if gcs_file_cache == "True":
         folder_name = create_gcs_bucket_folder_name_hashed(uri, originalname)
+        logging.info(f"📁 Uploading chunk to GCS: {folder_name}")
         upload_file_to_gcs(
             chunk, chunk_number, originalname, BUCKET_UPLOAD, folder_name
         )
     else:
         if not os.path.exists(chunk_dir):
             os.mkdir(chunk_dir)
+            logging.info(f"📂 Created chunk directory: {chunk_dir}")
 
         chunk_file_path = os.path.join(chunk_dir, f"{originalname}_part_{chunk_number}")
-        logging.info(f"Chunk File Path: {chunk_file_path}")
+        logging.info(f"💾 Saving chunk to: {chunk_file_path}")
 
         with open(chunk_file_path, "wb") as chunk_file:
-            chunk_file.write(chunk.file.read())
+            chunk_content = chunk.file.read()
+            content_size = len(chunk_content)
+            chunk_file.write(chunk_content)
+            logging.info(f"✅ Chunk {chunk_number} saved successfully, bytes written: {content_size}")
+            
+            if content_size == 0:
+                logging.warning(f"⚠️ Written chunk is empty for {originalname}, chunk {chunk_number}/{total_chunks}")
+            else:
+                logging.info(f"📊 Chunk content summary - First 100 chars: {chunk_content[:100] if content_size > 0 else 'EMPTY'}")
 
     if int(chunk_number) == int(total_chunks):
+        logging.info(f"🔗 Last chunk received, starting file merge process for: {originalname}")
         # If this is the last chunk, merge all chunks into a single file
         if gcs_file_cache == "True":
             file_size = merge_file_gcs(
@@ -1471,7 +1536,7 @@ def upload_file(
                 originalname, int(total_chunks), chunk_dir, merged_dir
             )
 
-        logging.info("File merged successfully")
+        logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
         file_extension = originalname.split(".")[-1]
         obj_source_node = sourceNode()
         obj_source_node.file_name = (
@@ -1491,12 +1556,24 @@ def upload_file(
         graphDb_data_Access = graphDBdataAccess(graph)
 
         graphDb_data_Access.create_source_node(obj_source_node)
+        logging.info(f"📋 Source node created in database for: {originalname}")
+        
+        # Dosyanın gerçekten merged_dir'de oluşturulup oluşturulmadığını kontrol et
+        if not gcs_file_cache or gcs_file_cache != "True":
+            merged_file_path = os.path.join(merged_dir, originalname)
+            if os.path.exists(merged_file_path):
+                actual_file_size = os.path.getsize(merged_file_path)
+                logging.info(f"✅ File verification successful - File exists at: {merged_file_path}, Size: {actual_file_size} bytes")
+            else:
+                logging.error(f"❌ File verification failed - File NOT found at: {merged_file_path}")
+        
         return {
             "file_size": file_size,
             "file_name": originalname,
             "file_extension": file_extension,
             "message": f"Chunk {chunk_number}/{total_chunks} saved",
         }
+    logging.info(f"✅ Chunk {chunk_number}/{total_chunks} processed successfully")
     return f"Chunk {chunk_number}/{total_chunks} saved"
 
 
@@ -1639,7 +1716,11 @@ def failed_file_process(uri, file_name, merged_file_path):
         time.sleep(5)
         delete_file_from_gcs(BUCKET_UPLOAD, folder_name, file_name)
     else:
-        logging.info(
-            f"Deleted File Path: {merged_file_path} and Deleted File Name : {file_name}"
-        )
-        delete_uploaded_local_file(merged_file_path, file_name)
+        # Dosya zaten silinmişse tekrar silme işlemi yapmaya gerek yok
+        if os.path.exists(merged_file_path):
+            logging.info(
+                f"Deleted File Path: {merged_file_path} and Deleted File Name : {file_name}"
+            )
+            delete_uploaded_local_file(merged_file_path, file_name)
+        else:
+            logging.info(f"File {file_name} already deleted, skipping cleanup")

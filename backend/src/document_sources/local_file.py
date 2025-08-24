@@ -289,8 +289,8 @@ def load_document_content(file_path):
 def get_documents_from_file_by_path(file_path, file_name):
     file_path = Path(file_path)
     if not file_path.exists():
-        logging.info(f"File {file_name} does not exist")
-        raise Exception(f"File {file_name} does not exist")
+        logging.warning(f"File {file_name} does not exist at path: {file_path}")
+        raise FileNotFoundError(f"File {file_name} does not exist")
     
     # File name'i normalize et
     file_name = normalize_file_name(file_name)

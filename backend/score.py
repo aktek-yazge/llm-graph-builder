@@ -529,6 +529,12 @@ async def extract_knowledge_graph_from_file(
         if source_type == 'local file':
             file_name = sanitize_filename(file_name)
             merged_file_path = validate_file_path(MERGED_DIR, file_name)
+            
+            # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
+            if not os.path.exists(merged_file_path):
+                logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
+                raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
+            
             uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
         elif source_type == 's3 bucket' and source_url:
@@ -1822,11 +1828,18 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
                                         password=Form(None), database=Form(None),email=Form(None)):
     try:
         start = time.time()
+        logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)
         result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR)
+        
         end = time.time()
         elapsed_time = end - start
+        
+        logging.info(f"✅ Upload processing completed in {elapsed_time:.2f}s - Chunk: {chunkNumber}/{totalChunks}")
+        
         if int(chunkNumber) == int(totalChunks):
+            logging.info(f"🎉 Final chunk processed for {originalname} - Upload complete!")
             json_obj = {'api_name':'upload','db_url':uri,'userName':userName, 'database':database, 'chunkNumber':chunkNumber,'totalChunks':totalChunks,
                                 'original_file_name':originalname,'model':model, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
             logger.log_struct(json_obj, "INFO")
@@ -1837,6 +1850,8 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
     except Exception as e:
         message="Unable to upload file in chunks"
         error_message = str(e)
+        logging.error(f"❌ Upload failed for {originalname}, chunk {chunkNumber}/{totalChunks}: {error_message}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)   
         graphDb_data_Access = graphDBdataAccess(graph)
         graphDb_data_Access.update_exception_db(originalname,error_message)
