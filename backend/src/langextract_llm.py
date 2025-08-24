@@ -5,8 +5,10 @@ import logging
 import time
 from typing import List, Dict, Any, Tuple
 from langchain.docstore.document import Document
+from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 from langextract_graph_integration import LangExtractGraphExtractor
+from src.entity_resolver_simple import SimpleEntityResolver
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -132,12 +134,13 @@ async def get_graph_from_langextract(
             total_entities += len(entities)
             total_relationships += len(relationships)
             
-            # GraphDocument formatına çevir (mevcut sisteme uyumlu)
+            # GraphDocument formatına çevir (mevcut sisteme uyumlu) - Entity Resolution ile
             graph_doc = convert_langextract_to_graph_document(
                 entities=entities,
                 relationships=relationships,
                 chunk_ids=chunk_data["chunk_ids"],
-                source_text=chunk_data["text"][:200] + "..." if len(chunk_data["text"]) > 200 else chunk_data["text"]
+                source_text=chunk_data["text"][:200] + "..." if len(chunk_data["text"]) > 200 else chunk_data["text"],
+                graph=graph  # Entity resolution için graph objesi geç
             )
             
             all_graph_documents.append(graph_doc)
@@ -160,65 +163,122 @@ async def get_graph_from_langextract(
         raise LLMGraphBuilderException(f"Error in getting graph from LangExtract: {e}")
 
 
-def convert_langextract_to_graph_document(entities, relationships, chunk_ids, source_text):
+def convert_langextract_to_graph_document(entities, relationships, chunk_ids, source_text, graph=None):
     """
     LangExtract çıktısını LangChain GraphDocument formatına çevir
+    Entity Resolution ile duplicate entity'leri önle
     """
     try:
         # Import GraphDocument ve Node/Relationship classları
         from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
         
-        # Node'ları oluştur
+        # Entity Resolution için SimpleEntityResolver kullan
+        entity_id_mapping = {}
+        
+        if graph:
+            resolver = SimpleEntityResolver(similarity_threshold=0.6)  # Düşük threshold
+            entity_list = [
+                {
+                    'id': entity.id,
+                    'name': getattr(entity, 'name', entity.id),
+                    'entity_type': entity.label
+                }
+                for entity in entities
+            ]
+            
+            final_entities, entity_id_mapping = resolver.resolve_entities(graph, entity_list)
+            logging.info(f"✅ Entity Resolution sonucu:")
+            logging.info(f"  - Yeni node sayısı: {len(final_entities)}")
+            logging.info(f"  - Mevcut entity kullanımı: {len(entity_list) - len(final_entities)}")
+        else:
+            # Graph yok ise, direkt mapping yap
+            for entity in entities:
+                entity_id_mapping[entity.id] = entity.id
+        
+        # Node'ları oluştur (sadece yeni entity'ler için)
         nodes = []
         for entity in entities:
+            final_id = entity_id_mapping.get(entity.id, entity.id)
+            
+            # Eğer entity yeniden kullanılıyorsa (mapping farklı ID'ye işaret ediyorsa), node yaratma
+            if final_id != entity.id:
+                logging.debug(f"🔗 Entity yeniden kullanılıyor: '{entity.id}' -> '{final_id}'")
+                continue
+                
+            # Yeni node oluştur - Hybrid approach: Type-specific + Generic labels
+            node_properties = {
+                **entity.properties,  # Original properties
+                "entity_type": entity.label,  # For generic queries
+                "name": getattr(entity, 'name', entity.id),  # Ensure name property
+                "extracted_by": "langextract"  # Extraction method
+            }
+            
             node = Node(
                 id=entity.id,
-                type=entity.label, 
-                properties=entity.properties
+                type=f"{entity.label}:__Entity__",  # Hybrid labels: Person:__Entity__
+                properties=node_properties
             )
             nodes.append(node)
         
-        # Entity ID mapping oluştur (normalize edilmiş ID'ler için)
-        entity_id_mapping = {}
+        # Relationship'ler için reverse mapping oluştur (normalized -> original)
+        reverse_mapping = {}
         for entity in entities:
-            # Normalize edilmiş versiyonu da mapping'e ekle
             normalized_id = entity.id.lower().replace(' ', '_').replace('ç', 'c').replace('ö', 'o').replace('ş', 's').replace('ı', 'i').replace('ü', 'u').replace('ğ', 'g')
-            entity_id_mapping[normalized_id] = entity.id
-            entity_id_mapping[entity.id] = entity.id  # Original ID de mapping'de olsun
+            reverse_mapping[normalized_id] = entity.id
             
-            # Policy entities için "policy_" prefix'i ile de mapping ekle
+            # Policy entities için "policy_" prefix'i ile de reverse mapping ekle
             if entity.label.lower() == 'policy':
                 policy_prefixed_id = f"policy_{normalized_id}"
-                entity_id_mapping[policy_prefixed_id] = entity.id
+                reverse_mapping[policy_prefixed_id] = entity.id
         
-        logging.info(f"Entity ID mapping: {entity_id_mapping}")
+        logging.info(f"Entity ID mapping (sample): {dict(list(entity_id_mapping.items())[:5])}")
         
         # Relationship'leri oluştur
         rels = []
         for rel in relationships:
-            # Source ve target ID'lerini mapping'den bul
-            actual_source_id = entity_id_mapping.get(rel.source_id, rel.source_id)
-            actual_target_id = entity_id_mapping.get(rel.target_id, rel.target_id)
+            # Önce normalized ID'leri gerçek isimlere çevir
+            original_source_id = reverse_mapping.get(rel.source_id, rel.source_id)
+            original_target_id = reverse_mapping.get(rel.target_id, rel.target_id)
+            
+            # Sonra gerçek isimlerden actual ID'leri bul
+            actual_source_id = entity_id_mapping.get(original_source_id, original_source_id)
+            actual_target_id = entity_id_mapping.get(original_target_id, original_target_id)
+            
+            logging.info(f"🔗 Relationship mapping: {rel.source_id} -> {original_source_id} -> {actual_source_id}, {rel.target_id} -> {original_target_id} -> {actual_target_id}")
             
             # Source ve target node'ları bul
             source_node = next((n for n in nodes if n.id == actual_source_id), None)
             target_node = next((n for n in nodes if n.id == actual_target_id), None)
             
             if source_node and target_node:
+                # Hybrid relationship approach: HAS_RELATION with semantic properties
+                relationship_properties = {
+                    **rel.properties,  # Original properties
+                    "semantic_type": rel.type,  # Original relationship type
+                    "relation_type": rel.type.lower(),  # Normalized for LLM discovery
+                    "source_entity_type": source_node.type,  # For cross-domain queries
+                    "target_entity_type": target_node.type,  # For cross-domain queries
+                    "extracted_by": "langextract"  # Extraction method
+                }
+                
                 relationship = Relationship(
                     source=source_node,
                     target=target_node,
-                    type=rel.type,
-                    properties=rel.properties
+                    type="HAS_RELATION",
+                    properties=relationship_properties
                 )
                 rels.append(relationship)
+                logging.info(f"✅ Relationship oluşturuldu: {source_node.id} -[HAS_RELATION {{semantic_type: '{rel.type}'}}]-> {target_node.id}")
             else:
-                logging.warning(f"Relationship için node bulunamadı: {rel} (source_id={rel.source_id}, target_id={rel.target_id}, mapped_source={actual_source_id}, mapped_target={actual_target_id})")
+                logging.warning(f"Relationship için node bulunamadı: GraphRelationship(source_id='{rel.source_id}', target_id='{rel.target_id}', type='{rel.type}', properties={rel.properties}) (original: {original_source_id}->{original_target_id}, mapped: {actual_source_id}->{actual_target_id})")
         
         # Document oluştur
         document = Document(
             page_content=source_text,
-            metadata={"chunk_ids": chunk_ids}
+            metadata={
+                "chunk_ids": chunk_ids,
+                "entity_mapping": entity_id_mapping
+            }
         )
         
         # GraphDocument oluştur
@@ -228,6 +288,22 @@ def convert_langextract_to_graph_document(entities, relationships, chunk_ids, so
             source=document
         )
         
+        logging.info(f"✅ GraphDocument oluşturuldu: {len(nodes)} node, {len(rels)} relationship")
+        return graph_document
+        
+    except Exception as e:
+        logging.error(f"Error in convert_langextract_to_graph_document: {e}", exc_info=True)
+        raise LLMGraphBuilderException(f"Error converting LangExtract to graph: {e}")
+
+
+# Entity resolution helper fonksiyonları kaldırıldı - SimpleEntityResolver kullanıyoruz
+        graph_document = GraphDocument(
+            nodes=nodes,
+            relationships=rels,
+            source=document
+        )
+        
+        logging.info(f"✅ GraphDocument oluşturuldu: {len(nodes)} node, {len(rels)} relationship")
         return graph_document
         
     except Exception as e:

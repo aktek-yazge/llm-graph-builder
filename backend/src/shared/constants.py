@@ -1224,32 +1224,7 @@ This advanced system cleans complex knowledge graph structures extracted from in
 # types such as dates, numbers, revenues, and other non-entity information are not extracted as separate nodes.
 # Instead, treat these as properties associated with the relevant entities."""
 
-ADDITIONAL_INSTRUCTIONS = """ULTRA KISITLI ÇIKARMA - SADECE BU 4 TİP:
-
-ÇIKAR (TOPLAM 4 ENTITY MAKSIMUM):
-1. Person (Müşteri adı soyadı)
-2. Company (Sigorta şirketi adı)  
-3. PolicyType (Sadece: Kasko, Trafik, Konut, DASK)
-4. PolicyYear (Sadece poliçe başlangıç yılı)
-
-YASAKLI - HİÇBİR ŞEKILDE ÇIKARMA:
-- Coverage, Clause, Exclusion, CoverageLimit 
-- Premium, Discount, Risk, Asset, Building
-- Address, PhoneNumber, Email
-- StartDate, EndDate, PolicyNumber
-- Para miktarları, limitler, istisnalar
-- Yasal maddeler, klauzullar
-
-İLİŞKİ KURALLARI (TOPLAM 2 İLİŞKİ MAKSIMUM):
-- Person -> PolicyType 
-- Company -> PolicyType
-
-SIKI KURALLAR:
-- Chunk başına MAX 3 entity
-- Chunk başına MAX 2 relationship  
-- Detaya girme, temelde kal
-- Fazla node çıkarma
-
+ADDITIONAL_INSTRUCTIONS = """
 """
 
 

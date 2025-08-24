@@ -70,16 +70,20 @@ class LangExtractGraphExtractor:
         
         # Person entity örneği
         person_example = ExampleData(
-            text="John Smith is a 35-year-old software engineer from San Francisco.",
+            text="""Bölge Müdürlüğü:Kurumsal Satış ve Alternatif Dağıtım Kanalları Bölge Müdürlüğü Bölge Tel :
+Sigortalı
+AYÇA DİNÇKÖK
+KEMER BOYU YOLU GÖKTÜRK MERKEZ 42 AP.42 / 16473264 MERKEZ (MERKEZ) EYÜPSULTAN İSTANBUL (UAVT:
+2021823337)""",
             extractions=[
                 Extraction(
                     extraction_class="Person",
-                    extraction_text="John Smith",
+                    extraction_text="Ayça Dinçkök",
                     attributes={
-                        "name": "John Smith",
-                        "age": "35",
-                        "occupation": "software engineer",
-                        "location": "San Francisco"
+                        "name": "Ayça Dinçkök",
+                        "age": None,
+                        "occupation": None,
+                        "location": "Eyüpsultan, İstanbul"
                     }
                 )
             ]
@@ -88,16 +92,20 @@ class LangExtractGraphExtractor:
         
         # Organization entity örneği
         org_example = ExampleData(
-            text="Google Inc. is a technology company founded in 1998 in Mountain View, California.",
+            text="""Sagmer Poliçe No:
+Acente Kodu / Tali No / Ünvanı:302113/ /DİNKAL SİGORTA ACENTELİĞİ ANONİM ŞİRKETİ
+Acente Levha No:T08527-SSV3 Acente Tel:0212 393 01 11
+Bölge Müdürlüğü:Kurumsal Satış ve Alternatif Dağıtım Kanalları Bölge Müdürlüğü 
+            """,
             extractions=[
                 Extraction(
                     extraction_class="Organization",
-                    extraction_text="Google Inc.",
+                    extraction_text="Dinkal Sigorta Acenteliği Anonim Şirketi",
                     attributes={
-                        "name": "Google Inc.",
-                        "industry": "technology",
-                        "founded_year": "1998",
-                        "location": "Mountain View, California"
+                        "name": "Dinkal Sigorta Acenteliği Anonim Şirketi",
+                        "industry": "insurance",
+                        "tel": "0212 393 01 11",
+                        "location": "Eyüpsultan, İstanbul"
                     }
                 )
             ]
@@ -106,15 +114,21 @@ class LangExtractGraphExtractor:
         
         # Policy örneği
         policy_example = ExampleData(
-            text="Policy number ABC123 is a life insurance policy with coverage amount of $500,000.",
+            text="""Tanzim Tarihi :08.02.2021 Tanzim Yeri:İSTANBUL
+Başlama Tarihi:12.02.2021- Bitiş Tarihi:12.02.2022-Süre:365
+Poliçe / Yenileme No:84441967/ Zeyil No:
+Sagmer Poliçe No:
+Acente Kodu / Tali No / Ünvanı:302113/ /DİNKAL SİGORTA ACENTELİĞİ ANONİM ŞİRKETİ
+Acente Levha No:T08527-SSV3 """,
             extractions=[
                 Extraction(
                     extraction_class="Policy",
-                    extraction_text="ABC123",
+                    extraction_text="84441967",
                     attributes={
-                        "policy_number": "ABC123",
-                        "type": "life insurance",
-                        "coverage_amount": "500000"
+                        "policy_number": "84441967",
+                        "location": "İSTANBUL",
+                        "year": "2021",
+                        "agent_code":"302113"
                     }
                 )
             ]
@@ -129,16 +143,19 @@ class LangExtractGraphExtractor:
         
         # Person-Organization relationship
         work_example = ExampleData(
-            text="John Smith works at Google as a software engineer.",
+            text="""Bölge Müdürlüğü:Kurumsal Satış ve Alternatif Dağıtım Kanalları Bölge Müdürlüğü Bölge Tel :
+Sigortalı
+AYÇA DİNÇKÖK
+KEMER BOYU YOLU GÖKTÜRK MERKEZ 42 AP.42 / 16473264 MERKEZ (MERKEZ) EYÜPSULTAN İSTANBUL (UAVT:
+2021823337)""",
             extractions=[
                 Extraction(
                     extraction_class="Relationship",
-                    extraction_text="works at",
+                    extraction_text="Ayça Dinçkök",
                     attributes={
-                        "source": "john_smith",
-                        "target": "google",
-                        "relationship_type": "WORKS_AT",
-                        "role": "software engineer"
+                        "source": "Ayça Dinçkök",
+                        "target": "84441967",
+                        "relationship_type": "HAS_POLICY"
                     }
                 )
             ]
@@ -147,15 +164,18 @@ class LangExtractGraphExtractor:
         
         # Person-Policy relationship
         policy_example = ExampleData(
-            text="John Smith has a life insurance policy ABC123.",
+            text="""Sagmer Poliçe No:
+Acente Kodu / Tali No / Ünvanı:302113/ /DİNKAL SİGORTA ACENTELİĞİ ANONİM ŞİRKETİ
+Acente Levha No:T08527-SSV3 Acente Tel:0212 393 01 11
+Bölge Müdürlüğü:Kurumsal Satış ve Alternatif Dağıtım Kanalları Bölge Müdürlüğü """,
             extractions=[
                 Extraction(
                     extraction_class="Relationship",
-                    extraction_text="has",
+                    extraction_text="DİNKAL SİGORTA ACENTELİĞİ ANONİM ŞİRKETİ",
                     attributes={
-                        "source": "john_smith",
-                        "target": "policy_abc123",
-                        "relationship_type": "HAS_POLICY"
+                        "source": "84441967",
+                        "target": "DİNKAL SİGORTA ACENTELİĞİ ANONİM ŞİRKETİ",
+                        "relationship_type": "HAS_ORG"
                     }
                 )
             ]
