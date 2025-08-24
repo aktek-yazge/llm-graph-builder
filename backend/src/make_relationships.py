@@ -81,7 +81,7 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     """       
     execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
     
-def create_relation_between_chunks(graph, file_name, chunks: List[Document])->list:
+def create_relation_between_chunks(graph, file_name, chunks: List[Document], page_images: List[str] = None)->list:
     logging.info("creating FIRST_CHUNK and NEXT_CHUNK relationships between chunks")
     
     # File name'i normalize et
@@ -126,6 +126,25 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         
         if 'page_number' in chunk.metadata:
             chunk_data['page_number'] = chunk.metadata['page_number']
+            
+            # Page link'i belirle (eğer page_images varsa)
+            page_link = None
+            if page_images and isinstance(page_images, list):
+                page_number = chunk.metadata['page_number']
+                # Page number'a göre uygun image dosya adını bul
+                # page_images listesinde formatın şöyle olduğunu varsayıyoruz: 
+                # "doc_name_page_001.png"
+                for img_filename in page_images:
+                    # Dosya adından page number'ı extract et
+                    import re
+                    match = re.search(r'_page_(\d+)\.png$', img_filename)
+                    if match:
+                        img_page_num = int(match.group(1))
+                        if img_page_num == page_number:
+                            page_link = img_filename  # Sadece dosya adı
+                            break
+            
+            chunk_data['page_link'] = page_link
          
         if 'start_timestamp' in chunk.metadata and 'end_timestamp' in chunk.metadata:
             chunk_data['start_time'] = chunk.metadata['start_timestamp']
@@ -157,7 +176,8 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document])->li
         WITH data, c
         SET c.page_number = CASE WHEN data.page_number IS NOT NULL THEN data.page_number END,
             c.start_time = CASE WHEN data.start_time IS NOT NULL THEN data.start_time END,
-            c.end_time = CASE WHEN data.end_time IS NOT NULL THEN data.end_time END
+            c.end_time = CASE WHEN data.end_time IS NOT NULL THEN data.end_time END,
+            c.page_link = CASE WHEN data.page_link IS NOT NULL THEN data.page_link END
         WITH data, c
         MATCH (d:Document {fileName: data.f_name})
         MERGE (c)-[:PART_OF]->(d)
