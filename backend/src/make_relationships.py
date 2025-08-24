@@ -564,3 +564,125 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
     logging.info(f"Total document connections created: {total_connections}")
     
     return results
+
+
+def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
+    """
+    Upload aşamasında chunk node'ları oluştur (embedding'siz, sadece temel bilgiler)
+    
+    Args:
+        graph: Neo4j graph connection
+        chunks: List of langchain Document objects
+        file_name: İşlenen dosya adı
+        page_images: Sayfa resim dosyalarının listesi (dosya adları)
+    
+    Returns:
+        List of created chunk IDs
+    """
+    logging.info(f"🔄 Creating {len(chunks)} chunk nodes for upload (without embeddings)")
+    
+    batch_data = []
+    relationships = []
+    created_chunk_ids = []
+    previous_chunk_id = None
+    firstChunk = True
+    
+    for i, chunk in enumerate(chunks):
+        # Chunk ID oluştur
+        current_chunk_id = f"{file_name}_chunk_{i}"
+        created_chunk_ids.append(current_chunk_id)
+        
+        # Chunk verilerini hazırla
+        chunk_data = {
+            "id": current_chunk_id,
+            "pg_content": chunk.page_content,
+            "position": i,
+            "length": len(chunk.page_content),
+            "f_name": file_name,
+            "previous_id": previous_chunk_id,
+            "content_offset": 0  # Upload aşamasında offset hesaplanmaz
+        }
+        
+        # Page number ve page_link ekle
+        if 'page_number' in chunk.metadata:
+            chunk_data['page_number'] = chunk.metadata['page_number']
+            
+            # Page link'i belirle (eğer page_images varsa)
+            page_link = None
+            if page_images and isinstance(page_images, list):
+                page_number = chunk.metadata['page_number']
+                # Page number'a göre uygun image dosya adını bul
+                for img_filename in page_images:
+                    # Dosya adından page number'ı extract et
+                    import re
+                    match = re.search(r'_page_(\d+)\.png$', img_filename)
+                    if match:
+                        img_page_num = int(match.group(1))
+                        if img_page_num == page_number:
+                            page_link = img_filename  # Sadece dosya adı
+                            break
+            
+            chunk_data['page_link'] = page_link
+         
+        # Timestamp bilgileri (video dosyaları için)
+        if 'start_timestamp' in chunk.metadata and 'end_timestamp' in chunk.metadata:
+            chunk_data['start_time'] = chunk.metadata['start_timestamp']
+            chunk_data['end_time'] = chunk.metadata['end_timestamp'] 
+               
+        batch_data.append(chunk_data)
+        
+        # Chunk relationship'leri hazırla
+        if firstChunk:
+            relationships.append({"type": "FIRST_CHUNK", "chunk_id": current_chunk_id})
+            firstChunk = False
+        else:
+            relationships.append({
+                "type": "NEXT_CHUNK",
+                "previous_chunk_id": previous_chunk_id,
+                "current_chunk_id": current_chunk_id
+            })
+        
+        previous_chunk_id = current_chunk_id
+          
+    # Chunk node'larını ve PART_OF ilişkilerini oluştur
+    query_to_create_chunk_and_PART_OF_relation = """
+        UNWIND $batch_data AS data
+        MERGE (c:Chunk {id: data.id})
+        SET c.text = data.pg_content, 
+            c.chunkId = data.id,
+            c.position = data.position, 
+            c.length = data.length, 
+            c.fileName = data.f_name, 
+            c.content_offset = data.content_offset
+        WITH data, c
+        SET c.page_number = CASE WHEN data.page_number IS NOT NULL THEN data.page_number END,
+            c.start_time = CASE WHEN data.start_time IS NOT NULL THEN data.start_time END,
+            c.end_time = CASE WHEN data.end_time IS NOT NULL THEN data.end_time END,
+            c.page_link = CASE WHEN data.page_link IS NOT NULL THEN data.page_link END
+        WITH data, c
+        MATCH (d:Document {fileName: data.f_name})
+        MERGE (c)-[:PART_OF]->(d)
+    """
+    execute_graph_query(graph, query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
+    
+    # FIRST_CHUNK ve NEXT_CHUNK ilişkilerini oluştur
+    query_to_create_FIRST_relation = """ 
+        UNWIND $relationships AS relationship
+        MATCH (d:Document {fileName: $f_name})
+        MATCH (c:Chunk {id: relationship.chunk_id})
+        WHERE relationship.type = 'FIRST_CHUNK'
+        MERGE (d)-[:FIRST_CHUNK]->(c)
+    """
+    execute_graph_query(graph, query_to_create_FIRST_relation, params={"relationships": relationships, "f_name": file_name})
+    
+    query_to_create_NEXT_relation = """
+        UNWIND $relationships AS relationship
+        MATCH (c1:Chunk {id: relationship.previous_chunk_id})
+        MATCH (c2:Chunk {id: relationship.current_chunk_id})
+        WHERE relationship.type = 'NEXT_CHUNK'
+        MERGE (c1)-[:NEXT_CHUNK]->(c2)
+    """
+    execute_graph_query(graph, query_to_create_NEXT_relation, params={"relationships": relationships})
+    
+    logging.info(f"✅ Created {len(created_chunk_ids)} chunk nodes and relationships for: {file_name}")
+    return created_chunk_ids
