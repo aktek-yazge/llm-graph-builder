@@ -1029,20 +1029,20 @@ async def processing_source(
                 )
 
             # Otomatik cleanup ve post-processing (eğer extract başarılı ise)
-            if job_status == "Completed":
-                try:
-                    # 1. Policy Node Cleanup - Orphan Policy node'larını temizle
-                    logging.info(f"Policy node cleanup başlıyor: {file_name}")
-                    from src.policy_cleanup import cleanup_policy_nodes_to_document
+            # if job_status == "Completed":
+            #     try:
+            #         # 1. Policy Node Cleanup - Orphan Policy node'larını temizle
+            #         logging.info(f"Policy node cleanup başlıyor: {file_name}")
+            #         from src.policy_cleanup import cleanup_policy_nodes_to_document
                     
-                    cleanup_result = cleanup_policy_nodes_to_document(graph, file_name)
-                    if cleanup_result['policy_nodes_found'] > 0:
-                        logging.info(f"Policy cleanup tamamlandı: {cleanup_result['policy_nodes_deleted']} node silindi, {cleanup_result['relationships_moved']} ilişki taşındı")
-                    else:
-                        logging.info(f"Policy cleanup: Temizlenecek Policy node bulunamadı")
+            #         cleanup_result = cleanup_policy_nodes_to_document(graph, file_name)
+            #         if cleanup_result['policy_nodes_found'] > 0:
+            #             logging.info(f"Policy cleanup tamamlandı: {cleanup_result['policy_nodes_deleted']} node silindi, {cleanup_result['relationships_moved']} ilişki taşındı")
+            #         else:
+            #             logging.info(f"Policy cleanup: Temizlenecek Policy node bulunamadı")
                         
-                except Exception as cleanup_error:
-                    logging.error(f"Policy cleanup hatası: {cleanup_error}")
+            #     except Exception as cleanup_error:
+            #         logging.error(f"Policy cleanup hatası: {cleanup_error}")
                 
                 # 2. Cross-chunk similarity relationships
                 # try:
