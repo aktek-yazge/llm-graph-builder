@@ -530,10 +530,48 @@ async def extract_knowledge_graph_from_file(
             file_name = sanitize_filename(file_name)
             merged_file_path = validate_file_path(MERGED_DIR, file_name)
             
+            # Debug loglama: Dosya yolu ve varlık kontrolü
+            logging.info(f"🔍 DEBUG - Original file_name: {file_name}")
+            logging.info(f"🔍 DEBUG - Sanitized file_name: {file_name}")
+            logging.info(f"🔍 DEBUG - MERGED_DIR: {MERGED_DIR}")
+            logging.info(f"🔍 DEBUG - Constructed merged_file_path: {merged_file_path}")
+            logging.info(f"🔍 DEBUG - File exists check: {os.path.exists(merged_file_path)}")
+            
+            # Merged files klasöründeki tüm dosyaları listele
+            if os.path.exists(MERGED_DIR):
+                files_in_dir = os.listdir(MERGED_DIR)
+                logging.info(f"🔍 DEBUG - Files in {MERGED_DIR}: {files_in_dir}")
+                
+                # Dosya adı karşılaştırması
+                for existing_file in files_in_dir:
+                    if existing_file == file_name:
+                        logging.info(f"✅ DEBUG - Exact match found: {existing_file}")
+                    else:
+                        logging.info(f"❌ DEBUG - No match: '{existing_file}' != '{file_name}'")
+                        logging.info(f"🔍 DEBUG - Bytes comparison: {existing_file.encode('utf-8')} vs {file_name.encode('utf-8')}")
+            
             # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
             if not os.path.exists(merged_file_path):
-                logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
-                raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
+                # Unicode normalizasyon farklılıkları için alternatif dosya adlarını dene
+                logging.warning(f"File not found with NFC normalization, trying NFD normalization")
+                
+                import unicodedata
+                # NFD normalizasyonu dene (Decomposed)
+                file_name_nfd = unicodedata.normalize('NFD', file_name)
+                merged_file_path_nfd = validate_file_path(MERGED_DIR, file_name_nfd)
+                
+                logging.info(f"🔍 DEBUG - Trying NFD normalized file_name: {file_name_nfd}")
+                logging.info(f"🔍 DEBUG - NFD file path: {merged_file_path_nfd}")
+                logging.info(f"🔍 DEBUG - NFD file exists: {os.path.exists(merged_file_path_nfd)}")
+                
+                if os.path.exists(merged_file_path_nfd):
+                    logging.info(f"✅ Found file with NFD normalization: {merged_file_path_nfd}")
+                    merged_file_path = merged_file_path_nfd
+                    file_name = file_name_nfd
+                else:
+                    # Her iki normalizasyon da başarısız, dosya gerçekten yok
+                    logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
+                    raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
             
             uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 

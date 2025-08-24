@@ -20,15 +20,42 @@ const DropZone: FunctionComponent = () => {
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
     console.log(`📁 Files dropped: ${f.length} files`);
+
+    // Dosya validasyonu
+    const validFiles: File[] = [];
     f.forEach((file, index) => {
+      // Dosya undefined kontrolü
+      if (!file || !file.name) {
+        console.error(`❌ File ${index + 1} is invalid or missing name - skipping`);
+        return;
+      }
+
       console.log(
-        `📄 File ${index + 1}: ${file.name}, Size: ${file.size} bytes, Type: ${file.type}, Last Modified: ${file.lastModified ? new Date(file.lastModified).toISOString() : 'Unknown'}`
+        `📄 File ${index + 1}: ${file.name}, Size: ${file.size ?? 'undefined'} bytes, Type: ${file.type}, Last Modified: ${file.lastModified ? new Date(file.lastModified).toISOString() : 'Unknown'}`
       );
+
+      // Dosya boyutu kontrolü
+      if (!file.size || file.size === 0) {
+        console.error(`❌ File ${file.name} is empty (${file.size ?? 'undefined'} bytes) - skipping`);
+        showErrorToast(`File "${file.name}" is empty and cannot be uploaded`);
+      } else if (file.size > 100 * 1024 * 1024) {
+        // 100MB limit
+        console.error(`❌ File ${file.name} is too large (${file.size} bytes) - skipping`);
+        showErrorToast(`File "${file.name}" is too large (max 100MB allowed)`);
+      } else {
+        validFiles.push(file as File);
+        console.log(`✅ File ${file.name} passed validation`);
+      }
     });
 
-    setSelectedFiles(f.map((f) => f as File));
+    if (validFiles.length === 0) {
+      console.warn(`⚠️ No valid files to upload`);
+      return;
+    }
 
-    if (f.length) {
+    setSelectedFiles(validFiles);
+
+    if (validFiles.length) {
       const defaultValues: CustomFileBase = {
         processingTotalTime: 0,
         status: 'None',
@@ -50,16 +77,16 @@ const DropZone: FunctionComponent = () => {
       };
 
       const copiedFilesData: CustomFile[] = [...filesData];
-      for (let index = 0; index < f.length; index++) {
-        const file = f[index];
+      for (let index = 0; index < validFiles.length; index++) {
+        const file = validFiles[index];
         const filedataIndex = copiedFilesData.findIndex((filedataitem) => filedataitem?.name === file?.name);
         if (filedataIndex == -1) {
           copiedFilesData.unshift({
             name: file.name,
             // @ts-ignore
             type: `${file.name.substring(file.name.lastIndexOf('.') + 1, file.name.length).toUpperCase()}`,
-            size: file.size,
-            uploadProgress: file.size && file?.size < chunkSize ? 100 : 0,
+            size: file.size || 0,
+            uploadProgress: file.size && file.size < chunkSize ? 100 : 0,
             id: uuidv4(),
             ...defaultValues,
           });
