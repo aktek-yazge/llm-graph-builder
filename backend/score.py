@@ -1866,6 +1866,32 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
                                         password=Form(None), database=Form(None),email=Form(None)):
     try:
         start = time.time()
+        
+        # Debug: FastAPI Form field'ından gelen dosya ismini kontrol et
+        logging.info(f"🔍 RAW originalname from FastAPI Form: {repr(originalname)}")
+        logging.info(f"🔍 originalname type: {type(originalname)}")
+        
+        # FastAPI Form field'ları bazen bytes olarak gelebilir, decode etmeye çalış
+        if isinstance(originalname, bytes):
+            try:
+                originalname = originalname.decode('utf-8')
+                logging.info(f"🔄 Decoded bytes to UTF-8: {originalname}")
+            except UnicodeDecodeError as e:
+                logging.warning(f"⚠️ UTF-8 decode failed, trying latin-1: {e}")
+                originalname = originalname.decode('latin-1')
+                logging.info(f"🔄 Decoded bytes to latin-1: {originalname}")
+        
+        # Eğer string ama yanlış encode edilmişse (URL-encoded UTF-8 bytes), düzelt
+        if isinstance(originalname, str) and '\\x' in originalname:
+            try:
+                # '\\xc3\\xa7' gibi escaped bytes'ları gerçek bytes'a çevir
+                import codecs
+                originalname_bytes = codecs.decode(originalname, 'unicode_escape').encode('latin-1')
+                originalname = originalname_bytes.decode('utf-8')
+                logging.info(f"🔄 Fixed escaped UTF-8 bytes: {originalname}")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to fix escaped UTF-8: {e}")
+        
         logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
         
         graph = create_graph_database_connection(uri, userName, password, database)

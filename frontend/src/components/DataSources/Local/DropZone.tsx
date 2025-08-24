@@ -157,7 +157,15 @@ const DropZone: FunctionComponent = () => {
         formData.append('file', chunk);
         formData.append('chunkNumber', chunkNumber.toString());
         formData.append('totalChunks', totalChunks.toString());
+
+        // Dosya ismini UTF-8 olarak encode ettiğimizden emin olalım
+        console.log(`🔤 Original filename: ${file.name}`);
+        console.log(`🔤 Filename bytes: ${new TextEncoder().encode(file.name)}`);
+
+        // FormData otomatik olarak UTF-8 encoding kullanır ama debug için kontrol edelim
         formData.append('originalname', file.name);
+        console.log(`📋 FormData'ya eklenen filename: ${file.name}`);
+
         formData.append('model', model);
         for (const key in userCredentials) {
           formData.append(key, userCredentials[key]);
