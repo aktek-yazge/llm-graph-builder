@@ -383,10 +383,12 @@ async def extract_graph_from_file_local_file(
             )
         else:
             try:
-                file_name, pages, file_extension = get_documents_from_file_by_path(
-                    merged_file_path, fileName
+                file_name, pages, file_extension, generated_images = get_documents_from_file_by_path(
+                    merged_file_path, fileName, generate_images=True, output_dir="output"
                 )
                 logging.info(f"Loaded {len(pages) if pages else 0} pages for file: {fileName}")
+                if generated_images:
+                    logging.info(f"Generated {len(generated_images)} page images for file: {fileName}")
             except (FileNotFoundError, Exception) as e:
                 if "does not exist" in str(e):
                     logging.warning(f"File {fileName} not found during processing - may have been deleted by another operation")

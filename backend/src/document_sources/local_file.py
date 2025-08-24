@@ -290,6 +290,62 @@ def detect_encoding(file_path):
         return result["encoding"] or "utf-8"
 
 
+def generate_page_images_with_pymupdf(file_path, output_dir="output"):
+    """
+    PyMuPDF (fitz) kullanarak PDF dosyasından page image'larını generate eder.
+    
+    Args:
+        file_path: PDF dosyasının yolu
+        output_dir: Çıktı klasörü (varsayılan: "output")
+        
+    Returns:
+        List[str]: Kaydedilen image dosyalarının yolları
+    """
+    try:
+        if fitz is None:
+            logging.warning("PyMuPDF (fitz) is not available for image generation")
+            return []
+            
+        # Output directory'yi oluştur
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        start_time = time.time()
+        logging.info(f"Starting PyMuPDF page image generation for {file_path}")
+        
+        # PDF'i aç
+        doc = fitz.open(str(file_path))
+        doc_filename = Path(file_path).stem
+        saved_images = []
+        
+        # Her sayfayı image olarak kaydet
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            
+            # Page'i image'a çevir (2x scale için matrix kullan)
+            mat = fitz.Matrix(IMAGE_RESOLUTION_SCALE, IMAGE_RESOLUTION_SCALE)
+            pix = page.get_pixmap(matrix=mat)
+            
+            # PNG olarak kaydet
+            page_image_filename = output_path / f"{doc_filename}_page_{page_num + 1:03d}.png"
+            pix.save(str(page_image_filename))
+            pix = None  # Memory cleanup
+            
+            saved_images.append(str(page_image_filename))
+            logging.info(f"Saved PyMuPDF page image: {page_image_filename}")
+        
+        doc.close()
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"PyMuPDF page image generation completed in {elapsed_time:.2f} seconds. Generated {len(saved_images)} images.")
+        
+        return saved_images
+        
+    except Exception as e:
+        logging.error(f"Error generating page images with PyMuPDF for {file_path}: {e}")
+        return []
+
+
 def generate_page_images_from_converter(converter, file_path, output_dir="output"):
     """
     Mevcut DocumentConverter kullanarak page image'larını generate eder.
@@ -513,6 +569,10 @@ def get_documents_from_file_by_path(file_path, file_name, generate_images=False,
                             content = normalize_unicode_text(content)
                             txt = markdown_to_text_with_csv_tables(content, delimiter=",")
                             logging.info(f"✅ Fallback PDF parsing successful for {file_name}")
+                            
+                            # PyMuPDF fallback'inde de image generation yap
+                            if generate_images:
+                                generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
                         else:
                             raise Exception(f"Fallback PDF loader returned no content for {file_name}")
                             
@@ -553,6 +613,10 @@ def get_documents_from_file_by_path(file_path, file_name, generate_images=False,
                                     txt = markdown_to_text_with_csv_tables(content, delimiter=",")
                                     loaded_docs = [Document(page_content=content, metadata={"source": str(file_path)})]
                                     logging.info(f"✅ Basic text extraction successful for {file_name}")
+                                    
+                                    # Basic text extraction'da da image generation yap
+                                    if generate_images:
+                                        generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
                                 else:
                                     raise Exception(f"No extractable text found in {file_name}")
                                     
