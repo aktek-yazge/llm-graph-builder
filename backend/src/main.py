@@ -18,11 +18,12 @@ from datetime import datetime
 import logging
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
-from src.document_sources.local_file import get_documents_from_file_by_path
+from src.document_sources.local_file import get_documents_from_file_by_path, generate_page_images_with_pymupdf
 from src.entities.source_node import sourceNode
 from src.llm import get_graph_from_llm
 from src.document_sources.gcs_bucket import *
 from src.document_sources.s3_bucket import *
+from src.document_sources.s3_upload_utils import *
 from src.document_sources.wikipedia import *
 from src.document_sources.youtube import *
 from src.shared.common_fn import *
@@ -401,6 +402,22 @@ async def extract_graph_from_file_local_file(
             raise LLMGraphBuilderException(
                 f"File content is not available for file : {file_name}"
             )
+        
+        # Document node'undan page_images'ı al
+        page_images = None
+        try:
+            graph = create_graph_database_connection(uri, userName, password, database)
+            graphDb_data_Access = graphDBdataAccess(graph)
+            result = graphDb_data_Access.execute_query(
+                "MATCH (d:Document {fileName: $file_name}) RETURN d.page_images AS page_images",
+                {"file_name": file_name}
+            )
+            if result and len(result) > 0 and result[0].get('page_images'):
+                page_images = result[0]['page_images']
+                logging.info(f"🖼️ Retrieved {len(page_images)} page images from Document node")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not retrieve page_images from Document node: {e}")
+        
         return await processing_source(
             uri,
             userName,
@@ -420,6 +437,8 @@ async def extract_graph_from_file_local_file(
             # Post-processing parametreleri
             enable_post_processing=enable_post_processing,
             post_processing_rules=post_processing_rules,
+            # Page images for chunk links
+            page_images=page_images,
         )
     else:
         return await processing_source(
@@ -766,6 +785,8 @@ async def processing_source(
     # Post-processing parametreleri
     enable_post_processing=False,
     post_processing_rules=None,
+    # Page images for chunk links
+    page_images=None,
 ):
     """
     Extracts a Neo4jGraph from a PDF file based on the model.
@@ -807,7 +828,7 @@ async def processing_source(
     create_chunk_vector_index(graph)
     start_get_chunkId_chunkDoc_list = time.time()
     total_chunks, chunkId_chunkDoc_list = get_chunkId_chunkDoc_list(
-        graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition
+        graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition, page_images
     )
     end_get_chunkId_chunkDoc_list = time.time()
     elapsed_get_chunkId_chunkDoc_list = (
@@ -1278,7 +1299,7 @@ async def processing_chunks(
 
 
 def get_chunkId_chunkDoc_list(
-    graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition
+    graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition, page_images=None
 ):
     if not retry_condition:
         logging.info("Break down file into chunks")
@@ -1312,7 +1333,7 @@ def get_chunkId_chunkDoc_list(
             # fallback: use pages as chunks
             chunks = pages
         # print("chunks: ", chunks)
-        chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks)
+        chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks, page_images)
         return len(chunks), chunkId_chunkDoc_list
 
     else:
@@ -1545,6 +1566,89 @@ def upload_file(
             )
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
+        
+        # PDF sayfa resimlerini extract et ve S3'e upload et
+        merged_file_path = os.path.join(merged_dir, originalname)
+        doc_link = None
+        page_images = []
+        
+        # PDF ise sayfa resimlerini extract et (GCS cache durumunda merged_file_path olmayabilir)
+        file_extension = originalname.split(".")[-1].lower()
+        if file_extension == "pdf" and os.path.exists(merged_file_path):
+                try:
+                    logging.info(f"🖼️ Starting page image extraction for: {originalname}")
+                    
+                    # Output klasör yapısını oluştur
+                    document_dir, pdf_dir, images_dir = create_document_output_structure(
+                        originalname, "output"
+                    )
+                    
+                    # PDF'i pdf klasörüne kopyala
+                    pdf_copy_path = os.path.join(pdf_dir, originalname)
+                    shutil.copy2(merged_file_path, pdf_copy_path)
+                    logging.info(f"📄 PDF copied to: {pdf_copy_path}")
+                    
+                    # Sayfa resimlerini extract et
+                    generated_images = generate_page_images_with_pymupdf(
+                        merged_file_path, images_dir
+                    )
+                    
+                    if generated_images:
+                        logging.info(f"✅ Generated {len(generated_images)} page images")
+                        
+                        # S3'e upload et
+                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                        
+                        if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                            # S3 prefix oluştur (dosya adı tabanlı)
+                            doc_name = Path(originalname).stem
+                            s3_prefix = f"documents/{doc_name}"
+                            
+                            # Tüm dosyaları (PDF + images) upload et
+                            all_files = [pdf_copy_path] + generated_images
+                            uploaded_urls, failed_files = upload_files_to_s3(
+                                all_files,
+                                s3_bucket,
+                                s3_prefix,
+                                aws_access_key_id,
+                                aws_secret_access_key,
+                                delete_local_after_upload=True  # S3 upload sonrası local dosyaları sil
+                            )
+                            
+                            if uploaded_urls:
+                                logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
+                                
+                                # Document link'i bul (PDF dosyası) - sadece dosya adı
+                                for url in uploaded_urls:
+                                    if url.endswith(f"/{originalname}"):
+                                        doc_link = os.path.basename(url)  # Sadece dosya adı
+                                        break
+                                
+                                # Page image link'lerini kaydet - sadece dosya adları
+                                page_images = []
+                                for url in uploaded_urls:
+                                    if url != f"s3://{s3_bucket}/{s3_prefix}/{originalname}":
+                                        page_images.append(os.path.basename(url))  # Sadece dosya adı
+                                
+                                logging.info(f"📄 Document file name: {doc_link}")
+                                logging.info(f"🖼️ Page image file names: {len(page_images)} images")
+                                
+                                # Local output klasörünü temizle
+                                cleanup_local_files(document_dir)
+                            
+                            if failed_files:
+                                logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
+                        else:
+                            logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
+                    else:
+                        logging.warning(f"⚠️ No page images generated for: {originalname}")
+                        
+                except Exception as image_error:
+                    logging.error(f"❌ Page image extraction failed for {originalname}: {image_error}")
+                    # Continue with normal processing even if image extraction fails
+        
         file_extension = originalname.split(".")[-1]
         obj_source_node = sourceNode()
         obj_source_node.file_name = (
@@ -1561,6 +1665,16 @@ def upload_file(
         obj_source_node.entityEntityRelCount = 0
         obj_source_node.communityNodeCount = 0
         obj_source_node.communityRelCount = 0
+        
+        # S3 document link'i ve page images'ı ekle
+        if doc_link:
+            obj_source_node.doc_link = doc_link
+            logging.info(f"📄 Added doc_link to source node: {doc_link}")
+        
+        if page_images:
+            obj_source_node.page_images = page_images
+            logging.info(f"🖼️ Added {len(page_images)} page_images to source node")
+        
         graphDb_data_Access = graphDBdataAccess(graph)
 
         graphDb_data_Access.create_source_node(obj_source_node)
@@ -1568,7 +1682,6 @@ def upload_file(
         
         # Dosyanın gerçekten merged_dir'de oluşturulup oluşturulmadığını kontrol et
         if not gcs_file_cache or gcs_file_cache != "True":
-            merged_file_path = os.path.join(merged_dir, originalname)
             if os.path.exists(merged_file_path):
                 actual_file_size = os.path.getsize(merged_file_path)
                 logging.info(f"✅ File verification successful - File exists at: {merged_file_path}, Size: {actual_file_size} bytes")
@@ -1579,6 +1692,9 @@ def upload_file(
             "file_size": file_size,
             "file_name": originalname,
             "file_extension": file_extension,
+            "doc_link": doc_link,
+            "page_images": page_images,
+            "page_images_count": len(page_images),
             "message": f"Chunk {chunk_number}/{total_chunks} saved",
         }
     logging.info(f"✅ Chunk {chunk_number}/{total_chunks} processed successfully")
