@@ -176,8 +176,15 @@ def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=3, de
 def delete_uploaded_local_file(merged_file_path, file_name):
   file_path = Path(merged_file_path)
   if file_path.exists():
-    file_path.unlink()
-    logging.info(f'file {file_name} deleted successfully')
+    try:
+      file_path.unlink()
+      logging.info(f'file {file_name} deleted successfully')
+    except FileNotFoundError:
+      logging.info(f'file {file_name} was already deleted')
+    except Exception as e:
+      logging.error(f'Error deleting file {file_name}: {e}')
+  else:
+    logging.info(f'file {file_name} does not exist, no deletion needed')
    
 def close_db_connection(graph, api_name):
   if not graph._driver._closed:
