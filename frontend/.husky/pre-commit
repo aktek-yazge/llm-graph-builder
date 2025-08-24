@@ -1,15 +1,17 @@
+#!/bin/sh
 export PATH="$HOME/.nvm/versions/node/v22.17.1/bin:$PATH"
-repo_root=$(git rev-parse --show-toplevel)
-cd "$repo_root"
-
-# Frontend dosyaları varsa frontend linting yap
-if git diff --cached --name-only | grep -q "^frontend/"; then
-  cd frontend && yarn run lint-staged
-fi
 
 # Backend Python dosyaları varsa syntax check yap
 if git diff --cached --name-only | grep -q "\.py$"; then
+  echo "Checking Python syntax..."
   for file in $(git diff --cached --name-only | grep "\.py$"); do
-    python -m py_compile "$file"
+    echo "Checking $file"
+    python -m py_compile "$file" || exit 1
   done
+fi
+
+# Frontend dosyaları varsa frontend linting yap  
+if git diff --cached --name-only | grep -q "^frontend/"; then
+  echo "Running frontend linting..."
+  cd frontend && npx lint-staged
 fi
