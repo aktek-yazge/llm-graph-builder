@@ -17,6 +17,18 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 from markdown import markdown as md_to_html
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+class ListLoader(BaseLoader):
+    """Basit bir document listesi loader'ı"""
+    def __init__(self, docs):
+        self.docs = docs
+    
+    def load(self):
+        return self.docs
 
 
 def _norm(s: str) -> str:
@@ -300,13 +312,79 @@ def get_documents_from_file_by_path(file_path, file_name):
         loader, encoding_flag = load_document_content(file_path)
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
-            loaded_docs = loader.load()
-            content = loaded_docs[0].page_content
+            try:
+                loaded_docs = loader.load()
+                content = loaded_docs[0].page_content
+                
+                # UTF-8 ve Unicode normalization
+                content = normalize_unicode_text(content)
+                
+                txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+            except Exception as pdf_error:
+                if file_extension == ".pdf":
+                    logging.warning(f"Docling PDF parsing failed for {file_name}: {pdf_error}")
+                    logging.info(f"Trying fallback PDF loader (PyMuPDF) for {file_name}")
+                    
+                    # Fallback: PyMuPDF kullan
+                    try:
+                        from langchain_community.document_loaders import PyMuPDFLoader
+                        fallback_loader = PyMuPDFLoader(str(file_path))
+                        loaded_docs = fallback_loader.load()
+                        
+                        if loaded_docs and len(loaded_docs) > 0:
+                            content = loaded_docs[0].page_content
+                            content = normalize_unicode_text(content)
+                            txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                            logging.info(f"✅ Fallback PDF parsing successful for {file_name}")
+                        else:
+                            raise Exception(f"Fallback PDF loader returned no content for {file_name}")
+                            
+                    except Exception as fallback_error:
+                        logging.error(f"❌ PyMuPDF fallback also failed for {file_name}: {fallback_error}")
+                        
+                        # İkinci fallback: UnstructuredPDFLoader dene
+                        try:
+                            from langchain_community.document_loaders import UnstructuredPDFLoader
+                            unstructured_loader = UnstructuredPDFLoader(str(file_path))
+                            loaded_docs = unstructured_loader.load()
+                            
+                            if loaded_docs and len(loaded_docs) > 0:
+                                content = " ".join([doc.page_content for doc in loaded_docs])
+                                content = normalize_unicode_text(content)
+                                txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                                logging.info(f"✅ Unstructured PDF parsing successful for {file_name}")
+                            else:
+                                raise Exception(f"Unstructured PDF loader returned no content for {file_name}")
+                                
+                        except Exception as unstructured_error:
+                            logging.error(f"❌ Unstructured PDF parsing also failed for {file_name}: {unstructured_error}")
+                            
+                            # Son çare: Basit text extraction dene
+                            try:
+                                if fitz is None:
+                                    raise Exception("PyMuPDF (fitz) is not available")
+                                    
+                                doc = fitz.open(str(file_path))
+                                content = ""
+                                for page_num in range(len(doc)):
+                                    page = doc.load_page(page_num)
+                                    content += page.get_text() + "\n[PAGE BREAK]\n"
+                                doc.close()
+                                
+                                if content.strip():
+                                    content = normalize_unicode_text(content)
+                                    txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                                    loaded_docs = [Document(page_content=content, metadata={"source": str(file_path)})]
+                                    logging.info(f"✅ Basic text extraction successful for {file_name}")
+                                else:
+                                    raise Exception(f"No extractable text found in {file_name}")
+                                    
+                            except Exception as basic_error:
+                                logging.error(f"❌ All PDF parsing methods failed for {file_name}: {basic_error}")
+                                raise Exception(f"Unable to parse PDF file {file_name}. The file may be corrupted, encrypted, or have unsupported formatting.")
+                else:
+                    raise pdf_error
             
-            # UTF-8 ve Unicode normalization
-            content = normalize_unicode_text(content)
-            
-            txt = markdown_to_text_with_csv_tables(content, delimiter=",")
             # Eğer sadece bir Document ve içinde [PAGE BREAK] varsa split et
             if (
                 file_extension == ".pdf"
@@ -334,6 +412,7 @@ def get_documents_from_file_by_path(file_path, file_name):
             unstructured_pages = loader.load()
             pages = get_pages_with_page_numbers(unstructured_pages)
     except Exception as e:
+        logging.error(f"❌ Complete document processing failed for {file_name}: {e}")
         raise Exception(f"Error while reading the file content or metadata, {e}")
     return file_name, pages, file_extension
 

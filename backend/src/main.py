@@ -1485,7 +1485,13 @@ def upload_file(
     chunk_dir,
     merged_dir,
 ):
+    # Dosya adını normalize et (Unicode consistency için)
+    import unicodedata
+    from src.utf8_utils import normalize_file_name
+    
+    originalname = normalize_file_name(originalname)
     logging.info(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
+    logging.info(f"🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
     
     # Chunk boyutu kontrol et
     if hasattr(chunk, 'size'):
