@@ -102,11 +102,20 @@ POLIÇE TİPİ ÖRNEKLERİ:
 - "DASK poliçesi" → "DASK"
 - "D4 konut" → "D4"
 - "yangın sigortası" → "yangın"
+
+VECTOR ARAMA KARAR KRİTERLERİ:
+- "Kaç adet", "kaç tane", "kaç poliçe" gibi SAYMA soruları → use_vector: false
+- Diğer tüm sorular (detay bilgi, prim tutarı, taksit, sözleşme metni, vb.) → use_vector: true
+
+ÖRNEKLER:
+- "Ahmet Bey'in kiraz teknesi için sigorta poliçesi primi ne kadar?" → use_vector: true (prim detayı istiyor)
+- "2020 yılında kaç adet konut poliçesi var?" → use_vector: false (sayma sorusu)
+- "Ayça hanım 2020 D4 poliçesi taksitleri neler?" → use_vector: true (taksit detayı istiyor)
+- "Mehmet'in araç sigortası prim ödemesi ne zaman?" → use_vector: true (ödeme detayı istiyor)
 """)
         human = HumanMessage(content=(
             "Soru: " + question + "\n\n" +
-            "Karar verme kriterleri: eğer soru belge içi metin detayları (taksit detayı, sözleşme metni, ifadeler) istiyorsa use_vector:true;" 
-            "eğer sadece sayısal özet ya da 'kaç adet' gibi aggregate bilgi isteniyorsa use_vector:false."
+            "Karar ver: Bu soru sayma sorusu mu (kaç adet/tane) yoksa detay bilgi gerektiren bir soru mu?"
         ))
 
         try:
@@ -583,7 +592,9 @@ POLIÇE TİPİ ÖRNEKLERİ:
     def answer_question(self, question: str) -> Dict[str, Any]:
         """Kullanıcı sorusunu alır, kurallara göre işlem yapar ve sonuç döner.
 
-        Dönen sözlükte en azından: { 'mode': 'count'|'vector'|'cypher_fallback', 'response_text': str, 'meta': {...} }
+        Yeni basit kural: Count sorusu değilse vector araması yap, fallback yok.
+        
+        Dönen sözlükte en azından: { 'mode': 'count'|'vector', 'response_text': str, 'meta': {...} }
         """
         question = question.strip()
         logger.info(f"Answering question: {question}")
@@ -615,9 +626,11 @@ POLIÇE TİPİ ÖRNEKLERİ:
                 }
             }
 
-        # 2) Diğer durumlarda LLM'e sor: vector arama yapmalı mı?
+        # 2) Count sorusu değilse, direkt vector araması yap
+        logger.info("Not a count query - using vector search for detailed information")
+        
+        # LLM'den filtreleri al
         decision = self.ask_llm_for_decision(question)
-        use_vector = bool(decision.get('use_vector')) if isinstance(decision, dict) else False
         filters = SimpleFilters()
         if isinstance(decision, dict):
             f = decision.get('filters', {}) or {}
@@ -628,36 +641,27 @@ POLIÇE TİPİ ÖRNEKLERİ:
         else:
             filters = self.extract_filters_heuristic(question)
 
-        logger.info(f"LLM decision: use_vector={use_vector}, filters={filters}")
+        logger.info(f"Extracted filters for vector search: {filters}")
 
-        if use_vector:
-            # LLM kararına göre chunk vector araması yap
-            # Tercihen kullanıcı sorusunu ve filtreleri birleştir
-            query_text = question
-            if filters.name:
-                query_text += f" owner:{filters.name}"
-            if filters.year:
-                query_text += f" year:{filters.year}"
-            if filters.policy_type:
-                query_text += f" policy:{filters.policy_type}"
+        # Vector araması yap
+        query_text = question
+        if filters.name:
+            query_text += f" owner:{filters.name}"
+        if filters.year:
+            query_text += f" year:{filters.year}"
+        if filters.policy_type:
+            query_text += f" policy:{filters.policy_type}"
 
-            chunks = self.vector_search_chunks(query_text, filters, limit=10)
-            text = self.format_chunk_response(chunks, filters, question)
-            return {'mode': 'vector', 'response_text': text, 'meta': {'chunks': chunks, 'filters': filters.to_dict(), 'decision_reason': decision.get('reason')}}
-
-        # 3) Eğer LLM vector demediyse, fallback olarak graph query ile belge listesi veya sayma yap
-        logger.info("LLM chose not to use vector. Falling back to graph aggregate/list query.")
-        filters = filters or self.extract_filters_heuristic(question)
-        count_result = self.count_and_list_documents(filters)
-        text = self.format_count_prompt(count_result, filters, question)
+        chunks = self.vector_search_chunks(query_text, filters, limit=10)
+        text = self.format_chunk_response(chunks, filters, question)
+        
         return {
-            'mode': 'cypher_fallback', 
+            'mode': 'vector', 
             'response_text': text, 
             'meta': {
-                'count': count_result.get('count', 0),
-                'documents': count_result.get('documents', []),
+                'chunks': chunks, 
                 'filters': filters.to_dict(), 
-                'decision': decision
+                'decision_reason': decision.get('reason', 'Not a count query, using vector search')
             }
         }
 
