@@ -7,9 +7,21 @@ const apiCall = async (url: string, method: Method, additionalParams: Partial<Fo
   try {
     const formData = new FormData();
 
+    console.log(`🌐 Making API call to: ${url} with method: ${method.toUpperCase()}`);
+    console.log(`📋 API parameters:`, Object.keys(additionalParams));
+
     for (const key in additionalParams) {
-      formData.append(key, additionalParams[key]);
+      const value = additionalParams[key];
+      formData.append(key, value);
+
+      // File parametresi için ek bilgi
+      if (key === 'file' && value instanceof Blob) {
+        console.log(`📎 File parameter - Size: ${value.size} bytes, Type: ${value.type}`);
+      } else if (key !== 'file') {
+        console.log(`📝 Parameter ${key}: ${value}`);
+      }
     }
+
     const response: AxiosResponse = await api({
       method: method,
       url: url,
@@ -18,9 +30,11 @@ const apiCall = async (url: string, method: Method, additionalParams: Partial<Fo
         'Content-Type': 'multipart/form-data',
       },
     });
+
+    console.log(`✅ API response received - Status: ${response.status}, Data:`, response.data);
     return response.data;
   } catch (error) {
-    console.log('API Error:', error);
+    console.error('❌ API Error:', error);
     throw error;
   }
 };

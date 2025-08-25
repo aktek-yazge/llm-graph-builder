@@ -57,6 +57,14 @@ from docling_core.types.doc import ImageRefMode, DocItemLabel
 from docling_core.types.doc.document import  DEFAULT_EXPORT_LABELS
 load_dotenv(override=True)
 
+from pathlib import Path
+from typing import Dict, List
+import requests
+import shutil
+import subprocess
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_path
+
 logger = CustomLogger()
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
 MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
@@ -173,6 +181,185 @@ class CustomGZipMiddleware:
             compresslevel=self.compresslevel
         )
         await gzip_middleware(scope, receive, send)
+        
+
+def convert_result_to_base64(
+    result: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    TypeScript convertResultToBase64 fonksiyonunun Python versiyonu.
+    result: {
+        "attachmentName": [
+            {"fileName": "example.png", "path": "/path/to/example.png"}
+        ]
+    }
+    return: {
+        "attachmentName": [
+            {"fileName": "example.png", "base64": "iVBORw0KGgoAAAANSUhEUg..."}
+        ]
+    }
+    """
+    base64_result: Dict[str, List[Dict[str, str]]] = {}
+
+    for attachment_name, images in result.items():
+        base64_result[attachment_name] = []
+        for image in images:
+            file_name = image["fileName"]
+            path = Path(image["path"])
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            encoded = base64.b64encode(file_bytes).decode("utf-8")
+            base64_result[attachment_name].append({"fileName": file_name, "base64": encoded})
+
+    return base64_result
+
+# Klasör ayarları
+TEMP_FOLDER = os.getenv("FILE_TEMP_FOLDER", "./temp/temp/")
+PDF_TEMP_FOLDER = os.getenv("PDF_CONVERT_TEMP_FOLDER", "./temp/pdf_temp/")
+IMAGE_OUTPUT_FOLDER = os.getenv("IMAGE_OUTPUT_FOLDER", "./temp/images/")
+
+def ensure_folders():
+    for folder in [TEMP_FOLDER, PDF_TEMP_FOLDER, IMAGE_OUTPUT_FOLDER]:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+
+def download_file(url: str, output_path: str) -> str:
+    response = requests.get(url, stream=True)
+    with open(output_path, "wb") as f:
+        shutil.copyfileobj(response.raw, f)
+    return output_path
+
+def convert_to_pdf(file_path: str, filename: str) -> str:
+    """ LibreOffice kullanarak dosyayı PDF'e çevirir """
+    output_path = os.path.join(PDF_TEMP_FOLDER, filename + ".pdf")
+    subprocess.run([
+        "libreoffice", "--headless", "--convert-to", "pdf", 
+        "--outdir", PDF_TEMP_FOLDER, file_path
+    ], check=True)
+    return output_path
+
+def get_pdf_page_count(pdf_path: str) -> int:
+    reader = PdfReader(pdf_path)
+    return len(reader.pages)
+
+def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
+    """ PDF sayfalarını PNG'e çevirir """
+    images = convert_from_path(
+        pdf_path,
+        dpi=200,
+        output_folder=IMAGE_OUTPUT_FOLDER,
+        output_file=output_base_name,
+        fmt="png",
+        size=(1200, 1600)
+    )
+    image_paths = []
+    for i, img in enumerate(images, start=1):
+        output_path = os.path.join(IMAGE_OUTPUT_FOLDER, f"{output_base_name}_sayfa{i}.png")
+        img.save(output_path, "PNG")
+        image_paths.append(output_path)
+    return image_paths
+
+# def handle_attachments(
+#     attachments: Dict[str, List[Dict[str, str]]]
+# ) -> Dict[str, List[Dict[str, str]]]:
+#     """
+#     attachments: {
+#         "filename.docx": [
+#             {"fileName": "filename.docx", "downloadUrl": "http://...", "fileType": "docx"}
+#         ]
+#     }
+
+#     return: {
+#         "filename.docx": [
+#             {"fileName": "filename_1.png", "path": "./images/filename_1.png"}
+#         ]
+#     }
+#     """
+
+#     ensure_folders()
+#     result: Dict[str, List[Dict[str, str]]] = {}
+
+#     for attachment_name, items in attachments.items():
+#         for attachment in items:
+#             file_name = attachment["fileName"]
+#             file_type = attachment["fileType"].lower()
+#             download_url = attachment["downloadUrl"]
+
+#             filename_without_ext = Path(file_name).stem
+#             temp_file_path = os.path.join(TEMP_FOLDER, file_name)
+
+#             # 1. Dosyayı indir
+#             download_file(download_url, temp_file_path)
+
+#             # 2. PDF değilse dönüştür
+#             if file_type != "pdf":
+#                 pdf_path = convert_to_pdf(temp_file_path, filename_without_ext)
+#             else:
+#                 pdf_path = temp_file_path
+
+#             # 3. PDF sayfalarını resme çevir
+#             images = pdf_to_images(pdf_path, filename_without_ext)
+
+#             # 4. Çıktı hazırlama
+#             images_info = [{"fileName": Path(p).name, "path": p} for p in images]
+
+#             # 🔧 fix: aynı attachment için tek key altında topla
+#             if attachment_name not in result:
+#                 result[attachment_name] = []
+#             result[attachment_name].extend(images_info)
+
+#     return result
+
+def handle_attachments(
+    attachments: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    attachments: {
+        "filename.docx": [
+            {"fileName": "filename.docx", "downloadUrl": "http://...", "fileType": "docx"}
+        ]
+    }
+
+    return: {
+        "filename.docx": [
+            {"fileName": "filename_1.png", "path": "./images/filename_1.png"}
+        ]
+    }
+    """
+
+    ensure_folders()
+    result: Dict[str, List[Dict[str, str]]] = {}
+
+    for attachment_name, items in attachments.items():
+        for attachment in items:
+            file_name = attachment["fileName"]
+            file_type = attachment["fileType"].lower()
+            download_url = attachment["downloadUrl"]
+
+            filename_without_ext = Path(file_name).stem
+            temp_file_path = os.path.join(TEMP_FOLDER, file_name)
+
+            # 1. Dosyayı indir
+            download_file(download_url, temp_file_path)
+
+            # 2. PDF değilse dönüştür
+            if file_type != "pdf":
+                pdf_path = convert_to_pdf(temp_file_path, filename_without_ext)
+            else:
+                pdf_path = temp_file_path
+
+            # 3. PDF sayfalarını resme çevir
+            # images = pdf_to_images(pdf_path, filename_without_ext)
+
+            # 4. Çıktı hazırlama
+            images_info = [{"fileName": filename_without_ext, "path": pdf_path}]
+
+            # 🔧 fix: aynı attachment için tek key altında topla
+            if attachment_name not in result:
+                result[attachment_name] = []
+            result[attachment_name].extend(images_info)
+
+    return result
+
 
 class UTF8JSONResponse:
     """UTF-8 JSON Response Middleware"""
@@ -342,6 +529,50 @@ async def extract_knowledge_graph_from_file(
         if source_type == 'local file':
             file_name = sanitize_filename(file_name)
             merged_file_path = validate_file_path(MERGED_DIR, file_name)
+            
+            # Debug loglama: Dosya yolu ve varlık kontrolü
+            logging.info(f"🔍 DEBUG - Original file_name: {file_name}")
+            logging.info(f"🔍 DEBUG - Sanitized file_name: {file_name}")
+            logging.info(f"🔍 DEBUG - MERGED_DIR: {MERGED_DIR}")
+            logging.info(f"🔍 DEBUG - Constructed merged_file_path: {merged_file_path}")
+            logging.info(f"🔍 DEBUG - File exists check: {os.path.exists(merged_file_path)}")
+            
+            # Merged files klasöründeki tüm dosyaları listele
+            if os.path.exists(MERGED_DIR):
+                files_in_dir = os.listdir(MERGED_DIR)
+                logging.info(f"🔍 DEBUG - Files in {MERGED_DIR}: {files_in_dir}")
+                
+                # Dosya adı karşılaştırması
+                for existing_file in files_in_dir:
+                    if existing_file == file_name:
+                        logging.info(f"✅ DEBUG - Exact match found: {existing_file}")
+                    else:
+                        logging.info(f"❌ DEBUG - No match: '{existing_file}' != '{file_name}'")
+                        logging.info(f"🔍 DEBUG - Bytes comparison: {existing_file.encode('utf-8')} vs {file_name.encode('utf-8')}")
+            
+            # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
+            if not os.path.exists(merged_file_path):
+                # Unicode normalizasyon farklılıkları için alternatif dosya adlarını dene
+                logging.warning(f"File not found with NFC normalization, trying NFD normalization")
+                
+                import unicodedata
+                # NFD normalizasyonu dene (Decomposed)
+                file_name_nfd = unicodedata.normalize('NFD', file_name)
+                merged_file_path_nfd = validate_file_path(MERGED_DIR, file_name_nfd)
+                
+                logging.info(f"🔍 DEBUG - Trying NFD normalized file_name: {file_name_nfd}")
+                logging.info(f"🔍 DEBUG - NFD file path: {merged_file_path_nfd}")
+                logging.info(f"🔍 DEBUG - NFD file exists: {os.path.exists(merged_file_path_nfd)}")
+                
+                if os.path.exists(merged_file_path_nfd):
+                    logging.info(f"✅ Found file with NFD normalization: {merged_file_path_nfd}")
+                    merged_file_path = merged_file_path_nfd
+                    file_name = file_name_nfd
+                else:
+                    # Her iki normalizasyon da başarısız, dosya gerçekten yok
+                    logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
+                    raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
+            
             uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
         elif source_type == 's3 bucket' and source_url:
@@ -1234,12 +1465,44 @@ async def chat_bot_stream(
     document_names: str = Form(None),
     session_id: str = Form(None),
     mode: str = Form(None),
-    email: str = Form(None)
+    email: str = Form(None),
+    files: Optional[str] = Form(None)
 ):
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile 
     token-by-token chat cevapları gönderir.
     """
+    
+    # print("chat_bot_stream files: ", files)
+    
+    filesJson = None
+    downloadedFiles = None
+    if files:
+        try:
+            filesJson = json.loads(files)
+        except json.JSONDecodeError:
+            logging.info("files JSON parse error.")
+            # return {"error": "Invalid JSON in 'files'"}
+    print("chat_bot_stream filesJson: ", filesJson)
+    if filesJson:
+        try:
+            # handle_attachments can be slow (downloads, conversions). Run in thread to avoid blocking event loop.
+            downloadedFiles = await asyncio.to_thread(handle_attachments, filesJson)
+        except json.JSONDecodeError:
+            logging.info("files handle_attachments error.")
+            # return {"error": "Invalid JSON in 'files'"}
+        except Exception as e:
+            logging.exception(f"handle_attachments hatası: {e}")
+            downloadedFiles = None
+    print("chat_bot_stream downloadedFiles: ", downloadedFiles)
+    # files_data: Dict[str, List[Dict[str, str]]] = {}
+    # if downloadedFiles:
+    #     try:
+    #         files_data = convert_result_to_base64(downloadedFiles)
+    #     except json.JSONDecodeError:
+    #         logging.info("files convert_result_to_base64 error.")
+            # return {"error": "Invalid JSON in 'files'"}
+    
     
     async def generate_real_streaming_response():
         try:
@@ -1288,6 +1551,7 @@ async def chat_bot_stream(
                 write_access=write_access,
                 # intelligent_agent=intelligent_agent,
                 alternative_agent=alternative_agent,
+                files=downloadedFiles
             ):
                 # Client disconnect kontrolü
                 if await request.is_disconnected():
@@ -1602,11 +1866,44 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
                                         password=Form(None), database=Form(None),email=Form(None)):
     try:
         start = time.time()
+        
+        # Debug: FastAPI Form field'ından gelen dosya ismini kontrol et
+        logging.info(f"🔍 RAW originalname from FastAPI Form: {repr(originalname)}")
+        logging.info(f"🔍 originalname type: {type(originalname)}")
+        
+        # FastAPI Form field'ları bazen bytes olarak gelebilir, decode etmeye çalış
+        if isinstance(originalname, bytes):
+            try:
+                originalname = originalname.decode('utf-8')
+                logging.info(f"🔄 Decoded bytes to UTF-8: {originalname}")
+            except UnicodeDecodeError as e:
+                logging.warning(f"⚠️ UTF-8 decode failed, trying latin-1: {e}")
+                originalname = originalname.decode('latin-1')
+                logging.info(f"🔄 Decoded bytes to latin-1: {originalname}")
+        
+        # Eğer string ama yanlış encode edilmişse (URL-encoded UTF-8 bytes), düzelt
+        if isinstance(originalname, str) and '\\x' in originalname:
+            try:
+                # '\\xc3\\xa7' gibi escaped bytes'ları gerçek bytes'a çevir
+                import codecs
+                originalname_bytes = codecs.decode(originalname, 'unicode_escape').encode('latin-1')
+                originalname = originalname_bytes.decode('utf-8')
+                logging.info(f"🔄 Fixed escaped UTF-8 bytes: {originalname}")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to fix escaped UTF-8: {e}")
+        
+        logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)
         result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR)
+        
         end = time.time()
         elapsed_time = end - start
+        
+        logging.info(f"✅ Upload processing completed in {elapsed_time:.2f}s - Chunk: {chunkNumber}/{totalChunks}")
+        
         if int(chunkNumber) == int(totalChunks):
+            logging.info(f"🎉 Final chunk processed for {originalname} - Upload complete!")
             json_obj = {'api_name':'upload','db_url':uri,'userName':userName, 'database':database, 'chunkNumber':chunkNumber,'totalChunks':totalChunks,
                                 'original_file_name':originalname,'model':model, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
             logger.log_struct(json_obj, "INFO")
@@ -1617,6 +1914,8 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
     except Exception as e:
         message="Unable to upload file in chunks"
         error_message = str(e)
+        logging.error(f"❌ Upload failed for {originalname}, chunk {chunkNumber}/{totalChunks}: {error_message}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)   
         graphDb_data_Access = graphDBdataAccess(graph)
         graphDb_data_Access.update_exception_db(originalname,error_message)

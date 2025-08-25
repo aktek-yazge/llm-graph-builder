@@ -3,7 +3,10 @@ from pathlib import Path
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_docling import DoclingLoader
 from langchain_docling.loader import ExportType
-from docling.document_converter import DocumentConverter
+from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_core.documents import Document
 import chardet
@@ -13,10 +16,55 @@ from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import csv
 import io
+import os
+import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 from markdown import markdown as md_to_html
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+# Image resolution scale constant
+IMAGE_RESOLUTION_SCALE = 2.0  # 2x scale for better quality
+
+
+def demo_page_image_generation():
+    """
+    Example function showing how to use the page image generation feature.
+    """
+    logging.basicConfig(level=logging.INFO)
+    
+    # Example usage
+    file_path = "path/to/your/document.pdf"
+    output_dir = "output"
+    
+    try:
+        file_name, pages, file_extension, generated_images = get_documents_from_file_by_path(
+            file_path=file_path, 
+            file_name="document.pdf", 
+            generate_images=True, 
+            output_dir=output_dir
+        )
+        
+        print(f"Processed {len(pages)} pages")
+        print(f"Generated {len(generated_images)} page images:")
+        for img_path in generated_images:
+            print(f"  - {img_path}")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+class ListLoader(BaseLoader):
+    """Basit bir document listesi loader'ı"""
+    def __init__(self, docs):
+        self.docs = docs
+    
+    def load(self):
+        return self.docs
 
 
 def _norm(s: str) -> str:
@@ -242,27 +290,230 @@ def detect_encoding(file_path):
         return result["encoding"] or "utf-8"
 
 
-def load_document_content(file_path):
+def generate_page_images_with_pymupdf(file_path, output_dir="output"):
+    """
+    PyMuPDF (fitz) kullanarak PDF dosyasından page image'larını generate eder.
+    
+    Args:
+        file_path: PDF dosyasının yolu
+        output_dir: Çıktı klasörü (varsayılan: "output")
+        
+    Returns:
+        List[str]: Kaydedilen image dosyalarının yolları
+    """
+    try:
+        if fitz is None:
+            logging.warning("PyMuPDF (fitz) is not available for image generation")
+            return []
+            
+        # Output directory'yi oluştur
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        start_time = time.time()
+        logging.info(f"🖼️ [PyMuPDF] Starting page image generation for {file_path}")
+        
+        # PDF'i aç
+        doc = fitz.open(str(file_path))
+        doc_filename = Path(file_path).stem
+        saved_images = []
+        
+        # Her sayfayı image olarak kaydet
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            
+            # Page'i image'a çevir (2x scale için matrix kullan)
+            mat = fitz.Matrix(IMAGE_RESOLUTION_SCALE, IMAGE_RESOLUTION_SCALE)
+            pix = page.get_pixmap(matrix=mat)
+            
+            # PNG olarak kaydet
+            page_image_filename = output_path / f"{doc_filename}_page_{page_num + 1:03d}.png"
+            pix.save(str(page_image_filename))
+            pix = None  # Memory cleanup
+            
+            saved_images.append(str(page_image_filename))
+            logging.info(f"Saved PyMuPDF page image: {page_image_filename}")
+        
+        doc.close()
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"PyMuPDF page image generation completed in {elapsed_time:.2f} seconds. Generated {len(saved_images)} images.")
+        
+        return saved_images
+        
+    except Exception as e:
+        logging.error(f"Error generating page images with PyMuPDF for {file_path}: {e}")
+        return []
+
+
+def generate_page_images_from_converter(converter, file_path, output_dir="output"):
+    """
+    Mevcut DocumentConverter kullanarak page image'larını generate eder.
+    
+    Args:
+        converter: DocumentConverter instance
+        file_path: PDF dosyasının yolu
+        output_dir: Çıktı klasörü (varsayılan: "output")
+        
+    Returns:
+        List[str]: Kaydedilen image dosyalarının yolları
+    """
+    try:
+        # Output directory'yi oluştur
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        start_time = time.time()
+        logging.info(f"🖼️ [Docling] Starting page image generation for {file_path}")
+        
+        # Document'i convert et
+        conv_res = converter.convert(file_path)
+        
+        doc_filename = Path(file_path).stem
+        saved_images = []
+        
+        # Page image'larını kaydet
+        for page_no, page in conv_res.document.pages.items():
+            if hasattr(page, 'image') and page.image and hasattr(page.image, 'pil_image'):
+                page_image_filename = output_path / f"{doc_filename}_page_{page_no:03d}.png"
+                with page_image_filename.open("wb") as fp:
+                    page.image.pil_image.save(fp, format="PNG")
+                saved_images.append(str(page_image_filename))
+                logging.info(f"Saved page image: {page_image_filename}")
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"Page image generation completed in {elapsed_time:.2f} seconds. Generated {len(saved_images)} images.")
+        
+        return saved_images
+        
+    except Exception as e:
+        logging.error(f"Error generating page images for {file_path}: {e}")
+        return []
+
+
+def generate_page_images(file_path, output_dir="output"):
+    """
+    PDF dosyasından page image'larını generate eder ve belirtilen klasöre kaydeder.
+    
+    Args:
+        file_path: PDF dosyasının yolu
+        output_dir: Çıktı klasörü (varsayılan: "output")
+        
+    Returns:
+        List[str]: Kaydedilen image dosyalarının yolları
+    """
+    try:
+        # Output directory'yi oluştur
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Pipeline options ile PDF format option oluştur
+        pipeline_options = PdfPipelineOptions(
+            images_scale=IMAGE_RESOLUTION_SCALE,
+            generate_page_images=True,
+            generate_picture_images=True
+        )
+        
+        # Document converter'ı oluştur
+        doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        
+        start_time = time.time()
+        logging.info(f"Starting page image generation for {file_path}")
+        
+        # Document'i convert et
+        conv_res = doc_converter.convert(file_path)
+        
+        doc_filename = Path(file_path).stem
+        saved_images = []
+        
+        # Page image'larını kaydet
+        for page_no, page in conv_res.document.pages.items():
+            if hasattr(page, 'image') and page.image and hasattr(page.image, 'pil_image'):
+                page_image_filename = output_path / f"{doc_filename}_page_{page_no:03d}.png"
+                with page_image_filename.open("wb") as fp:
+                    page.image.pil_image.save(fp, format="PNG")
+                saved_images.append(str(page_image_filename))
+                logging.info(f"Saved page image: {page_image_filename}")
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"Page image generation completed in {elapsed_time:.2f} seconds. Generated {len(saved_images)} images.")
+        
+        return saved_images
+        
+    except Exception as e:
+        logging.error(f"Error generating page images for {file_path}: {e}")
+        return []
+
+
+def load_document_content(file_path, generate_images=False, output_dir="output"):
     file_extension = Path(file_path).suffix.lower()
     encoding_flag = False
-    if file_extension == ".pdf":
-        # converter = DocumentConverter()
-        # loader = PyMuPDFLoader(file_path)
+    generated_images = []
+    
+    # Docling desteklenen formatlar: PDF, DOCX, PPTX, HTML, CSV, Markdown
+    docling_supported_formats = [".pdf", ".docx", ".pptx", ".html", ".csv", ".md"]
+    
+    if file_extension in docling_supported_formats:
+        logging.info(f"Using Docling for {file_extension} file processing (generate_images={generate_images})")
+        
+        # Common labels for all document types
         labels = [
             label
             for label in DEFAULT_EXPORT_LABELS
             if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
         ]
-        loader = DoclingLoader(
-            file_path=file_path,
-            export_type=ExportType.MARKDOWN,
-            md_export_kwargs={
-                "page_break_placeholder": "[PAGE BREAK]",
-                "labels": labels,
-            },
-        )
-        # loader = DoclingLoader(file_path, export_type=ExportType.MARKDOWN)
-        return loader, encoding_flag
+        
+        # Image generation için custom converter oluştur
+        if generate_images:
+            # PDF için özel yaklaşım: sadece PyMuPDF kullan
+            if file_extension == ".pdf":
+                # PDF için standart DoclingLoader (image generation olmadan)
+                loader = DoclingLoader(
+                    file_path=file_path,
+                    export_type=ExportType.MARKDOWN,
+                    md_export_kwargs={
+                        "page_break_placeholder": "[PAGE BREAK]",
+                        "labels": labels,
+                    },
+                )
+                
+                # PDF için sadece PyMuPDF ile image generation yap
+                generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
+            else:
+                # Diğer formatlar için Docling converter ile image generation
+                custom_converter = DocumentConverter()
+                
+                # DoclingLoader'a custom converter'ı geç
+                loader = DoclingLoader(
+                    file_path=file_path,
+                    converter=custom_converter,
+                    export_type=ExportType.MARKDOWN,
+                    md_export_kwargs={
+                        "page_break_placeholder": "[PAGE BREAK]",
+                        "labels": labels,
+                    },
+                )
+                
+                # Diğer formatlar için Docling converter'dan image'ları extract et
+                generated_images = generate_page_images_from_converter(
+                    custom_converter, file_path, output_dir
+                )
+        else:
+            # Standart DoclingLoader kullan (image generation olmadan)
+            loader = DoclingLoader(
+                file_path=file_path,
+                export_type=ExportType.MARKDOWN,
+                md_export_kwargs={
+                    "page_break_placeholder": "[PAGE BREAK]",
+                    "labels": labels,
+                },
+            )
+        
+        return loader, encoding_flag, generated_images
     elif file_extension == ".txt":
         encoding = detect_encoding(file_path)
         logging.info(f"Detected encoding for {file_path}: {encoding}")
@@ -270,7 +521,7 @@ def load_document_content(file_path):
             loader = UnstructuredFileLoader(
                 file_path, mode="elements", autodetect_encoding=True
             )
-            return loader, encoding_flag
+            return loader, encoding_flag, generated_images
         else:
             with open(file_path, encoding=encoding, errors="replace") as f:
                 content = f.read()
@@ -278,35 +529,111 @@ def load_document_content(file_path):
                 [Document(page_content=content, metadata={"source": file_path})]
             )
             encoding_flag = True
-            return loader, encoding_flag
+            return loader, encoding_flag, generated_images
     else:
         loader = UnstructuredFileLoader(
             file_path, mode="elements", autodetect_encoding=True
         )
-        return loader, encoding_flag
+        return loader, encoding_flag, generated_images
 
 
-def get_documents_from_file_by_path(file_path, file_name):
+def get_documents_from_file_by_path(file_path, file_name, generate_images=False, output_dir="output"):
     file_path = Path(file_path)
     if not file_path.exists():
-        logging.info(f"File {file_name} does not exist")
-        raise Exception(f"File {file_name} does not exist")
+        logging.warning(f"File {file_name} does not exist at path: {file_path}")
+        raise FileNotFoundError(f"File {file_name} does not exist")
     
     # File name'i normalize et
     file_name = normalize_file_name(file_name)
     logging.info(f"file {file_name} processing")
     
+    generated_images = []
+    
     try:
-        loader, encoding_flag = load_document_content(file_path)
+        loader, encoding_flag, generated_images = load_document_content(file_path, generate_images, output_dir)
         file_extension = file_path.suffix.lower()
         if file_extension == ".pdf" or (file_extension == ".txt" and encoding_flag):
-            loaded_docs = loader.load()
-            content = loaded_docs[0].page_content
+            try:
+                loaded_docs = loader.load()
+                content = loaded_docs[0].page_content
+                
+                # UTF-8 ve Unicode normalization
+                content = normalize_unicode_text(content)
+                
+                txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+            except Exception as pdf_error:
+                if file_extension == ".pdf":
+                    logging.warning(f"Docling PDF parsing failed for {file_name}: {pdf_error}")
+                    logging.info(f"Trying fallback PDF loader (PyMuPDF) for {file_name}")
+                    
+                    # Fallback: PyMuPDF kullan
+                    try:
+                        from langchain_community.document_loaders import PyMuPDFLoader
+                        fallback_loader = PyMuPDFLoader(str(file_path))
+                        loaded_docs = fallback_loader.load()
+                        
+                        if loaded_docs and len(loaded_docs) > 0:
+                            content = loaded_docs[0].page_content
+                            content = normalize_unicode_text(content)
+                            txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                            logging.info(f"✅ Fallback PDF parsing successful for {file_name}")
+                            
+                            # PyMuPDF fallback'inde de image generation yap
+                            if generate_images:
+                                generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
+                        else:
+                            raise Exception(f"Fallback PDF loader returned no content for {file_name}")
+                            
+                    except Exception as fallback_error:
+                        logging.error(f"❌ PyMuPDF fallback also failed for {file_name}: {fallback_error}")
+                        
+                        # İkinci fallback: UnstructuredPDFLoader dene
+                        try:
+                            from langchain_community.document_loaders import UnstructuredPDFLoader
+                            unstructured_loader = UnstructuredPDFLoader(str(file_path))
+                            loaded_docs = unstructured_loader.load()
+                            
+                            if loaded_docs and len(loaded_docs) > 0:
+                                content = " ".join([doc.page_content for doc in loaded_docs])
+                                content = normalize_unicode_text(content)
+                                txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                                logging.info(f"✅ Unstructured PDF parsing successful for {file_name}")
+                            else:
+                                raise Exception(f"Unstructured PDF loader returned no content for {file_name}")
+                                
+                        except Exception as unstructured_error:
+                            logging.error(f"❌ Unstructured PDF parsing also failed for {file_name}: {unstructured_error}")
+                            
+                            # Son çare: Basit text extraction dene
+                            try:
+                                if fitz is None:
+                                    raise Exception("PyMuPDF (fitz) is not available")
+                                    
+                                doc = fitz.open(str(file_path))
+                                content = ""
+                                for page_num in range(len(doc)):
+                                    page = doc.load_page(page_num)
+                                    content += page.get_text() + "\n[PAGE BREAK]\n"
+                                doc.close()
+                                
+                                if content.strip():
+                                    content = normalize_unicode_text(content)
+                                    txt = markdown_to_text_with_csv_tables(content, delimiter=",")
+                                    loaded_docs = [Document(page_content=content, metadata={"source": str(file_path)})]
+                                    logging.info(f"✅ Basic text extraction successful for {file_name}")
+                                    
+                                    # Basic text extraction'da da image generation yap
+                                    if generate_images:
+                                        generated_images = generate_page_images_with_pymupdf(file_path, output_dir)
+                                else:
+                                    raise Exception(f"No extractable text found in {file_name}")
+                                    
+                            except Exception as basic_error:
+                                logging.error(f"❌ All PDF parsing methods failed for {file_name}: {basic_error}")
+                                raise Exception(f"Unable to parse PDF file {file_name}. The file may be corrupted, encrypted, or have unsupported formatting.")
+                else:
+                    raise pdf_error
             
-            # UTF-8 ve Unicode normalization
-            content = normalize_unicode_text(content)
-            
-            txt = markdown_to_text_with_csv_tables(content, delimiter=",")
             # Eğer sadece bir Document ve içinde [PAGE BREAK] varsa split et
             if (
                 file_extension == ".pdf"
@@ -334,8 +661,16 @@ def get_documents_from_file_by_path(file_path, file_name):
             unstructured_pages = loader.load()
             pages = get_pages_with_page_numbers(unstructured_pages)
     except Exception as e:
+        logging.error(f"❌ Complete document processing failed for {file_name}: {e}")
         raise Exception(f"Error while reading the file content or metadata, {e}")
-    return file_name, pages, file_extension
+    
+    # Generated images'ı metadata'ya ekle
+    if generated_images:
+        for page in pages:
+            if hasattr(page, 'metadata') and page.metadata:
+                page.metadata['generated_images'] = generated_images
+    
+    return file_name, pages, file_extension, generated_images
 
 
 def get_pages_with_page_numbers(unstructured_pages):
