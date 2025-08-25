@@ -836,11 +836,17 @@ class graphDBdataAccess:
                     p.type = $policy_type,
                     p.policyNumber = $policy_number,
                     p.customer = $customer_name,
+                    p.year = $year,
+                    p.insuredItem = $insured_item,
                     p.createdAt = datetime(),
-                    p.source_file = $filename
+                    p.source_file = $filename,
+                    p.extraction_method = $extraction_method
                 ON MATCH SET 
                     p.updatedAt = datetime(),
-                    p.source_file = $filename
+                    p.source_file = $filename,
+                    p.year = $year,
+                    p.insuredItem = $insured_item,
+                    p.extraction_method = $extraction_method
                 RETURN p.id as policy_id
             """
             
@@ -850,7 +856,10 @@ class graphDBdataAccess:
                 "policy_type": policy_info.get('policy_type', 'Insurance Policy'),
                 "policy_number": policy_info.get('policy_number', ''),
                 "customer_name": policy_info.get('customer_name', ''),
-                "filename": file_name
+                "year": policy_info.get('year', ''),
+                "insured_item": policy_info.get('insured_item', ''),
+                "filename": file_name,
+                "extraction_method": "LLM"
             }, session_params={"database": self.graph._database})
             
             if result:
@@ -881,12 +890,12 @@ class graphDBdataAccess:
 
     def extract_policy_info_from_filename(self, file_name: str) -> dict:
         """
-        Dosya isminden poliçe bilgilerini çıkarır.
+        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
         
-        Örnek: "Ayça Dinçkök Galata Residance D4 Konut Poliçesi.pdf"
+        Örnek: "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf"
         """
         import os
-        import re
+        import json
         
         try:
             # Dosya uzantısını kaldır
@@ -896,6 +905,107 @@ class graphDBdataAccess:
             from src.utf8_utils import normalize_unicode_text
             base_name = normalize_unicode_text(base_name)
             
+            # LLM'den poliçe bilgilerini al
+            policy_info = self._extract_policy_info_with_llm(base_name)
+            
+            if not policy_info:
+                # LLM başarısız olursa fallback kullan
+                return self._extract_policy_info_fallback(base_name)
+            
+            # Policy ID'yi oluştur
+            policy_id = base_name.strip()
+            policy_info['policy_id'] = policy_id
+            policy_info['policy_name'] = policy_id
+            
+            logging.info(f"LLM ile çıkarılan poliçe bilgisi: {policy_info}")
+            return policy_info
+            
+        except Exception as e:
+            logging.error(f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}")
+            # Hata durumunda fallback kullan
+            return self._extract_policy_info_fallback(base_name)
+
+    def _extract_policy_info_with_llm(self, file_name: str) -> dict:
+        """
+        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
+        """
+        try:
+            from src.llm import get_llm
+            
+            # Sistem mevcut get_llm metodunu kullan
+            llm, _ = get_llm('openai_gpt_4.1_mini')
+            
+            # Prompt oluştur
+            prompt = f"""
+Verilen dosya isminden sigorta poliçesi bilgilerini çıkar ve JSON formatında döndür.
+
+Dosya ismi: "{file_name}"
+
+Çıkarılacak bilgiler:
+- customer_name: Müşteri ismi (ad soyad)
+- year: Poliçe yılı (varsa)
+- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, vb.)
+- insured_item: Sigortalanan eşya/konum (ev adresi, araç, vb.)
+- policy_number: Poliçe numarası (varsa)
+
+Örnekler:
+- "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf" → customer_name: "Ayça Dinçkök", year: "2020", policy_type: "Konut Sigortası", insured_item: "Galata Residance D6"
+- "Mehmet Yılmaz BMW X5 Kasko 2023.pdf" → customer_name: "Mehmet Yılmaz", year: "2023", policy_type: "Kasko Sigortası", insured_item: "BMW X5"
+
+Sadece JSON formatında yanıt ver, başka açıklama ekleme:
+{{
+    "customer_name": "...",
+    "year": "...",
+    "policy_type": "...",
+    "insured_item": "...",
+    "policy_number": "..."
+}}
+"""
+            
+            # LLM'den yanıt al
+            response = llm.invoke(prompt)
+            response_text = response.content.strip()
+            
+            # JSON parse et
+            try:
+                # JSON kısmını ayıkla
+                if '{' in response_text and '}' in response_text:
+                    start_idx = response_text.find('{')
+                    end_idx = response_text.rfind('}') + 1
+                    json_text = response_text[start_idx:end_idx]
+                    policy_info = json.loads(json_text)
+                    
+                    # Boş değerleri temizle ve UTF-8 normalize et
+                    cleaned_info = {}
+                    for key, value in policy_info.items():
+                        if value and value.strip() and value.strip() != "...":
+                            # UTF-8 normalizasyon uygula
+                            from src.utf8_utils import normalize_unicode_text
+                            normalized_value = normalize_unicode_text(value.strip())
+                            cleaned_info[key] = normalized_value
+                    
+                    logging.info(f"✅ LLM başarıyla poliçe bilgilerini çıkardı (UTF-8 normalized): {cleaned_info}")
+                    return cleaned_info
+                else:
+                    logging.warning("LLM yanıtında JSON formatı bulunamadı")
+                    return None
+                    
+            except json.JSONDecodeError as e:
+                logging.warning(f"LLM yanıtı JSON parse edilemedi: {e}")
+                logging.warning(f"LLM yanıtı: {response_text}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"LLM ile poliçe bilgisi çıkarma hatası: {e}")
+            return None
+
+    def _extract_policy_info_fallback(self, file_name: str) -> dict:
+        """
+        LLM başarısız olduğunda kullanılacak fallback fonksiyon.
+        """
+        import re
+        
+        try:
             # Poliçe türlerini tespit et
             policy_types = {
                 'konut': 'Konut Sigortası',
@@ -910,12 +1020,12 @@ class graphDBdataAccess:
             
             detected_type = 'Insurance Policy'
             for key, value in policy_types.items():
-                if key.lower() in base_name.lower():
+                if key.lower() in file_name.lower():
                     detected_type = value
                     break
             
             # Müşteri ismini çıkarmaya çalış (ilk kelimeler genellikle isim)
-            words = base_name.split()
+            words = file_name.split()
             customer_name = ''
             if len(words) >= 2:
                 # İlk 2-3 kelimeyi isim olarak al
@@ -924,30 +1034,44 @@ class graphDBdataAccess:
                 if re.match(r'^[a-zA-ZçÇğĞıIşŞöÖüÜ\s]+$', potential_name):
                     customer_name = potential_name.strip()
             
-            # Policy ID'yi oluştur (dosya ismi base'i)
-            policy_id = base_name.strip()
+            # Yıl bilgisini bul
+            year = ''
+            year_pattern = r'\b(20\d{2})\b'  # 2000-2099 arası yıllar
+            years = re.findall(year_pattern, file_name)
+            if years:
+                year = years[0]
             
             # Poliçe numarasını bulmaya çalış
             policy_number = ''
             number_pattern = r'\b\d{4,}\b'  # 4+ digit numbers
-            numbers = re.findall(number_pattern, base_name)
+            numbers = re.findall(number_pattern, file_name)
             if numbers:
                 policy_number = numbers[0]  # İlk uzun sayıyı al
             
             result = {
-                'policy_id': policy_id,
-                'policy_name': policy_id,
+                'policy_id': file_name.strip(),
+                'policy_name': file_name.strip(),
                 'policy_type': detected_type,
                 'policy_number': policy_number,
-                'customer_name': customer_name
+                'customer_name': customer_name,
+                'year': year,
+                'insured_item': ''
             }
             
-            logging.info(f"Dosya isminden çıkarılan poliçe bilgisi: {result}")
+            logging.info(f"Fallback ile çıkarılan poliçe bilgisi: {result}")
             return result
             
         except Exception as e:
-            logging.error(f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}")
-            return None
+            logging.error(f"Fallback poliçe bilgisi çıkarma hatası: {e}")
+            return {
+                'policy_id': file_name,
+                'policy_name': file_name,
+                'policy_type': 'Insurance Policy',
+                'customer_name': '',
+                'year': '',
+                'policy_number': '',
+                'insured_item': ''
+            }
 
     def get_websource_url(self,file_name):
         logging.info("Checking if same title with different URL exist in db ")
