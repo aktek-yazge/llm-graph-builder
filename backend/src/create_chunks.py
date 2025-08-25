@@ -2,6 +2,7 @@ from langchain_text_splitters import TokenTextSplitter
 from langchain.docstore.document import Document
 from langchain_neo4j import Neo4jGraph
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import MarkdownTextSplitter
 import logging
 from src.document_sources.youtube import get_chunks_with_timestamps, get_calculated_timestamps
 import re
@@ -57,12 +58,12 @@ class CreateChunksofDocument:
 
     def split_file_into_chunks_recursive(self, chunk_size: int, chunk_overlap: int):
         """
-        Split the whole document (all pages) using RecursiveCharacterTextSplitter.
+        Split the whole document (all pages) using MarkdownTextSplitter.
 
-        This method concatenates all page texts into a single text with page
-        separators, then applies the RecursiveCharacterTextSplitter to produce
-        character-based chunks. Each produced chunk will have metadata with a
-        best-effort page range (start_page, end_page) when possible.
+        This method concatenates all page texts into a single markdown text,
+        then applies the MarkdownTextSplitter to produce chunks that respect
+        markdown structure (headers, lists, code blocks, etc.). Each produced 
+        chunk will have metadata with a best-effort page range when possible.
 
         Args:
             chunk_size: target chunk size in characters
@@ -71,7 +72,7 @@ class CreateChunksofDocument:
         Returns:
             List of langchain Document objects
         """
-        logging.info("Split whole document using RecursiveCharacterTextSplitter")
+        logging.info("Split whole document using MarkdownTextSplitter")
 
         # If pages look like a youtube transcript (time-based), keep existing behaviour
         if 'length' in self.pages[0].metadata:
@@ -128,45 +129,36 @@ class CreateChunksofDocument:
             if i < 3:  # Log first 3 pages content preview
                 logging.info(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
 
-        full_text = "".join(page_texts)
-        logging.info(f"DEBUG: Full text length after concatenation: {len(full_text)} chars")
-        logging.info(f"DEBUG: Full text preview: {full_text[:200]}...")
+        # Join pages with markdown page separators (preserving markdown structure)
+        full_text = "\n\n---\n\n".join(page_texts)
+        logging.info(f"DEBUG: Full markdown text length after concatenation: {len(full_text)} chars")
+        logging.info(f"DEBUG: Full markdown text preview: {full_text[:200]}...")
 
-        # No max chunks limit for recursive splitting - process entire document
+        # No max chunks limit for markdown splitting - process entire document
         logging.info(f"DEBUG: No chunk limit applied, chunk_size: {chunk_size}")
+        logging.info(f"DEBUG: No chunk limit applied, chunk_overlap: {chunk_overlap}")
 
-        splitter = RecursiveCharacterTextSplitter(
+        # Use MarkdownTextSplitter to respect markdown structure
+        splitter = MarkdownTextSplitter(
             chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
+            chunk_overlap=chunk_overlap
         )
 
-        raw_chunks = splitter.split_text(full_text)
-        logging.info(f"DEBUG: Raw chunks created: {len(raw_chunks)}")
-        for i, chunk in enumerate(raw_chunks[:5]):  # Log first 5 chunks
-            logging.info(f"DEBUG: Raw chunk {i+1} length: {len(chunk)}, preview: {chunk[:100]}...")
-
-        documents = []
-        for ch_idx, ch in enumerate(raw_chunks):  # Process all chunks, no limit
-            meta = {}
-            
-            # Clean chunk content for searching
-            clean_ch = ch.strip()
-            if not clean_ch:
-                # Empty chunk, assign first page as fallback
-                meta['page_number'] = 1
-                documents.append(Document(page_content=ch, metadata=meta))
-                logging.info(f"DEBUG: Empty chunk {ch_idx+1} assigned to page 1")
-                continue
+        # Create documents from the markdown text
+        documents = splitter.create_documents([full_text])
+        logging.info(f"DEBUG: Markdown chunks created: {len(documents)}")
+        
+        # Add page metadata to each chunk
+        for ch_idx, doc in enumerate(documents):
+            # Try to find which page(s) this chunk belongs to
+            chunk_text = doc.page_content
             
             # Try multiple search strategies to find chunk position
             idx = -1
             search_attempts = [
-                ch,  # exact match
-                clean_ch,  # stripped
-                ch[:min(100, len(ch))],  # first 100 chars
-                clean_ch[:min(50, len(clean_ch))] if len(clean_ch) >= 50 else clean_ch  # first 50 chars
+                chunk_text,  # exact match
+                chunk_text.strip(),  # stripped
+                chunk_text[:min(100, len(chunk_text))],  # first 100 chars
             ]
             
             for attempt in search_attempts:
@@ -178,11 +170,12 @@ class CreateChunksofDocument:
                 except ValueError:
                     continue
             
+            meta = {}
             if idx >= 0:
                 start_idx = idx
-                end_idx = idx + len(ch) - 1
+                end_idx = idx + len(chunk_text) - 1
 
-                # Find start_page and end_page with improved logic
+                # Find start_page and end_page
                 start_page = None
                 end_page = None
                 
@@ -211,17 +204,18 @@ class CreateChunksofDocument:
                     meta['page_number'] = end_page
                 else:
                     # Fallback: assign to middle page based on chunk index
-                    estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(raw_chunks)) + 1))
+                    estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(documents)) + 1))
                     meta['page_number'] = estimated_page
                     logging.warning(f"Could not determine exact page for chunk {ch_idx+1}, assigned estimated page {estimated_page}")
             else:
                 # Could not find chunk in full text, use estimation
-                estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(raw_chunks)) + 1))
+                estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(documents)) + 1))
                 meta['page_number'] = estimated_page
                 logging.warning(f"Could not locate chunk {ch_idx+1} in full text, assigned estimated page {estimated_page}")
 
-            documents.append(Document(page_content=ch, metadata=meta))
-            logging.info(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(ch)}")
+            # Update document metadata
+            doc.metadata.update(meta)
+            logging.info(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(chunk_text)}")
 
-        logging.info(f"DEBUG: Total final documents created: {len(documents)}")
+        logging.info(f"DEBUG: Total final documents created with metadata: {len(documents)}")
         return documents

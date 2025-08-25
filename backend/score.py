@@ -602,16 +602,16 @@ async def extract_knowledge_graph_from_file(
             logging.info("Nodes and Relationship Counts updated")
             
             # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
-            try:
-                from src.make_relationships import create_document_relationships
-                doc_relationships_start = time.time()
-                doc_connections = await asyncio.to_thread(create_document_relationships, graph, file_name)
-                doc_relationships_end = time.time()
-                logging.info(f"Document relationships created for {file_name}: {doc_connections} in {doc_relationships_end - doc_relationships_start:.2f} seconds")
-                result['document_relationships'] = doc_connections
-            except Exception as doc_rel_error:
-                logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
-                result['document_relationships'] = {'error': str(doc_rel_error)}
+            # try:
+            #     from src.make_relationships import create_document_relationships
+            #     doc_relationships_start = time.time()
+            #     doc_connections = await asyncio.to_thread(create_document_relationships, graph, file_name)
+            #     doc_relationships_end = time.time()
+            #     logging.info(f"Document relationships created for {file_name}: {doc_connections} in {doc_relationships_end - doc_relationships_start:.2f} seconds")
+            #     result['document_relationships'] = doc_connections
+            # except Exception as doc_rel_error:
+            #     logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
+            #     result['document_relationships'] = {'error': str(doc_rel_error)}
             
             if count_response :
                 result['chunkNodeCount'] = count_response[file_name].get('chunkNodeCount',"0")
