@@ -37,6 +37,7 @@ def normalize_unicode_text(text: str) -> str:
 def normalize_file_name(filename: str) -> str:
     """
     File name normalization for Neo4j consistency
+    Dosya sistem uyumluluğu için NFC normalizasyonu kullanır
     
     Args:
         filename (str): Input filename
@@ -48,15 +49,37 @@ def normalize_file_name(filename: str) -> str:
         return filename
     
     try:
-        # Unicode normalization
-        normalized = normalize_unicode_text(filename)
+        # Unicode normalization - NFC kullan (Composed)
+        # Bu, çoğu dosya sistemi ile uyumlu olan format
+        normalized = unicodedata.normalize('NFC', filename)
         
-        # Dosya adı için özel temizlik gerekirse buraya eklenebilir
+        # UTF-8 encoding'i güvence altına al
+        normalized = normalized.encode('utf-8', errors='replace').decode('utf-8')
+        
+        # Additional cleaning
+        normalized = normalized.strip()
+        
+        logging.debug(f"Filename normalized: '{filename}' -> '{normalized}'")
         
         return normalized
     except Exception as e:
         logging.warning(f"Filename normalization hatası: {e}")
         return filename
+
+def try_both_normalizations(filename: str):
+    """
+    Hem NFC hem NFD normalizasyonlarını döndürür
+    Dosya arama işlemleri için kullanılır
+    """
+    if not filename or not isinstance(filename, str):
+        return filename, filename
+    
+    try:
+        nfc = unicodedata.normalize('NFC', filename)
+        nfd = unicodedata.normalize('NFD', filename)
+        return nfc, nfd
+    except Exception:
+        return filename, filename
 
 def ensure_utf8_encoding(data: any) -> any:
     """

@@ -167,7 +167,7 @@ class graphDBdataAccess:
                             d.relationshipCount = $r_count, d.model= $model, d.gcsBucket=$gcs_bucket, 
                             d.gcsBucketFolder= $gcs_bucket_folder, d.language= $language,d.gcsProjectId= $gcs_project_id,
                             d.is_cancelled=False, d.total_chunks=0, d.processed_chunk=0,
-                            d.access_token=$access_token,
+                            d.access_token=$access_token, d.doc_link=$doc_link, d.page_images=$page_images,
                             d.chunkNodeCount=$chunkNodeCount,d.chunkRelCount=$chunkRelCount,
                             d.entityNodeCount=$entityNodeCount,d.entityEntityRelCount=$entityEntityRelCount,
                             d.communityNodeCount=$communityNodeCount,d.communityRelCount=$communityRelCount""",
@@ -177,7 +177,7 @@ class graphDBdataAccess:
                             "u_at":obj_source_node.created_at, "pt":0, "e_message":'', "n_count":0, "r_count":0, "model":obj_source_node.model,
                             "gcs_bucket": obj_source_node.gcsBucket, "gcs_bucket_folder": obj_source_node.gcsBucketFolder, 
                             "language":obj_source_node.language, "gcs_project_id":obj_source_node.gcsProjectId,
-                            "access_token":obj_source_node.access_token,
+                            "access_token":obj_source_node.access_token, "doc_link":obj_source_node.doc_link, "page_images":obj_source_node.page_images,
                             "chunkNodeCount":obj_source_node.chunkNodeCount,
                             "chunkRelCount":obj_source_node.chunkRelCount,
                             "entityNodeCount":obj_source_node.entityNodeCount,
@@ -837,11 +837,18 @@ class graphDBdataAccess:
                     p.type = $policy_type,
                     p.policyNumber = $policy_number,
                     p.customer = $customer_name,
+                    p.year = $year,
+                    p.insuredItem = $insured_item,
                     p.createdAt = datetime(),
-                    p.source_file = $filename
+                    p.source_file = $filename,
+                    p.extraction_method = $extraction_method
                 ON MATCH SET 
                     p.updatedAt = datetime(),
-                    p.source_file = $filename
+                    p.source_file = $filename,
+                    p.year = $year,
+                    p.insuredItem = $insured_item,
+                    p.extraction_method = $extraction_method,
+                    p.policyNumber = $policy_number
                 RETURN p.id as policy_id
             """
             
@@ -851,21 +858,81 @@ class graphDBdataAccess:
                 "policy_type": policy_info.get('policy_type', 'Insurance Policy'),
                 "policy_number": policy_info.get('policy_number', ''),
                 "customer_name": policy_info.get('customer_name', ''),
-                "filename": file_name
+                "year": policy_info.get('year', ''),
+                "insured_item": policy_info.get('insured_item', ''),
+                "filename": file_name,
+                "extraction_method": "LLM"
             }, session_params={"database": self.graph._database})
             
             if result:
                 logging.info(f"Policy node oluşturuldu: {policy_id}")
                 
-                # Policy ile Document arasında DOCUMENTED_IN ilişkisi kur
-                link_query = """
+                # Document'a docType ekle
+                update_document_query = """
                     MATCH (d:Document {fileName: $file_name})
-                    MATCH (p:Policy {id: $policy_id})
-                    MERGE (p)-[r:DOCUMENTED_IN]->(d)
-                    SET r.created_at = datetime(),
-                        r.source = 'filename_extraction'
-                    RETURN count(r) as links_created
+                    SET d.docType = $doc_type,
+                        d.updatedAt = datetime()
+                    RETURN d.fileName as updated_file
                 """
+                
+                doc_type = policy_info.get('document_type', 'MAIN_POLICY')
+                self.graph.query(update_document_query, {
+                    "file_name": file_name,
+                    "doc_type": doc_type
+                }, session_params={"database": self.graph._database})
+                
+                # Belge türüne göre farklı ilişkiler kur
+                if doc_type == 'MAIN_POLICY':
+                    link_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (p)-[r:DOCUMENTED_IN]->(d)
+                        SET r.created_at = datetime(),
+                            r.source = 'filename_extraction'
+                        RETURN count(r) as links_created
+                    """
+                    relationship_type = "DOCUMENTED_IN"
+                elif doc_type == 'ENDORSEMENT':
+                    link_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (p)-[r:HAS_ENDORSEMENT]->(d)
+                        SET r.created_at = datetime(),
+                            r.source = 'filename_extraction'
+                        RETURN count(r) as links_created
+                    """
+                    relationship_type = "HAS_ENDORSEMENT"
+                elif doc_type == 'RENEWAL':
+                    link_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (p)-[r:HAS_RENEWAL]->(d)
+                        SET r.created_at = datetime(),
+                            r.source = 'filename_extraction'
+                        RETURN count(r) as links_created
+                    """
+                    relationship_type = "HAS_RENEWAL"
+                elif doc_type == 'CANCELLATION':
+                    link_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (p)-[r:HAS_CANCELLATION]->(d)
+                        SET r.created_at = datetime(),
+                            r.source = 'filename_extraction'
+                        RETURN count(r) as links_created
+                    """
+                    relationship_type = "HAS_CANCELLATION"
+                else:
+                    # Fallback: varsayılan DOCUMENTED_IN
+                    link_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (p)-[r:DOCUMENTED_IN]->(d)
+                        SET r.created_at = datetime(),
+                            r.source = 'filename_extraction'
+                        RETURN count(r) as links_created
+                    """
+                    relationship_type = "DOCUMENTED_IN"
                 
                 link_result = self.graph.query(link_query, {
                     "file_name": file_name,
@@ -873,21 +940,235 @@ class graphDBdataAccess:
                 }, session_params={"database": self.graph._database})
                 
                 if link_result and link_result[0]['links_created'] > 0:
-                    logging.info(f"Policy-Document DOCUMENTED_IN ilişkisi oluşturuldu: {policy_id} -> {file_name}")
+                    logging.info(f"Policy-Document {relationship_type} ilişkisi oluşturuldu: {policy_id} -> {file_name}")
                 else:
-                    logging.warning(f"Policy-Document ilişkisi oluşturulamadı: {policy_id} -> {file_name}")
+                    logging.warning(f"Policy-Document {relationship_type} ilişkisi oluşturulamadı: {policy_id} -> {file_name}")
+                
+                # Customer, PolicyYear, InsuredItem ve PolicyType node'larını oluştur
+                self._create_policy_related_nodes(policy_info, policy_id, file_name)
             
         except Exception as e:
             logging.error(f"Policy node oluşturma hatası ({file_name}): {e}")
 
+    def _create_policy_related_nodes(self, policy_info: dict, policy_id: str, file_name: str):
+        """
+        Policy bilgilerinden Customer, PolicyYear, InsuredItem ve PolicyType node'larını oluşturur
+        """
+        try:
+            # Customer node oluştur
+            customer_name = policy_info.get('customer_name', '').strip()
+            if customer_name:
+                self._create_customer_node(customer_name, policy_id, file_name)
+            
+            # PolicyYear node oluştur
+            year = policy_info.get('year', '').strip()
+            if year:
+                self._create_policy_year_node(year, policy_id)
+            
+            # InsuredItem node oluştur
+            insured_item = policy_info.get('insured_item', '').strip()
+            if insured_item:
+                self._create_insured_item_node(insured_item, policy_id)
+            
+            # PolicyType node oluştur
+            policy_type = policy_info.get('policy_type', '').strip()
+            if policy_type:
+                self._create_policy_type_node(policy_type, policy_id)
+                
+        except Exception as e:
+            logging.error(f"Policy related node'ları oluşturma hatası: {e}")
+
+    def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
+        """Customer node oluşturur ve ilişkilendirir"""
+        try:
+            # Customer node oluştur veya güncelle
+            create_customer_query = """
+                MERGE (c:Customer {name: $customer_name})
+                ON CREATE SET 
+                    c.createdAt = datetime(),
+                    c.fullName = $customer_name,
+                    c.policyCount = 1
+                ON MATCH SET 
+                    c.updatedAt = datetime(),
+                    c.policyCount = c.policyCount + 1
+                RETURN c.name as customer_name
+            """
+            
+            result = self.graph.query(create_customer_query, {
+                "customer_name": customer_name
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"Customer node oluşturuldu/güncellendi: {customer_name}")
+                
+                # Customer -> Document HAS_DOC ilişkisi
+                customer_doc_query = """
+                    MATCH (c:Customer {name: $customer_name})
+                    MATCH (d:Document {fileName: $file_name})
+                    MERGE (c)-[r:HAS_DOC]->(d)
+                    SET r.created_at = datetime()
+                    RETURN count(r) as links_created
+                """
+                
+                self.graph.query(customer_doc_query, {
+                    "customer_name": customer_name,
+                    "file_name": file_name
+                }, session_params={"database": self.graph._database})
+                
+                # Customer -> Policy HAS_POLICY ilişkisi
+                customer_policy_query = """
+                    MATCH (c:Customer {name: $customer_name})
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (c)-[r:HAS_POLICY]->(p)
+                    SET r.created_at = datetime()
+                    RETURN count(r) as links_created
+                """
+                
+                self.graph.query(customer_policy_query, {
+                    "customer_name": customer_name,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Customer ilişkileri oluşturuldu: {customer_name}")
+                
+        except Exception as e:
+            logging.error(f"Customer node oluşturma hatası: {e}")
+
+    def _create_policy_year_node(self, year: str, policy_id: str):
+        """PolicyYear node oluşturur ve ilişkilendirir"""
+        try:
+            # PolicyYear node oluştur (sadece bir kez)
+            create_year_query = """
+                MERGE (py:PolicyYear {name: $year})
+                ON CREATE SET 
+                    py.year = toInteger($year),
+                    py.createdAt = datetime(),
+                    py.policyCount = 1
+                ON MATCH SET 
+                    py.updatedAt = datetime(),
+                    py.policyCount = py.policyCount + 1
+                RETURN py.name as year_name
+            """
+            
+            result = self.graph.query(create_year_query, {
+                "year": year
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"PolicyYear node oluşturuldu/güncellendi: {year}")
+                
+                # Policy -> PolicyYear HAS_YEAR ilişkisi
+                policy_year_query = """
+                    MATCH (p:Policy {id: $policy_id})
+                    MATCH (py:PolicyYear {name: $year})
+                    MERGE (p)-[r:HAS_YEAR]->(py)
+                    SET r.created_at = datetime()
+                    RETURN count(r) as links_created
+                """
+                
+                self.graph.query(policy_year_query, {
+                    "policy_id": policy_id,
+                    "year": year
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Policy-PolicyYear ilişkisi oluşturuldu: {policy_id} -> {year}")
+                
+        except Exception as e:
+            logging.error(f"PolicyYear node oluşturma hatası: {e}")
+
+    def _create_insured_item_node(self, insured_item: str, policy_id: str):
+        """InsuredItem node oluşturur ve ilişkilendirir"""
+        try:
+            # InsuredItem node oluştur
+            create_item_query = """
+                MERGE (ii:InsuredItem {name: $insured_item})
+                ON CREATE SET 
+                    ii.description = $insured_item,
+                    ii.createdAt = datetime(),
+                    ii.policyCount = 1
+                ON MATCH SET 
+                    ii.updatedAt = datetime(),
+                    ii.policyCount = ii.policyCount + 1
+                RETURN ii.name as item_name
+            """
+            
+            result = self.graph.query(create_item_query, {
+                "insured_item": insured_item
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"InsuredItem node oluşturuldu/güncellendi: {insured_item}")
+                
+                # Policy -> InsuredItem HAS_INSURED_ITEM ilişkisi
+                policy_item_query = """
+                    MATCH (p:Policy {id: $policy_id})
+                    MATCH (ii:InsuredItem {name: $insured_item})
+                    MERGE (p)-[r:HAS_INSURED_ITEM]->(ii)
+                    SET r.created_at = datetime()
+                    RETURN count(r) as links_created
+                """
+                
+                self.graph.query(policy_item_query, {
+                    "policy_id": policy_id,
+                    "insured_item": insured_item
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Policy-InsuredItem ilişkisi oluşturuldu: {policy_id} -> {insured_item}")
+                
+        except Exception as e:
+            logging.error(f"InsuredItem node oluşturma hatası: {e}")
+
+    def _create_policy_type_node(self, policy_type: str, policy_id: str):
+        """PolicyType node oluşturur ve ilişkilendirir"""
+        try:
+            # PolicyType node oluştur
+            create_type_query = """
+                MERGE (pt:PolicyType {name: $policy_type})
+                ON CREATE SET 
+                    pt.typeName = $policy_type,
+                    pt.createdAt = datetime(),
+                    pt.policyCount = 1
+                ON MATCH SET 
+                    pt.updatedAt = datetime(),
+                    pt.policyCount = pt.policyCount + 1
+                RETURN pt.name as type_name
+            """
+            
+            result = self.graph.query(create_type_query, {
+                "policy_type": policy_type
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"PolicyType node oluşturuldu/güncellendi: {policy_type}")
+                
+                # Policy -> PolicyType HAS_TYPE ilişkisi
+                policy_type_query = """
+                    MATCH (p:Policy {id: $policy_id})
+                    MATCH (pt:PolicyType {name: $policy_type})
+                    MERGE (p)-[r:HAS_TYPE]->(pt)
+                    SET r.created_at = datetime()
+                    RETURN count(r) as links_created
+                """
+                
+                self.graph.query(policy_type_query, {
+                    "policy_id": policy_id,
+                    "policy_type": policy_type
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Policy-PolicyType ilişkisi oluşturuldu: {policy_id} -> {policy_type}")
+                
+        except Exception as e:
+            logging.error(f"PolicyType node oluşturma hatası: {e}")
+
     def extract_policy_info_from_filename(self, file_name: str) -> dict:
         """
-        Dosya isminden poliçe bilgilerini çıkarır.
+        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
+        Fallback yok - LLM başarısız olursa hata fırlatır.
         
-        Örnek: "Ayça Dinçkök Galata Residance D4 Konut Poliçesi.pdf"
+        Örnek: "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf"
         """
         import os
-        import re
+        import json
         
         try:
             # Dosya uzantısını kaldır
@@ -897,58 +1178,122 @@ class graphDBdataAccess:
             from src.utf8_utils import normalize_unicode_text
             base_name = normalize_unicode_text(base_name)
             
-            # Poliçe türlerini tespit et
-            policy_types = {
-                'konut': 'Konut Sigortası',
-                'dask': 'DASK Sigortası', 
-                'kasko': 'Kasko Sigortası',
-                'trafik': 'Trafik Sigortası',
-                'sağlık': 'Sağlık Sigortası',
-                'hayat': 'Hayat Sigortası',
-                'işyeri': 'İşyeri Sigortası',
-                'poliçe': 'Genel Poliçe'
-            }
+            # LLM'den poliçe bilgilerini al
+            policy_info = self._extract_policy_info_with_llm(base_name)
             
-            detected_type = 'Insurance Policy'
-            for key, value in policy_types.items():
-                if key.lower() in base_name.lower():
-                    detected_type = value
-                    break
+            if not policy_info:
+                error_msg = f"LLM dosya isminden poliçe bilgisi çıkaramadı: {file_name}"
+                logging.error(error_msg)
+                raise ValueError(error_msg)
             
-            # Müşteri ismini çıkarmaya çalış (ilk kelimeler genellikle isim)
-            words = base_name.split()
-            customer_name = ''
-            if len(words) >= 2:
-                # İlk 2-3 kelimeyi isim olarak al
-                potential_name = ' '.join(words[:min(3, len(words))])
-                # Sadece harf içeren kelimeleri al
-                if re.match(r'^[a-zA-ZçÇğĞıIşŞöÖüÜ\s]+$', potential_name):
-                    customer_name = potential_name.strip()
-            
-            # Policy ID'yi oluştur (dosya ismi base'i)
+            # Policy ID'yi oluştur
             policy_id = base_name.strip()
+            policy_info['policy_id'] = policy_id
+            policy_info['policy_name'] = policy_id
             
-            # Poliçe numarasını bulmaya çalış
-            policy_number = ''
-            number_pattern = r'\b\d{4,}\b'  # 4+ digit numbers
-            numbers = re.findall(number_pattern, base_name)
-            if numbers:
-                policy_number = numbers[0]  # İlk uzun sayıyı al
-            
-            result = {
-                'policy_id': policy_id,
-                'policy_name': policy_id,
-                'policy_type': detected_type,
-                'policy_number': policy_number,
-                'customer_name': customer_name
-            }
-            
-            logging.info(f"Dosya isminden çıkarılan poliçe bilgisi: {result}")
-            return result
+            logging.info(f"LLM ile çıkarılan poliçe bilgisi: {policy_info}")
+            return policy_info
             
         except Exception as e:
-            logging.error(f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}")
-            return None
+            error_msg = f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
+
+    def _extract_policy_info_with_llm(self, file_name: str) -> dict:
+        """
+        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
+        """
+        try:
+            from src.llm import get_llm
+            
+            # Sistem mevcut get_llm metodunu kullan
+            llm, _ = get_llm('openai_gpt_4o_mini')
+            
+            # Prompt oluştur
+            prompt = f"""
+Verilen dosya isminden sigorta poliçesi bilgilerini çıkar ve JSON formatında döndür.
+
+Dosya ismi: "{file_name}"
+
+Çıkarılacak bilgiler:
+- customer_name: Müşteri ismi (ad soyad)
+- year: Poliçe yılı (varsa)
+- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, vb.)
+- insured_item: Sigortalanan eşya/konum (ev adresi, araç, vb.)
+- policy_number: Poliçe numarası (varsa)
+- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION)
+
+Belge türü belirleme kuralları:
+- MAIN_POLICY: Ana poliçe (zeyilname, yenileme, iptal belirtisi yoksa)
+- ENDORSEMENT: Zeyilname (dosya isminde "zeyilname", "ek", "tadilat" varsa)
+- RENEWAL: Yenileme (dosya isminde "yenileme", "renewal" varsa)
+- CANCELLATION: İptal (dosya isminde "iptal", "fesih" varsa)
+
+Örnekler:
+- "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf" → customer_name: "Ayça Dinçkök", year: "2020", policy_type: "Konut Sigortası", insured_item: "Galata Residance D6", document_type: "MAIN_POLICY"
+- "Mehmet Yılmaz BMW X5 Kasko Zeyilname 2023.pdf" → customer_name: "Mehmet Yılmaz", year: "2023", policy_type: "Kasko Sigortası", insured_item: "BMW X5", document_type: "ENDORSEMENT"
+
+Sadece JSON formatında yanıt ver, başka açıklama ekleme:
+{{
+    "customer_name": "...",
+    "year": "...",
+    "policy_type": "...",
+    "insured_item": "...",
+    "policy_number": "...",
+    "document_type": "..."
+}}
+"""
+            
+            # LLM'den yanıt al
+            response = llm.invoke(prompt)
+            response_text = response.content.strip()
+            
+            # JSON parse et
+            try:
+                # JSON kısmını ayıkla
+                if '{' in response_text and '}' in response_text:
+                    start_idx = response_text.find('{')
+                    end_idx = response_text.rfind('}') + 1
+                    json_text = response_text[start_idx:end_idx]
+                    policy_info = json.loads(json_text)
+                    
+                    # Boş değerleri temizle ve UTF-8 normalize et
+                    cleaned_info = {}
+                    for key, value in policy_info.items():
+                        if value and value.strip() and value.strip() != "...":
+                            # UTF-8 normalizasyon uygula
+                            from src.utf8_utils import normalize_unicode_text
+                            normalized_value = normalize_unicode_text(value.strip())
+                            cleaned_info[key] = normalized_value
+                    
+                    logging.info(f"✅ LLM başarıyla poliçe bilgilerini çıkardı (UTF-8 normalized): {cleaned_info}")
+                    
+                    # Minimum gerekli alanları kontrol et
+                    required_fields = ['customer_name', 'policy_type', 'document_type']
+                    missing_fields = [field for field in required_fields if not cleaned_info.get(field, '').strip()]
+                    
+                    if missing_fields:
+                        error_msg = f"LLM eksik bilgi döndürdü. Eksik alanlar: {missing_fields}"
+                        logging.error(error_msg)
+                        raise ValueError(error_msg)
+                    
+                    return cleaned_info
+                else:
+                    error_msg = "LLM yanıtında JSON formatı bulunamadı"
+                    logging.error(error_msg)
+                    logging.error(f"LLM yanıtı: {response_text}")
+                    raise ValueError(error_msg)
+                    
+            except json.JSONDecodeError as e:
+                error_msg = f"LLM yanıtı JSON parse edilemedi: {e}"
+                logging.error(error_msg)
+                logging.error(f"LLM yanıtı: {response_text}")
+                raise ValueError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"LLM ile poliçe bilgisi çıkarma hatası: {e}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
 
     def get_websource_url(self,file_name):
         logging.info("Checking if same title with different URL exist in db ")

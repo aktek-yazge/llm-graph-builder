@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import List, Optional
 
 class sourceNode:
     file_name:str=None
@@ -30,3 +31,5 @@ class sourceNode:
     processed_chunk:int=None
     access_token:str=None
     retry_condition:str=None
+    doc_link:str=None
+    page_images:Optional[List[str]]=None
