@@ -16,6 +16,8 @@ from src.shared.schema_extraction import schema_extraction_from_text
 from dotenv import load_dotenv
 from datetime import datetime
 import logging
+import os
+import time
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.document_sources.local_file import get_documents_from_file_by_path, generate_page_images_with_pymupdf
@@ -376,32 +378,9 @@ async def extract_graph_from_file_local_file(
 
     logging.info(f"Process file name: {fileName}")
     if not retry_condition:
-        gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
-        if gcs_file_cache == "True":
-            folder_name = create_gcs_bucket_folder_name_hashed(uri, fileName)
-            file_name, pages = get_documents_from_gcs(
-                PROJECT_ID, BUCKET_UPLOAD, folder_name, fileName
-            )
-        else:
-            try:
-                file_name, pages, file_extension, generated_images = get_documents_from_file_by_path(
-                    merged_file_path, fileName, generate_images=True, output_dir="output"
-                )
-                logging.info(f"Loaded {len(pages) if pages else 0} pages for file: {fileName}")
-                if generated_images:
-                    logging.info(f"Generated {len(generated_images)} page images for file: {fileName}")
-            except (FileNotFoundError, Exception) as e:
-                if "does not exist" in str(e):
-                    logging.warning(f"File {fileName} not found during processing - may have been deleted by another operation")
-                    raise LLMGraphBuilderException(f"File {fileName} is no longer available for processing")
-                else:
-                    raise e
-        
-        if pages == None or len(pages) == 0:
-            logging.error(f"No pages found for file: {file_name}. File may be corrupted, empty, or unsupported format.")
-            raise LLMGraphBuilderException(
-                f"File content is not available for file : {file_name}"
-            )
+        # Extract işlemi artık sadece mevcut chunk'larla çalışır
+        # Pages'leri yüklemek gereksiz - chunk'lar upload sırasında oluşturulmuş olmalı
+        logging.info(f"🔄 Starting extract process for: {fileName} (chunks should exist from upload)")
         
         # Document node'undan page_images'ı al
         page_images = None
@@ -410,7 +389,7 @@ async def extract_graph_from_file_local_file(
             graphDb_data_Access = graphDBdataAccess(graph)
             result = graphDb_data_Access.execute_query(
                 "MATCH (d:Document {fileName: $file_name}) RETURN d.page_images AS page_images",
-                {"file_name": file_name}
+                {"file_name": fileName}
             )
             if result and len(result) > 0 and result[0].get('page_images'):
                 page_images = result[0]['page_images']
@@ -424,8 +403,8 @@ async def extract_graph_from_file_local_file(
             password,
             database,
             model,
-            file_name,
-            pages,
+            fileName,  # file_name olarak kullan
+            [],  # pages artık gereksiz - boş array gönder
             allowedNodes,
             allowedRelationship,
             token_chunk_size,
@@ -448,7 +427,7 @@ async def extract_graph_from_file_local_file(
             database,
             model,
             fileName,
-            [],
+            [],  # pages artık gereksiz - boş array gönder
             allowedNodes,
             allowedRelationship,
             token_chunk_size,
@@ -1305,12 +1284,24 @@ def get_chunkId_chunkDoc_list(
     file_name = normalize_file_name(file_name)
     
     if not retry_condition:
-        logging.info("Break down file into chunks")
+        logging.info("Looking for existing chunks (chunks must be created during upload)")
         
-        # İlk olarak chunk'ların zaten var olup olmadığını kontrol et
+        # Chunk'ların upload sırasında oluşturulmuş olup olmadığını kontrol et
+        # Yeni sistem: PART_OF ilişkisi ile
         existing_chunks = execute_graph_query(
             graph, QUERY_TO_GET_CHUNKS, params={"filename": file_name}
         )
+        
+        # Eğer yeni sistemde chunk bulunamazsa eski sistemi dene (fileName property'si ile)
+        if not existing_chunks or not existing_chunks[0].get("text"):
+            logging.info(f"🔄 Trying legacy chunk lookup for: {file_name}")
+            legacy_query = """
+                MATCH (c:Chunk) 
+                WHERE c.fileName = $filename 
+                RETURN c.id as id, c.text as text, c.position as position 
+                ORDER BY c.position
+            """
+            existing_chunks = execute_graph_query(graph, legacy_query, params={"filename": file_name})
         
         if existing_chunks and existing_chunks[0].get("text"):
             logging.info(f"✅ Found {len(existing_chunks)} existing chunks for {file_name}")
@@ -1331,35 +1322,92 @@ def get_chunkId_chunkDoc_list(
             
             return len(existing_chunks), chunkId_chunkDoc_list
         else:
-            logging.info("No existing chunks found, creating new chunks from pages")
+            # Chunk'lar upload sırasında oluşturulmamışsa (eski dosyalar için)
+            logging.warning(f"No chunks found for {file_name}. Attempting to create chunks from existing document...")
             
-            # Bad characters'ı temizle
-            bad_chars = ['"', "\n", "'"]
-            for i in range(0, len(pages)):
-                text = pages[i].page_content
-                
-                # UTF-8 ve Unicode normalization
-                text = normalize_unicode_text(text)
-                
-                for j in bad_chars:
-                    if j == "\n":
-                        text = text.replace(j, " ")
-                    else:
-                        text = text.replace(j, "")
-                pages[i] = Document(page_content=str(text), metadata=pages[i].metadata)
-
-            # Yeni chunk'ları oluştur
-            create_chunks_obj = CreateChunksofDocument(pages, graph)
+            # Document node'dan dosya bilgilerini al
             try:
-                chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                    chunk_size=int(token_chunk_size), chunk_overlap=int(chunk_overlap)
-                )
+                document_query = """
+                MATCH (d:Document {fileName: $file_name}) 
+                RETURN d.file_type AS file_type, d.created_at AS created_at
+                """
+                doc_result = execute_graph_query(graph, document_query, params={"filename": file_name})
+                
+                if doc_result and len(doc_result) > 0:
+                    logging.info(f"Found Document node for {file_name}, attempting chunk creation...")
+                    
+                    # Dosya path'ini bul ve chunk'ları oluştur
+                    merged_file_path = None
+                    possible_paths = [
+                        f"/Users/mehmeterdogan/python-projects/llm-graph-builder/merged_files/{file_name}",
+                        f"./merged_files/{file_name}",
+                        f"merged_files/{file_name}"
+                    ]
+                    
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            merged_file_path = path
+                            break
+                    
+                    if merged_file_path and os.path.exists(merged_file_path):
+                        logging.info(f"Found file at: {merged_file_path}, creating chunks...")
+                        
+                        # Dosyayı load et ve chunk'ları oluştur
+                        from src.document_sources.local_file import load_document_content
+                        loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
+                        pages = loader.load()
+                        
+                        if pages:
+                            # Chunk'ları oluştur
+                            from src.create_chunks import CreateChunksofDocument
+                            create_chunks_obj = CreateChunksofDocument(pages, graph)
+                            
+                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                                chunk_size=int(token_chunk_size), 
+                                chunk_overlap=int(chunk_overlap)
+                            )
+                            
+                            if chunks:
+                                # Chunk node'ları veritabanına kaydet
+                                from src.make_relationships import create_chunks_for_upload
+                                
+                                created_chunks = create_chunks_for_upload(
+                                    graph=graph,
+                                    chunks=chunks, 
+                                    file_name=file_name,
+                                    page_images=page_images if page_images else []
+                                )
+                                
+                                logging.info(f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created")
+                                
+                                # Şimdi chunk'ları kullan
+                                chunkId_chunkDoc_list = []
+                                for i, chunk_data in enumerate(created_chunks):
+                                    chunk_doc = Document(
+                                        page_content=chunk_data["text"],
+                                        metadata={"id": chunk_data["id"], "position": i + 1},
+                                    )
+                                    chunkId_chunkDoc_list.append(
+                                        {"chunk_id": chunk_data["id"], "chunk_doc": chunk_doc}
+                                    )
+                                
+                                return len(created_chunks), chunkId_chunkDoc_list
+                            else:
+                                logging.error(f"Failed to create chunks for {file_name}")
+                        else:
+                            logging.error(f"No pages could be loaded from {merged_file_path}")
+                    else:
+                        logging.error(f"File not found in any expected location for {file_name}")
+                else:
+                    logging.error(f"No Document node found for {file_name}")
             except Exception as e:
-                logging.warning(f"Recursive splitting failed ({e}), falling back to page-based chunks")
-                chunks = pages
+                logging.error(f"Emergency chunk creation failed for {file_name}: {e}")
             
-            chunkId_chunkDoc_list = create_relation_between_chunks(graph, file_name, chunks, page_images)
-            return len(chunks), chunkId_chunkDoc_list
+            # Son çare: hata ver
+            raise LLMGraphBuilderException(
+                f"No chunks found for {file_name}. File may need to be re-uploaded. "
+                f"Please re-upload the file to create chunks during upload phase."
+            )
 
     else:
         chunkId_chunkDoc_list = []
@@ -1737,10 +1785,10 @@ def upload_file(
                     )
                     
                     if chunks:
-                        # Chunk node'ları veritabanına kaydet (embedding'siz)
+                        # Chunk node'ları veritabanına kaydet (extract-compatible format)
                         from src.make_relationships import create_chunks_for_upload
                         
-                        created_chunks = create_chunks_for_upload(
+                        chunkId_chunkDoc_list = create_chunks_for_upload(
                             graph=graph,
                             chunks=chunks, 
                             file_name=originalname,
@@ -1748,9 +1796,10 @@ def upload_file(
                         )
                         
                         # Source node'daki chunk sayısını güncelle
-                        obj_source_node.chunkNodeCount = len(created_chunks)
+                        obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
                         
-                        logging.info(f"✅ Created {len(created_chunks)} chunk nodes for: {originalname}")
+                        logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
+                        logging.info(f"📊 Upload created chunks ready for extract processing")
                     else:
                         logging.warning(f"⚠️ No chunks created for: {originalname}")
                 else:
@@ -1764,6 +1813,18 @@ def upload_file(
         graphDb_data_Access = graphDBdataAccess(graph)
         graphDb_data_Access.create_source_node(obj_source_node)
         logging.info(f"📋 Source node created in database for: {originalname}")
+        
+        # Chunk'ları Document'e bağla (eğer chunk'lar oluşturulmuşsa)
+        if file_extension.lower() in docling_supported_formats and pages:
+            try:
+                from src.make_relationships import link_chunks_to_document
+                linked_count = link_chunks_to_document(graph, originalname)
+                if linked_count > 0:
+                    logging.info(f"🔗 Successfully linked {linked_count} relationships between chunks and Document")
+                else:
+                    logging.info(f"ℹ️ Chunks were already linked to Document")
+            except Exception as link_error:
+                logging.error(f"❌ Failed to link chunks to Document: {link_error}")
         
         # Dosyanın gerçekten merged_dir'de oluşturulup oluşturulmadığını kontrol et
         if not gcs_file_cache or gcs_file_cache != "True":

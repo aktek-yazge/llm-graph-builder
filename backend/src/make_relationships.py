@@ -568,7 +568,7 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
 
 def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
     """
-    Upload aşamasında chunk node'ları oluştur (embedding'siz, sadece temel bilgiler)
+    Upload aşamasında chunk node'ları oluştur (extract'a uyumlu yapı)
     
     Args:
         graph: Neo4j graph connection
@@ -577,33 +577,54 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
         page_images: Sayfa resim dosyalarının listesi (dosya adları)
     
     Returns:
-        List of created chunk IDs
+        List of created chunk IDs with chunk documents (extract format)
     """
-    logging.info(f"🔄 Creating {len(chunks)} chunk nodes for upload (without embeddings)")
+    logging.info(f"🔄 Creating {len(chunks)} chunk nodes for upload (extract-compatible structure)")
+    
+    # Extract'daki content normalizasyon fonksiyonunu kullan
+    from src.utf8_utils import normalize_unicode_text
     
     batch_data = []
     relationships = []
-    created_chunk_ids = []
+    lst_chunks_including_hash = []  # Extract format için
     previous_chunk_id = None
-    firstChunk = True
+    offset = 0
     
     for i, chunk in enumerate(chunks):
-        # Chunk ID oluştur
-        current_chunk_id = f"{file_name}_chunk_{i}"
-        created_chunk_ids.append(current_chunk_id)
+        # Extract'daki gibi content normalizasyon
+        content = chunk.page_content.strip()
+        content = normalize_unicode_text(content)
         
-        # Chunk verilerini hazırla
+        # Extract'daki gibi SHA1 hash ID oluştur (filename ile kombine)
+        content_with_filename = f"{file_name}:::{content}"
+        page_content_sha1 = hashlib.sha1(content_with_filename.encode('utf-8'))
+        current_chunk_id = page_content_sha1.hexdigest()
+        
+        position = i + 1
+        if i > 0:
+            offset += len(chunks[i-1].page_content)
+        
+        firstChunk = (i == 0)
+        
+        # Extract'daki gibi metadata yapısı
+        metadata = {"position": position, "length": len(chunk.page_content), "content_offset": offset}
+        chunk_document = Document(
+            page_content=content, metadata=metadata
+        )
+        
+        # Chunk verilerini hazırla (extract format)
         chunk_data = {
             "id": current_chunk_id,
-            "pg_content": chunk.page_content,
-            "position": i,
-            "length": len(chunk.page_content),
+            "pg_content": chunk_document.page_content,
+            "position": position,
+            "length": chunk_document.metadata["length"],
             "f_name": file_name,
             "previous_id": previous_chunk_id,
-            "content_offset": 0  # Upload aşamasında offset hesaplanmaz
+            "content_offset": offset
         }
         
-        # Page number ve page_link ekle
+                
+        # Page number ve page_link ekle (extract'daki gibi)
         if 'page_number' in chunk.metadata:
             chunk_data['page_number'] = chunk.metadata['page_number']
             
@@ -631,10 +652,12 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
                
         batch_data.append(chunk_data)
         
-        # Chunk relationship'leri hazırla
+        # Extract format için chunk list oluştur
+        lst_chunks_including_hash.append({'chunk_id': current_chunk_id, 'chunk_doc': chunk_document})
+        
+        # Chunk relationship'leri hazırla (extract'daki gibi)
         if firstChunk:
             relationships.append({"type": "FIRST_CHUNK", "chunk_id": current_chunk_id})
-            firstChunk = False
         else:
             relationships.append({
                 "type": "NEXT_CHUNK",
@@ -643,8 +666,9 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
             })
         
         previous_chunk_id = current_chunk_id
-          
-    # Chunk node'larını ve PART_OF ilişkilerini oluştur
+    
+    # Chunk node'ları ve PART_OF ilişkilerini oluştur (extract'daki gibi)
+    logging.info(f"🔄 Creating chunk nodes and PART_OF relationships for {len(batch_data)} chunks")
     query_to_create_chunk_and_PART_OF_relation = """
         UNWIND $batch_data AS data
         MERGE (c:Chunk {id: data.id})
@@ -660,29 +684,77 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
             c.end_time = CASE WHEN data.end_time IS NOT NULL THEN data.end_time END,
             c.page_link = CASE WHEN data.page_link IS NOT NULL THEN data.page_link END
         WITH data, c
-        MATCH (d:Document {fileName: data.f_name})
-        MERGE (c)-[:PART_OF]->(d)
+        // Document node'u bulamazsa chunk'ı yine de oluştur, ilişki daha sonra kurulacak
+        OPTIONAL MATCH (d:Document {fileName: data.f_name})
+        FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (c)-[:PART_OF]->(d)
+        )
     """
     execute_graph_query(graph, query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
     
-    # FIRST_CHUNK ve NEXT_CHUNK ilişkilerini oluştur
+    # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
+    first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
+    logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
     query_to_create_FIRST_relation = """ 
         UNWIND $relationships AS relationship
-        MATCH (d:Document {fileName: $f_name})
+        OPTIONAL MATCH (d:Document {fileName: $f_name})
         MATCH (c:Chunk {id: relationship.chunk_id})
-        WHERE relationship.type = 'FIRST_CHUNK'
-        MERGE (d)-[:FIRST_CHUNK]->(c)
-    """
-    execute_graph_query(graph, query_to_create_FIRST_relation, params={"relationships": relationships, "f_name": file_name})
+        FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (d)-[:FIRST_CHUNK]->(c))
+        """
+    execute_graph_query(graph, query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
     
+    # Debug: FIRST_CHUNK ilişkilerini kontrol et
+    first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
+    first_check_result = execute_graph_query(graph, first_check_query, params={"file_name": file_name})
+    logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
+    
+    # NEXT_CHUNK ilişkilerini oluştur (extract'daki gibi)
+    next_relationships = [r for r in relationships if r["type"] == "NEXT_CHUNK"]
+    logging.info(f"🔄 Creating NEXT_CHUNK relationships for {len(next_relationships)} chunk pairs")
     query_to_create_NEXT_relation = """
         UNWIND $relationships AS relationship
         MATCH (c1:Chunk {id: relationship.previous_chunk_id})
         MATCH (c2:Chunk {id: relationship.current_chunk_id})
         WHERE relationship.type = 'NEXT_CHUNK'
         MERGE (c1)-[:NEXT_CHUNK]->(c2)
+        RETURN count(*) as created_count
     """
-    execute_graph_query(graph, query_to_create_NEXT_relation, params={"relationships": relationships})
+    next_result = execute_graph_query(graph, query_to_create_NEXT_relation, params={"relationships": relationships})
+    logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships")
     
-    logging.info(f"✅ Created {len(created_chunk_ids)} chunk nodes and relationships for: {file_name}")
-    return created_chunk_ids
+    logging.info(f"✅ Created {len(lst_chunks_including_hash)} chunk nodes and relationships for: {file_name}")
+    return lst_chunks_including_hash  # Extract format: chunk_id ve chunk_doc içeren list
+
+
+def link_chunks_to_document(graph, file_name):
+    """
+    Upload sonrası chunk'ları Document node'una bağla (eğer henüz bağlanmadıysa)
+    """
+    logging.info(f"🔗 Linking chunks to Document node for: {file_name}")
+    
+    # Chunk'ları Document'e bağla
+    link_chunks_query = """
+    MATCH (c:Chunk {fileName: $file_name})
+    MATCH (d:Document {fileName: $file_name})
+    WHERE NOT (c)-[:PART_OF]->(d)
+    MERGE (c)-[:PART_OF]->(d)
+    RETURN count(*) as linked_count
+    """
+    result = execute_graph_query(graph, link_chunks_query, params={"file_name": file_name})
+    linked_count = result[0]['linked_count'] if result else 0
+    logging.info(f"🔗 Linked {linked_count} chunks to Document with PART_OF relationship")
+    
+    # FIRST_CHUNK ilişkisini kur
+    first_chunk_query = """
+    MATCH (d:Document {fileName: $file_name})
+    MATCH (c:Chunk {fileName: $file_name})
+    WHERE c.position = 1 AND NOT (d)-[:FIRST_CHUNK]->(c)
+    MERGE (d)-[:FIRST_CHUNK]->(c)
+    RETURN count(*) as first_linked_count
+    """
+    first_result = execute_graph_query(graph, first_chunk_query, params={"file_name": file_name})
+    first_linked_count = first_result[0]['first_linked_count'] if first_result else 0
+    logging.info(f"🔗 Linked {first_linked_count} first chunk to Document with FIRST_CHUNK relationship")
+    
+    return linked_count + first_linked_count
