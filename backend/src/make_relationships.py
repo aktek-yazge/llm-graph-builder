@@ -390,64 +390,6 @@ def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_t
     # Create entity vector index if it doesn't exist
     create_entity_vector_index(graph)
 
-def create_global_chunk_similarity(graph: Neo4jGraph, similarity_threshold: float = None):
-    """
-    Create similarity relationships between ALL chunks in the database (cross-file similarity).
-    Bu fonksiyon tüm dosyalar arasında benzerlik ilişkileri kurar.
-    """
-    if similarity_threshold is None:
-        similarity_threshold = float(os.getenv('KNN_MIN_SCORE', '0.7'))
-    
-    logging.info(f"Creating global chunk similarity relationships with threshold: {similarity_threshold}")
-    
-    query = """
-    // Tüm chunk'lar arasında benzerlik ilişkileri kur
-    MATCH (c:Chunk)
-    WHERE c.embedding IS NOT NULL
-    CALL db.index.vector.queryNodes('vector', 10, c.embedding) YIELD node AS other, score
-    WHERE other <> c AND score >= $threshold AND id(c) < id(other)
-    // Tek yönlü ilişki kurma (duplikasyon önlemek için ID karşılaştırması)
-    MERGE (c)-[r:SIMILAR]->(other)
-    SET r.score = score, r.global_similarity = true
-    RETURN count(r) as relationships_created
-    """
-    
-    result = execute_graph_query(graph, query, params={"threshold": similarity_threshold})
-    created_count = result[0]['relationships_created'] if result else 0
-    logging.info(f"Created {created_count} global similarity relationships")
-    return created_count
-
-async def create_llm_chunk_relations(graph, model, chunk_list, allowed_rel, additional_instructions=None):
-    """
-    Use LLM to detect continuation between consecutive chunks and create CONTINUES relationships.
-    """
-    llm, _ = get_llm(model)
-    for i in range(len(chunk_list) - 1):
-        src_id = chunk_list[i]['chunk_id']
-        tgt_id = chunk_list[i+1]['chunk_id']
-        first_text = chunk_list[i]['chunk_doc'].page_content
-        second_text = chunk_list[i+1]['chunk_doc'].page_content
-        prompt = CHUNK_CONTINUATION_PROMPT.format(first_text=first_text, second_text=second_text)
-        # call LLM
-        response = await llm.apredict_messages([{"role": "system", "content": prompt}]) if hasattr(llm, 'apredict_messages') else llm([{"role": "system", "content": prompt}])
-        # parse JSON
-        try:
-            resp_json = json.loads(response.content if hasattr(response, 'content') else response)
-            relations = resp_json.get('relations', [])
-        except Exception:
-            continue
-        # write relations in Neo4j
-        for rel in relations:
-            # expect format "<src_id>-CONTINUES-><tgt_id>"
-            parts = rel.split('-CONTINUES->')
-            if len(parts) == 2:
-                s, t = parts
-                query = (
-                    "MATCH (a:Chunk {id:$src}), (b:Chunk {id:$tgt})"
-                    " MERGE (a)-[:CONTINUES]->(b)"
-                )
-                execute_graph_query(graph, query, params={"src": s, "tgt": t})
-
 def create_document_relationships(graph: Neo4jGraph, target_document: str = None) -> dict:
     """
     Person node'larını HAS_POLICY ilişkisiyle document'lara bağlar
