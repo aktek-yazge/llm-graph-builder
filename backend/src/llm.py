@@ -422,7 +422,7 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
         
         // LLM tarafından çıkarılan benzer entity'leri bul
         MATCH (chunk:Chunk)-[:PART_OF]->(d)
-        MATCH (chunk)-[:EXTRACTED_FROM]->(llm_entity:__Entity__)
+        MATCH (llm_entity:__Entity__)-[:EXTRACTED_FROM]->(chunk)
         WHERE llm_entity.entity_type = upload_info.upload_type
         AND (
             // Tam eşleşme
@@ -464,7 +464,7 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
         
         // Chunk'ın EXTRACTED_FROM relationship'ini upload node'una yönlendir
         WITH upload_info, llm_entity, chunk
-        MERGE (chunk)-[:EXTRACTED_FROM]->(upload_info.upload)
+        MERGE (upload_info.upload)-[:EXTRACTED_FROM]->(chunk)
         ON CREATE SET chunk.extracted_from_created = datetime()
         
         // LLM entity'sini sil

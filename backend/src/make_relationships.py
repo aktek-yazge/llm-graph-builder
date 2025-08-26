@@ -38,7 +38,7 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
                     UNWIND $batch_data AS data
                     MATCH (c:Chunk {id: data.chunk_id})
                     CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
-                    MERGE (c)-[:EXTRACTED_FROM]->(n)
+                    MERGE (n)-[:EXTRACTED_FROM]->(c)
                 """
         execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
 
@@ -717,7 +717,7 @@ def create_policy_entity_relationships(graph: Neo4jGraph, file_name: str):
     # Önce tüm LLM'den çıkan node'ların __Entity__ label'ına sahip olduğundan emin ol
     ensure_entity_labels_query = """
     MATCH (d:Document {fileName: $file_name})
-    MATCH (d)<-[:PART_OF]-(c:Chunk)-[:EXTRACTED_FROM]->(n)
+    MATCH (d)<-[:PART_OF]-(c:Chunk)<-[:EXTRACTED_FROM]-(n)
     WHERE NOT n:__Entity__
     SET n:__Entity__
     RETURN count(n) AS updated_nodes
@@ -735,11 +735,11 @@ def create_policy_entity_relationships(graph: Neo4jGraph, file_name: str):
     policy_entity_query = """
     // Her chunk için: o chunk'tan çıkarılan Policy node'unu bul
     MATCH (d:Document {fileName: $file_name})
-    MATCH (d)<-[:PART_OF]-(c:Chunk)-[:EXTRACTED_FROM]->(policy:__Entity__)
+    MATCH (d)<-[:PART_OF]-(c:Chunk)<-[:EXTRACTED_FROM]-(policy:__Entity__)
     WHERE 'Policy' in labels(policy) OR policy.entity_type = 'Policy' OR toLower(policy.id) CONTAINS 'policy'
     
     // Aynı chunk'tan çıkarılan diğer entity'leri bul (Policy hariç)
-    MATCH (c)-[:EXTRACTED_FROM]->(entity:__Entity__)
+    MATCH (entity:__Entity__)-[:EXTRACTED_FROM]->(c)
     WHERE entity <> policy 
     AND NOT 'Policy' in labels(entity) 
     AND entity.entity_type <> 'Policy'
