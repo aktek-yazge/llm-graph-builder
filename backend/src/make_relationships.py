@@ -22,7 +22,7 @@ EMBEDDING_FUNCTION , EMBEDDING_DIMENSION = load_embedding_model(EMBEDDING_MODEL)
 
 def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_documents_chunk_chunk_Id : list):
     batch_data = []
-    logging.info("Create HAS_ENTITY relationship between chunks and entities")
+    logging.info("Create EXTRACTED_FROM relationship between chunks and entities (technical tracking)")
     
     for graph_doc_chunk_id in graph_documents_chunk_chunk_Id:
         for node in graph_doc_chunk_id['graph_doc'].nodes:
@@ -38,7 +38,7 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
                     UNWIND $batch_data AS data
                     MATCH (c:Chunk {id: data.chunk_id})
                     CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
-                    MERGE (c)-[:HAS_ENTITY]->(n)
+                    MERGE (c)-[:EXTRACTED_FROM]->(n)
                 """
         execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
 
@@ -701,3 +701,95 @@ def link_chunks_to_document(graph, file_name):
     logging.info(f"🔗 Linked {first_linked_count} first chunk to Document with FIRST_CHUNK relationship")
     
     return linked_count + first_linked_count
+
+
+def create_policy_entity_relationships(graph: Neo4jGraph, file_name: str):
+    """
+    İşlem yapılan chunk'ın bağlı olduğu Policy node'unu bulur ve 
+    o chunk'tan çıkarılan entity'lere HAS_ENTITY ile bağlar.
+    
+    Args:
+        graph: Neo4j graph instance
+        file_name: İşlem yapılacak dosya adı
+    """
+    logging.info(f"Creating Policy-Entity relationships for file: {file_name}")
+    
+    # Önce tüm LLM'den çıkan node'ların __Entity__ label'ına sahip olduğundan emin ol
+    ensure_entity_labels_query = """
+    MATCH (d:Document {fileName: $file_name})
+    MATCH (d)<-[:PART_OF]-(c:Chunk)-[:EXTRACTED_FROM]->(n)
+    WHERE NOT n:__Entity__
+    SET n:__Entity__
+    RETURN count(n) AS updated_nodes
+    """
+    
+    try:
+        entity_result = execute_graph_query(graph, ensure_entity_labels_query, params={"file_name": file_name})
+        updated_nodes = entity_result[0].get('updated_nodes', 0) if entity_result else 0
+        if updated_nodes > 0:
+            logging.info(f"✅ Added __Entity__ label to {updated_nodes} nodes")
+    except Exception as e:
+        logging.warning(f"Warning: Could not ensure __Entity__ labels: {e}")
+    
+    # Policy node'ları chunk'lardan çıkarılan entity'lere bağla
+    policy_entity_query = """
+    // Her chunk için: o chunk'tan çıkarılan Policy node'unu bul
+    MATCH (d:Document {fileName: $file_name})
+    MATCH (d)<-[:PART_OF]-(c:Chunk)-[:EXTRACTED_FROM]->(policy:__Entity__)
+    WHERE 'Policy' in labels(policy) OR policy.entity_type = 'Policy' OR toLower(policy.id) CONTAINS 'policy'
+    
+    // Aynı chunk'tan çıkarılan diğer entity'leri bul (Policy hariç)
+    MATCH (c)-[:EXTRACTED_FROM]->(entity:__Entity__)
+    WHERE entity <> policy 
+    AND NOT 'Policy' in labels(entity) 
+    AND entity.entity_type <> 'Policy'
+    AND NOT toLower(entity.id) CONTAINS 'policy'
+    
+    // Policy'yi aynı chunk'tan çıkarılan entity'lere HAS_ENTITY ile bağla (business logic)
+    MERGE (policy)-[r:HAS_ENTITY]->(entity)
+    ON CREATE SET 
+        r.created_at = datetime(),
+        r.source_chunk = c.id,
+        r.relationship_type = 'policy_to_chunk_entity',
+        r.source = 'chunk_based_linking'
+    ON MATCH SET 
+        r.updated_at = datetime()
+    
+    RETURN count(DISTINCT r) AS relationships_created, 
+           count(DISTINCT policy) AS policy_nodes_processed,
+           count(DISTINCT entity) AS entities_linked,
+           count(DISTINCT c) AS chunks_processed
+    """
+    
+    try:
+        result = execute_graph_query(graph, policy_entity_query, params={"file_name": file_name})
+        
+        if result and len(result) > 0:
+            relationships_created = result[0].get('relationships_created', 0)
+            policy_nodes_processed = result[0].get('policy_nodes_processed', 0)
+            entities_linked = result[0].get('entities_linked', 0)
+            chunks_processed = result[0].get('chunks_processed', 0)
+            
+            logging.info(f"✅ Policy-Entity relationships created: {relationships_created} relationships")
+            logging.info(f"   Policy nodes processed: {policy_nodes_processed}")
+            logging.info(f"   Entities linked: {entities_linked}")
+            logging.info(f"   Chunks processed: {chunks_processed}")
+            
+            return {
+                'relationships_created': relationships_created,
+                'policy_nodes_processed': policy_nodes_processed,
+                'entities_linked': entities_linked,
+                'chunks_processed': chunks_processed
+            }
+        else:
+            logging.info("No Policy nodes found or no relationships created")
+            return {
+                'relationships_created': 0,
+                'policy_nodes_processed': 0,
+                'entities_linked': 0,
+                'chunks_processed': 0
+            }
+            
+    except Exception as e:
+        logging.error(f"Error creating Policy-Entity relationships: {e}")
+        raise

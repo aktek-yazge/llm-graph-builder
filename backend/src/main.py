@@ -825,6 +825,27 @@ async def processing_source(
     )
     uri_latency["total_chunks"] = total_chunks
 
+    # POLICY EXTRACTION - Eksik policy bilgilerini chunk içeriklerinden çıkar
+    if total_chunks > 0:  # Chunk'lar varsa policy extraction yap
+        try:
+            logging.info(f"🔍 Policy extraction başlıyor: {file_name}")
+            from src.policy_extraction import extract_missing_policy_info
+            
+            start_policy_extraction = time.time()
+            policy_extraction_result = await extract_missing_policy_info(graph, file_name, model)
+            end_policy_extraction = time.time()
+            elapsed_policy_extraction = end_policy_extraction - start_policy_extraction
+            
+            logging.info(f"✅ Policy extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye")
+            logging.info(f"📋 Extraction sonucu: {policy_extraction_result}")
+            
+            uri_latency["policy_extraction"] = f"{elapsed_policy_extraction:.2f}"
+            
+        except Exception as e:
+            logging.error(f"❌ Policy extraction hatası: {e}")
+            # Policy extraction başarısız olsa bile ana işleme devam et
+            uri_latency["policy_extraction"] = "failed"
+
     start_status_document_node = time.time()
     result = graphDb_data_Access.get_current_status_document_node(file_name)
     end_status_document_node = time.time()
@@ -1180,7 +1201,7 @@ async def processing_chunks(
 ):
   latency = {}
   successful_steps = 0
-  total_steps = 6
+  total_steps = 7  # 6'dan 7'ye artırdık
 
   # (re)open driver if closed
   if graph is None or graph._driver._closed:
@@ -1192,10 +1213,10 @@ async def processing_chunks(
     create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
     latency["update_embedding"] = f"{time.time() - t0:.2f}"
     successful_steps += 1
-    logging.info(f"Step 1/6 başarılı: Chunk embeddings oluşturuldu")
+    logging.info(f"Step 1/7 başarılı: Chunk embeddings oluşturuldu")
   except Exception as e:
     latency["update_embedding"] = "FAILED"
-    logging.error(f"Step 1/6 başarısız: Chunk embeddings oluşturulamadı - {e}")
+    logging.error(f"Step 1/7 başarısız: Chunk embeddings oluşturulamadı - {e}")
 
   # 2. ask LLM for sub-graph per chunk
   try:
@@ -1212,10 +1233,10 @@ async def processing_chunks(
     )
     latency["entity_extraction"] = f"{time.time() - t1:.2f}"
     successful_steps += 1
-    logging.info(f"Step 2/6 başarılı: LLM'den entity'ler çıkarıldı")
+    logging.info(f"Step 2/7 başarılı: LLM'den entity'ler çıkarıldı")
   except Exception as e:
     latency["entity_extraction"] = "FAILED"
-    logging.error(f"Step 2/6 başarısız: LLM entity extraction hatası - {e}")
+    logging.error(f"Step 2/7 başarısız: LLM entity extraction hatası - {e}")
     # LLM hatası kritik - boş graph_documents ile devam et
     graph_documents = []
 
@@ -1223,9 +1244,9 @@ async def processing_chunks(
   try:
     cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
     successful_steps += 1
-    logging.info(f"Step 3/6 başarılı: Entity'ler normalize edildi")
+    logging.info(f"Step 3/7 başarılı: Entity'ler normalize edildi")
   except Exception as e:
-    logging.error(f"Step 3/6 başarısız: Entity normalization hatası - {e}")
+    logging.error(f"Step 3/7 başarısız: Entity normalization hatası - {e}")
     cleaned = []
 
   # 4. save nodes & rels into Neo4j
@@ -1234,33 +1255,46 @@ async def processing_chunks(
     save_graphDocuments_in_neo4j(graph, cleaned)
     latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
     successful_steps += 1
-    logging.info(f"Step 4/6 başarılı: Entity'ler Neo4j'ye kaydedildi")
+    logging.info(f"Step 4/7 başarılı: Entity'ler Neo4j'ye kaydedildi")
   except Exception as e:
     latency["save_graphDocuments"] = "FAILED"
-    logging.error(f"Step 4/6 başarısız: Neo4j'ye kaydetme hatası - {e}")
+    logging.error(f"Step 4/7 başarısız: Neo4j'ye kaydetme hatası - {e}")
 
-  # 5. relate each chunk to its extracted entities
+  # 5. relate each chunk to its extracted entities (technical tracking)
   try:
     pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
     t3 = time.time()
     merge_relationship_between_chunk_and_entites(graph, pairs)
     latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
     successful_steps += 1
-    logging.info(f"Step 5/6 başarılı: Chunk-Entity ilişkileri oluşturuldu")
+    logging.info(f"Step 5/7 başarılı: Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuldu (technical tracking)")
   except Exception as e:
     latency["chunk_entity_rel"] = "FAILED"
-    logging.error(f"Step 5/6 başarısız: Chunk-Entity ilişki hatası - {e}")
+    logging.error(f"Step 5/7 başarısız: Chunk-Entity EXTRACTED_FROM ilişki hatası - {e}")
 
-  # 6. Create document metadata entities
+  # 6. Create Policy-Entity relationships (business logic)
   try:
-    t5 = time.time()
-    create_document_metadata_entities(graph, file_name)
-    latency["doc_metadata_entities"] = f"{time.time() - t5:.2f}"
+    t4 = time.time()
+    create_policy_entity_relationships(graph, file_name)
+    latency["policy_entity_rel"] = f"{time.time() - t4:.2f}"
     successful_steps += 1
-    logging.info(f"Step 6/6 başarılı: Document metadata entity'leri oluşturuldu")
+    logging.info(f"Step 6/7 başarılı: Policy-Entity HAS_ENTITY ilişkileri oluşturuldu (business logic)")
   except Exception as e:
-    latency["doc_metadata_entities"] = "FAILED"
-    logging.error(f"Step 6/6 başarısız: Document metadata entity hatası - {e}")
+    latency["policy_entity_rel"] = "FAILED"
+    logging.error(f"Step 6/7 başarısız: Policy-Entity HAS_ENTITY ilişki hatası - {e}")
+
+  # 6.5. Merge duplicate nodes with upload-time nodes
+  try:
+    from src.llm import merge_duplicate_nodes_with_upload_nodes
+    t5 = time.time()
+    merge_result = merge_duplicate_nodes_with_upload_nodes(graph, file_name)
+    latency["duplicate_node_merge"] = f"{time.time() - t5:.2f}"
+    logging.info(f"Duplicate node merge: {merge_result['merged_count']} node merge edildi")
+    if merge_result['merged_count'] > 0:
+      logging.info(f"Merge detayları: {merge_result['details']}")
+  except Exception as e:
+    latency["duplicate_node_merge"] = "FAILED"
+    logging.error(f"Duplicate node merge hatası - {e}")
 
   # 7. update overall node/relationship counts (her zaman çalıştır)
   try:
