@@ -246,8 +246,272 @@ async def get_graph_document_list(
     
     return graph_document_list
 
+def get_upload_time_nodes(graph, file_name):
+    """
+    Upload sırasında oluşturulan sabit node'ları alır.
+    Bu node'lar LLM tarafından tekrar çıkarılmamalıdır.
+    
+    Upload sırasında oluşturulan node tipleri:
+    - Document, Policy, Customer, PolicyYear, InsuredItem, PolicyType
+    """
+    if not graph or not file_name:
+        return []
+    
+    try:
+        # Upload sırasında oluşturulan tüm node tiplerini al
+        query = """
+        MATCH (d:Document {fileName: $file_name})
+        
+        // Policy node'ları
+        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+        
+        // Customer node'ları
+        OPTIONAL MATCH (c:Customer)-[:HAS_DOC]->(d)
+        
+        // PolicyYear node'ları (Policy üzerinden)
+        OPTIONAL MATCH (p)-[:HAS_YEAR]->(py:PolicyYear)
+        
+        // InsuredItem node'ları (Policy üzerinden)
+        OPTIONAL MATCH (p)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)
+        
+        // PolicyType node'ları (Policy üzerinden)
+        OPTIONAL MATCH (p)-[:HAS_TYPE]->(pt:PolicyType)
+        
+        // Tüm node'ları topla
+        WITH d.fileName as fileName,
+             collect(DISTINCT {id: d.id, type: 'Document', name: d.fileName}) +
+             collect(DISTINCT {id: p.id, type: 'Policy', name: p.name}) +
+             collect(DISTINCT {id: c.name, type: 'Customer', name: c.name}) +
+             collect(DISTINCT {id: py.name, type: 'PolicyYear', name: py.name}) +
+             collect(DISTINCT {id: ii.name, type: 'InsuredItem', name: ii.name}) +
+             collect(DISTINCT {id: pt.name, type: 'PolicyType', name: pt.name}) as all_nodes
+        
+        UNWIND all_nodes as node
+        WHERE node.id IS NOT NULL
+        RETURN DISTINCT 
+            node.id as node_id,
+            node.type as entity_type,
+            node.name as node_name
+        """
+        
+        from src.shared.common_fn import execute_graph_query
+        result = execute_graph_query(graph, query, params={"file_name": file_name})
+        
+        upload_nodes = []
+        for record in result:
+            if record.get('node_id'):
+                node_info = {
+                    'id': record['node_id'],
+                    'entity_type': record.get('entity_type', 'unknown'),
+                    'name': record.get('node_name', record['node_id'])
+                }
+                upload_nodes.append(node_info)
+        
+        if upload_nodes:
+            logging.info(f"🏗️ Upload sırasında oluşturulan {len(upload_nodes)} node tespit edildi")
+            for node in upload_nodes:
+                logging.info(f"   - {node['name']} (ID: {node['id']}, Type: {node.get('entity_type', 'unknown')})")
+        else:
+            logging.info("🏗️ Upload sırasında oluşturulan node bulunamadı")
+        
+        return upload_nodes
+        
+    except Exception as e:
+        logging.error(f"Upload node'larını alırken hata: {e}")
+        return []
+
+def enhance_instructions_with_existing_nodes(additional_instructions, existing_nodes):
+    """
+    LLM instruction'larını mevcut node'lar hakkında bilgi ile zenginleştirir.
+    Upload sırasında oluşturulan node'ların tekrar çıkarılmasını önler.
+    """
+    if not existing_nodes:
+        return additional_instructions or ""
+    
+    # Node tipine göre grupla
+    nodes_by_type = {}
+    for node in existing_nodes:
+        node_type = node.get('entity_type', 'unknown')
+        if node_type not in nodes_by_type:
+            nodes_by_type[node_type] = []
+        nodes_by_type[node_type].append(node)
+    
+    # Mevcut node'lar hakkında detaylı bilgi oluştur
+    node_details = []
+    for node_type, nodes in nodes_by_type.items():
+        node_names = [f"'{node.get('name', node.get('id', 'unknown'))}'" for node in nodes]
+        node_details.append(f"- {node_type}: {', '.join(node_names)}")
+    
+    conflict_prevention_instruction = f"""
+
+CRITICAL INSTRUCTION - AVOID DUPLICATE ENTITIES:
+
+The following entities were already created during document upload and exist in the database:
+{chr(10).join(node_details)}
+
+MANDATORY RULES:
+1. DO NOT extract these entities again as new entities
+2. DO NOT create duplicate nodes for Document, Policy, Customer, PolicyYear, InsuredItem, or PolicyType
+3. If the text references any of these existing entities:
+   - Reference them by their exact names/IDs
+   - Create relationships TO these existing entities
+   - Focus ONLY on extracting NEW entities not in the above list
+
+4. Extract ONLY the following types of NEW entities from the text content:
+   - Specific amounts (prices, coverage limits, deductibles)
+   - Dates (claim dates, incident dates, coverage periods)
+   - Locations (addresses, geographic references)
+   - People (agents, adjusters, witnesses - NOT the main customer)
+   - Organizations (insurance companies, repair shops, vendors)
+   - Events (claims, incidents, accidents)
+   - Technical terms (coverage types, policy clauses)
+   - Items (specific damaged items, property details)
+
+5. When creating relationships, connect NEW entities to the existing Policy entity using HAS_ENTITY relationship.
+
+EXAMPLE:
+- If text mentions "2024 policy year", do NOT create a new PolicyYear entity
+- If text mentions a "claim amount of 50000 TL", DO create a new Amount entity
+- If text mentions "Axa Sigorta company", DO create a new Company entity
+"""
+    
+    # Mevcut instruction'lara ekle
+    enhanced = (additional_instructions or "") + conflict_prevention_instruction
+    
+    logging.info(f"🔗 LLM instruction'ları {len(existing_nodes)} mevcut node ile zenginleştirildi")
+    logging.info(f"📋 Mevcut node tipleri: {list(nodes_by_type.keys())}")
+    
+    return enhanced
+
+def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
+    """
+    LLM tarafından çıkarılan duplicate node'ları upload sırasında 
+    oluşturulan node'larla merge eder.
+    
+    Upload node tipleri: Document, Policy, Customer, PolicyYear, InsuredItem, PolicyType
+    """
+    if not graph or not file_name:
+        return {"merged_count": 0, "details": "Graph veya file_name eksik"}
+    
+    try:
+        logging.info(f"🔄 Duplicate node merge işlemi başlıyor: {file_name}")
+        
+        # Duplicate node'ları bul ve merge et
+        merge_query = """
+        MATCH (d:Document {fileName: $file_name})
+        
+        // Upload sırasında oluşturulan tüm node tiplerini al
+        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+        OPTIONAL MATCH (c:Customer)-[:HAS_DOC]->(d)
+        OPTIONAL MATCH (p)-[:HAS_YEAR]->(py:PolicyYear)
+        OPTIONAL MATCH (p)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)
+        OPTIONAL MATCH (p)-[:HAS_TYPE]->(pt:PolicyType)
+        
+        // LLM tarafından çıkarılan benzer node'ları bul ve merge et
+        WITH d, p, c, py, ii, pt
+        UNWIND [
+            {upload: d, upload_type: 'Document', upload_id: d.id, upload_name: d.fileName},
+            {upload: p, upload_type: 'Policy', upload_id: p.id, upload_name: p.name},
+            {upload: c, upload_type: 'Customer', upload_id: c.name, upload_name: c.name},
+            {upload: py, upload_type: 'PolicyYear', upload_id: py.name, upload_name: py.name},
+            {upload: ii, upload_type: 'InsuredItem', upload_id: ii.name, upload_name: ii.name},
+            {upload: pt, upload_type: 'PolicyType', upload_id: pt.name, upload_name: pt.name}
+        ] as upload_info
+        
+        WHERE upload_info.upload IS NOT NULL
+        
+        // LLM tarafından çıkarılan benzer entity'leri bul
+        MATCH (chunk:Chunk)-[:PART_OF]->(d)
+        MATCH (chunk)-[:EXTRACTED_FROM]->(llm_entity:__Entity__)
+        WHERE llm_entity.entity_type = upload_info.upload_type
+        AND (
+            // Tam eşleşme
+            llm_entity.id = upload_info.upload_id OR
+            llm_entity.id = upload_info.upload_name OR
+            // Case-insensitive eşleşme
+            toLower(llm_entity.id) = toLower(upload_info.upload_id) OR
+            toLower(llm_entity.id) = toLower(upload_info.upload_name) OR
+            // PolicyYear için özel matching (2024, PolicyYear_2024, etc.)
+            (upload_info.upload_type = 'PolicyYear' AND 
+             (toLower(llm_entity.id) CONTAINS toLower(upload_info.upload_name) OR
+              toLower(upload_info.upload_name) CONTAINS toLower(llm_entity.id))) OR
+            // Policy için benzer matching
+            (upload_info.upload_type = 'Policy' AND
+             toLower(llm_entity.id) CONTAINS toLower(split(upload_info.upload_name, ' ')[0]))
+        )
+        
+        // LLM entity'nin tüm relationship'lerini upload node'una taşı
+        WITH upload_info, llm_entity, chunk
+        OPTIONAL MATCH (llm_entity)-[outgoing_rel]->(target)
+        WHERE target <> upload_info.upload
+        FOREACH (ignore IN CASE WHEN outgoing_rel IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (upload_info.upload)-[new_rel:HAS_ENTITY]->(target)
+            SET new_rel = properties(outgoing_rel), 
+                new_rel.merged_from_llm = true,
+                new_rel.created_at = datetime()
+        )
+        
+        // LLM entity'ne gelen relationship'leri upload node'una taşı
+        WITH upload_info, llm_entity, chunk
+        OPTIONAL MATCH (source)-[incoming_rel]->(llm_entity)
+        WHERE source <> upload_info.upload AND NOT source:Chunk
+        FOREACH (ignore IN CASE WHEN incoming_rel IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (source)-[new_rel:HAS_ENTITY]->(upload_info.upload)
+            SET new_rel = properties(incoming_rel), 
+                new_rel.merged_from_llm = true,
+                new_rel.created_at = datetime()
+        )
+        
+        // Chunk'ın EXTRACTED_FROM relationship'ini upload node'una yönlendir
+        WITH upload_info, llm_entity, chunk
+        MERGE (chunk)-[:EXTRACTED_FROM]->(upload_info.upload)
+        ON CREATE SET chunk.extracted_from_created = datetime()
+        
+        // LLM entity'sini sil
+        DETACH DELETE llm_entity
+        
+        RETURN count(DISTINCT llm_entity) as merged_count,
+               collect(DISTINCT {
+                   type: upload_info.upload_type, 
+                   id: upload_info.upload_id,
+                   name: upload_info.upload_name
+               }) as updated_nodes
+        """
+        
+        from src.shared.common_fn import execute_graph_query
+        result = execute_graph_query(graph, merge_query, params={"file_name": file_name})
+        
+        if result and len(result) > 0:
+            merged_count = result[0].get('merged_count', 0)
+            updated_nodes = result[0].get('updated_nodes', [])
+            
+            if merged_count > 0:
+                logging.info(f"✅ {merged_count} duplicate node merge edildi")
+                for node in updated_nodes:
+                    logging.info(f"   Güncellenen {node['type']}: {node['name']} (ID: {node['id']})")
+            else:
+                logging.info("ℹ️ Merge edilecek duplicate node bulunamadı")
+            
+            return {
+                "merged_count": merged_count,
+                "updated_nodes": updated_nodes,
+                "details": f"{merged_count} node merged successfully"
+            }
+        else:
+            return {"merged_count": 0, "details": "Query sonucu bulunamadı"}
+            
+    except Exception as e:
+        logging.error(f"Duplicate node merge hatası: {e}")
+        return {"merged_count": 0, "details": f"Hata: {str(e)}"}
+        
+        return enhanced
+
 async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
    try:
+       # Upload sırasında oluşturulan node'ları al ve çakışmayı önle
+       existing_nodes = get_upload_time_nodes(graph, file_name) if graph and file_name else []
+       enhanced_instructions = enhance_instructions_with_existing_nodes(additional_instructions, existing_nodes)
+       
        # LangExtract kontrolü - model "langextract" içeriyorsa LangExtract kullan
        if "langextract" in model.lower():
            from src.langextract_llm import get_graph_from_langextract
@@ -259,7 +523,7 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
                allowedRelationship=allowedRelationship,
                chunks_to_combine=chunks_to_combine,
                file_name=file_name,
-               additional_instructions=additional_instructions,
+               additional_instructions=enhanced_instructions,  # Enhanced instruction kullan
                graph=graph
            )
        
@@ -331,7 +595,7 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
            combined_chunk_document_list,
            allowed_nodes,
            allowed_relationships,
-           additional_instructions
+           enhanced_instructions  # Enhanced instruction'ı kullan
        )
        logging.info(f"Generated {len(graph_document_list)} graph documents")
        return graph_document_list
