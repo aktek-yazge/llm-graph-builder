@@ -13,6 +13,29 @@ from src.entity_resolver_simple import SimpleEntityResolver
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# LangExtract debug loglarını kapat
+langextract_logger = logging.getLogger('langextract')
+langextract_logger.setLevel(logging.ERROR)
+
+# LangExtract debug loglarını tamamen kapat
+langextract_debug_logger = logging.getLogger('langextract.debug')
+langextract_debug_logger.setLevel(logging.ERROR)
+
+# LangExtract tüm submodüllerini kapat
+logging.getLogger('langextract.core').setLevel(logging.ERROR)
+logging.getLogger('langextract.core.tokenizer').setLevel(logging.ERROR)
+logging.getLogger('langextract.core.annotator').setLevel(logging.ERROR)
+logging.getLogger('langextract.core.aligner').setLevel(logging.ERROR)
+logging.getLogger('langextract.core.chunker').setLevel(logging.ERROR)
+logging.getLogger('langextract.core.resolver').setLevel(logging.ERROR)
+logging.getLogger('langextract.annotators').setLevel(logging.ERROR)
+logging.getLogger('langextract.providers').setLevel(logging.ERROR)
+logging.getLogger('langextract.providers.openai').setLevel(logging.ERROR)
+logging.getLogger('langextract.extractors').setLevel(logging.ERROR)
+
+# ABSL (Google logging) loglarını da kapat
+logging.getLogger('absl').setLevel(logging.ERROR)
+
 def get_combined_chunks_for_langextract(chunkId_chunkDoc_list, chunks_to_combine):
     """
     LangExtract için chunk'ları combine et
@@ -45,6 +68,164 @@ def get_combined_chunks_for_langextract(chunkId_chunkDoc_list, chunks_to_combine
         })
     
     return combined_texts
+
+def get_full_document_for_langextract(chunkId_chunkDoc_list):
+    """
+    Tüm chunk'ları tek doküman olarak birleştir
+    LangExtract'in tüm dokümanda global extraction yapmasını sağlar
+    """
+    full_text = ""
+    all_chunk_ids = []
+    
+    logging.info(f"📄 Tüm dokümanı birleştiriliyor: {len(chunkId_chunkDoc_list)} chunk")
+    
+    for chunk_data in chunkId_chunkDoc_list:
+        chunk_doc = chunk_data["chunk_doc"]
+        chunk_id = chunk_data["chunk_id"]
+        
+        # Chunk text'ini al
+        chunk_text = chunk_doc.page_content if hasattr(chunk_doc, 'page_content') else str(chunk_doc)
+        
+        full_text += chunk_text + "\n\n"
+        all_chunk_ids.append(chunk_id)
+    
+    # Doküman istatistikleri
+    word_count = len(full_text.split())
+    char_count = len(full_text)
+    
+    logging.info(f"📊 Birleştirilmiş doküman:")
+    logging.info(f"  📝 Toplam karakter: {char_count:,}")
+    logging.info(f"  📝 Toplam kelime: {word_count:,}")
+    logging.info(f"  📄 Chunk sayısı: {len(all_chunk_ids)}")
+    
+    return {
+        "text": full_text.strip(),
+        "chunk_ids": all_chunk_ids,
+        "chunk_count": len(chunkId_chunkDoc_list),
+        "word_count": word_count,
+        "char_count": char_count
+    }
+
+async def get_graph_from_langextract_full_document(
+    model: str, 
+    chunkId_chunkDoc_list: List[Dict], 
+    allowedNodes: str, 
+    allowedRelationship: str, 
+    file_name: str = None, 
+    additional_instructions: str = None, 
+    graph=None
+) -> List[Any]:
+    """
+    LangExtract kullanarak TÜM DOKÜMAN için tek seferde graph extraction yap
+    Chunk'ları birleştirip global extraction yapar
+    
+    Args:
+        model: Model adı (LangExtract için kullanılmaz ama uyumluluk için)
+        chunkId_chunkDoc_list: Chunk data listesi
+        allowedNodes: İzin verilen node tipleri (comma separated)
+        allowedRelationship: İzin verilen relationship'ler (comma separated triplets)
+        file_name: Dosya adı
+        additional_instructions: Ek talimatlar
+        graph: Graph instance (entity resolution için)
+        
+    Returns:
+        List[GraphDocument]: LangChain formatında graph document'lar
+    """
+    try:
+        start_time = time.time()
+        
+        # LangExtract loglarını tamamen kapat
+        import langextract
+        langextract_root_logger = logging.getLogger('langextract')
+        langextract_root_logger.setLevel(logging.CRITICAL)
+        
+        # Tüm LangExtract alt modüllerini kapat
+        for logger_name in ['langextract.core', 'langextract.core.tokenizer', 'langextract.core.annotator',
+                           'langextract.core.aligner', 'langextract.core.chunker', 'langextract.core.resolver',
+                           'langextract.annotators', 'langextract.providers', 'langextract.providers.openai',
+                           'langextract.extractors', 'langextract.debug']:
+            logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+        
+        # Giriş parametrelerini logla
+        logging.info("=== get_graph_from_langextract_full_document BAŞLADI ===")
+        logging.info(f"🚀 FULL DOCUMENT EXTRACTION MODE")
+        logging.info(f"Model: {model} (LangExtract kullanılacak)")
+        logging.info(f"File name: {file_name}")
+        logging.info(f"Additional instructions var mı: {additional_instructions is not None}")
+        logging.info(f"Toplam chunk sayısı: {len(chunkId_chunkDoc_list)}")
+        
+        # Raw giriş değerlerini logla
+        logging.info(f"RAW allowedNodes: '{allowedNodes}'")
+        logging.info(f"RAW allowedRelationship: '{allowedRelationship}'")
+        
+        # Tüm dokümanı birleştir
+        full_document = get_full_document_for_langextract(chunkId_chunkDoc_list)
+        
+        # allowedNodes işleme
+        allowed_nodes = []
+        if allowedNodes:
+            allowed_nodes = [node.strip() for node in allowedNodes.split(',') if node.strip()]
+            logging.info(f"İşlenmiş allowed_nodes: {allowed_nodes}")
+        
+        # allowedRelationship işleme 
+        allowed_relationships = []
+        if allowedRelationship:
+            items = [item.strip() for item in allowedRelationship.split(',') if item.strip()]
+            if len(items) % 3 != 0:
+                raise LLMGraphBuilderException("allowedRelationship must be a multiple of 3 (source, relationship, target)")
+            
+            for i in range(0, len(items), 3):
+                source, relation, target = items[i:i + 3]
+                allowed_relationships.append((source, relation, target))
+            logging.info(f"İşlenmiş allowed_relationships: {allowed_relationships}")
+        
+        # LangExtract extractor oluştur
+        extractor = LangExtractGraphExtractor()
+        
+        # Tek seferde tüm doküman için extraction
+        logging.info(f"🔄 Tüm doküman extraction başlıyor...")
+        logging.info(f"📄 İşlenecek text uzunluğu: {full_document['char_count']:,} karakter")
+        
+        # LangExtract ile extraction
+        result = await extractor.extract_graph(
+            text=full_document["text"],
+            allowed_nodes=allowed_nodes if allowed_nodes else None,
+            allowed_relationships=allowed_relationships if allowed_relationships else None
+        )
+        
+        # GraphExtractionResult'tan entities ve relationships al
+        entities = result.entities
+        relationships = result.relationships
+        
+        logging.info(f"✅ Extraction tamamlandı:")
+        logging.info(f"  🎯 Çıkarılan entity sayısı: {len(entities)}")
+        logging.info(f"  🔗 Çıkarılan relationship sayısı: {len(relationships)}")
+        
+        # GraphDocument formatına çevir (mevcut sisteme uyumlu) - Entity Resolution ile
+        graph_doc = convert_langextract_to_graph_document(
+            entities=entities,
+            relationships=relationships,
+            chunk_ids=full_document["chunk_ids"],
+            source_text=f"Full Document ({full_document['word_count']} words, {full_document['chunk_count']} chunks)",
+            graph=graph  # Entity resolution için graph objesi geç
+        )
+        
+        end_time = time.time()
+        total_time = end_time - start_time
+        
+        # Sonuçları logla
+        logging.info("📊 Full Document LangExtract extraction tamamlandı:")
+        logging.info(f"  ⏱️ Toplam süre: {total_time:.2f} saniye")
+        logging.info(f"  📄 İşlenen doküman boyutu: {full_document['char_count']:,} karakter")
+        logging.info(f"  🎯 Çıkarılan entity sayısı: {len(entities)}")
+        logging.info(f"  🔗 Çıkarılan relationship sayısı: {len(relationships)}")
+        logging.info(f"  ⚡ Karakter başına süre: {total_time/full_document['char_count']*1000:.3f} ms/char")
+        
+        return [graph_doc]  # Tek GraphDocument döndür
+        
+    except Exception as e:
+        logging.error(f"Error in get_graph_from_langextract_full_document: {e}", exc_info=True)
+        raise LLMGraphBuilderException(f"Error in full document LangExtract extraction: {e}")
 
 async def get_graph_from_langextract(
     model: str, 

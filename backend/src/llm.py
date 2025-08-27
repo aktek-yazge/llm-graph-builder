@@ -513,21 +513,26 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        enhanced_instructions = enhance_instructions_with_existing_nodes(additional_instructions, existing_nodes)
        
        # LangExtract kontrolü - model "langextract" içeriyorsa LangExtract kullan
+       logging.info(f"🔍 Model kontrol ediliyor: '{model}'")
+       logging.info(f"🔍 Model lower: '{model.lower()}'")
+       logging.info(f"🔍 'langextract' in model.lower(): {'langextract' in model.lower()}")
+       
        if "langextract" in model.lower():
-           from src.langextract_llm import get_graph_from_langextract
+           from src.langextract_llm import get_graph_from_langextract_full_document
            logging.info(f"🔄 LangExtract model tespit edildi: {model}")
-           return await get_graph_from_langextract(
+           logging.info(f"🚀 FULL DOCUMENT EXTRACTION modunda çalışacak")
+           return await get_graph_from_langextract_full_document(
                model=model,
                chunkId_chunkDoc_list=chunkId_chunkDoc_list,
                allowedNodes=allowedNodes,
                allowedRelationship=allowedRelationship,
-               chunks_to_combine=chunks_to_combine,
                file_name=file_name,
                additional_instructions=enhanced_instructions,  # Enhanced instruction kullan
                graph=graph
            )
        
        # Normal LLM processing
+       logging.info(f"🔄 Normal LLM processing modunda çalışacak")
        # Giriş parametrelerini logla
        logging.info(f"=== get_graph_from_llm BAŞLADI ===")
        logging.info(f"Model: {model}")
