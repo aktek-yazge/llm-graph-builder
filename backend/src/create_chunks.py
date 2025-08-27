@@ -109,11 +109,39 @@ class CreateChunksofDocument:
             if i < 3:  # Log first 3 pages content preview
                 logging.info(f"DEBUG: Page {i+1} preview: {page_content[:100]}...")
 
+        # Check if we have single document with [PAGE BREAK] markers
+        if (len(self.pages) == 1 and 
+            hasattr(self.pages[0], 'page_content') and 
+            "[PAGE BREAK]" in self.pages[0].page_content):
+            
+            logging.info("🔍 Single document with [PAGE BREAK] markers detected - splitting pages manually")
+            
+            # Split by PAGE BREAK markers first
+            full_content = self.pages[0].page_content
+            page_parts = full_content.split("[PAGE BREAK]")
+            
+            # Create proper page documents with page numbers
+            page_documents = []
+            for idx, page_content in enumerate(page_parts, start=1):
+                if page_content.strip():  # Only non-empty pages
+                    page_metadata = dict(self.pages[0].metadata) if self.pages[0].metadata else {}
+                    page_metadata['page_number'] = idx
+                    page_documents.append(Document(
+                        page_content=page_content.strip(), 
+                        metadata=page_metadata
+                    ))
+            
+            logging.info(f"📄 Created {len(page_documents)} pages from PAGE BREAK markers")
+            
+            # Now update self.pages for processing
+            self.pages = page_documents
+
         # Concatenate pages with page separators and record start/end offsets for each page
         page_texts = []
         page_starts = []
         page_ends = []
         current_offset = 0
+        separator = "\n\n---\n\n"
         
         for i, p in enumerate(self.pages):
             page_text = p.page_content if hasattr(p, 'page_content') else str(p)
@@ -125,12 +153,16 @@ class CreateChunksofDocument:
             current_offset += len(page_text)
             page_ends.append(current_offset)
             
+            # Add separator length for next page (except for the last page)
+            if i < len(self.pages) - 1:
+                current_offset += len(separator)
+            
             logging.info(f"DEBUG: Page {i+1} - start: {page_starts[i]}, end: {page_ends[i]}, length: {len(page_text)}")
             if i < 3:  # Log first 3 pages content preview
                 logging.info(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
 
         # Join pages with markdown page separators (preserving markdown structure)
-        full_text = "\n\n---\n\n".join(page_texts)
+        full_text = separator.join(page_texts)
         logging.info(f"DEBUG: Full markdown text length after concatenation: {len(full_text)} chars")
         logging.info(f"DEBUG: Full markdown text preview: {full_text[:200]}...")
 
