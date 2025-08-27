@@ -24,23 +24,58 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
     batch_data = []
     logging.info("Create EXTRACTED_FROM relationship between chunks and entities (technical tracking)")
     
+    # Business entity types that should not be created by LLM
+    forbidden_entity_types = {
+        'Policy', 'PolicyType', 'Insurance', 'Document', 'Customer', 
+        'InsuredItem', 'PolicyYear', 'Sigorta', 'Poliçe', 'Belge',
+        'Müşteri', 'SigortaPoliçesi', 'InsurancePolicy'
+    }
+    
+    # Forbidden patterns in entity names
+    forbidden_patterns = {
+        'policy', 'poliçe', 'sigorta', 'insurance', 'belge', 
+        'document', 'döküman', 'form', 'müşteri', 'customer'
+    }
+    
+    filtered_count = 0
     for graph_doc_chunk_id in graph_documents_chunk_chunk_Id:
         for node in graph_doc_chunk_id['graph_doc'].nodes:
+            # Check if node type is forbidden
+            if node.type in forbidden_entity_types:
+                logging.warning(f"🚫 Filtered forbidden entity type: {node.type} ('{node.id}')")
+                filtered_count += 1
+                continue
+                
+            # Check if node ID contains forbidden patterns
+            node_id_lower = node.id.lower() if node.id else ""
+            if any(pattern in node_id_lower for pattern in forbidden_patterns):
+                logging.warning(f"🚫 Filtered forbidden entity name pattern: {node.type} ('{node.id}')")
+                filtered_count += 1
+                continue
+                
             query_data={
                 'chunk_id': graph_doc_chunk_id['chunk_id'],
                 'node_type': node.type,
                 'node_id': node.id
             }
             batch_data.append(query_data)
+    
+    if filtered_count > 0:
+        logging.info(f"🔍 Filtered {filtered_count} forbidden business entities from LLM extraction")
           
     if batch_data:
+        logging.info(f"📋 Creating {len(batch_data)} entity nodes (after filtering)")
         unwind_query = """
                     UNWIND $batch_data AS data
                     MATCH (c:Chunk {id: data.chunk_id})
                     CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
+                    SET n:__Entity__
                     MERGE (n)-[:EXTRACTED_FROM]->(c)
                 """
         execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
+        logging.info(f"✅ Created/updated {len(batch_data)} entities with EXTRACTED_FROM relationships")
+    else:
+        logging.info("ℹ️ No valid entities to create after filtering")
 
     
 def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):

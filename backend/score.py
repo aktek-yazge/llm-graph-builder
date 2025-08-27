@@ -713,49 +713,7 @@ async def extract_knowledge_graph_from_file(
             #             
             #     logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
                 
-            # Policy Graph Structure Enhancement - Müşteri merkezli yapı oluştur (YENİ MODEL)
-            try:
-                logging.info(f"Policy graph structure enhancement başlıyor (YENİ MODEL): {file_name}")
-                
-                from src.policy_metadata_linking import enhance_policy_graph_structure
-                policy_enhancement_start_time = time.time()
-                
-                # YENİ müşteri merkezli policy graph yapısını oluştur:
-                # Customer -[:OWNS]-> Policy -[:FOR_YEAR]-> PolicyYear
-                #                     +-[:OF_TYPE]-> PolicyType
-                #                     +-[:HAS_COVERAGE]-> Coverage
-                #                     +-[:DOCUMENTED_IN]-> Document
-                #                     +-[:HANDLED_BY]-> Agent
-                #                     +-[:COVERS]-> Asset
-                policy_enhancement_result = await asyncio.to_thread(
-                    enhance_policy_graph_structure,
-                    graph,
-                    file_name
-                )
-                
-                policy_enhancement_end_time = time.time()
-                
-                # Result'a Policy enhancement bilgilerini ekle
-                result['policy_enhancement'] = {
-                    'status': policy_enhancement_result['status'],
-                    'customers_found': policy_enhancement_result.get('customers_found', 0),
-                    'policies_found': policy_enhancement_result.get('policies_found', 0),
-                    'structures_created': policy_enhancement_result.get('structures_created', 0),
-                    'document_links': policy_enhancement_result.get('document_links', 0),
-                    'elapsed_time': f"{policy_enhancement_end_time - policy_enhancement_start_time:.2f}",
-                    'model': 'customer_centric_policy_structure'
-                }
-                
-                logging.info(f"Policy enhancement (YENİ MODEL) tamamlandı: {policy_enhancement_result.get('customers_found', 0)} müşteri, {policy_enhancement_result.get('policies_found', 0)} poliçe, {policy_enhancement_result.get('structures_created', 0)} yapı oluşturuldu")
-                
-            except Exception as policy_enhancement_error:
-                logging.error(f"Policy enhancement (YENİ MODEL) hatası: {policy_enhancement_error}")
-                result['policy_enhancement'] = {
-                    'status': 'error',
-                    'error': str(policy_enhancement_error),
-                    'elapsed_time': '0.00',
-                    'model': 'customer_centric_policy_structure'
-                }
+            
             
             # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
             try:
