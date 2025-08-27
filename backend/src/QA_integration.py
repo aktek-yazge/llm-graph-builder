@@ -48,6 +48,129 @@ from src.alternative_agent import AlternativeAgent
 from src.neo4j_retry import retry_neo4j_operation
 load_dotenv()
 
+def generate_reference_links(chunkdetails, sources):
+    """
+    RAG sürecinde kullanılan belgelerden page_link ve doc_link bilgilerini formatlar.
+    S3'ten dosyalar için presigned URL'ler oluşturur.
+    
+    Args:
+        chunkdetails: List of chunk detail objects containing page_link, page_number, fileName
+        sources: List of source file names
+        
+    Returns:
+        str: Formatted reference links string
+    """
+    if not chunkdetails and not sources:
+        return ""
+    
+    # S3 bilgileri
+    s3_bucket = os.getenv("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    
+    # Unique belgeler ve sayfa linkleri topla
+    document_refs = {}
+    page_refs = {}
+    
+    for chunk in chunkdetails:
+        fileName = chunk.get('fileName')
+        page_link = chunk.get('page_link')
+        page_number = chunk.get('page_number')
+        
+        if fileName:
+            # Document referansı
+            if fileName not in document_refs:
+                # S3'ten presigned URL oluştur
+                doc_s3_key = None
+                doc_url = None
+                
+                if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                    # Document'in S3 key'ini tahmin et (upload sırasında kullanılan format)
+                    from pathlib import Path
+                    doc_name = Path(fileName).stem
+                    doc_s3_key = f"documents/{doc_name}/{fileName}"
+                    
+                    # Presigned URL oluştur
+                    from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+                    doc_url = generate_s3_presigned_url(
+                        s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+                    )
+                
+                document_refs[fileName] = {
+                    'doc_link': doc_url or f"#document-{fileName}",  # Fallback
+                    'pages': set()
+                }
+            
+            # Page referansı
+            if page_link and page_number:
+                document_refs[fileName]['pages'].add(page_number)
+                
+                # S3'ten page image presigned URL oluştur
+                page_url = None
+                if s3_bucket and aws_access_key_id and aws_secret_access_key and page_link:
+                    from pathlib import Path
+                    doc_name = Path(fileName).stem
+                    page_s3_key = f"documents/{doc_name}/{page_link}"
+                    
+                    from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+                    page_url = generate_s3_presigned_url(
+                        s3_bucket, page_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+                    )
+                
+                page_refs[page_link] = {
+                    'page_number': page_number,
+                    'fileName': fileName,
+                    'page_link': page_url or f"#page-{page_link}"  # Fallback
+                }
+    
+    # Kaynaklardan eksik belgeleri ekle
+    for source in sources:
+        if source not in document_refs:
+            # S3'ten presigned URL oluştur
+            doc_url = None
+            if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                from pathlib import Path
+                doc_name = Path(source).stem
+                doc_s3_key = f"documents/{doc_name}/{source}"
+                
+                from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+                doc_url = generate_s3_presigned_url(
+                    s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+                )
+            
+            document_refs[source] = {
+                'doc_link': doc_url or f"#document-{source}",
+                'pages': set()
+            }
+    
+    # Format referans linklerini
+    reference_text = "\n\n---\n**Faydalanılan Kaynaklar:**\n"
+    
+    # Document links
+    if document_refs:
+        reference_text += "\n**📄 Belgeler:**\n"
+        for fileName, info in document_refs.items():
+            if info['doc_link'] and not info['doc_link'].startswith('#'):
+                reference_text += f"- [{fileName}]({info['doc_link']})"
+            else:
+                reference_text += f"- {fileName}"
+                
+            if info['pages']:
+                pages_list = sorted(list(info['pages']))
+                reference_text += f" (Sayfa: {', '.join(map(str, pages_list))})"
+            reference_text += "\n"
+    
+    # Page links (sadece page_link'i olanlar)
+    if page_refs:
+        reference_text += "\n**🖼️ Sayfa Görselleri:**\n"
+        for page_link, info in page_refs.items():
+            if info['page_link'] and not info['page_link'].startswith('#'):
+                reference_text += f"- [Sayfa {info['page_number']} - {info['fileName']}]({info['page_link']})\n"
+            else:
+                reference_text += f"- Sayfa {info['page_number']} - {info['fileName']}\n"
+    
+    return reference_text
+
 from typing import Dict, List
 import base64
 
@@ -1138,6 +1261,16 @@ def process_chat_response(messages, history, question, model, graph, document_na
             if agent_result.get('entity_details', []):
                 entity_ids = [entity['id'] for entity in agent_result.get('entity_details', [])]
                 response_info["entities"] = entity_ids
+        
+        # 📋 RAG belgelerinden referans linklerini oluştur ve cevaba ekle
+        chunkdetails = result.get("nodedetails", {}).get("chunkdetails", [])
+        sources = result.get("sources", [])
+        
+        if chunkdetails or sources:
+            reference_links = generate_reference_links(chunkdetails, sources)
+            if reference_links:
+                content += reference_links
+                logging.info(f"📋 Added reference links to response: {len(chunkdetails)} chunks, {len(sources)} sources")
         
         return {
             "session_id": "",  
@@ -2894,6 +3027,16 @@ async def process_chat_response_stream(messages, history, question, model, graph
                 response_info["entities"] = entities.get('entityids', [])
         else:
             response_info["entities"] = entities.get('entityids', [])
+        
+        # 📋 RAG belgelerinden referans linklerini oluştur ve cevaba ekle
+        chunkdetails = nodedetails.get("chunkdetails", [])
+        sources_for_refs = sources if isinstance(sources, list) else []
+        
+        if chunkdetails or sources_for_refs:
+            reference_links = generate_reference_links(chunkdetails, sources_for_refs)
+            if reference_links:
+                full_response += reference_links
+                logging.info(f"📋 Added reference links to streaming response: {len(chunkdetails)} chunks, {len(sources_for_refs)} sources")
         
         yield {
             "type": "complete",

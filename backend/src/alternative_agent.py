@@ -265,11 +265,16 @@ VECTOR ARAMA KARAR KRİTERLERİ:
                 where_clause = "WHERE " + " AND ".join(where_conditions)
             
             # Filtrelenmiş chunk'ları embedding'leri ile birlikte al
+            embedding_condition = "node.embedding IS NOT NULL AND size(node.embedding) > 0"
+            
+            if where_clause:
+                full_where = f"{where_clause} AND {embedding_condition}"
+            else:
+                full_where = f"WHERE {embedding_condition}"
+                
             filter_query = f"""
             MATCH (node:Chunk)-[:PART_OF]->(d:Document)
-            {where_clause}
-            AND node.embedding IS NOT NULL 
-            AND size(node.embedding) > 0
+            {full_where}
             RETURN node.chunkId as chunk_id,
                    node.text as text,
                    node.embedding as embedding,
@@ -479,8 +484,80 @@ VECTOR ARAMA KARAR KRİTERLERİ:
 
         return answer
 
-    def format_chunk_response(self, chunks: List[Dict[str, Any]], filters: SimpleFilters, raw_question: str) -> str:
+    def format_chunk_response(self, chunks: List[Dict[str, Any]], filters: SimpleFilters, raw_question: str, mode: str = "vector") -> str:
         """Chunk temelli arama sonrası sayfa bazlı tam veri raporu döndürür."""
+        
+        # RETRIEVER VERİSİNİ DETAYLI LOGLA
+        logger.info("="*60)
+        logger.info("🔍 RETRIEVER VERİSİ DETAYLI ANALIZ")
+        logger.info("="*60)
+        logger.info(f"📝 Soru: {raw_question}")
+        logger.info(f"🔧 Mode: {mode}")
+        logger.info(f"📊 Toplam chunk sayısı: {len(chunks)}")
+        logger.info(f"🎯 Filtreler: {filters.to_dict() if hasattr(filters, 'to_dict') else str(filters)}")
+        
+        # Her chunk'ın detaylarını logla
+        for i, chunk in enumerate(chunks[:10], 1):  # İlk 10 chunk'ı detaylı logla
+            logger.info(f"\n📋 CHUNK {i}:")
+            logger.info(f"  ├─ ID: {chunk.get('chunk_id', 'unknown')}")
+            logger.info(f"  ├─ Score: {chunk.get('score', 0):.3f}")
+            logger.info(f"  ├─ Document: {chunk.get('document', 'unknown')}")
+            logger.info(f"  ├─ Page: {chunk.get('page', '?')}")
+            if 'customer_name' in chunk:
+                logger.info(f"  ├─ Customer: {chunk.get('customer_name', 'N/A')}")
+            if 'policy_type' in chunk:
+                logger.info(f"  ├─ Policy Type: {chunk.get('policy_type', 'N/A')}")
+            if 'policy_year' in chunk:
+                logger.info(f"  ├─ Policy Year: {chunk.get('policy_year', 'N/A')}")
+            if 'filter_boost' in chunk:
+                logger.info(f"  ├─ Filter Boost: {chunk.get('filter_boost', 1.0):.1f}")
+            
+            text_preview = chunk.get('text', '')[:200] + "..." if len(chunk.get('text', '')) > 200 else chunk.get('text', '')
+            logger.info(f"  └─ Text: {text_preview}")
+        
+        if len(chunks) > 10:
+            logger.info(f"\n... ve {len(chunks) - 10} chunk daha var")
+        
+        logger.info("="*60)
+        
+        if mode == "intelligent_graph":
+            header = f"Soru: {raw_question}\nAkıllı Graf Arama Kullanıldı\n\n"
+            if not chunks:
+                return header + "Akıllı graf araması yapıldı ama ilgili chunk bulunamadı."
+            
+            # Intelligent search için daha detaylı bilgi ver
+            body = f"Bulunan {len(chunks)} chunk (akıllı graf araması):\n\n"
+            
+            for i, chunk in enumerate(chunks[:5], 1):
+                score = chunk.get('score', 0)
+                customer = chunk.get('customer_name', 'Bilinmiyor')
+                policy_type = chunk.get('policy_type', 'Bilinmiyor')
+                policy_year = chunk.get('policy_year', 'Bilinmiyor')
+                filter_boost = chunk.get('filter_boost', 1.0)
+                
+                body += f"📋 **Chunk {i}** (Score: {score:.3f}, Boost: {filter_boost:.1f})\n"
+                body += f"👤 Müşteri: {customer} | 📅 Yıl: {policy_year} | 📋 Tip: {policy_type}\n"
+                body += f"📄 {chunk.get('document', 'unknown')} - Sayfa {chunk.get('page', '?')}\n"
+                body += f"📝 {chunk.get('text', '')[:300]}...\n"
+                body += "-" * 80 + "\n\n"
+            
+            final_response = header + body
+            
+            # INTELLIGENT GRAPH MODE İÇİN LLM PROMPT LOGLA
+            logger.info("="*60)
+            logger.info("🤖 LLM'E GÖNDERİLECEK PROMPT (INTELLIGENT GRAPH)")
+            logger.info("="*60)
+            logger.info(f"📝 Prompt uzunluğu: {len(final_response)} karakter")
+            logger.info(f"📄 Header:\n{header}")
+            logger.info(f"🔍 Body özeti: {len(chunks)} chunk, {len(body)} karakter")
+            logger.info(f"📋 Full Prompt Preview (ilk 1000 karakter):\n{final_response[:1000]}")
+            if len(final_response) > 1000:
+                logger.info(f"📋 Full Prompt Preview (son 500 karakter):\n...{final_response[-500:]}")
+            logger.info("="*60)
+            
+            return final_response
+        
+        # Normal vector search formatı
         header = f"Soru: {raw_question}\nFiltreler: name={filters.name or '-'}, year={filters.year or '-'}, policy_type={filters.policy_type or '-'}\n\n"
         if not chunks:
             return header + "Vector arama yapıldı ama ilgili chunk bulunamadı."
@@ -520,7 +597,21 @@ VECTOR ARAMA KARAR KRİTERLERİ:
             body += f"{page_data['content']}\n"
             body += "-" * 80 + "\n\n"
 
-        return header + body
+        final_response = header + body
+        
+        # LLM'E GÖNDERİLECEK PROMPT'U LOGLA
+        logger.info("="*60)
+        logger.info("🤖 LLM'E GÖNDERİLECEK PROMPT")
+        logger.info("="*60)
+        logger.info(f"📝 Prompt uzunluğu: {len(final_response)} karakter")
+        logger.info(f"📄 Header:\n{header}")
+        logger.info(f"🔍 Body özeti: {len(full_page_content)} sayfa, {len(body)} karakter")
+        logger.info(f"📋 Full Prompt Preview (ilk 1000 karakter):\n{final_response[:1000]}")
+        if len(final_response) > 1000:
+            logger.info(f"📋 Full Prompt Preview (son 500 karakter):\n...{final_response[-500:]}")
+        logger.info("="*60)
+
+        return final_response
 
     def _get_all_chunks_for_page(self, document_name: str, page_number: int, filters: SimpleFilters) -> List[Dict[str, Any]]:
         """Belirli bir belgenin belirli bir sayfasındaki tüm chunk'ları position sırasına göre getirir."""
@@ -589,6 +680,156 @@ VECTOR ARAMA KARAR KRİTERLERİ:
         return result
 
     # -------------------- Ana akış --------------------
+    def extract_filters_from_question(self, question: str) -> Dict[str, Any]:
+        """LLM ile sorudan customer, year, policy_type, document_type, insured_item, document_name filtrelerini çıkar"""
+        system = SystemMessage(content="""Sen bir filtre çıkarma uzmanısın. Gelen soruyu analiz et ve şu filtreleri çıkar:
+- customer_filter: Müşteri/kişi adı (örn: "Ayça", "Mehmet", "ASUDE SİTESİ YÖNETİMİ")
+- year_filter: Yıl bilgisi (örn: "2020", "2021", "2023")  
+- policy_type_filter: Poliçe tipi (örn: "Yangın Sigortası", "DASK", "Konut", "Trafik")
+- document_type_filter: Doküman tipi (örn: "MAIN_POLICY", "ENDORSEMENT", "RENEWAL", "CANCELLATION")
+- insured_item_filter: Sigortalı eşya/varlık (örn: "kiraz teknesi", "ev", "araç", "bina")
+- document_name_filter: Belge adı/dosya adı (örn: "Ayça Dinçkök Galata Residance")
+
+SADECE JSON döndür:
+{"customer_filter": "...", "year_filter": "...", "policy_type_filter": "...", "document_type_filter": "...", "insured_item_filter": "...", "document_name_filter": "..."}
+
+Eğer bir filtre bulunamazsa null yap.
+
+DOCUMENT TİPLERİ:
+- "zeyilname", "endorsement" → "ENDORSEMENT" (Ana poliçenin zeyilnameleri)
+- "ana poliçe", "main policy" → "MAIN_POLICY" 
+- "yenileme", "renewal" → "RENEWAL"
+- "iptal", "cancellation" → "CANCELLATION"
+
+ÖRNEKLER:
+"Ayça hanımın 2020 yılındaki dask poliçe zeyilnamelerini listele" 
+→ {"customer_filter": "Ayça", "year_filter": "2020", "policy_type_filter": "dask", "document_type_filter": "ENDORSEMENT", "insured_item_filter": null, "document_name_filter": null}
+
+"2020 yılında kaç adet konut ana poliçesi var?"
+→ {"customer_filter": null, "year_filter": "2020", "policy_type_filter": "konut", "document_type_filter": "MAIN_POLICY", "insured_item_filter": null, "document_name_filter": null}
+
+"Mehmet'in kiraz teknesi için sigorta belgeleri"
+→ {"customer_filter": "Mehmet", "year_filter": null, "policy_type_filter": null, "document_type_filter": null, "insured_item_filter": "kiraz teknesi", "document_name_filter": null}
+
+"Ayça Dinçkök Galata Residance belgesindeki bilgiler"
+→ {"customer_filter": null, "year_filter": null, "policy_type_filter": null, "document_type_filter": null, "insured_item_filter": null, "document_name_filter": "Ayça Dinçkök Galata Residance"}
+""")
+        
+        human = HumanMessage(content=f"Soru: {question}")
+        
+        try:
+            response = self.llm.invoke([system, human])
+            text = response.content.strip()
+            # JSON çıkarımı
+            m = re.search(r"(\{.*\})", text, flags=re.S)
+            if m:
+                jtext = m.group(1)
+                try:
+                    data = json.loads(jtext)
+                    # Unicode normalize et
+                    result = {}
+                    for key, value in data.items():
+                        if value and isinstance(value, str):
+                            result[key] = normalize_unicode_text(value)
+                        else:
+                            result[key] = value
+                    return result
+                except Exception:
+                    logger.warning("LLM'den dönen JSON parse edilemedi")
+                    return {
+                        "customer_filter": None, "year_filter": None, "policy_type_filter": None,
+                        "document_type_filter": None, "insured_item_filter": None, "document_name_filter": None
+                    }
+            else:
+                logger.warning("LLM JSON içermeyen cevap verdi")
+                return {
+                    "customer_filter": None, "year_filter": None, "policy_type_filter": None,
+                    "document_type_filter": None, "insured_item_filter": None, "document_name_filter": None
+                }
+        except Exception as e:
+            logger.error(f"Filter extraction hatası: {e}")
+            return {
+                "customer_filter": None, "year_filter": None, "policy_type_filter": None,
+                "document_type_filter": None, "insured_item_filter": None, "document_name_filter": None
+            }
+
+    def intelligent_graph_search(self, question: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Yeni intelligent graph search query'sini kullan"""
+        try:
+            # Question embedding oluştur
+            normalized_query = normalize_unicode_text(question)
+            question_embedding = self.embedding_model.embed_query(normalized_query)
+            
+            # Cypher query parametreleri
+            params = {
+                'question': question,
+                'question_embedding': question_embedding,
+                'customer_filter': filters.get('customer_filter'),
+                'year_filter': filters.get('year_filter'),
+                'policy_type_filter': filters.get('policy_type_filter'),
+                'document_type_filter': filters.get('document_type_filter'),
+                'insured_item_filter': filters.get('insured_item_filter'),
+                'document_name_filter': filters.get('document_name_filter')
+            }
+            
+            logger.info(f"Intelligent graph search params: {params}")
+            
+            # INTELLIGENT_GRAPH_SEARCH_QUERY'yi burada import et
+            from src.shared.constants import INTELLIGENT_GRAPH_SEARCH_QUERY
+            
+            result = self.graph.query(INTELLIGENT_GRAPH_SEARCH_QUERY, params)
+            
+            # INTELLIGENT GRAPH SEARCH SONUÇLARINI DETAYLI LOGLA
+            logger.info("="*60)
+            logger.info("🎯 INTELLIGENT GRAPH SEARCH SONUÇLARI")
+            logger.info("="*60)
+            logger.info(f"📊 Neo4j sonuç sayısı: {len(result) if result else 0}")
+            
+            if not result:
+                logger.info("❌ Intelligent graph search: no results")
+                logger.info("="*60)
+                return []
+            
+            # İlk birkaç raw sonucu logla
+            for i, row in enumerate(result[:3], 1):
+                logger.info(f"\n🔍 RAW NEO4J SONUÇ {i}:")
+                logger.info(f"  ├─ ID: {row.get('id')}")
+                logger.info(f"  ├─ Score: {row.get('score')}")
+                logger.info(f"  ├─ Text preview: {str(row.get('text', ''))[:100]}...")
+                logger.info(f"  └─ Metadata: {row.get('metadata')}")
+            
+            # Sonuçları format et
+            chunks = []
+            for row in result:
+                chunk_data = {
+                    'chunk_id': row.get('id'),
+                    'text': row.get('text', ''),
+                    'score': float(row.get('score', 0)),
+                    'document': row.get('metadata', {}).get('document', ''),
+                    'page': row.get('metadata', {}).get('page_number'),
+                    'customer_name': row.get('metadata', {}).get('customer_name'),
+                    'policy_type': row.get('metadata', {}).get('policy_type'),
+                    'policy_year': row.get('metadata', {}).get('policy_year'),
+                    'filter_boost': row.get('metadata', {}).get('filter_boost', 1.0)
+                }
+                chunks.append(chunk_data)
+            
+            logger.info(f"\n✅ {len(chunks)} chunk formatlandı")
+            if chunks:
+                logger.info(f"🏆 En yüksek score: {chunks[0]['score']:.3f}")
+                logger.info(f"📉 En düşük score: {chunks[-1]['score']:.3f}")
+            logger.info("="*60)
+            
+            logger.info(f"Intelligent graph search returned {len(chunks)} chunks")
+            if chunks:
+                logger.info(f"Top score: {chunks[0]['score']:.3f}")
+            
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Intelligent graph search failed: {e}")
+            return []
+
     def answer_question(self, question: str) -> Dict[str, Any]:
         """Kullanıcı sorusunu alır, kurallara göre işlem yapar ve sonuç döner.
 
@@ -626,8 +867,29 @@ VECTOR ARAMA KARAR KRİTERLERİ:
                 }
             }
 
-        # 2) Count sorusu değilse, direkt vector araması yap
-        logger.info("Not a count query - using vector search for detailed information")
+        # 2) Intelligent graph search dene
+        logger.info("Trying intelligent graph search first")
+        filters_dict = self.extract_filters_from_question(question)
+        
+        # Eğer en az bir filtre varsa intelligent search kullan
+        if any(filters_dict.values()):
+            logger.info(f"Using intelligent graph search with filters: {filters_dict}")
+            chunks = self.intelligent_graph_search(question, filters_dict)
+            
+            if chunks and len(chunks) >= 3:  # Yeterli sonuç varsa intelligent search kullan
+                text = self.format_chunk_response(chunks, SimpleFilters(), question, mode="intelligent_graph")
+                return {
+                    'mode': 'intelligent_graph',
+                    'response_text': text,
+                    'meta': {
+                        'chunks': chunks,
+                        'filters': filters_dict,
+                        'decision_reason': 'Used intelligent graph search based on detected filters'
+                    }
+                }
+        
+        # 3) Fallback: Normal vector search
+        logger.info("Fallback to normal vector search")
         
         # LLM'den filtreleri al
         decision = self.ask_llm_for_decision(question)
@@ -681,9 +943,9 @@ def test_alternative_agent():
     agent = AlternativeAgent(graph)
 
     qs = [
-        # "Ayça hanımın 2020 yılında kaç adet poliçesi var?",
-        "Ayça hanım 2020 D4 poliçesi taksitleri neler?",
-        # "2020 yılında kaç DASK poliçesi var?"
+        "ASUDE SİTESİ YÖNETİMİ 2020 yangın sigortası detayları neler?",  # intelligent graph test
+        "2020 yılında kaç adet poliçe var?",  # count test
+        "sigorta prim tutarı ne kadar?"  # normal vector test
     ]
 
     for q in qs:
@@ -691,7 +953,8 @@ def test_alternative_agent():
         print('SORU:', q)
         r = agent.answer_question(q)
         print('MODE:', r['mode'])
-        print(r['response_text'])  # Tüm metni göster
+        print('META:', r.get('meta', {}))
+        print(r['response_text'][:500])  # İlk 500 karakter
 
 
 if __name__ == '__main__':

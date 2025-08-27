@@ -1,4 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
 from src.main import *
@@ -394,12 +395,85 @@ app.add_middleware(
 )
 app.add_middleware(SessionMiddleware, secret_key=os.urandom(24))
 
+# S3 configuration for file serving
+S3_BACKUP_BUCKET = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
 is_gemini_enabled = os.environ.get("GEMINI_ENABLED", "False").lower() in ("true", "1", "yes")
 if is_gemini_enabled:
     add_routes(app,ChatVertexAI(), path="/vertexai")
 
 app.add_api_route("/health", health([healthy_condition, healthy]))
 
+
+@app.get("/files/{file_name}")
+async def serve_document_file(file_name: str):
+    """
+    S3'ten document dosyalarını serve eder.
+    """
+    try:
+        if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+            raise HTTPException(status_code=503, detail="S3 configuration not available")
+        
+        # S3 key'ini tahmin et
+        from pathlib import Path
+        doc_name = Path(file_name).stem
+        s3_key = f"documents/{doc_name}/{file_name}"
+        
+        # Presigned URL oluştur
+        from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+        presigned_url = generate_s3_presigned_url(
+            S3_BACKUP_BUCKET, s3_key, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, expiration=3600
+        )
+        
+        if not presigned_url:
+            raise HTTPException(status_code=404, detail=f"File not found: {file_name}")
+        
+        # Redirect to presigned URL
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=presigned_url, status_code=302)
+        
+    except Exception as e:
+        logging.error(f"Error serving document file {file_name}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/images/{image_name}")
+async def serve_page_image(image_name: str):
+    """
+    S3'ten page image dosyalarını serve eder.
+    """
+    try:
+        if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+            raise HTTPException(status_code=503, detail="S3 configuration not available")
+        
+        # S3 key'ini tahmin et (image name'den document adını çıkar)
+        # Format: "doc_name_page_001.png"
+        import re
+        match = re.match(r'(.+)_page_\d+\.png$', image_name)
+        if not match:
+            raise HTTPException(status_code=400, detail="Invalid image name format")
+        
+        doc_name = match.group(1)
+        s3_key = f"documents/{doc_name}/{image_name}"
+        
+        # Presigned URL oluştur
+        from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+        presigned_url = generate_s3_presigned_url(
+            S3_BACKUP_BUCKET, s3_key, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, expiration=3600
+        )
+        
+        if not presigned_url:
+            raise HTTPException(status_code=404, detail=f"Image not found: {image_name}")
+        
+        # Redirect to presigned URL
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=presigned_url, status_code=302)
+        
+    except Exception as e:
+        logging.error(f"Error serving page image {image_name}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/url/scan")

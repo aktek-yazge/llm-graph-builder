@@ -6,6 +6,129 @@ BUCKET_FAILED_FILE = 'llm-graph-builder-failed'
 PROJECT_ID = 'llm-experiments-387609' 
 GRAPH_CHUNK_LIMIT = 50 
 
+# Intelligent Graph Search Query - Customer->Policy->Document path'ini takip eder
+INTELLIGENT_GRAPH_SEARCH_QUERY = """
+// Akıllı arama: Customer, PolicyYear, PolicyType, DocumentType, InsuredItem filtrelerine göre chunk'ları bul
+WITH $question AS question, $question_embedding AS question_embedding, 
+     $customer_filter AS customer_filter, $year_filter AS year_filter, $policy_type_filter AS policy_type_filter,
+     $document_type_filter AS document_type_filter, $insured_item_filter AS insured_item_filter,
+     $document_name_filter AS document_name_filter
+
+// Ana path: Customer->Policy->Document->Chunk (ESNEKLİK İÇİN OPTIONAL)
+MATCH (customer:Customer)-[:HAS_POLICY]->(policy:Policy)
+MATCH (doc:Document)<-[:PART_OF]-(chunk:Chunk)
+
+// Policy->Document ilişki türleri:
+// - DOCUMENTED_IN: Ana poliçe belgesi
+// - HAS_ENDORSEMENT: Ana poliçenin zeyilnameleri (endorsement documents)
+// - HAS_RENEWAL: Yenileme belgeleri  
+// - HAS_CANCELLATION: İptal belgeleri
+// - HAS_DOC: Genel doküman ilişkisi
+OPTIONAL MATCH (policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION|HAS_DOC]->(doc)
+
+// Document match kontrolü + ilişki türü kontrolü (opsiyonel)
+WITH customer, policy, doc, chunk, 
+     customer_filter, year_filter, policy_type_filter, document_type_filter, 
+     insured_item_filter, document_name_filter, question_embedding
+WHERE doc IS NOT NULL 
+  AND (
+    // Eğer document type filtresi yoksa, tüm ilişki türlerini kabul et
+    document_type_filter IS NULL OR document_type_filter = '' OR
+    // Eğer document type filtresi varsa, sadece o ilişki türünü kabul et
+    (document_type_filter = 'ENDORSEMENT' AND (policy)-[:HAS_ENDORSEMENT]->(doc)) OR
+    (document_type_filter = 'RENEWAL' AND (policy)-[:HAS_RENEWAL]->(doc)) OR
+    (document_type_filter = 'CANCELLATION' AND (policy)-[:HAS_CANCELLATION]->(doc)) OR
+    (document_type_filter = 'MAIN_POLICY' AND (policy)-[:DOCUMENTED_IN]->(doc))
+  )
+
+// PolicyType ve PolicyYear kontrolü
+OPTIONAL MATCH (policy)-[:HAS_TYPE]->(pt:PolicyType)
+OPTIONAL MATCH (policy)-[:HAS_YEAR]->(py:PolicyYear)
+OPTIONAL MATCH (policy)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)
+
+// Chunk'ın embedding'i olmalı
+WITH customer, policy, pt, py, ii, doc, chunk, question_embedding,
+     customer_filter, year_filter, policy_type_filter, document_type_filter, 
+     insured_item_filter, document_name_filter
+WHERE chunk.embedding IS NOT NULL AND size(chunk.embedding) > 0
+
+// Filter kontrolü
+WITH customer, policy, pt, py, ii, doc, chunk, question_embedding,
+     customer_filter, year_filter, policy_type_filter, document_type_filter, 
+     insured_item_filter, document_name_filter
+WHERE 
+  // Customer filtresi
+  (customer_filter IS NULL OR customer_filter = '' OR 
+   toLower(coalesce(customer.id, customer.name, '')) CONTAINS toLower(customer_filter))
+  AND
+  // Year filtresi  
+  (year_filter IS NULL OR year_filter = '' OR
+   (py IS NOT NULL AND (toString(py.year) = toString(year_filter) OR coalesce(py.name, '') CONTAINS toString(year_filter))))
+  AND
+  // PolicyType filtresi
+  (policy_type_filter IS NULL OR policy_type_filter = '' OR
+   (pt IS NOT NULL AND toLower(coalesce(pt.typeName, pt.name, '')) CONTAINS toLower(policy_type_filter)))
+  AND
+  // Document type filtresi (docType property)
+  (document_type_filter IS NULL OR document_type_filter = '' OR
+   toLower(coalesce(doc.docType, '')) CONTAINS toLower(document_type_filter))
+  AND
+  // InsuredItem filtresi
+  (insured_item_filter IS NULL OR insured_item_filter = '' OR
+   (ii IS NOT NULL AND toLower(coalesce(ii.name, ii.itemType, '')) CONTAINS toLower(insured_item_filter)))
+  AND
+  // Document name filtresi
+  (document_name_filter IS NULL OR document_name_filter = '' OR
+   toLower(coalesce(doc.fileName, '')) CONTAINS toLower(document_name_filter))
+
+// Filter boost hesapla
+WITH customer, policy, pt, py, ii, doc, chunk, question_embedding,
+     customer_filter, year_filter, policy_type_filter, document_type_filter, 
+     insured_item_filter, document_name_filter,
+     CASE WHEN customer_filter IS NOT NULL AND customer_filter <> '' THEN 1.3 ELSE 1.0 END AS customer_boost,
+     CASE WHEN year_filter IS NOT NULL AND year_filter <> '' THEN 1.2 ELSE 1.0 END AS year_boost,
+     CASE WHEN policy_type_filter IS NOT NULL AND policy_type_filter <> '' THEN 1.3 ELSE 1.0 END AS policy_type_boost,
+     CASE WHEN document_type_filter IS NOT NULL AND document_type_filter <> '' THEN 1.4 ELSE 1.0 END AS doc_type_boost,
+     CASE WHEN insured_item_filter IS NOT NULL AND insured_item_filter <> '' THEN 1.2 ELSE 1.0 END AS insured_item_boost,
+     CASE WHEN document_name_filter IS NOT NULL AND document_name_filter <> '' THEN 1.5 ELSE 1.0 END AS doc_name_boost
+
+// Vector similarity hesapla
+WITH customer, policy, pt, py, ii, doc, chunk, question_embedding,
+     customer_boost, year_boost, policy_type_boost, doc_type_boost, insured_item_boost, doc_name_boost,
+     (customer_boost * year_boost * policy_type_boost * doc_type_boost * insured_item_boost * doc_name_boost) AS filter_boost,
+     vector.similarity.cosine(question_embedding, chunk.embedding) AS base_score
+
+// Final score hesapla
+WITH customer, policy, pt, py, ii, doc, chunk,
+     base_score, filter_boost, 
+     (base_score * filter_boost) AS final_score
+
+WHERE final_score > 0.15
+
+// Sonuçları sırala ve döndür
+RETURN 
+    chunk.chunkId as id,
+    chunk.text as text,
+    final_score as score,
+    {
+        source: COALESCE(doc.fileName, "unknown"),
+        page_number: chunk.page_number,
+        fileName: chunk.fileName,
+        page_link: chunk.page_link,
+        customer_name: coalesce(customer.id, customer.name),
+        policy_id: policy.id,
+        policy_type: coalesce(pt.typeName, pt.name),
+        policy_year: coalesce(toString(py.year), py.name),
+        document_type: coalesce(doc.docType, "unknown"),
+        insured_item: coalesce(ii.name, ii.itemType),
+        document: doc.fileName,
+        filter_boost: filter_boost,
+        base_score: base_score
+    } as metadata
+
+ORDER BY final_score DESC
+LIMIT 15
+"""
 
 #query 
 GRAPH_QUERY = """
@@ -380,7 +503,13 @@ WITH d, avg_score, chunks,
 
 WITH d, avg_score, 
      [c IN chunks | c.chunk.text] AS texts, 
-     [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
+     [c IN chunks | {
+         id: c.chunk.id, 
+         score: c.score,
+         page_link: c.chunk.page_link,
+         page_number: c.chunk.page_number,
+         fileName: c.chunk.fileName
+     }] AS chunkdetails,
      documentMetadata
 
 // Document metadata'yı metine dahil et
@@ -635,7 +764,13 @@ WITH d, avg_score, chunks, nodes, rels, entities, documentMetadata, personPolicy
 // Text ve metadata oluştur - Document node'unu da entities'e dahil et
 WITH d, avg_score, [doc IN allDocuments | doc.fileName] AS documentList, totalDocumentCount, documentMetadata, personPolicyInfo, chunks, nodes, rels, entities,
     [c IN chunks | c.chunk.text] AS texts,
-    [c IN chunks | {id: c.chunk.id, score: c.score}] AS chunkdetails,
+    [c IN chunks | {
+        id: c.chunk.id, 
+        score: c.score,
+        page_link: c.chunk.page_link,
+        page_number: c.chunk.page_number,
+        fileName: c.chunk.fileName
+    }] AS chunkdetails,
     [n IN nodes + [d] | elementId(n)] AS entityIds,
     [r IN rels | elementId(r)] AS relIds,
     apoc.coll.sort([
@@ -918,6 +1053,7 @@ CHAT_VECTOR_GRAPH_MODE = "graph_vector"
 CHAT_VECTOR_GRAPH_FULLTEXT_MODE = "graph_vector_fulltext"
 CHAT_GLOBAL_VECTOR_FULLTEXT_MODE = "global_vector"
 CHAT_GRAPH_MODE = "graph"
+CHAT_INTELLIGENT_GRAPH_MODE = "intelligent_graph"
 CHAT_DEFAULT_MODE = "graph_vector_fulltext"
 
 CHAT_MODE_CONFIG_MAP= {
@@ -968,6 +1104,16 @@ CHAT_MODE_CONFIG_MAP= {
             "index_name": "vector",
             "keyword_index": "keyword",
             "document_filter": False,            
+            "node_label": "Chunk",
+            "embedding_node_property":"embedding",
+            "text_node_properties":["text"],
+        },
+        CHAT_INTELLIGENT_GRAPH_MODE : {
+            "retrieval_query": INTELLIGENT_GRAPH_SEARCH_QUERY,
+            "top_k": 15,
+            "index_name": "vector",
+            "keyword_index": None,
+            "document_filter": True,            
             "node_label": "Chunk",
             "embedding_node_property":"embedding",
             "text_node_properties":["text"],

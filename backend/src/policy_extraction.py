@@ -105,11 +105,15 @@ class PolicyExtractionService:
             WITH d, p, CASE WHEN p IS NULL THEN split($file_name, '.')[0] ELSE p.id END as potential_policy_id
             OPTIONAL MATCH (p2:Policy {id: potential_policy_id}) WHERE p IS NULL
             
-            // Customer bilgisini al
+            // Customer bilgisini al - önce Document'e bağlı Customer'ı ara
             OPTIONAL MATCH (c:Customer)-[:HAS_DOC]->(d)
-            OPTIONAL MATCH (c2:Customer)-[:HAS_POLICY]->(coalesce(p, p2))
             
-            WITH d, coalesce(p, p2) as final_policy, coalesce(c, c2) as final_customer
+            // Sonra Policy'ye bağlı Customer'ı ara
+            WITH d, p, p2, c
+            OPTIONAL MATCH (c2:Customer)-[:HAS_POLICY]->(p) WHERE p IS NOT NULL
+            OPTIONAL MATCH (c3:Customer)-[:HAS_POLICY]->(p2) WHERE p2 IS NOT NULL AND p IS NULL
+            
+            WITH d, coalesce(p, p2) as final_policy, coalesce(c, c2, c3) as final_customer
             
             // İlişkili node'ları al
             OPTIONAL MATCH (final_policy)-[:HAS_YEAR]->(py:PolicyYear)
