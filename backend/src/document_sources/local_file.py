@@ -690,32 +690,53 @@ def get_pages_with_page_numbers(unstructured_pages):
                 }
 
             if page.metadata["page_number"] > page_number:
-                page_number += 1
-                pages.append(Document(page_content=page_content))
-                page_content = ""
+                # Mevcut sayfa içeriğini kaydet (önceki sayfa için)
+                if page_content.strip():
+                    pages.append(Document(page_content=page_content, metadata=metadata))
+                
+                # Yeni sayfaya geç
+                page_number = page.metadata["page_number"]
+                page_content = page.page_content
+                metadata = {
+                    "source": page.metadata["source"],
+                    "page_number": page_number,
+                    "filename": page.metadata["filename"],
+                    "filetype": page.metadata["filetype"],
+                }
 
             if page == unstructured_pages[-1]:
-                pages.append(Document(page_content=page_content))
+                # Son sayfa için metadata ile birlikte kaydet
+                if page_content.strip():
+                    pages.append(Document(page_content=page_content, metadata=metadata))
 
-        elif page.metadata["category"] == "PageBreak" and page != unstructured_pages[0]:
+        elif page.metadata.get("category") == "PageBreak" and page != unstructured_pages[0]:
+            # PageBreak ile sayfa geçişi
+            if page_content.strip():
+                pages.append(Document(page_content=page_content, metadata=metadata))
             page_number += 1
-            pages.append(Document(page_content=page_content, metadata=metadata))
             page_content = ""
-            metadata = {}
+            metadata = {
+                "source": page.metadata.get("source", ""),
+                "page_number": page_number,
+                "filename": page.metadata.get("filename", ""),
+                "filetype": page.metadata.get("filetype", ""),
+            }
 
         else:
+            # Normal sayfa içeriği
             page_content += page.page_content
-            metadata_with_custom_page_number = {
-                "source": page.metadata["source"],
-                "page_number": 1,
-                "filename": page.metadata["filename"],
-                "filetype": page.metadata["filetype"],
-            }
+            # Metadata yoksa mevcut page_number kullan
+            if not metadata:
+                metadata = {
+                    "source": page.metadata.get("source", ""),
+                    "page_number": page_number,
+                    "filename": page.metadata.get("filename", ""),
+                    "filetype": page.metadata.get("filetype", ""),
+                }
+            
             if page == unstructured_pages[-1]:
-                pages.append(
-                    Document(
-                        page_content=page_content,
-                        metadata=metadata_with_custom_page_number,
-                    )
-                )
+                # Son sayfa için metadata ile birlikte kaydet
+                if page_content.strip():
+                    pages.append(Document(page_content=page_content, metadata=metadata))
+    
     return pages

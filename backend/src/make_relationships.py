@@ -26,14 +26,14 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
     
     # Business entity types that should not be created by LLM
     forbidden_entity_types = {
-        'Policy', 'PolicyType', 'Insurance', 'Document', 'Customer', 
+        'PolicyType', 'Insurance', 'Document', 'Customer', 
         'InsuredItem', 'PolicyYear', 'Sigorta', 'Poliçe', 'Belge',
         'Müşteri', 'SigortaPoliçesi', 'InsurancePolicy'
     }
     
     # Forbidden patterns in entity names
     forbidden_patterns = {
-        'policy', 'poliçe', 'sigorta', 'insurance', 'belge', 
+        'poliçe', 'sigorta', 'insurance', 'belge', 
         'document', 'döküman', 'form', 'müşteri', 'customer'
     }
     
@@ -65,15 +65,54 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
           
     if batch_data:
         logging.info(f"📋 Creating {len(batch_data)} entity nodes (after filtering)")
-        unwind_query = """
-                    UNWIND $batch_data AS data
-                    MATCH (c:Chunk {id: data.chunk_id})
-                    CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
-                    SET n:__Entity__
-                    MERGE (n)-[:EXTRACTED_FROM]->(c)
-                """
-        execute_graph_query(graph,unwind_query, params={"batch_data": batch_data})
-        logging.info(f"✅ Created/updated {len(batch_data)} entities with EXTRACTED_FROM relationships")
+        
+        # Policy node'larını ve diğer node'ları ayır
+        policy_nodes = [data for data in batch_data if data['node_type'] == 'Policy']
+        other_nodes = [data for data in batch_data if data['node_type'] != 'Policy']
+        
+        # Policy node'ları için özel işlem: Mevcut Policy node'una merge et
+        if policy_nodes:
+            logging.info(f"🔄 Processing {len(policy_nodes)} Policy nodes with existing node merge")
+            policy_query = """
+                        UNWIND $policy_data AS data
+                        MATCH (c:Chunk {id: data.chunk_id})
+                        
+                        // Herhangi bir mevcut Policy node'unu bul
+                        OPTIONAL MATCH (existing_policy:Policy)
+                        WHERE existing_policy IS NOT NULL
+                        WITH c, data, COLLECT(existing_policy)[0] as first_policy
+                        
+                        // Eğer Policy node varsa onu kullan, yoksa yenisini oluştur
+                        MERGE (policy_node:Policy {id: COALESCE(first_policy.id, data.node_id)})
+                        ON CREATE SET 
+                            policy_node:__Entity__,
+                            policy_node.name = data.node_id,
+                            policy_node.created_from_llm = true,
+                            policy_node.created_at = datetime()
+                        ON MATCH SET 
+                            policy_node.llm_extracted_count = COALESCE(policy_node.llm_extracted_count, 0) + 1,
+                            policy_node.last_llm_update = datetime()
+                        
+                        // Policy node'unu chunk'a bağla
+                        MERGE (policy_node)-[:EXTRACTED_FROM]->(c)
+                        
+                        RETURN policy_node
+                    """
+            execute_graph_query(graph, policy_query, params={"policy_data": policy_nodes})
+            logging.info(f"✅ Processed {len(policy_nodes)} Policy nodes with existing node merge")
+        
+        # Diğer node'lar için normal işlem
+        if other_nodes:
+            logging.info(f"📋 Creating {len(other_nodes)} non-Policy entity nodes")
+            unwind_query = """
+                        UNWIND $batch_data AS data
+                        MATCH (c:Chunk {id: data.chunk_id})
+                        CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
+                        SET n:__Entity__
+                        MERGE (n)-[:EXTRACTED_FROM]->(c)
+                    """
+            execute_graph_query(graph, unwind_query, params={"batch_data": other_nodes})
+            logging.info(f"✅ Created/updated {len(other_nodes)} non-Policy entities with EXTRACTED_FROM relationships")
     else:
         logging.info("ℹ️ No valid entities to create after filtering")
 

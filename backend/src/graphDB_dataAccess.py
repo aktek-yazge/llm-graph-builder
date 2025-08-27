@@ -558,16 +558,54 @@ class graphDBdataAccess:
             WITH COLLECT(d) AS documents
             CALL (documents) {
             UNWIND documents AS d
+            
+            // 1. Chunk'ları ve chunk-entity ilişkilerini topla
             OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-            OPTIONAL MATCH (c:Chunk)-[:HAS_ENTITY]->(e)
-            WITH d, c, e, documents
-            WHERE NOT EXISTS {
-                MATCH (e)<-[:HAS_ENTITY]-(c2)-[:PART_OF]->(d2:Document)
-                WHERE NOT d2 IN documents
-                }
-            WITH d, COLLECT(c) AS chunks, COLLECT(e) AS entities
+            OPTIONAL MATCH (c)-[:HAS_ENTITY]->(ce)
+            
+            // 2. Document'a direkt bağlı entity'leri topla (Policy, Customer vs.)
+            OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(policy:Policy)
+            OPTIONAL MATCH (d)<-[:HAS_DOC]-(customer:Customer)
+            OPTIONAL MATCH (policy)-[:HAS_YEAR]->(py:PolicyYear)
+            OPTIONAL MATCH (policy)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)
+            OPTIONAL MATCH (policy)-[:HAS_TYPE]->(pt:PolicyType)
+            
+            // 3. Document'a bağlı diğer node'ları topla (Agent, InsuranceCompany vs.)
+            OPTIONAL MATCH (d)-[*0..2]-(other)
+            WHERE other:Agent OR other:InsuranceCompany OR other:Address OR other:Phone OR other:Email
+            
+            WITH d, documents, 
+                 COLLECT(DISTINCT c) AS chunks, 
+                 COLLECT(DISTINCT ce) AS chunkEntities,
+                 COLLECT(DISTINCT policy) + COLLECT(DISTINCT customer) + COLLECT(DISTINCT py) + COLLECT(DISTINCT ii) + COLLECT(DISTINCT pt) AS docEntities,
+                 COLLECT(DISTINCT other) AS otherNodes
+            
+            // 4. Sadece başka document'larda kullanılmayan entity'leri sil
+            WITH d, chunks, 
+                 [entity IN chunkEntities WHERE entity IS NOT NULL AND NOT EXISTS {
+                     MATCH (entity)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+                     WHERE NOT d2 IN documents
+                 }] AS safeChunkEntities,
+                 [entity IN docEntities WHERE entity IS NOT NULL AND NOT EXISTS {
+                     MATCH (d2:Document)
+                     WHERE NOT d2 IN documents AND (
+                         (d2)<-[:DOCUMENTED_IN]-(entity) OR 
+                         (d2)<-[:HAS_DOC]-(entity) OR
+                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_YEAR]->(entity) OR
+                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_INSURED_ITEM]->(entity) OR
+                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_TYPE]->(entity)
+                     )
+                 }] AS safeDocEntities,
+                 [node IN otherNodes WHERE node IS NOT NULL AND NOT EXISTS {
+                     MATCH (node)-[*0..2]-(d2:Document)
+                     WHERE NOT d2 IN documents
+                 }] AS safeOtherNodes
+            
+            // 5. Güvenli silme işlemi
             FOREACH (chunk IN chunks | DETACH DELETE chunk)
-            FOREACH (entity IN entities | DETACH DELETE entity)
+            FOREACH (entity IN safeChunkEntities | DETACH DELETE entity)
+            FOREACH (entity IN safeDocEntities | DETACH DELETE entity) 
+            FOREACH (node IN safeOtherNodes | DETACH DELETE node)
             DETACH DELETE d
             } IN TRANSACTIONS OF 1 ROWS
             """
