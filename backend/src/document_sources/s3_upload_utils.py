@@ -191,3 +191,93 @@ def cleanup_local_files(directory_path: str):
             logging.info(f"ℹ️ Directory already cleaned or doesn't exist: {directory_path}")
     except Exception as e:
         logging.error(f"❌ Failed to cleanup directory {directory_path}: {e}")
+
+
+def generate_s3_presigned_url(
+    bucket_name: str,
+    s3_key: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None,
+    expiration: int = 3600
+) -> Optional[str]:
+    """
+    S3 object için presigned URL oluşturur.
+    
+    Args:
+        bucket_name: S3 bucket name
+        s3_key: S3 object key
+        aws_access_key_id: AWS access key
+        aws_secret_access_key: AWS secret key
+        expiration: URL'in geçerlilik süresi (saniye)
+    
+    Returns:
+        Optional[str]: Presigned URL (başarısızsa None)
+    """
+    try:
+        # S3 client oluştur
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
+        else:
+            s3_client = boto3.client('s3')
+        
+        # Presigned URL oluştur
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': s3_key},
+            ExpiresIn=expiration
+        )
+        
+        logging.info(f"🔗 Generated presigned URL for s3://{bucket_name}/{s3_key}")
+        return presigned_url
+        
+    except Exception as e:
+        logging.error(f"❌ Failed to generate presigned URL for s3://{bucket_name}/{s3_key}: {e}")
+        return None
+
+
+def get_s3_file_info(
+    bucket_name: str,
+    s3_key: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None
+) -> Optional[dict]:
+    """
+    S3 object hakkında bilgi alır.
+    
+    Args:
+        bucket_name: S3 bucket name
+        s3_key: S3 object key
+        aws_access_key_id: AWS access key
+        aws_secret_access_key: AWS secret key
+    
+    Returns:
+        Optional[dict]: File bilgileri (başarısızsa None)
+    """
+    try:
+        # S3 client oluştur
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
+        else:
+            s3_client = boto3.client('s3')
+        
+        # Object metadata al
+        response = s3_client.head_object(Bucket=bucket_name, Key=s3_key)
+        
+        return {
+            'size': response.get('ContentLength', 0),
+            'last_modified': response.get('LastModified'),
+            'content_type': response.get('ContentType', 'application/octet-stream'),
+            'etag': response.get('ETag', '').strip('"')
+        }
+        
+    except Exception as e:
+        logging.error(f"❌ Failed to get S3 file info for s3://{bucket_name}/{s3_key}: {e}")
+        return None

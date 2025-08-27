@@ -287,6 +287,7 @@ def get_upload_time_nodes(graph, file_name):
              collect(DISTINCT {id: pt.name, type: 'PolicyType', name: pt.name}) as all_nodes
         
         UNWIND all_nodes as node
+        WITH node
         WHERE node.id IS NOT NULL
         RETURN DISTINCT 
             node.id as node_id,
@@ -418,6 +419,7 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
             {upload: pt, upload_type: 'PolicyType', upload_id: pt.name, upload_name: pt.name}
         ] as upload_info
         
+        WITH d, upload_info
         WHERE upload_info.upload IS NOT NULL
         
         // LLM tarafından çıkarılan benzer entity'leri bul
@@ -441,30 +443,30 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
         )
         
         // LLM entity'nin tüm relationship'lerini upload node'una taşı
-        WITH upload_info, llm_entity, chunk
+        WITH upload_info, llm_entity, chunk, upload_info.upload as upload_node
         OPTIONAL MATCH (llm_entity)-[outgoing_rel]->(target)
-        WHERE target <> upload_info.upload
-        FOREACH (ignore IN CASE WHEN outgoing_rel IS NOT NULL THEN [1] ELSE [] END |
-            MERGE (upload_info.upload)-[new_rel:HAS_ENTITY]->(target)
-            SET new_rel = properties(outgoing_rel), 
-                new_rel.merged_from_llm = true,
-                new_rel.created_at = datetime()
-        )
+        WHERE target <> upload_node AND outgoing_rel IS NOT NULL
+        
+        WITH upload_info, llm_entity, chunk, upload_node, outgoing_rel, target
+        MERGE (upload_node)-[new_rel:HAS_ENTITY]->(target)
+        SET new_rel = properties(outgoing_rel), 
+            new_rel.merged_from_llm = true,
+            new_rel.created_at = datetime()
         
         // LLM entity'ne gelen relationship'leri upload node'una taşı
-        WITH upload_info, llm_entity, chunk
+        WITH upload_info, llm_entity, chunk, upload_node
         OPTIONAL MATCH (source)-[incoming_rel]->(llm_entity)
-        WHERE source <> upload_info.upload AND NOT source:Chunk
-        FOREACH (ignore IN CASE WHEN incoming_rel IS NOT NULL THEN [1] ELSE [] END |
-            MERGE (source)-[new_rel:HAS_ENTITY]->(upload_info.upload)
-            SET new_rel = properties(incoming_rel), 
-                new_rel.merged_from_llm = true,
-                new_rel.created_at = datetime()
-        )
+        WHERE source <> upload_node AND NOT source:Chunk AND incoming_rel IS NOT NULL
+        
+        WITH upload_info, llm_entity, chunk, upload_node, incoming_rel, source
+        MERGE (source)-[new_rel:HAS_ENTITY]->(upload_node)
+        SET new_rel = properties(incoming_rel), 
+            new_rel.merged_from_llm = true,
+            new_rel.created_at = datetime()
         
         // Chunk'ın EXTRACTED_FROM relationship'ini upload node'una yönlendir
-        WITH upload_info, llm_entity, chunk
-        MERGE (upload_info.upload)-[:EXTRACTED_FROM]->(chunk)
+        WITH upload_info, llm_entity, chunk, upload_node
+        MERGE (upload_node)-[:EXTRACTED_FROM]->(chunk)
         ON CREATE SET chunk.extracted_from_created = datetime()
         
         // LLM entity'sini sil
