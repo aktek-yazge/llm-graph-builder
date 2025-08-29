@@ -22,110 +22,192 @@ EMBEDDING_FUNCTION , EMBEDDING_DIMENSION = load_embedding_model(EMBEDDING_MODEL)
 
 def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_documents_chunk_chunk_Id : list):
     batch_data = []
-    logging.info("Create EXTRACTED_FROM relationship between chunks and entities (technical tracking)")
+    logging.info("Create business relationships and EXTRACTED_FROM between chunks and entities")
     
-    # Business entity types that should not be created by LLM
-    forbidden_entity_types = {
-        'PolicyType', 'Insurance', 'Document', 'Customer', 
-        'InsuredItem', 'PolicyYear', 'Sigorta', 'Poliçe', 'Belge',
-        'Müşteri', 'SigortaPoliçesi', 'InsurancePolicy'
-    }
-    
-    # Forbidden patterns in entity names
-    forbidden_patterns = {
-        'poliçe', 'sigorta', 'insurance', 'belge', 
-        'document', 'döküman', 'form', 'müşteri', 'customer'
-    }
-    
-    filtered_count = 0
     for graph_doc_chunk_id in graph_documents_chunk_chunk_Id:
         for node in graph_doc_chunk_id['graph_doc'].nodes:
-            # Check if node type is forbidden
-            if node.type in forbidden_entity_types:
-                logging.warning(f"🚫 Filtered forbidden entity type: {node.type} ('{node.id}')")
-                filtered_count += 1
-                continue
-                
-            # Check if node ID contains forbidden patterns
-            node_id_lower = node.id.lower() if node.id else ""
-            if any(pattern in node_id_lower for pattern in forbidden_patterns):
-                logging.warning(f"🚫 Filtered forbidden entity name pattern: {node.type} ('{node.id}')")
-                filtered_count += 1
-                continue
-                
             query_data={
                 'chunk_id': graph_doc_chunk_id['chunk_id'],
                 'node_type': node.type,
                 'node_id': node.id
             }
             batch_data.append(query_data)
-    
-    if filtered_count > 0:
-        logging.info(f"🔍 Filtered {filtered_count} forbidden business entities from LLM extraction")
           
     if batch_data:
-        logging.info(f"📋 Creating {len(batch_data)} entity nodes (after filtering)")
+        logging.info(f"📋 Creating {len(batch_data)} entity nodes with EXTRACTED_FROM relationships")
         
-        # Policy node'larını ve diğer node'ları ayır
-        policy_nodes = [data for data in batch_data if data['node_type'] == 'Policy']
-        other_nodes = [data for data in batch_data if data['node_type'] != 'Policy']
+        # Sadece entity'leri oluştur ve chunk'a bağla - business logic gereksiz
+        simple_query = """
+        UNWIND $batch_data AS data
+        MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
         
-        # Policy node'ları için özel işlem: Mevcut Policy node'una merge et
-        if policy_nodes:
-            logging.info(f"🔄 Processing {len(policy_nodes)} Policy nodes with existing node merge")
-            policy_query = """
-                        UNWIND $policy_data AS data
-                        MATCH (c:Chunk {id: data.chunk_id})
-                        
-                        // Herhangi bir mevcut Policy node'unu bul
-                        OPTIONAL MATCH (existing_policy:Policy)
-                        WHERE existing_policy IS NOT NULL
-                        WITH c, data, COLLECT(existing_policy)[0] as first_policy
-                        
-                        // Eğer Policy node varsa onu kullan, yoksa yenisini oluştur
-                        MERGE (policy_node:Policy {id: COALESCE(first_policy.id, data.node_id)})
-                        ON CREATE SET 
-                            policy_node:__Entity__,
-                            policy_node.name = data.node_id,
-                            policy_node.created_from_llm = true,
-                            policy_node.created_at = datetime()
-                        ON MATCH SET 
-                            policy_node.llm_extracted_count = COALESCE(policy_node.llm_extracted_count, 0) + 1,
-                            policy_node.last_llm_update = datetime()
-                        
-                        // Policy node'unu chunk'a bağla
-                        MERGE (policy_node)-[:EXTRACTED_FROM]->(c)
-                        
-                        RETURN policy_node
-                    """
-            execute_graph_query(graph, policy_query, params={"policy_data": policy_nodes})
-            logging.info(f"✅ Processed {len(policy_nodes)} Policy nodes with existing node merge")
+        // Entity node'unu güvenli şekilde oluştur veya bul
+        CALL apoc.merge.node(['__Entity__'] + [data.node_type], {id: data.node_id}) YIELD node AS entity
         
-        # Diğer node'lar için normal işlem
-        if other_nodes:
-            logging.info(f"📋 Creating {len(other_nodes)} non-Policy entity nodes")
-            unwind_query = """
-                        UNWIND $batch_data AS data
-                        MATCH (c:Chunk {id: data.chunk_id})
-                        CALL apoc.merge.node([data.node_type], {id: data.node_id}) YIELD node AS n
-                        SET n:__Entity__
-                        MERGE (n)-[:EXTRACTED_FROM]->(c)
-                    """
-            execute_graph_query(graph, unwind_query, params={"batch_data": other_nodes})
-            logging.info(f"✅ Created/updated {len(other_nodes)} non-Policy entities with EXTRACTED_FROM relationships")
+        // EXTRACTED_FROM ilişkisini kur (tek gerekli ilişki)
+        MERGE (entity)-[:EXTRACTED_FROM]->(c)
+        
+        RETURN count(DISTINCT entity) as entities_created
+        """
+        
+        result = execute_graph_query(graph, simple_query, params={"batch_data": batch_data})
+        
+        if result:
+            entities_created = result[0].get('entities_created', 0)
+            logging.info(f"✅ Created {entities_created} entities with EXTRACTED_FROM relationships")
+        else:
+            logging.info("✅ Entities created with EXTRACTED_FROM relationships")
+        
+        # Business Entity Linking: PolicyType, InsuredItem entity'lerini business node'lara bağla
+        logging.info("🔗 Linking business entities to their respective business nodes...")
+        
+        business_linking_query = """
+        UNWIND $batch_data AS data
+        MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
+        MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
+        
+        // PolicyType entity'lerini Policy node'una bağla
+        FOREACH (_ IN CASE WHEN data.node_type = 'PolicyType' THEN [1] ELSE [] END |
+            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
+            MERGE (policy)-[:HAS_TYPE]->(entity)
+        )
+        
+        // InsuredItem entity'lerini Policy node'una bağla
+        FOREACH (_ IN CASE WHEN data.node_type = 'InsuredItem' THEN [1] ELSE [] END |
+            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
+            MERGE (policy)-[:HAS_INSURED_ITEM]->(entity)
+        )
+        
+        RETURN count(*) as processed
+        """
+        
+        business_result = execute_graph_query(graph, business_linking_query, params={"batch_data": batch_data})
+        
+        if business_result:
+            logging.info(f"🔗 Processed business entity linking for {business_result[0]['processed']} entities")
+            
+            # PolicyYear ve Customer işlemlerini ayrı query'lerde yap
+            # PolicyYear entity'lerini kontrol et ve Policy'ye bağla
+            policy_year_query = """
+            UNWIND $batch_data AS data
+            MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
+            MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
+            WHERE data.node_type = 'PolicyYear' AND data.node_id =~ '^(19|20)\\\\d{2}$'
+            
+            MERGE (policyYear:PolicyYear {year: toInteger(data.node_id), name: data.node_id})
+            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
+            MERGE (policy)-[:HAS_YEAR]->(policyYear)
+            
+            RETURN count(*) as policy_year_processed
+            """
+            
+            policy_year_result = execute_graph_query(graph, policy_year_query, params={"batch_data": batch_data})
+            if policy_year_result:
+                logging.info(f"🔗 Processed {policy_year_result[0]['policy_year_processed']} PolicyYear entities")
+            
+            # Customer entity'lerini kontrol et ve Customer node'u oluştur
+            customer_query = """
+            UNWIND $batch_data AS data
+            MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
+            MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
+            WHERE data.node_type = 'Customer'
+            
+            MERGE (customer:Customer {name: data.node_id, fullName: data.node_id})
+            MERGE (customer)-[:HAS_DOC]->(d)
+            
+            RETURN count(*) as customer_processed
+            """
+            
+            customer_result = execute_graph_query(graph, customer_query, params={"batch_data": batch_data})
+            if customer_result:
+                logging.info(f"🔗 Processed {customer_result[0]['customer_processed']} Customer entities")
+        
+        if business_result:
+            logging.info(f"🔗 Processed business entity linking for {business_result[0]['processed']} entities")
+            
+            # Bağlantı sayılarını kontrol et
+            check_query = """
+            UNWIND $batch_data AS data
+            MATCH (entity:__Entity__ {id: data.node_id})
+            
+            OPTIONAL MATCH (policy:Policy)-[:HAS_TYPE]->(entity)
+            WHERE data.node_type = 'PolicyType'
+            
+            OPTIONAL MATCH (policy2:Policy)-[:HAS_INSURED_ITEM]->(entity)
+            WHERE data.node_type = 'InsuredItem'
+            
+            OPTIONAL MATCH (policy3:Policy)-[:HAS_YEAR]->(py:PolicyYear)
+            WHERE data.node_type = 'PolicyYear' AND py.name = data.node_id
+            
+            OPTIONAL MATCH (customer:Customer)-[:HAS_DOC]->(d:Document)
+            WHERE data.node_type = 'Customer' AND customer.name = data.node_id
+            
+            RETURN 
+                data.node_type as entity_type,
+                data.node_id as entity_id,
+                count(DISTINCT policy) as policy_type_links,
+                count(DISTINCT policy2) as insured_item_links,
+                count(DISTINCT policy3) as policy_year_links,
+                count(DISTINCT customer) as customer_links
+            """
+            
+            check_result = execute_graph_query(graph, check_query, params={"batch_data": batch_data})
+            
+            if check_result:
+                for result in check_result:
+                    entity_type = result['entity_type']
+                    entity_id = result['entity_id']
+                    
+                    if entity_type == 'PolicyType' and result['policy_type_links'] > 0:
+                        logging.info(f"  ✅ PolicyType '{entity_id}' linked to {result['policy_type_links']} Policy node(s)")
+                    elif entity_type == 'InsuredItem' and result['insured_item_links'] > 0:
+                        logging.info(f"  ✅ InsuredItem '{entity_id}' linked to {result['insured_item_links']} Policy node(s)")
+                    elif entity_type == 'PolicyYear' and result['policy_year_links'] > 0:
+                        logging.info(f"  ✅ PolicyYear '{entity_id}' linked to {result['policy_year_links']} Policy node(s)")
+                    elif entity_type == 'Customer' and result['customer_links'] > 0:
+                        logging.info(f"  ✅ Customer '{entity_id}' linked to {result['customer_links']} Document(s)")
     else:
-        logging.info("ℹ️ No valid entities to create after filtering")
+        logging.info("ℹ️ No entities to create")
 
     
 def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     isEmbedding = os.getenv('IS_EMBEDDING')
     
+    if isEmbedding.upper() != "TRUE":
+        logging.info("Embedding creation disabled (IS_EMBEDDING != TRUE)")
+        return
+    
     embeddings, dimension = EMBEDDING_FUNCTION , EMBEDDING_DIMENSION
     logging.info(f'embedding model:{embeddings} and dimesion:{dimension}')
+    
+    # İlk önce hangi chunk'larda embedding eksik olduğunu kontrol et
+    chunk_ids = [row['chunk_id'] for row in chunkId_chunkDoc_list]
+    
+    missing_embeddings_query = """
+        UNWIND $chunk_ids AS chunkId
+        MATCH (c:Chunk {id: chunkId})
+        WHERE c.embedding IS NULL OR size(c.embedding) = 0
+        RETURN c.id as chunk_id
+    """
+    
+    missing_chunks_result = execute_graph_query(graph, missing_embeddings_query, params={"chunk_ids": chunk_ids})
+    missing_chunk_ids = [row['chunk_id'] for row in missing_chunks_result]
+    
+    logging.info(f"📊 Embedding kontrolü:")
+    logging.info(f"  - Toplam chunk sayısı: {len(chunk_ids)}")
+    logging.info(f"  - Embedding eksik chunk sayısı: {len(missing_chunk_ids)}")
+    logging.info(f"  - Embedding mevcut chunk sayısı: {len(chunk_ids) - len(missing_chunk_ids)}")
+    
+    if not missing_chunk_ids:
+        logging.info("✅ Tüm chunk'larda embedding mevcut, yeniden oluşturma gerekmiyor")
+        return
+    
+    # Sadece embedding eksik olan chunk'lar için embedding oluştur
     data_for_query = []
-    logging.info(f"update embedding and vector index for chunks")
+    logging.info(f"🔄 {len(missing_chunk_ids)} chunk için embedding oluşturuluyor...")
+    
     for row in chunkId_chunkDoc_list:
-        if isEmbedding.upper() == "TRUE":
+        if row['chunk_id'] in missing_chunk_ids:
             try:
                 # Document objesi'nden page_content'i al
                 chunk_doc = row['chunk_doc']
@@ -142,18 +224,82 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
                     "chunkId": row['chunk_id'],
                     "embeddings": embeddings_arr
                 })
+                logging.debug(f"✅ Embedding oluşturuldu: {row['chunk_id']}")
             except Exception as e:
-                logging.error(f"Embedding creation failed for chunk {row['chunk_id']}: {e}")
+                logging.error(f"❌ Embedding creation failed for chunk {row['chunk_id']}: {e}")
                 continue
     
-    query_to_create_embedding = """
-        UNWIND $data AS row
-        MATCH (d:Document {fileName: $fileName})
-        MERGE (c:Chunk {id: row.chunkId})
-        SET c.embedding = row.embeddings
-        MERGE (c)-[:PART_OF]->(d)
-    """       
-    execute_graph_query(graph,query_to_create_embedding, params={"fileName":file_name, "data":data_for_query})
+    if data_for_query:
+        # Sadece embedding eksik olan chunk'ları güncelle
+        query_to_create_embedding = """
+            UNWIND $data AS row
+            MATCH (c:Chunk {id: row.chunkId})
+            SET c.embedding = row.embeddings
+            WITH c, row
+            OPTIONAL MATCH (d:Document {fileName: $fileName})
+            FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (c)-[:PART_OF]->(d)
+            )
+            RETURN count(c) as updated_count
+        """       
+        result = execute_graph_query(graph, query_to_create_embedding, params={"fileName": file_name, "data": data_for_query})
+        updated_count = result[0]['updated_count'] if result else len(data_for_query)
+        logging.info(f"✅ {updated_count} chunk için embedding başarıyla oluşturuldu")
+    else:
+        logging.warning("⚠️ Hiç embedding oluşturulamadı")
+
+def create_chunk_embeddings_immediate(graph, chunkId_chunkDoc_list, file_name):
+    """
+    Upload aşamasında chunk'lar oluşturulduktan hemen sonra embedding'leri oluştur
+    """
+    isEmbedding = os.getenv('IS_EMBEDDING')
+    
+    if isEmbedding and isEmbedding.upper() != "TRUE":
+        logging.info("Embedding creation disabled (IS_EMBEDDING != TRUE)")
+        return
+    
+    embeddings, dimension = EMBEDDING_FUNCTION, EMBEDDING_DIMENSION
+    logging.info(f'🔄 Immediate embedding creation - model: {embeddings}, dimension: {dimension}')
+    
+    # Chunk'lar yeni oluşturuldu, tümü için embedding oluştur
+    data_for_query = []
+    logging.info(f"🔄 {len(chunkId_chunkDoc_list)} yeni chunk için embedding oluşturuluyor...")
+    
+    for row in chunkId_chunkDoc_list:
+        try:
+            # Document objesi'nden page_content'i al
+            chunk_doc = row['chunk_doc']
+            if hasattr(chunk_doc, 'page_content'):
+                content = chunk_doc.page_content
+            else:
+                content = str(chunk_doc)
+            
+            # Dosya içeriğini normalize et
+            from src.utf8_utils import normalize_unicode_text
+            normalized_content = normalize_unicode_text(content)
+            embeddings_arr = embeddings.embed_query(normalized_content)
+            data_for_query.append({
+                "chunkId": row['chunk_id'],
+                "embeddings": embeddings_arr
+            })
+            logging.debug(f"✅ Embedding oluşturuldu: {row['chunk_id']}")
+        except Exception as e:
+            logging.error(f"❌ Embedding creation failed for chunk {row['chunk_id']}: {e}")
+            continue
+    
+    if data_for_query:
+        # Chunk'ları embedding ile güncelle (chunk'lar yeni oluşturuldu, direkt güncelle)
+        query_to_create_embedding = """
+            UNWIND $data AS row
+            MATCH (c:Chunk {id: row.chunkId})
+            SET c.embedding = row.embeddings
+            RETURN count(c) as updated_count
+        """       
+        result = execute_graph_query(graph, query_to_create_embedding, params={"data": data_for_query})
+        updated_count = result[0]['updated_count'] if result else len(data_for_query)
+        logging.info(f"✅ {updated_count} yeni chunk için embedding başarıyla oluşturuldu")
+    else:
+        logging.warning("⚠️ Hiç embedding oluşturulamadı")
     
 def create_relation_between_chunks(graph, file_name, chunks: List[Document], page_images: List[str] = None)->list:
     logging.info("creating FIRST_CHUNK and NEXT_CHUNK relationships between chunks")
@@ -329,119 +475,6 @@ def create_entity_vector_index(graph: Neo4jGraph):
         else:
             raise
 
-def create_document_metadata_entities(graph: Neo4jGraph, file_name: str):
-    """
-    Create entity nodes for document metadata: year, owner, document name, page count, document type
-    """
-    logging.info(f"Creating document metadata entities for {file_name}")
-    
-    # Query to get document metadata
-    query = """
-    MATCH (d:Document {fileName: $fileName})
-    RETURN d.fileName as fileName, 
-           d.fileType as fileType, 
-           d.fileSize as fileSize, 
-           d.createdAt as createdAt
-    """
-    
-    result = execute_graph_query(graph, query, params={"fileName": file_name})
-    if not result:
-        logging.warning(f"Document {file_name} not found or has no metadata")
-        return
-    
-    doc_data = result[0]
-    year = None
-    if doc_data.get("createdAt"):
-        try:
-            year = str(datetime.fromisoformat(doc_data.get("createdAt")).year)
-        except:
-            # Extract year from filename if possible
-            year_match = re.search(r'(19|20)\d{2}', file_name)
-            if year_match:
-                year = year_match.group(0)
-    
-    # Extract owner from filename
-    owner = None
-    name_match = re.search(r'^([A-Za-zÀ-ÖØ-öø-ÿ\s]+)', file_name)
-    if name_match:
-        owner = name_match.group(1).strip()
-    
-    # Document name is the filename
-    doc_name = file_name
-    
-    # File type from metadata
-    doc_type = doc_data.get("fileType", "unknown")
-    
-    # Get actual page count from chunks' page_number metadata
-    page_count_query = """
-    MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-    WHERE c.page_number IS NOT NULL
-    RETURN max(c.page_number) as maxPageNumber, count(DISTINCT c.page_number) as distinctPages, count(c) as totalChunks
-    """
-    page_count_result = execute_graph_query(graph, page_count_query, params={"fileName": file_name})
-    
-    if page_count_result and page_count_result[0]:
-        result_data = page_count_result[0]
-        # Önce maksimum sayfa numarasını kullan, yoksa farklı sayfa sayısını, son çare chunk sayısı
-        if result_data["maxPageNumber"] is not None:
-            page_count = str(result_data["maxPageNumber"])
-        elif result_data["distinctPages"] is not None and result_data["distinctPages"] > 0:
-            page_count = str(result_data["distinctPages"])
-        else:
-            page_count = str(result_data["totalChunks"])
-    else:
-        page_count = "0"
-    
-    # Create entity nodes and relationships to document
-    entities = []
-    
-    if year:
-        entities.append({"type": "Year", "id": year, "property": "year"})
-    if owner:
-        entities.append({"type": "Owner", "id": owner, "property": "owner"})
-    if doc_name:
-        entities.append({"type": "DocumentName", "id": doc_name, "property": "documentName"})
-    if page_count:
-        entities.append({"type": "PageCount", "id": page_count, "property": "pageCount"})
-    if doc_type:
-        entities.append({"type": "DocumentType", "id": doc_type, "property": "documentType"})
-    
-    # Create entities and relationships in batch
-    if entities:
-        entity_query = """
-        MATCH (d:Document {fileName: $fileName})
-        UNWIND $entities as entity
-        
-        // Güvenli node oluşturma - mevcut node'u bul veya yenisini oluştur
-        MERGE (node:__Entity__ {id: entity.id})
-        ON CREATE SET node.entity_type = entity.type
-        ON MATCH SET node.entity_type = COALESCE(node.entity_type, entity.type)
-        
-        SET d[entity.property] = entity.id
-        MERGE (d)-[:HAS_METADATA]->(node)
-        RETURN node
-        """
-        execute_graph_query(graph, entity_query, params={"fileName": file_name, "entities": entities})
-        
-        # Document metadata entities'leri tüm chunk'lara da bağla
-        chunk_entity_query = """
-        MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-        MATCH (d)-[:HAS_METADATA]->(meta:__Entity__)
-        MERGE (c)-[:HAS_ENTITY]->(meta)
-        """
-        execute_graph_query(graph, chunk_entity_query, params={"fileName": file_name})
-        
-        # Create embeddings for the new entity nodes
-        for entity in entities:
-            from src.utf8_utils import normalize_unicode_text
-            normalized_entity_id = normalize_unicode_text(entity["id"])
-            embedding = EMBEDDING_FUNCTION.embed_query(normalized_entity_id)
-            embedding_query = """
-            MATCH (e:__Entity__ {id: $id})
-            SET e.embedding = $embedding
-            """
-            execute_graph_query(graph, embedding_query, params={"id": entity["id"], "embedding": embedding})
-
 def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_threshold: float = None):
     """
     Create cross-chunk relationships based on vector similarity using Neo4j vector index.
@@ -583,7 +616,7 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
     return results
 
 
-def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
+def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generate_embedding=False):
     """
     Upload aşamasında chunk node'ları oluştur (extract'a uyumlu yapı)
     
@@ -592,6 +625,7 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
         chunks: List of langchain Document objects
         file_name: İşlenen dosya adı
         page_images: Sayfa resim dosyalarının listesi (dosya adları)
+        generate_embedding: Chunk'lar oluşturulduktan sonra embedding oluşturulsun mu
     
     Returns:
         List of created chunk IDs with chunk documents (extract format)
@@ -739,6 +773,17 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None):
     """
     next_result = execute_graph_query(graph, query_to_create_NEXT_relation, params={"relationships": relationships})
     logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships")
+    
+    # Embedding'leri oluştur (eğer isteniyorsa)
+    if generate_embedding:
+        logging.info(f"🔄 Upload sırasında embedding oluşturuluyor...")
+        try:
+            # Embedding oluşturma için mevcut fonksiyonu kullan
+            create_chunk_embeddings_immediate(graph, lst_chunks_including_hash, file_name)
+            logging.info(f"✅ Upload sırasında {len(lst_chunks_including_hash)} chunk için embedding oluşturuldu")
+        except Exception as e:
+            logging.error(f"❌ Upload sırasında embedding oluşturma hatası: {e}")
+            # Embedding hatası chunk oluşturmayı durdurmasın
     
     logging.info(f"✅ Created {len(lst_chunks_including_hash)} chunk nodes and relationships for: {file_name}")
     return lst_chunks_including_hash  # Extract format: chunk_id ve chunk_doc içeren list

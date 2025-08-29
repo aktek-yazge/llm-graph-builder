@@ -2,7 +2,13 @@ import asyncio
 import json
 import logging
 import time
+import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, Union, cast
+import time
+import logging
+import asyncio
+import json
 
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 from langchain_core.documents import Document
@@ -19,39 +25,354 @@ from pydantic import BaseModel, Field, create_model
 
 DEFAULT_NODE_TYPE = "Node"
 
+def log_llm_output_incremental(raw_output, chunk_id=None, timestamp=None, document_filename=None, enable_logging=True):
+    """
+    LLM'in çıkardığı tüm node ve relationship'leri incremental olarak JSON dosyasına yazar
+    
+    Args:
+        raw_output: LLM'den dönen raw çıktı
+        chunk_id: Chunk ID'si
+        timestamp: Zaman damgası
+        document_filename: Belge dosya adı (log'da isim olarak kullanılır)
+        enable_logging: Log'u açıp kapatmak için (True/False)
+    """
+    # Eğer logging kapalıysa hiçbir şey yapma
+    if not enable_logging:
+        return
+        
+    try:
+        # Log dosyası yolu
+        log_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'llm_extractions.jsonl')
+        
+        # Timestamp oluştur
+        if not timestamp:
+            timestamp = datetime.now().isoformat()
+        
+        # Raw output'u parse et
+        parsed_data = None
+        if hasattr(raw_output, 'content'):
+            content = raw_output.content
+        else:
+            content = str(raw_output)
+        
+        try:
+            # JSON parse et - backtick'li JSON'u temizle
+            clean_content = content
+            if isinstance(content, str):
+                # ```json ve ``` backtick'lerini temizle
+                clean_content = content.strip()
+                if clean_content.startswith('```json'):
+                    clean_content = clean_content[7:]  # '```json' kaldır
+                if clean_content.startswith('```'):
+                    clean_content = clean_content[3:]  # '```' kaldır
+                if clean_content.endswith('```'):
+                    clean_content = clean_content[:-3]  # Son '```' kaldır
+                clean_content = clean_content.strip()
+            
+            if isinstance(clean_content, str) and clean_content.startswith('['):
+                parsed_data = json.loads(clean_content)
+            elif isinstance(clean_content, str) and clean_content.startswith('{'):
+                parsed_data = [json.loads(clean_content)]
+            else:
+                parsed_data = clean_content
+        except json.JSONDecodeError as e:
+            # JSON değilse raw olarak kaydet
+            parsed_data = {"raw_content": content, "parse_error": True, "error_message": str(e)}
+        
+        # Log entry oluştur
+        log_entry = {
+            "timestamp": timestamp,
+            "document_name": document_filename or "unknown_document",
+            "chunk_id": chunk_id,
+            "raw_output_type": str(type(raw_output)),
+            "content_length": len(content),
+            "parsed_data": parsed_data,
+            "extraction_count": len(parsed_data) if isinstance(parsed_data, list) else 1
+        }
+        
+        # Node ve relationship sayılarını çıkar
+        if isinstance(parsed_data, list):
+            nodes = set()
+            relationships = []
+            for item in parsed_data:
+                if isinstance(item, dict):
+                    if 'head' in item and 'tail' in item:
+                        nodes.add((item.get('head'), item.get('head_type')))
+                        nodes.add((item.get('tail'), item.get('tail_type')))
+                        relationships.append({
+                            'relation': item.get('relation'),
+                            'head': item.get('head'),
+                            'head_type': item.get('head_type'),
+                            'tail': item.get('tail'),
+                            'tail_type': item.get('tail_type')
+                        })
+            
+            log_entry["unique_nodes"] = list(nodes)
+            log_entry["relationships"] = relationships
+            log_entry["node_count"] = len(nodes)
+            log_entry["relationship_count"] = len(relationships)
+        
+        # JSON dosyasına yaz (append mode)
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        
+        doc_name = document_filename or "unknown_document"
+        print(f"🟢 LLM extraction logged for [{doc_name}]: {log_file}")
+        print(f"📊 Nodes: {log_entry.get('node_count', 'N/A')}, Relationships: {log_entry.get('relationship_count', 'N/A')}")
+        
+    except Exception as e:
+        print(f"❌ Incremental logging error: {e}")
+        logging.error(f"Incremental logging error: {e}")
+
+def get_existing_context_for_prompt(graph_instance, chunk_id):
+    """
+    Chunk'a ait mevcut node'ları ID'leriyle birlikte bul
+    LLM'e bu context'i ver ki doğru bağlantıları kursun
+    """
+    if not graph_instance or not chunk_id:
+        return ""
+    
+    context_query = """
+    MATCH (c:Chunk {id: $chunk_id})-[:PART_OF]->(d:Document)
+    
+    // Belge ile ilişkili tüm node'ları bul
+    OPTIONAL MATCH (policy:Policy)-[:DOCUMENTED_IN]->(d)
+    OPTIONAL MATCH (customer:Customer)-[:HAS_DOC]->(d)
+    OPTIONAL MATCH (policy)-[:HAS_TYPE]->(policyType:PolicyType)
+    OPTIONAL MATCH (policy)-[:HAS_INSURED_ITEM]->(insuredItem:InsuredItem)
+    OPTIONAL MATCH (policy)-[:HAS_YEAR]->(policyYear:PolicyYear)
+    
+    // Belgeye bağlı diğer entity'leri de bul
+    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(otherPolicy:Policy)
+    OPTIONAL MATCH (otherPolicy)-[:HAS_TYPE]->(otherPolicyType:PolicyType)
+    OPTIONAL MATCH (otherPolicy)-[:HAS_INSURED_ITEM]->(otherInsuredItem:InsuredItem)
+    
+    RETURN DISTINCT
+        collect(DISTINCT {type: 'Policy', id: policy.id, name: policy.name}) as policies,
+        collect(DISTINCT {type: 'Customer', id: customer.id, name: customer.name}) as customers,
+        collect(DISTINCT {type: 'PolicyType', id: policyType.id, name: policyType.name}) as policyTypes,
+        collect(DISTINCT {type: 'InsuredItem', id: insuredItem.id, name: insuredItem.name}) as insuredItems,
+        collect(DISTINCT {type: 'PolicyYear', id: policyYear.id, name: policyYear.year}) as policyYears
+    """
+    
+    try:
+        result = graph_instance.query(context_query, params={"chunk_id": chunk_id})
+        if result and result[0]:
+            data = result[0]
+            context_parts = []
+            
+            context_parts.append("# MEVCUT SİSTEM NODE'LARI (Bu exact ID'leri kullan):")
+            
+            # Policy node'ları
+            policies = [p for p in data.get('policies', []) if p.get('id')]
+            if policies:
+                context_parts.append("\n## MEVCUT POLICY NODE'LARI:")
+                for policy in policies:
+                    context_parts.append(f"- Policy(id: '{policy['id']}', name: '{policy.get('name', '')}') - Bu ID'yi kullan!")
+            
+            # Customer node'ları  
+            customers = [c for c in data.get('customers', []) if c.get('id')]
+            if customers:
+                context_parts.append("\n## MEVCUT CUSTOMER NODE'LARI:")
+                for customer in customers:
+                    context_parts.append(f"- Customer(id: '{customer['id']}', name: '{customer.get('name', '')}') - Bu ID'yi kullan!")
+            
+            # PolicyType node'ları
+            policyTypes = [pt for pt in data.get('policyTypes', []) if pt.get('id')]
+            if policyTypes:
+                context_parts.append("\n## MEVCUT POLICYTYPE NODE'LARI:")
+                for policyType in policyTypes:
+                    context_parts.append(f"- PolicyType(id: '{policyType['id']}', name: '{policyType.get('name', '')}') - Bu ID'yi kullan!")
+            
+            # InsuredItem node'ları
+            insuredItems = [ii for ii in data.get('insuredItems', []) if ii.get('id')]
+            if insuredItems:
+                context_parts.append("\n## MEVCUT INSUREDITEM NODE'LARI:")
+                for insuredItem in insuredItems:
+                    context_parts.append(f"- InsuredItem(id: '{insuredItem['id']}', name: '{insuredItem.get('name', '')}') - Bu ID'yi kullan!")
+            
+            # PolicyYear node'ları
+            policyYears = [py for py in data.get('policyYears', []) if py.get('id')]
+            if policyYears:
+                context_parts.append("\n## MEVCUT POLICYYEAR NODE'LARI:")
+                for policyYear in policyYears:
+                    context_parts.append(f"- PolicyYear(id: '{policyYear['id']}', year: '{policyYear.get('name', '')}') - Bu ID'yi kullan!")
+            
+            context_parts.append("\n# BAĞLANTI KURALLARI:")
+            context_parts.append("- YUKARDAKI NODE'LARI TEKRAR OLUŞTURMA! Sadece exact ID'lerini kullan")
+            context_parts.append("- Yeni entity'leri mevcut node'lara HAS_ENTITY ile bağla")
+            context_parts.append("- Örnek: Yeni 'Adres' entity'si -> mevcut Customer ID'sine bağla")
+            context_parts.append("- Örnek: Yeni 'Acente' entity'si -> mevcut Policy ID'sine bağla")
+            context_parts.append("- CRITICAL: Mevcut node'ların exact ID'lerini kullan, yeni node yaratma!")
+            
+            return "\n".join(context_parts) + "\n\n"
+    except Exception as e:
+        import logging
+        logging.warning(f"Context alınamadı: {e}")
+    
+    return ""
+
+def get_db_schema_for_prompt(graph_instance=None):
+    """
+    Veritabanından node ve relationship tiplerini çeker ve prompt için hazırlar.
+    Document ve Policy haricindeki tipleri döndürür.
+    """
+    try:
+        # intelligent_agent.py'deki get_neo4j_schema fonksiyonunu kullan
+        print("🔄 Neo4j'den schema çekiliyor...")
+        
+        if graph_instance is None:
+            # Graph instance yoksa, doğrudan Neo4j sorgusu yap
+            from neo4j import GraphDatabase
+            import os
+            
+            # Neo4j bağlantı bilgilerini al
+            uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+            username = os.getenv("NEO4J_USERNAME", "neo4j")
+            password = os.getenv("NEO4J_PASSWORD", "password")
+            
+            driver = GraphDatabase.driver(uri, auth=(username, password))
+            
+            try:
+                with driver.session() as session:
+                    # Node labels çek
+                    node_labels_result = session.run("CALL db.labels()")
+                    node_labels = [record["label"] for record in node_labels_result]
+                    
+                    # Relationship types çek
+                    rel_types_result = session.run("CALL db.relationshipTypes()")
+                    relationship_types = [record["relationshipType"] for record in rel_types_result]
+                    
+            finally:
+                driver.close()
+                
+        else:
+            # Graph instance varsa intelligent_agent'taki fonksiyonu kullan
+            from intelligent_agent import IntelligentAgent
+            if hasattr(graph_instance, 'get_neo4j_schema'):
+                schema_data = graph_instance.get_neo4j_schema()
+                node_labels = schema_data.get("node_labels", [])
+                relationship_types = schema_data.get("relationship_types", [])
+            else:
+                # Fallback: Doğrudan sorgu
+                node_labels_result = graph_instance.query("CALL db.labels()")
+                node_labels = [record["label"] for record in node_labels_result]
+                
+                rel_types_result = graph_instance.query("CALL db.relationshipTypes()")
+                relationship_types = [record["relationshipType"] for record in rel_types_result]
+        
+        # Node tiplerini filtrele (Document, Policy, __Entity__, Chunk, Session, Message ve _ ile başlayanlar hariç)
+        db_node_types = []
+        for node_name in node_labels:
+            if (node_name not in ["Document", "Policy", "__Entity__", "Chunk", "Session", "Message"] and
+                not node_name.startswith("_")):
+                db_node_types.append(node_name)
+        
+        # Relationship tiplerini filtrele (sistem internal'ları hariç)
+        db_relationship_types = []
+        for rel_name in relationship_types:
+            if rel_name not in ["PART_OF", "NEXT_CHUNK", "FIRST_CHUNK", "NEXT", "LAST_MESSAGE", "EXTRACTED_FROM"]:
+                db_relationship_types.append(rel_name)
+        
+        print(f"🗄️ DB'den çekilen node tipleri ({len(db_node_types)}): {db_node_types}")
+        print(f"🔗 DB'den çekilen relationship tipleri ({len(db_relationship_types)}): {db_relationship_types}")
+        
+        return db_node_types, db_relationship_types
+        
+    except Exception as e:
+        logging.warning(f"DB schema çekilemedi, varsayılan değerler kullanılıyor: {e}")
+        # Hata durumunda varsayılan değerler
+        return [
+            "Customer", "Company", "Person", "Organization", "PolicyType", 
+            "InsuredItem", "Location", "Date"
+        ], ["HAS_POLICY", "HAS_ENTITY", "HAS_TYPE", "HAS_INSURED_ITEM"]
+
+def create_turkish_insurance_prompt(allowed_nodes=None, allowed_relationships=None):
+    """
+    Türkçe sigorta prompt'unu oluşturur - allowed types ile entegre
+    """
+    base_prompt = (
+        "# Entity Extraction ve Knowledge Graph Oluşturma\n"
+        "## 1. Ana Görev\n"
+        "Metindeki TÜM anlamlı entity'leri çıkarın ve knowledge graph oluşturun.\n"
+        "En spesifik ve doğru node tiplerini kullanın.\n"
+        
+        "## 2. MEVCUT SİSTEM NODE'LARI (KRİTİK)\n"
+        "- MEVCUT SİSTEM NODE'LARI bölümünde listelenen node'ları ASLA tekrar oluşturmayın\n"
+        "- Bu node'lar zaten sistemde mevcut - sadece exact ID'lerini kullanın\n"
+        "- Örnek: 'Policy(id: POL123)' görürsen, yeni Policy yaratma! 'POL123' ID'sini kullan\n"
+        "- Örnek: 'Customer(id: CUST456)' görürsen, yeni Customer yaratma! 'CUST456' ID'sini kullan\n"
+        "- CRITICAL: Mevcut node'ların exact ID'lerini kullan, yeni node yaratma!\n"
+
+        "## 3. Düğüm Etiketleme\n"
+        "- **Tutarlılık**: Mevcut türleri düğüm etiketleri için kullanın.\n"
+        "Temel veya başlangıç düzeyindeki türleri kullanın.\n"
+        "- Örneğin, poliçede taraflardan müşteri olan kişiyi temsil eden varlık tespit ettiğinizde, "
+        "her zaman **'Customer'** olarak etiketleyin. 'Kişi' veya 'Person' gibi "
+        "genel terimler kullanmayın."
+        "- **Düğüm ID'leri**: Asla tamsayı kullanmayın. Düğüm ID'leri "
+        "metinde bulunan isimler veya okunabilir tanımlayıcılar olmalıdır.\n"
+        "- **İlişkiler** varlıklar veya kavramlar arasındaki bağlantıları temsil eder.\n"
+        "Bilgi grafiği oluştururken ilişki türlerinde tutarlılık ve genellik sağlayın.\n"
+    )
+    
+    # Allowed nodes kısmını ekle - çok esnek yaklaşım
+    if allowed_nodes:
+        nodes_str = ", ".join(allowed_nodes)
+        base_prompt += f"\n## 4. NODE TİPLERİ (ÇOK ESNEKLİK - YENİ TİPLER ÖNEMSENEN)\n"
+        base_prompt += f"**DOĞRULUK UYUM ÜZERİNDE**: Her zaman en doğru tipi seçin\n"
+        base_prompt += f"**Öncelikle bu node tiplerini kullanmayı gözden geçir: {nodes_str} Eğer uygun değilse yeni tipler yaratabilirsin.\n"
+    
+    # Allowed relationships kısmını ekle - katı
+    if allowed_relationships:
+        if isinstance(allowed_relationships[0], tuple):
+            rels_str = ", ".join([f"({s}, {r}, {t})" for s, r, t in allowed_relationships])
+        else:
+            rels_str = ", ".join(allowed_relationships)
+        base_prompt += f"\n## 5. İZİN VERİLEN İLİŞKİ TİPLERİ (KATI ZORUNLU)\n"
+        base_prompt += f"SADECE şu relationship tiplerini kullanın: {rels_str}\n"
+        base_prompt += f"Bu listede olmayan hiçbir relationship tipi kullanmayın!\n"
+        base_prompt += f"MANTIK KONTROLÜ: Eğer allowed relationship'ler entity'ler için mantıklı değilse, daha az ilişki çıkarın veya ilişki çıkarmayın!\n"
+    
+
+    
+    return base_prompt
+
 examples = [
     {
         "text": (
-            "Adam is a software engineer in Microsoft since 2009, "
-            "and last year he got an award as the Best Talent"
+            "Ayça Dinçkök Galata Residans D4 dairesinde oturmaktadır "
+            "ve 2020 yılı konut poliçesi sahibidir"
         ),
-        "head": "Adam",
-        "head_type": "Person",
-        "relation": "WORKS_FOR",
-        "tail": "Microsoft",
-        "tail_type": "Company",
+        "head": "Ayça Dinçkök",
+        "head_type": "Customer",
+        "relation": "HAS_POLICY",
+        "tail": "Konut Poliçesi 2020",
+        "tail_type": "PolicyType",
     },
     {
         "text": (
-            "Adam is a software engineer in Microsoft since 2009, "
-            "and last year he got an award as the Best Talent"
+            "Ayça Dinçkök Galata Residans D4 dairesinde oturmaktadır "
+            "ve 2020 yılı konut poliçesi sahibidir"
         ),
-        "head": "Adam",
-        "head_type": "Person",
-        "relation": "HAS_AWARD",
-        "tail": "Best Talent",
-        "tail_type": "Award",
+        "head": "Ayça Dinçkök",
+        "head_type": "Customer",
+        "relation": "HAS_ENTITY",
+        "tail": "Galata Residans D4",
+        "tail_type": "Location",
     },
     {
         "text": (
-            "Microsoft is a tech company that provide "
-            "several products such as Microsoft Word"
+            "Doga Sigorta A.Ş. tarafından düzenlenen DASK poliçesi "
+            "Ankara Çiftçi Apartmanı için geçerlidir"
         ),
-        "head": "Microsoft Word",
-        "head_type": "Product",
-        "relation": "PRODUCED_BY",
-        "tail": "Microsoft",
-        "tail_type": "Company",
+        "head": "Doga Sigorta A.Ş.",
+        "head_type": "Company",
+        "relation": "HAS_ENTITY",
+        "tail": "DASK Poliçesi",
+        "tail_type": "PolicyType",
     },
 ]
 
@@ -60,21 +381,21 @@ system_prompt = (
     "## 1. Overview\n"
     "You are a top-tier algorithm designed for extracting information in structured "
     "formats to build a knowledge graph.\n"
-    "CRITICAL: Focus ONLY on business-essential entities. Do NOT extract financial amounts, "
-    "reference numbers, detailed legal text, or administrative details.\n"
-    "Extract only the most important and relevant information that provides significant "
-    "business value. Prioritize quality over quantity. LIMIT: Extract maximum 3-5 relationships per document chunk. "
+    "CREATIVITY ENCOURAGED: Extract ALL meaningful entities and relationships from the text. "
+    "Create specific and descriptive node types for each entity.\n"
+    "Extract all important and relevant information that provides value. "
+    "Prioritize accuracy and completeness. LIMIT: Extract maximum 3 relationships per document chunk. "
     "Do not add any information that is not explicitly "
     "mentioned in the text.\n"
     "- **Nodes** represent entities and concepts.\n"
-    "- The aim is to achieve simplicity and clarity in the knowledge graph, making it\n"
-    "accessible for a vast audience.\n"
+    "- The aim is to achieve accuracy and completeness in the knowledge graph, making it\n"
+    "comprehensive and detailed.\n"
     "## 2. Labeling Nodes\n"
-    "- **Consistency**: Ensure you use available types for node labels.\n"
-    "Ensure you use basic or elementary types for node labels.\n"
-    "- For example, when you identify an entity representing a person, "
-    "always label it as **'Person'**. Avoid using more specific terms "
-    "like 'mathematician' or 'scientist'."
+    "- **Specificity**: Create specific and descriptive types for node labels.\n"
+    "Use specific and descriptive types for node labels.\n"
+    "- For example, when you identify an entity representing a doctor, "
+    "always label it as **'Doctor'**. Use specific terms "
+    "like 'University', 'Hospital', or 'Award'."
     "- **Node IDs**: Never utilize integers as node IDs. Node IDs should be "
     "names or human-readable identifiers found in the text.\n"
     "- **Relationships** represent connections between entities or concepts.\n"
@@ -91,18 +412,15 @@ system_prompt = (
     'knowledge graph. In this example, use "John Doe" as the entity ID.\n'
     "Remember, the knowledge graph should be coherent and easily understandable, "
     "so maintaining consistency in entity references is crucial.\n"
-    "## 4. Business Focus for Insurance Documents\n"
-    "When processing insurance documents, ONLY extract the most critical relationships:\n"
-    "- Customer HAS_POLICY with Policy type\n"
-    "- Agent MANAGES Customer\n"
-    "- Policy COVERS Asset\n"
-    "- Customer LIVES_AT Address\n"
-    "- Policy VALID_IN PolicyYear\n"
-    "LIMIT: Extract MAXIMUM 3 relationships per document. Focus on the most business-critical connections only.\n"
-    "NEVER extract: monetary amounts, policy numbers, legal clauses, technical jargon, "
-    "detailed administrative information, or specific financial calculations.\n"
-    "## 5. Strict Compliance\n"
-    "Adhere to the rules strictly. Extract fewer, high-quality relationships rather than many low-value ones."
+    "## 4. Entity Extraction Guidelines\n"
+    "Extract ALL meaningful entities and relationships from the text:\n"
+    "- People, Organizations, Locations, Objects, Concepts\n"
+    "- Use specific and descriptive node types for each entity\n"
+    "- Create comprehensive knowledge graphs\n"
+    "- Focus on accuracy and completeness\n"
+    "LIMIT: Extract MAXIMUM 3 relationships per document chunk.\n"
+    "## 5. Quality Focus\n"
+    "Prioritize accuracy and meaningful connections over quantity."
 )
 
 
@@ -117,21 +435,27 @@ def get_default_prompt(
     
     if node_labels:
         constraints_parts.append(
-            f"## 5. STRICT Node Type Constraints\n"
-            f"- **MANDATORY**: You MUST ONLY use these exact node types: {node_labels}\n"
-            f"- **FORBIDDEN**: Do NOT create nodes with any other types\n"
-            f"- **VALIDATION**: Every node must have one of these types: {', '.join(node_labels)}\n"
-            f"- **REJECTION**: Ignore any entities that don't fit these types\n"
-            f"- **ALLOWED NODE TYPES**: {node_labels}"
+            f"## 5. Node Type Guidelines (VERY FLEXIBLE - CREATIVITY ENCOURAGED)\n"
+            f"- **CREATIVITY FIRST**: Create NEW node types that best describe each entity\n"
+            f"- **ACCURACY OVER CONFORMITY**: Always choose the most accurate type for each entity\n"
+            f"- **PREFERRED BUT NOT MANDATORY**: You may use these types when appropriate: {node_labels}\n"
+            f"- **ENCOURAGE NEW TYPES**: Create specific types like 'Doctor', 'University', 'Hospital', 'Book', 'Award', etc.\n"
+            f"- **EXAMPLES**: \n"
+            f"  - Doctor → use 'Doctor' (not 'Customer')\n"
+            f"  - University → use 'University' (not 'Policy')\n"
+            f"  - Hospital → use 'Hospital' (not 'Customer')\n"
+            f"- **PRINCIPLE**: The most descriptive and accurate type is always the best choice\n"
+            f"- **PREFERRED BUT OPTIONAL**: {node_labels}"
         )
     
     if rel_types:
         if relationship_type == "tuple":
             rel_types_str = list({item[1] for item in rel_types})
             constraints_parts.append(
-                f"## 6. STRICT Relationship Type Constraints\n"
+                f"## 6. STRICT Relationship Type Constraints (MANDATORY)\n"
                 f"- **MANDATORY**: You MUST ONLY use these exact relationship types: {rel_types_str}\n"
                 f"- **FORBIDDEN**: Do NOT create relationships with any other types\n"
+                f"- **STRICT**: Relationships are strictly enforced - no exceptions\n"
                 f"- **SCHEMA**: All relationships must follow this schema: {rel_types}\n"
                 f"- **FORMAT**: (SourceNodeType, RELATIONSHIP_TYPE, TargetNodeType)\n"
                 f"- **VALIDATION**: Only extract relationships that match the schema exactly\n"
@@ -140,9 +464,11 @@ def get_default_prompt(
             )
         else:
             constraints_parts.append(
-                f"## 6. STRICT Relationship Type Constraints\n"
+                f"## 6. STRICT Relationship Type Constraints (MANDATORY)\n"
                 f"- **MANDATORY**: You MUST ONLY use these exact relationship types: {rel_types}\n"
                 f"- **FORBIDDEN**: Do NOT create relationships with any other types\n"
+                f"- **LOGIC CHECK**: If allowed relationship types don't make logical sense for the entities, extract fewer relationships or skip relationships\n"
+                f"- **STRICT**: Relationships are strictly enforced - no exceptions\n"
                 f"- **VALIDATION**: Every relationship must have one of these types: {', '.join(rel_types)}\n"
                 f"- **REJECTION**: Ignore any relationships that don't fit these types\n"
                 f"- **ALLOWED RELATIONSHIP TYPES**: {rel_types}"
@@ -153,13 +479,13 @@ def get_default_prompt(
     if constraints_parts:
         enhanced_system_prompt += "\n" + "\n".join(constraints_parts)
         enhanced_system_prompt += (
-            "\n\n## CRITICAL INSTRUCTION:\n"
-            "STRICT LIMIT: Extract MAXIMUM 3 relationships per document chunk. "
-            "Focus ONLY on extracting the most important entities and relationships that match the allowed types above. "
-            "Prioritize quality over quantity - extract only high-value, business-essential entities. "
-            "Do NOT extract anything that doesn't fit the allowed node types and relationship types. "
-            "Avoid redundant, minor, or trivial entities. Choose only the 3 most critical relationships. "
-            "It's better to extract fewer, correct entities than to extract many incorrect ones."
+            "\n\n## EXTRACTION INSTRUCTION:\n"
+            "LIMIT: Extract MAXIMUM 3 relationships per document chunk. "
+            "Extract ALL meaningful entities from the text using the most specific and accurate node types. "
+            "Create new node types as needed for accuracy (not limited to allowed list). "
+            "For relationships, use ONLY the specified relationship types (strict requirement). "
+            "Focus on extracting comprehensive and accurate entities. Choose the 3 most meaningful relationships. "
+            "Prioritize accuracy and completeness in entity extraction."
         )
     
     return ChatPromptTemplate.from_messages(
@@ -168,9 +494,11 @@ def get_default_prompt(
             (
                 "human",
                 additional_instructions
-                + " IMPORTANT: Focus ONLY on the allowed node types and relationship types specified above. "
-                + "STRICT LIMIT: Extract maximum 3 relationships per document chunk. "
-                + "Prioritize quality over quantity. Do not extract entities or relationships that don't match the allowed types. "
+                + " IMPORTANT: Extract ALL meaningful entities using specific and accurate node types. "
+                + "Create new node types as needed for accuracy (not limited to allowed list). "
+                + "For relationships, use ONLY the specified relationship types (strict requirement). "
+                + "LIMIT: Extract maximum 3 relationships per document chunk. "
+                + "Prioritize accuracy and completeness in entity extraction. "
                 + "Tip: Make sure to answer in the correct format and do "
                 "not include any explanations. "
                 "Use the given format to extract information from the "
@@ -188,10 +516,10 @@ def _get_additional_info(input_type: str) -> str:
     # Perform actions based on the input_type
     if input_type == "node":
         return (
-            "Ensure you use basic or elementary types for node labels.\n"
-            "For example, when you identify an entity representing a person, "
-            "always label it as **'Person'**. Avoid using more specific terms "
-            "like 'Mathematician' or 'Scientist'"
+            "Use specific and descriptive types for node labels.\n"
+            "For example, when you identify an entity representing a doctor, "
+            "always label it as **'Doctor'**. Use specific terms "
+            "like 'VehiclePlate', 'Company', 'University', 'Hospital' instead of generic types."
         )
     elif input_type == "relationship":
         return (
@@ -218,18 +546,26 @@ def optional_enum_field(
     if relationship_type == "tuple":
         parsed_enum_values = list({el[1] for el in enum_values})  # type: ignore
 
-    # Only openai supports enum param
-    if enum_values and llm_type == "openai-chat":
+    # Only openai supports enum param - but we want flexibility, so don't use strict enum
+    if enum_values and llm_type == "openai-chat" and input_type == "relationship":
+        # Keep strict enum only for relationships
         return Field(
             ...,
             enum=parsed_enum_values,  # type: ignore[call-arg]
             description=f"{description}. Available options are {parsed_enum_values}",
             **field_kwargs,
         )  # type: ignore[call-overload]
+    elif enum_values and llm_type == "openai-chat" and input_type == "node":
+        # For nodes, be flexible - no strict enum
+        return Field(
+            ...,
+            description=f"{description}. Preferred options (use if suitable): {parsed_enum_values}. Create new specific types if none fit the entity.",
+            **field_kwargs,
+        )
     elif enum_values:
         return Field(
             ...,
-            description=f"{description}. Available options are {parsed_enum_values}",
+            description=f"{description}. Preferred options (use if suitable): {parsed_enum_values}. Create new specific types if none fit the entity.",
             **field_kwargs,
         )
     else:
@@ -264,6 +600,59 @@ class UnstructuredRelation(BaseModel):
     )
 
 
+def create_json_turkish_prompt(
+    node_labels: Optional[List[str]] = None,
+    rel_types: Optional[Union[List[str], List[Tuple[str, str, str]]]] = None,
+    relationship_type: Optional[str] = None,
+    additional_instructions: Optional[str] = "",
+) -> ChatPromptTemplate:
+    """
+    Sadece JSON format talimatları + Türkçe prompt içeren basit mod
+    """
+    
+    # Basit JSON format talimatları
+    json_instructions = [
+        "You must generate the output in a JSON format containing a list "
+        'with JSON objects. Each object should have the keys: "head", '
+        '"head_type", "relation", "tail", and "tail_type".',
+        "CRITICAL LIMIT: Extract MAXIMUM 3 important relationships per document chunk.",
+    ]
+    
+    system_prompt = "\n".join(json_instructions)
+    system_message = SystemMessage(content=system_prompt)
+    parser = JsonOutputParser(pydantic_object=UnstructuredRelation)
+
+    # Türkçe prompt - yapısında değişiklik yok
+    turkish_prompt = create_turkish_insurance_prompt(
+        allowed_nodes=node_labels,
+        allowed_relationships=rel_types
+    )
+    
+    human_string_parts = [
+        turkish_prompt,
+        additional_instructions,
+        "For the following text, extract entities and relations. "
+        "NODE TYPES: Create most accurate types. RELATIONSHIP TYPES: Use only allowed types. "
+        "{format_instructions}\nText: {input}",
+    ]
+    
+    human_prompt_string = "\n".join(filter(None, human_string_parts))
+    human_prompt = PromptTemplate(
+        template=human_prompt_string,
+        input_variables=["input"],
+        partial_variables={
+            "format_instructions": parser.get_format_instructions(),
+        },
+    )
+
+    human_message_prompt = HumanMessagePromptTemplate(prompt=human_prompt)
+
+    chat_prompt = ChatPromptTemplate.from_messages(
+        [system_message, human_message_prompt]
+    )
+    return chat_prompt
+
+
 def create_unstructured_prompt(
     node_labels: Optional[List[str]] = None,
     rel_types: Optional[Union[List[str], List[Tuple[str, str, str]]]] = None,
@@ -293,9 +682,10 @@ def create_unstructured_prompt(
         "DO NOT extract monetary amounts, policy numbers, legal clauses, technical jargon, "
         "administrative details, or specific financial calculations. "
         "STRICT PRIORITY: Customer relationships, Policy coverage, Agent assignments only.",
-        f'The "head_type" key must contain the type of the extracted head entity, '
-        f"which MUST be one of these ALLOWED types: {node_labels_str}. "
-        f"DO NOT use any other node types!"
+        f'The "head_type" key must contain the type of the extracted head entity. '
+        f"CREATE the most accurate type for each entity! "
+        f"PREFERRED types (use if suitable): {node_labels_str}. "
+        f"CREATE NEW TYPES if none of the preferred types fit the entity!"
         if node_labels
         else "",
         f'The "relation" key must contain the type of relation between the "head" '
@@ -305,8 +695,9 @@ def create_unstructured_prompt(
         else "",
         f'The "tail" key must represent the text of an extracted entity which is '
         f'the tail of the relation, and the "tail_type" key must contain the type '
-        f"of the tail entity from these ALLOWED types: {node_labels_str}. "
-        f"DO NOT use any other node types!"
+        f"of the tail entity. CREATE the most accurate type for each entity! "
+        f"PREFERRED types (use if suitable): {node_labels_str}. "
+        f"CREATE NEW TYPES if none of the preferred types fit the entity!"
         if node_labels
         else "",
         "CRITICAL: Your task is to extract relationships from text strictly adhering "
@@ -314,7 +705,8 @@ def create_unstructured_prompt(
         "between specific node types are presented in the schema format "
         "like: (Entity1Type, RELATIONSHIP_TYPE, Entity2Type). "
         f"ONLY use this provided schema: {rel_types}. "
-        f"REJECT any relationships that don't match this schema!"
+        f"REJECT any relationships that don't match this schema! "
+        f"BUT CREATE appropriate node types for entities (not limited to allowed)."
         if relationship_type == "tuple"
         else "",
         "Extract ONLY the 3 most critical business relationships. "
@@ -329,11 +721,10 @@ def create_unstructured_prompt(
         "crucial.",
         "IMPORTANT NOTES:\n"
         "- Don't add any explanation and text.\n"
-        "- Focus ONLY on the allowed node and relationship types.\n"
-        "- For insurance documents, prioritize business-essential entities over technical details.\n"
+        "- NODE TYPES: Create best-fitting types (not limited to allowed list).\n"
+        "- RELATIONSHIP TYPES: Use ONLY allowed relationship types (strict).\n"
         "- CRITICAL: Extract MAXIMUM 3 relationships - quality over quantity.\n"
         "- It's better to extract fewer, correct entities than many incorrect ones.\n"
-        "- Ignore entities and relationships that don't match the allowed types.\n"
         "- Avoid extracting redundant, minor, or trivial entities.\n"
         "- STRICT LIMIT: Maximum 3 relationships per document chunk.",
         additional_instructions,
@@ -346,8 +737,8 @@ def create_unstructured_prompt(
     human_string_parts = [
         "Based on the following example, extract entities and "
         "relations from the provided text.\n\n",
-        "MANDATORY: Use ONLY the following entity types, don't use any other entity types:"
-        "# ALLOWED ENTITY TYPES:"
+        "FLEXIBLE: Use the following entity types when suitable, create new types when needed:"
+        "# PREFERRED ENTITY TYPES:"
         "{node_labels}"
         if node_labels
         else "",
@@ -361,18 +752,20 @@ def create_unstructured_prompt(
         "between specific node types are presented in the schema format "
         "like: (Entity1Type, RELATIONSHIP_TYPE, Entity2Type). "
         f"MANDATORY SCHEMA: {rel_types}. "
-        f"REJECT any relationships that don't match this exact schema!"
+        f"REJECT any relationships that don't match this exact schema! "
+        f"BUT CREATE appropriate node types for entities (not limited to preferred)."
         if relationship_type == "tuple"
         else "",
         "Below are a number of examples of text and their extracted "
         "entities and relationships."
         "{examples}\n",
-        "IMPORTANT REMINDER: Focus ONLY on the allowed types above. "
-        "Extract MAXIMUM 3 relationships that provide the highest business value. "
-        "Ignore any entities or relationships that don't match the allowed types.",
+        "IMPORTANT REMINDER: "
+        "NODE TYPES: Create most accurate types (not limited to preferred list). "
+        "RELATIONSHIP TYPES: Use ONLY allowed types (strict). "
+        "Extract MAXIMUM 3 relationships that provide the highest business value.",
         additional_instructions,
         "For the following text, extract entities and relations as "
-        "in the provided example, but ONLY use the allowed types specified above and limit to maximum 3 relationships."
+        "in the provided example. NODE TYPES: Create most accurate types. RELATIONSHIP TYPES: Use only allowed types. Limit to maximum 3 relationships."
         "{format_instructions}\nText: {input}",
     ]
     human_prompt_string = "\n".join(filter(None, human_string_parts))
@@ -670,24 +1063,42 @@ def _parse_and_clean_json(
     return nodes, relationships
 
 
-def _format_nodes(nodes: List[Node]) -> List[Node]:
+def _format_nodes(nodes: List[Node], allowed_nodes: Optional[List[str]] = None) -> List[Node]:
+    """
+    Format nodes with proper case handling for allowed node types
+    """
+    def get_proper_node_type(node_type: str, allowed_types: Optional[List[str]] = None) -> str:
+        if not allowed_types:
+            return node_type.capitalize() if node_type else DEFAULT_NODE_TYPE
+        
+        # Exact match kontrolü
+        if node_type in allowed_types:
+            return node_type
+        
+        # Case-insensitive match
+        lower_type = node_type.lower()
+        for allowed_type in allowed_types:
+            if allowed_type.lower() == lower_type:
+                return allowed_type
+        
+        # Default capitalize if no match
+        return node_type.capitalize() if node_type else DEFAULT_NODE_TYPE
+    
     return [
         Node(
             id=el.id.title() if isinstance(el.id, str) else el.id,
-            type=el.type.capitalize()  # type: ignore[arg-type]
-            if el.type
-            else DEFAULT_NODE_TYPE,  # handle empty strings  # type: ignore[arg-type]
+            type=get_proper_node_type(el.type, allowed_nodes),
             properties=el.properties,
         )
         for el in nodes
     ]
 
 
-def _format_relationships(rels: List[Relationship]) -> List[Relationship]:
+def _format_relationships(rels: List[Relationship], allowed_nodes: Optional[List[str]] = None) -> List[Relationship]:
     return [
         Relationship(
-            source=_format_nodes([el.source])[0],
-            target=_format_nodes([el.target])[0],
+            source=_format_nodes([el.source], allowed_nodes)[0],
+            target=_format_nodes([el.target], allowed_nodes)[0],
             type=el.type.replace(" ", "_").upper(),
             properties=el.properties,
         )
@@ -706,6 +1117,7 @@ def format_property_key(s: str) -> str:
 
 def _convert_to_graph_document(
     raw_schema: Dict[Any, Any],
+    allowed_nodes: Optional[List[str]] = None,
 ) -> Tuple[List[Node], List[Relationship]]:
     # If there are validation errors
     if not raw_schema["parsed"]:
@@ -751,8 +1163,8 @@ def _convert_to_graph_document(
             if parsed_schema.relationships
             else []
         )
-    # Title / Capitalize
-    return _format_nodes(nodes), _format_relationships(relationships)
+    # Title / Capitalize with proper allowed types
+    return _format_nodes(nodes, allowed_nodes), _format_relationships(relationships, allowed_nodes)
 
 
 def validate_and_get_relationship_type(
@@ -819,6 +1231,9 @@ class LLMGraphTransformer:
           bypass the use of structured output functionality of the language model.
           If set to True, the transformer will not use the language model's native
           function calling capabilities to handle structured output. Defaults to False.
+        use_simple_json_mode (bool): If True, uses simple JSON format + Turkish prompt mode.
+          This is a minimal mode with only JSON instructions and Turkish prompt structure.
+          Defaults to False.
         additional_instructions (str): Allows you to add additional instructions
           to the prompt without having to change the whole prompt.
 
@@ -847,8 +1262,26 @@ class LLMGraphTransformer:
         node_properties: Union[bool, List[str]] = False,
         relationship_properties: Union[bool, List[str]] = False,
         ignore_tool_usage: bool = False,
+        use_simple_json_mode: bool = False,  # Yeni parametre: Basit JSON + Türkçe mod
         additional_instructions: str = "",
+        use_db_schema: bool = True,  # Yeni parametre: DB schema'sını kullan
+        graph: Optional[Any] = None,  # Graph instance'ı dinamik schema için
+        enable_llm_logging: bool = True,  # Yeni parametre: LLM extraction logging'i açıp kapat
     ) -> None:
+        
+        # Eğer allowed_nodes ve allowed_relationships boşsa ve use_db_schema True ise, DB'den çek
+        if use_db_schema and (not allowed_nodes or not allowed_relationships):
+            print("🔄 Veritabanından schema çekiliyor...")
+            db_nodes, db_relationships = get_db_schema_for_prompt(graph_instance=graph)
+            
+            if not allowed_nodes:
+                allowed_nodes = db_nodes
+                print(f"✅ DB'den node tipleri alındı: {allowed_nodes}")
+            
+            if not allowed_relationships:
+                allowed_relationships = db_relationships
+                print(f"✅ DB'den relationship tipleri alındı: {allowed_relationships}")
+        
         # Validate and check allowed relationships input
         self._relationship_type = validate_and_get_relationship_type(
             allowed_relationships, allowed_nodes
@@ -858,6 +1291,17 @@ class LLMGraphTransformer:
         self.allowed_relationships = allowed_relationships
         self.strict_mode = strict_mode
         self._function_call = not ignore_tool_usage
+        
+        # Graph instance'ını store et ki process_response'da kullanabilelim
+        self.graph = graph
+        
+        # LLM logging ayarı
+        self.enable_llm_logging = enable_llm_logging
+        
+        print(f"🎯 Final allowed nodes: {self.allowed_nodes}")
+        print(f"🔗 Final allowed relationships: {self.allowed_relationships}")
+        print(f"📊 LLM Logging: {'✅ Açık' if self.enable_llm_logging else '❌ Kapalı'}")
+        
         # Check if the LLM really supports structured output
         if self._function_call:
             try:
@@ -880,12 +1324,29 @@ class LLMGraphTransformer:
                     "Could not import json_repair python package. "
                     "Please install it with `pip install json-repair`."
                 )
-            prompt = prompt or create_unstructured_prompt(
-                allowed_nodes,
-                allowed_relationships,
-                self._relationship_type,
-                additional_instructions,
-            )
+            
+            # Türkçe prompt kullan
+            if not prompt:
+                if use_simple_json_mode:
+                    # Basit JSON + Türkçe prompt modu
+                    prompt = create_json_turkish_prompt(
+                        allowed_nodes,
+                        allowed_relationships,
+                        self._relationship_type,
+                        additional_instructions,
+                    )
+                else:
+                    # Mevcut unstructured mod
+                    turkish_system_prompt = create_turkish_insurance_prompt(
+                        allowed_nodes=allowed_nodes,
+                        allowed_relationships=allowed_relationships
+                    )
+                    prompt = create_unstructured_prompt(
+                        allowed_nodes,
+                        allowed_relationships,
+                        self._relationship_type,
+                        f"{additional_instructions}\n{turkish_system_prompt}",
+                    )
             self.chain = prompt | llm
         else:
             # Define chain
@@ -902,12 +1363,18 @@ class LLMGraphTransformer:
                 self._relationship_type,
             )
             structured_llm = llm.with_structured_output(schema, include_raw=True)
-            prompt = prompt or get_default_prompt(
-                additional_instructions,
-                allowed_nodes,
-                allowed_relationships,
-                self._relationship_type,
-            )
+            
+            if not prompt:
+                turkish_system_prompt = create_turkish_insurance_prompt(
+                    allowed_nodes=allowed_nodes,
+                    allowed_relationships=allowed_relationships
+                )
+                prompt = get_default_prompt(
+                    f"{additional_instructions}\n{turkish_system_prompt}",
+                    allowed_nodes,
+                    allowed_relationships,
+                    self._relationship_type,
+                )
             self.chain = prompt | structured_llm
 
     def process_response(
@@ -919,10 +1386,40 @@ class LLMGraphTransformer:
         """
         text = document.page_content
         
+        # Chunk ID'yi metadata'dan al
+        chunk_id = None
+        document_filename = None
+        if hasattr(document, 'metadata') and document.metadata:
+            if isinstance(document.metadata.get('chunk_id'), list):
+                chunk_id = document.metadata['chunk_id'][0] if document.metadata['chunk_id'] else None
+            else:
+                chunk_id = document.metadata.get('chunk_id')
+            
+            # Document filename'i metadata'dan al
+            document_filename = (document.metadata.get('fileName') or 
+                               document.metadata.get('filename') or 
+                               document.metadata.get('source') or 
+                               document.metadata.get('file_name') or 
+                               document.metadata.get('document_name'))
+        
+        # Mevcut context'i al ve text'e ekle
+        existing_context = ""
+        if chunk_id and hasattr(self, 'graph') and self.graph:
+            existing_context = get_existing_context_for_prompt(self.graph, chunk_id)
+            if existing_context:
+                print(f"📋 Context bulundu: {len(existing_context)} karakter")
+                print(f"🔗 Context: {existing_context}...")
+        
+        # Context'i text'e ekle
+        if existing_context:
+            enhanced_text = f"{existing_context}METİN:\n{text}"
+        else:
+            enhanced_text = text
+        
         # LOG: Input bilgileri
         print("🚀 LLMGraphTransformer process_response başladı")
-        print(f"📝 Input text uzunluğu: {len(text)} karakter")
-        print(f"📝 Input text başlangıcı: {text[:200]}...")
+        print(f"📝 Input text uzunluğu: {len(enhanced_text)} karakter")
+        print(f"📝 Input text başlangıcı: {enhanced_text}...")
         print(f"⚙️ Function call modu: {self._function_call}")
         print(f"🎯 FULL Allowed nodes: {self.allowed_nodes}")
         print(f"🔗 FULL Allowed relationships: {self.allowed_relationships}")
@@ -976,12 +1473,12 @@ class LLMGraphTransformer:
         # LOG: LLM çağrısı ve token kullanımı
         import time
         start_time = time.time()
-        raw_schema = self.chain.invoke({"input": text}, config=config)
+        raw_schema = self.chain.invoke({"input": enhanced_text}, config=config)
         end_time = time.time()
         
         # Token kullanımını logla
         try:
-            prompt_length = len(text)
+            prompt_length = len(enhanced_text)
             response_length = 0
             
             # Token usage bilgisini al
@@ -1029,10 +1526,19 @@ class LLMGraphTransformer:
         else:
             print(f"📥 FULL Raw sonuç:\n{str(raw_schema)}")
         
+        # 🟢 INCREMENTAL JSON LOGGING - LLM çıktısını kaydet
+        log_llm_output_incremental(
+            raw_schema, 
+            chunk_id, 
+            datetime.now().isoformat(),
+            document_filename,
+            self.enable_llm_logging
+        )
+        
         if self._function_call:
             raw_schema = cast(Dict[Any, Any], raw_schema)
             print("🔧 Function call modunda - structured output kullanılıyor")
-            nodes, relationships = _convert_to_graph_document(raw_schema)
+            nodes, relationships = _convert_to_graph_document(raw_schema, self.allowed_nodes)
         else:
             print("🔧 Unstructured modda - JSON parsing yapılıyor")
             nodes_set = set()
@@ -1083,30 +1589,25 @@ class LLMGraphTransformer:
         print(f"🔍 Filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
 
         # Apply filtering based on allowed nodes and relationships
-        # Strict mode filtering
+        # Esnek node filtering, katı relationship filtering
         if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
             print("🚧 Filtreleme uygulanıyor...")
             
+            # Node filtreleme - ESNEK (preference-based, tüm node'ları kabul et)
             if self.allowed_nodes:
-                print(f"🎯 Node filtreleme: {self.allowed_nodes}")
-                lower_allowed_nodes = [el.lower() for el in self.allowed_nodes]
+                print(f"🎯 Node filtreleme (ESNEK): {self.allowed_nodes}")
                 nodes_before = len(nodes)
-                relationships_before = len(relationships)
                 
-                nodes = [
-                    node for node in nodes if node.type.lower() in lower_allowed_nodes
-                ]
-                relationships = [
-                    rel
-                    for rel in relationships
-                    if rel.source.type.lower() in lower_allowed_nodes
-                    and rel.target.type.lower() in lower_allowed_nodes
-                ]
+                # Esnek filtreleme: preferred ve other node'ları say
+                preferred_count = sum(1 for node in nodes if node.type.lower() in [el.lower() for el in self.allowed_nodes])
+                other_count = len(nodes) - preferred_count
                 
-                print(f"📊 Node filtresi sonrası - Nodes: {nodes_before} -> {len(nodes)}, Relationships: {relationships_before} -> {len(relationships)}")
+                print(f"📊 Esnek node analizi - Tercih edilen: {preferred_count}, Diğer: {other_count}, Toplam: {len(nodes)} (hepsi kabul)")
+                # Node'ları filtreleme - ESNEK yaklaşım, hepsini kabul et
                 
+            # Relationship filtreleme - KATI (strict filtering)
             if self.allowed_relationships:
-                print(f"🔗 Relationship filtreleme: {self.allowed_relationships}")
+                print(f"🔗 Relationship filtreleme (KATI): {self.allowed_relationships}")
                 relationships_before = len(relationships)
                 
                 # Filter by type and direction
@@ -1178,202 +1679,10 @@ class LLMGraphTransformer:
         Asynchronously processes a single document, transforming it into a
         graph document.
         """
-        text = document.page_content
+        print(" LLMGraphTransformer aprocess_response (ASYNC) - delegating to sync process_response")
         
-        # LOG: Async version - Input bilgileri
-        print("🚀 LLMGraphTransformer aprocess_response (ASYNC) başladı")
-        print(f"📝 Input text uzunluğu: {len(text)} karakter")
-        print(f"📝 Input text başlangıcı: {text[:200]}...")
-        print(f"⚙️ Function call modu: {self._function_call}")
-        print(f"🎯 FULL Allowed nodes: {self.allowed_nodes}")
-        print(f"🔗 FULL Allowed relationships: {self.allowed_relationships}")
-        print(f"🔧 Relationship type: {self._relationship_type}")
-        
-        # LOG: Async LLM çağrısı ve token kullanımı
-        import time
-        start_time = time.time()
-        raw_schema = await self.chain.ainvoke({"input": text}, config=config)
-        end_time = time.time()
-        
-        # Token kullanımını logla
-        try:
-            prompt_length = len(text)
-            response_length = 0
-            
-            # Token usage bilgisini al
-            if hasattr(raw_schema, 'usage_metadata') and raw_schema.usage_metadata:
-                usage = raw_schema.usage_metadata
-                input_tokens = usage.get('input_tokens', 0)
-                output_tokens = usage.get('output_tokens', 0) 
-                total_tokens = usage.get('total_tokens', 0)
-                
-                logging.info(f"🔢 ASYNC LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
-                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
-                
-            elif hasattr(raw_schema, 'response_metadata') and 'token_usage' in raw_schema.response_metadata:
-                usage = raw_schema.response_metadata['token_usage']
-                input_tokens = usage.get('prompt_tokens', 0)
-                output_tokens = usage.get('completion_tokens', 0)
-                total_tokens = usage.get('total_tokens', 0)
-                
-                logging.info(f"🔢 ASYNC LLM Token Kullanımı - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
-                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
-                
-            else:
-                # Manuel token tahmini (yaklaşık)
-                if hasattr(raw_schema, 'content'):
-                    response_length = len(raw_schema.content)
-                else:
-                    response_length = len(str(raw_schema))
-                
-                estimated_input_tokens = int(prompt_length / 4)  # ~4 karakter = 1 token
-                estimated_output_tokens = int(response_length / 4)
-                estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
-                
-                logging.info(f"🔢 ASYNC LLM Token Tahmini - Input: ~{estimated_input_tokens}, Output: ~{estimated_output_tokens}, Total: ~{estimated_total_tokens}")
-                logging.info(f"📏 ASYNC Prompt uzunluğu: {prompt_length} karakter, Response uzunluğu: {response_length} karakter")
-                logging.info(f"⏱️ ASYNC LLM Çağrı süresi: {end_time - start_time:.2f} saniye")
-                
-        except Exception as token_log_error:
-            logging.error(f"Async token loglama hatası: {token_log_error}")
-        
-        
-        # LOG: LLM'den dönen raw sonuç
-        print(f"📥 LLM'den dönen raw sonuç tipi: {type(raw_schema)}")
-        if hasattr(raw_schema, 'content'):
-            print(f"📥 FULL Raw sonuç content:\n{raw_schema.content}")
-        else:
-            print(f"📥 FULL Raw sonuç:\n{str(raw_schema)}")
-        
-        if self._function_call:
-            raw_schema = cast(Dict[Any, Any], raw_schema)
-            print("🔧 Function call modunda - structured output kullanılıyor")
-            nodes, relationships = _convert_to_graph_document(raw_schema)
-        else:
-            print("🔧 Unstructured modda - JSON parsing yapılıyor")
-            nodes_set = set()
-            relationships = []
-            if not isinstance(raw_schema, str):
-                raw_schema = raw_schema.content
-            
-            print(f"🔍 FULL Parse edilecek JSON:\n{raw_schema}")
-            parsed_json = self.json_repair.loads(raw_schema)
-            print(f"✅ JSON parse edildi, tip: {type(parsed_json)}")
-            if isinstance(parsed_json, dict):
-                parsed_json = [parsed_json]
-                
-            print(f"📊 Parse edilen relation sayısı: {len(parsed_json)}")
-            
-            for i, rel in enumerate(parsed_json):
-                # Check if mandatory properties are there
-                if (
-                    not rel.get("head")
-                    or not rel.get("tail")
-                    or not rel.get("relation")
-                ):
-                    print(f"❌ Relation {i} eksik property'ler nedeniyle atlandı: {rel}")
-                    continue
-                
-                print(f"✅ Relation {i}: {rel.get('head')} ({rel.get('head_type')}) --[{rel.get('relation')}]--> {rel.get('tail')} ({rel.get('tail_type')})")
-                
-                # Nodes need to be deduplicated using a set
-                # Use default Node label for nodes if missing
-                nodes_set.add((rel["head"], rel.get("head_type", DEFAULT_NODE_TYPE)))
-                nodes_set.add((rel["tail"], rel.get("tail_type", DEFAULT_NODE_TYPE)))
-
-                source_node = Node(
-                    id=rel["head"], type=rel.get("head_type", DEFAULT_NODE_TYPE)
-                )
-                target_node = Node(
-                    id=rel["tail"], type=rel.get("tail_type", DEFAULT_NODE_TYPE)
-                )
-                relationships.append(
-                    Relationship(
-                        source=source_node, target=target_node, type=rel["relation"]
-                    )
-                )
-            # Create nodes list
-            nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
-
-        # LOG: Filtreleme öncesi durum
-        print(f"🔄 Filtreleme öncesi - Nodes: {len(nodes)}, Relationships: {len(relationships)}")
-        print(f"🔍 Filtreleme öncesi node tipleri: {list(set([node.type for node in nodes]))}")
-        print(f"🔍 Filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
-
-        # Apply filtering based on allowed nodes and relationships
-        # Strict mode filtering
-        if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
-            print("🚧 Filtreleme uygulanıyor...")
-            
-            if self.allowed_nodes:
-                print(f"🎯 Node filtreleme: {self.allowed_nodes}")
-                lower_allowed_nodes = [el.lower() for el in self.allowed_nodes]
-                nodes_before = len(nodes)
-                relationships_before = len(relationships)
-                
-                nodes = [
-                    node for node in nodes if node.type.lower() in lower_allowed_nodes
-                ]
-                relationships = [
-                    rel
-                    for rel in relationships
-                    if rel.source.type.lower() in lower_allowed_nodes
-                    and rel.target.type.lower() in lower_allowed_nodes
-                ]
-                
-                print(f"📊 Node filtresi sonrası - Nodes: {nodes_before} -> {len(nodes)}, Relationships: {relationships_before} -> {len(relationships)}")
-                
-            if self.allowed_relationships:
-                print(f"🔗 Relationship filtreleme: {self.allowed_relationships}")
-                relationships_before = len(relationships)
-                
-                # Filter by type and direction
-                if self._relationship_type == "tuple":
-                    print("🔧 Tuple modunda relationship filtresi")
-                    relationships = [
-                        rel
-                        for rel in relationships
-                        if (
-                            (
-                                rel.source.type.lower(),
-                                rel.type.lower(),
-                                rel.target.type.lower(),
-                            )
-                            in [  # type: ignore
-                                (s_t.lower(), r_t.lower(), t_t.lower())
-                                for s_t, r_t, t_t in self.allowed_relationships
-                            ]
-                        )
-                    ]
-                else:  # Filter by type only
-                    print("🔧 String modunda relationship filtresi")
-                    relationships = [
-                        rel
-                        for rel in relationships
-                        if rel.type.lower()
-                        in [el.lower() for el in self.allowed_relationships]  # type: ignore
-                    ]
-                
-                print(f"📊 Relationship filtresi sonrası: {relationships_before} -> {len(relationships)}")
-        else:
-            print("⚠️ Hiç filtreleme kuralı yok - tüm node ve relationship'ler kabul ediliyor")
-
-        # LOG: Final durum
-        print(f"✅ Final sonuç - Nodes: {len(nodes)}, Relationships: {len(relationships)}")
-        print(f"🏷️ Final node tipleri: {list(set([node.type for node in nodes]))}")
-        print(f"🔗 Final relationship tipleri: {list(set([rel.type for rel in relationships]))}")
-        
-        if nodes:
-            print("📝 İlk 3 node:")
-            for i, node in enumerate(nodes[:3]):
-                print(f"  {i+1}. {node.id} ({node.type})")
-        
-        if relationships:
-            print("📝 İlk 3 relationship:")
-            for i, rel in enumerate(relationships[:3]):
-                print(f"  {i+1}. {rel.source.id} ({rel.source.type}) --[{rel.type}]--> {rel.target.id} ({rel.target.type})")
-
-        return GraphDocument(nodes=nodes, relationships=relationships, source=document)
+        # Async fonksiyonu sync'e yönlendir - aynı mantığı kullanıyor
+        return self.process_response(document, config)
 
     async def aconvert_to_graph_documents(
         self, documents: Sequence[Document], config: Optional[RunnableConfig] = None

@@ -189,7 +189,7 @@ def get_chunk_id_as_doc_metadata(chunkId_chunkDoc_list):
       
 
 async def get_graph_document_list(
-    llm, combined_chunk_document_list, allowedNodes, allowedRelationship, additional_instructions=None
+    llm, combined_chunk_document_list, allowedNodes, allowedRelationship, additional_instructions=None, graph=None
 ):
     if additional_instructions:
         additional_instructions = sanitize_additional_instruction(additional_instructions)
@@ -197,26 +197,27 @@ async def get_graph_document_list(
     if "diffbot_api_key" in dir(llm):
         llm_transformer = llm
     else:
-        if "get_name" in dir(llm) and llm.get_name() != "ChatOpenAI" or llm.get_name() != "ChatVertexAI" or llm.get_name() != "AzureChatOpenAI":
-            node_properties = False
-            relationship_properties = False
-        else:
-            # Sadeleştirilmiş - description property'si de çıkarma
-            node_properties = False  # ["description"] yerine False
-            relationship_properties = False  # ["description"] yerine False
+        # if "get_name" in dir(llm) and llm.get_name() != "ChatOpenAI" or llm.get_name() != "ChatVertexAI" or llm.get_name() != "AzureChatOpenAI":
+        #     node_properties = False
+        #     relationship_properties = False
+        # else:
+        #     # Sadeleştirilmiş - description property'si de çıkarma
+        #     node_properties = False  # ["description"] yerine False
+        #     relationship_properties = False  # ["description"] yerine False
         TOOL_SUPPORTED_MODELS = {"qwen3", "deepseek"} 
         model_name = get_llm_model_name(llm)
         ignore_tool_usage = not any(pattern in model_name for pattern in TOOL_SUPPORTED_MODELS)
         logging.info(f"Keeping ignore tool usage parameter as {ignore_tool_usage}")
         llm_transformer = LLMGraphTransformer(
             llm=llm,
-            strict_mode=True,
-            node_properties=node_properties,
-            relationship_properties=relationship_properties,
-            allowed_nodes=allowedNodes,
-            allowed_relationships=allowedRelationship,
-            ignore_tool_usage=ignore_tool_usage,
-            additional_instructions=ADDITIONAL_INSTRUCTIONS+ (additional_instructions if additional_instructions else "")
+            # node_properties=node_properties,
+            # relationship_properties=relationship_properties,
+            # allowed_nodes=allowedNodes,
+            # allowed_relationships=allowedRelationship,
+            enable_llm_logging=True,
+            ignore_tool_usage=False, 
+            use_simple_json_mode=True,  # Simple JSON + Türkçe mod
+            additional_instructions=ADDITIONAL_INSTRUCTIONS+ (additional_instructions if additional_instructions else ""),
         )
     
     # Token kullanımı izleme için
@@ -240,9 +241,13 @@ async def get_graph_document_list(
     logging.info(f"  📄 İşlenen chunk sayısı: {total_chunks}")
     logging.info(f"  🎯 Çıkarılan node sayısı: {total_nodes}")
     logging.info(f"  🔗 Çıkarılan relationship sayısı: {total_relationships}")
-    logging.info(f"  ⚡ Chunk başına ortalama süre: {total_processing_time/total_chunks:.2f} saniye")
-    logging.info(f"  📈 Node/chunk oranı: {total_nodes/total_chunks:.1f}")
-    logging.info(f"  📈 Relationship/chunk oranı: {total_relationships/total_chunks:.1f}")
+    
+    if total_chunks > 0:
+        logging.info(f"  ⚡ Chunk başına ortalama süre: {total_processing_time/total_chunks:.2f} saniye")
+        logging.info(f"  📈 Node/chunk oranı: {total_nodes/total_chunks:.1f}")
+        logging.info(f"  📈 Relationship/chunk oranı: {total_relationships/total_chunks:.1f}")
+    else:
+        logging.info(f"  ⚠️ Hiç chunk işlenemedi - sayfa filtreleme sonucu tüm chunk'lar elendi")
     
     return graph_document_list
 
@@ -508,7 +513,7 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
         
         return enhanced
 
-async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None):
+async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowedRelationship, chunks_to_combine, file_name=None, additional_instructions=None, graph=None, max_pages=None):
    try:
        # Upload sırasında oluşturulan node'ları al ve çakışmayı önle
        existing_nodes = get_upload_time_nodes(graph, file_name) if graph and file_name else []
@@ -530,7 +535,8 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
                allowedRelationship=allowedRelationship,
                file_name=file_name,
                additional_instructions=enhanced_instructions,  # Enhanced instruction kullan
-               graph=graph
+               graph=graph,
+               max_pages=max_pages  # Sayfa sınırlandırma parametresi
            )
        
        # Normal LLM processing
@@ -564,8 +570,121 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        logging.info(f"Raw allowedNodes input: '{allowedNodes}'")
        logging.info(f"Raw allowedRelationship input: '{allowedRelationship}'")
     
+       # Gelen chunk verilerini detaylı logla
+       logging.info(f"📊 chunkId_chunkDoc_list analizi:")
+       logging.info(f"  - Toplam chunk sayısı: {len(chunkId_chunkDoc_list)}")
+       if chunkId_chunkDoc_list:
+           # İlk birkaç chunk'ın detaylarını logla
+           for i, chunk_data in enumerate(chunkId_chunkDoc_list[:3]):  # İlk 3 chunk
+               chunk_doc = chunk_data.get("chunk_doc")
+               if chunk_doc and hasattr(chunk_doc, 'metadata'):
+                   page_number = chunk_doc.metadata.get('page_number', 'YOK')
+                   position = chunk_doc.metadata.get('position', 'YOK')
+                   logging.info(f"    {i+1}. Chunk ID: {chunk_data.get('chunk_id')}")
+                   logging.info(f"       Page: {page_number}, Position: {position}")
+                   logging.info(f"       Text preview: {chunk_doc.page_content[:100]}...")
+               else:
+                   logging.info(f"    {i+1}. Chunk metadata eksik: {chunk_data}")
+           if len(chunkId_chunkDoc_list) > 3:
+               logging.info(f"    ... ve {len(chunkId_chunkDoc_list) - 3} chunk daha")
+       else:
+           logging.warning("  ⚠️ chunkId_chunkDoc_list BOŞ! Dosya upload edildi mi?")
+    
        combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
        logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
+       
+       # Başlangıçta chunk kontrolü
+       if len(combined_chunk_document_list) == 0:
+           if len(chunkId_chunkDoc_list) == 0:
+               raise ValueError(f"Hiç chunk bulunamadı. Dosya '{file_name}' yüklendi mi? Chunk'lar oluşturuldu mu?")
+           else:
+               raise ValueError("Chunk'lar var ama combined_chunk_document_list boş. combine işleminde sorun var.")
+       
+       # Sayfa sınırlandırma - Eğer max_pages belirtilmişse sadece belirtilen sayfalardaki chunk'ları kullan
+       if max_pages is not None and max_pages > 0:
+           logging.info(f"🔢 Sayfa sınırlandırma aktif: 1-{max_pages} arası sayfalar işlenecek")
+           filtered_documents = []
+           for document in combined_chunk_document_list:
+               # Combined chunks için metadata'dan chunk_ids'i al
+               combined_chunk_ids = document.metadata.get('combined_chunk_ids', [])
+               
+               # Bu combined chunk'ın hangi sayfalarda olduğunu kontrol et
+               include_chunk = False
+               chunk_pages = []
+               has_valid_page_info = False
+               
+               for chunk_id in combined_chunk_ids:
+                   # Orijinal chunkId_chunkDoc_list'ten bu chunk'ın page_number'ını bul
+                   for original_chunk in chunkId_chunkDoc_list:
+                       if original_chunk["chunk_id"] == chunk_id:
+                           chunk_doc = original_chunk["chunk_doc"]
+                           if hasattr(chunk_doc, 'metadata') and chunk_doc.metadata:
+                               page_number = chunk_doc.metadata.get('page_number')
+                               if page_number is not None:
+                                   try:
+                                       page_num = int(page_number)
+                                       chunk_pages.append(page_num)
+                                       has_valid_page_info = True
+                                       if 1 <= page_num <= max_pages:
+                                           include_chunk = True
+                                   except (ValueError, TypeError):
+                                       logging.warning(f"⚠️ Chunk {chunk_id} için geçersiz page_number: {page_number}")
+                           break
+               
+               # Eğer hiç sayfa bilgisi bulunamadıysa chunk'ı dahil et (backward compatibility)
+               if not has_valid_page_info:
+                   include_chunk = True
+                   logging.warning(f"⚠️ Combined chunk {combined_chunk_ids} için page_number bulunamadı, dahil edildi")
+               
+               if include_chunk:
+                   filtered_documents.append(document)
+                   if chunk_pages:
+                       logging.info(f"✅ Combined chunk {combined_chunk_ids} (sayfalar {chunk_pages}) dahil edildi")
+                   else:
+                       logging.info(f"✅ Combined chunk {combined_chunk_ids} (sayfa bilgisi yok) dahil edildi")
+               else:
+                   logging.info(f"❌ Combined chunk {combined_chunk_ids} (sayfalar {chunk_pages}) sayfa sınırı dışında, atlandı")
+           
+           combined_chunk_document_list = filtered_documents
+           logging.info(f"🔢 Sayfa filtrelemesi sonrası: {len(combined_chunk_document_list)} chunk kaldı")
+           
+           # Eğer hiç chunk kalmadıysa detaylı bilgi ver
+           if len(combined_chunk_document_list) == 0:
+               # Kaç chunk'ta hangi sayfalarda veri vardı
+               page_distribution = {}
+               total_chunks = 0
+               for document in get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine):
+                   combined_chunk_ids = document.metadata.get('combined_chunk_ids', [])
+                   for chunk_id in combined_chunk_ids:
+                       for original_chunk in chunkId_chunkDoc_list:
+                           if original_chunk["chunk_id"] == chunk_id:
+                               chunk_doc = original_chunk["chunk_doc"]
+                               if hasattr(chunk_doc, 'metadata') and chunk_doc.metadata:
+                                   page_number = chunk_doc.metadata.get('page_number')
+                                   if page_number is not None:
+                                       try:
+                                           page_num = int(page_number)
+                                           page_distribution[page_num] = page_distribution.get(page_num, 0) + 1
+                                           total_chunks += 1
+                                       except (ValueError, TypeError):
+                                           pass
+                               break
+               
+               if page_distribution:
+                   available_pages = sorted(page_distribution.keys())
+                   logging.error(f"❌ Sayfa filtreleme sorunu:")
+                   logging.error(f"   İstenen sayfa aralığı: 1-{max_pages}")
+                   logging.error(f"   Mevcut sayfalar: {available_pages}")
+                   logging.error(f"   Sayfa dağılımı: {page_distribution}")
+                   raise ValueError(f"Sayfa filtreleme (max_pages={max_pages}) sonucu hiç chunk kalmadı. "
+                                  f"Dosyada chunk'lar şu sayfalarda mevcut: {available_pages}. "
+                                  f"Lütfen max_pages değerini {max(available_pages)} veya daha yüksek yapın.")
+               else:
+                   logging.error(f"❌ Hiç chunk'ta page_number bilgisi bulunamadı!")
+                   raise ValueError(f"Sayfa filtreleme yapılamadı: Hiç chunk'ta page_number bilgisi yok. "
+                                  f"max_pages parametresini kaldırın veya dosyayı yeniden yükleyin.")
+       else:
+           logging.info("🔢 Sayfa sınırlandırma yok, tüm chunk'lar işlenecek")
     
        # allowedNodes işleme - AKTIF
        logging.info("=== allowedNodes İŞLEME BAŞLIYOR ===")
@@ -602,7 +721,8 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
            combined_chunk_document_list,
            allowed_nodes,
            allowed_relationships,
-           enhanced_instructions  # Enhanced instruction'ı kullan
+           enhanced_instructions,  # Enhanced instruction'ı kullan
+           graph  # Graph instance'ını geç
        )
        logging.info(f"Generated {len(graph_document_list)} graph documents")
        return graph_document_list

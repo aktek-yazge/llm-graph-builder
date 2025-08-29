@@ -9,6 +9,8 @@ import {
   Menu,
   SpotlightTarget,
   useSpotlightContext,
+  TextInput,
+  Checkbox,
 } from '@neo4j-ndl/react';
 import { useCredentials } from '../context/UserCredentials';
 import { useFileContext } from '../context/UsersFiles';
@@ -117,6 +119,10 @@ const Content: React.FC<ContentProps> = ({
     selectedTokenChunkSize,
     selectedChunk_overlap,
     selectedChunks_to_combine,
+    selectedMaxPages,
+    setSelectedMaxPages,
+    generateEmbedding,
+    setGenerateEmbedding,
     setSelectedNodes,
     setAllPatterns,
     setRowSelection,
@@ -285,7 +291,8 @@ const Content: React.FC<ContentProps> = ({
         fileItem.accessToken,
         additionalInstructions,
         postProcessingTasks.includes('entity_relationship_post_processing'),
-        JSON.stringify(entityRelationshipRules)
+        JSON.stringify(entityRelationshipRules),
+        selectedMaxPages
       );
       if (apiResponse?.status === 'Failed') {
         let errorobj = { error: apiResponse.error, message: apiResponse.message, fileName: apiResponse.file_name };
@@ -1027,6 +1034,24 @@ const Content: React.FC<ContentProps> = ({
               defaultValue={model}
               view='ContentView'
               isDisabled={false}
+            />
+          </div>
+          <div className='flex flex-row items-center gap-4 mb-2'>
+            <TextInput
+              placeholder='Max sayfa sayısı (boş = tümü)'
+              label='Max Sayfa'
+              value={selectedMaxPages?.toString() || ''}
+              onChange={(e) => {
+                const { value } = e.target;
+                setSelectedMaxPages(value ? parseInt(value) : undefined);
+              }}
+              className='w-48'
+              size={isTablet ? 'small' : 'medium'}
+            />
+            <Checkbox
+              label='Upload sırasında embedding oluştur'
+              isChecked={generateEmbedding}
+              onChange={(e) => setGenerateEmbedding(e.target.checked)}
             />
           </div>
           <Flex flexDirection='row' gap='4' className='self-end mb-2.5' flexWrap='wrap'>

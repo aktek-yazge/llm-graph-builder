@@ -4,9 +4,11 @@ Enhanced Intelligent Agent Test
 Token tracking ve context memory özelliklerini test eder
 """
 
+# Test environment setup
+from tests.test_setup import *
+
 from src.intelligent_agent import IntelligentAgent
 from langchain_neo4j import Neo4jGraph
-import os
 import json
 
 def main():
