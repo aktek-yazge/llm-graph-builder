@@ -113,7 +113,8 @@ async def get_graph_from_langextract_full_document(
     allowedRelationship: str, 
     file_name: str = None, 
     additional_instructions: str = None, 
-    graph=None
+    graph=None,
+    max_pages: int = None
 ) -> List[Any]:
     """
     LangExtract kullanarak TÜM DOKÜMAN için tek seferde graph extraction yap
@@ -151,15 +152,50 @@ async def get_graph_from_langextract_full_document(
         logging.info(f"🚀 FULL DOCUMENT EXTRACTION MODE")
         logging.info(f"Model: {model} (LangExtract kullanılacak)")
         logging.info(f"File name: {file_name}")
+        logging.info(f"Max pages: {max_pages}")
         logging.info(f"Additional instructions var mı: {additional_instructions is not None}")
         logging.info(f"Toplam chunk sayısı: {len(chunkId_chunkDoc_list)}")
+        
+        # Sayfa sınırlandırma - Eğer max_pages belirtilmişse sadece belirtilen sayfalardaki chunk'ları kullan
+        filtered_chunk_list = chunkId_chunkDoc_list
+        if max_pages is not None and max_pages > 0:
+            logging.info(f"🔢 Sayfa sınırlandırma aktif: 1-{max_pages} arası sayfalar işlenecek")
+            filtered_chunk_list = []
+            for chunk_data in chunkId_chunkDoc_list:
+                chunk_doc = chunk_data["chunk_doc"]
+                chunk_id = chunk_data["chunk_id"]
+                
+                # Document metadata'sından page_number'ı al
+                page_number = None
+                if hasattr(chunk_doc, 'metadata') and chunk_doc.metadata:
+                    page_number = chunk_doc.metadata.get('page_number')
+                
+                # Page number kontrolü
+                if page_number is not None:
+                    try:
+                        page_num = int(page_number)
+                        if 1 <= page_num <= max_pages:
+                            filtered_chunk_list.append(chunk_data)
+                            logging.info(f"✅ Chunk {chunk_id} (sayfa {page_num}) dahil edildi")
+                        else:
+                            logging.info(f"❌ Chunk {chunk_id} (sayfa {page_num}) sayfa sınırı dışında, atlandı")
+                    except (ValueError, TypeError):
+                        logging.warning(f"⚠️ Chunk {chunk_id} için geçersiz page_number: {page_number}, dahil edildi")
+                        filtered_chunk_list.append(chunk_data)
+                else:
+                    logging.warning(f"⚠️ Chunk {chunk_id} için page_number bulunamadı, dahil edildi")
+                    filtered_chunk_list.append(chunk_data)
+            
+            logging.info(f"🔢 Sayfa filtrelemesi sonrası: {len(filtered_chunk_list)} chunk kaldı")
+        else:
+            logging.info("🔢 Sayfa sınırlandırma yok, tüm chunk'lar işlenecek")
         
         # Raw giriş değerlerini logla
         logging.info(f"RAW allowedNodes: '{allowedNodes}'")
         logging.info(f"RAW allowedRelationship: '{allowedRelationship}'")
         
-        # Tüm dokümanı birleştir
-        full_document = get_full_document_for_langextract(chunkId_chunkDoc_list)
+        # Tüm dokümanı birleştir (filtrelenmiş chunk'larla)
+        full_document = get_full_document_for_langextract(filtered_chunk_list)
         
         # allowedNodes işleme
         allowed_nodes = []

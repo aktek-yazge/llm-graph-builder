@@ -86,6 +86,7 @@ export type ExtractParams = Pick<CustomFile, 'wikiQuery' | 'model' | 'sourceUrl'
   gcs_project_id?: string;
   retry_condition: string;
   additional_instructions?: string;
+  max_pages?: number;  // Sayfa sınırlandırma parametresi
 } & { [key: string]: any };
 
 export type UploadParams = {
@@ -94,6 +95,7 @@ export type UploadParams = {
   chunkNumber: number;
   totalChunks: number;
   originalname: string;
+  generateEmbedding?: boolean;
 } & { [key: string]: any };
 
 export type FormDataParams = ExtractParams | UploadParams;
@@ -285,7 +287,7 @@ export type ChatbotProps = {
   isChatOnly?: boolean;
   isDeleteChatLoading: boolean;
 };
-export interface WikipediaModalTypes extends Omit<S3ModalProps, ''> {}
+export interface WikipediaModalTypes extends Omit<S3ModalProps, ''> { }
 
 export interface GraphViewModalProps {
   open: boolean;
@@ -426,15 +428,15 @@ export interface commonserverresponse {
   message?: string | orphanTotalNodes;
   file_name?: string;
   data?:
-    | OptionType
-    | OptionType[]
-    | string
-    | string[]
-    | uploadData
-    | orphanNodeProps[]
-    | dupNodes[]
-    | { pageitems: chunkdata[]; total_pages: number }
-    | { triplets: string[] };
+  | OptionType
+  | OptionType[]
+  | string
+  | string[]
+  | uploadData
+  | orphanNodeProps[]
+  | dupNodes[]
+  | { pageitems: chunkdata[]; total_pages: number }
+  | { triplets: string[] };
 }
 export interface dupNodeProps {
   id: string;
@@ -540,20 +542,20 @@ export interface chatInfoMessage extends Partial<Messages> {
   relationships: ExtendedRelationship[];
   chunks: Chunk[];
   metricDetails:
-    | {
-        [key: string]: number | string;
-      }
-    | undefined;
+  | {
+    [key: string]: number | string;
+  }
+  | undefined;
   metricError: string;
   infoEntities: Entity[];
   communities: Community[];
   infoLoading: boolean;
   metricsLoading: boolean;
   activeChatmodes:
-    | {
-        [key: string]: ResponseMode;
-      }
-    | undefined;
+  | {
+    [key: string]: ResponseMode;
+  }
+  | undefined;
   multiModelMetrics: multimodelmetric[];
   saveInfoEntitites: (entities: Entity[]) => void;
   saveNodes: (chatNodes: ExtendedNode[]) => void;
@@ -928,6 +930,10 @@ export interface FileContextType {
   setSelectedChunk_overlap: Dispatch<SetStateAction<number>>;
   selectedChunks_to_combine: number;
   setSelectedChunks_to_combine: Dispatch<SetStateAction<number>>;
+  selectedMaxPages: number | undefined;
+  setSelectedMaxPages: Dispatch<SetStateAction<number | undefined>>;
+  generateEmbedding: boolean;
+  setGenerateEmbedding: Dispatch<SetStateAction<boolean>>;
   rowSelection: Record<string, boolean>;
   setRowSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   selectedRows: string[];

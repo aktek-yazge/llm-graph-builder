@@ -12,7 +12,7 @@ import { LoadingSpinner } from '@neo4j-ndl/react';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
 
 export default function DropZoneForSmallLayouts() {
-  const { filesData, setFilesData, model } = useFileContext();
+  const { filesData, setFilesData, model, generateEmbedding } = useFileContext();
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isClicked, setIsClicked] = useState<boolean>(false);
   const { userCredentials, connectionStatus, isReadOnlyUser } = useCredentials();
@@ -55,7 +55,7 @@ export default function DropZoneForSmallLayouts() {
           })
         );
         try {
-          const apiResponse = await uploadAPI(chunk, model, chunkNumber, totalChunks, file.name);
+          const apiResponse = await uploadAPI(chunk, model, chunkNumber, totalChunks, file.name, generateEmbedding);
           if (apiResponse?.status === 'Failed') {
             throw new Error(`message:${apiResponse.data.message},fileName:${apiResponse.data.file_name}`);
           } else {

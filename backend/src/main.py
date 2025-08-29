@@ -378,6 +378,7 @@ async def extract_graph_from_file_local_file(
     # Post-processing parametreleri
     enable_post_processing=False,
     post_processing_rules=None,
+    max_pages=None,  # Sayfa sınırlandırma parametresi
 ):
 
     logging.info(f"Process file name: {fileName}")
@@ -422,6 +423,7 @@ async def extract_graph_from_file_local_file(
             post_processing_rules=post_processing_rules,
             # Page images for chunk links
             page_images=page_images,
+            max_pages=max_pages,
         )
     else:
         return await processing_source(
@@ -444,6 +446,7 @@ async def extract_graph_from_file_local_file(
             # Post-processing parametreleri
             enable_post_processing=enable_post_processing,
             post_processing_rules=post_processing_rules,
+            max_pages=max_pages,
         )
 
 
@@ -770,6 +773,7 @@ async def processing_source(
     post_processing_rules=None,
     # Page images for chunk links
     page_images=None,
+    max_pages=None,
 ):
     """
     Extracts a Neo4jGraph from a PDF file based on the model.
@@ -934,6 +938,7 @@ async def processing_source(
                                 node_count,
                                 rel_count,
                                 additional_instructions,
+                                max_pages,
                             )
                         )
                         successful_chunks += len(selected_chunks)
@@ -1198,6 +1203,7 @@ async def processing_chunks(
   node_count,
   rel_count,
   additional_instructions=None,
+  max_pages=None,
 ):
   latency = {}
   successful_steps = 0
@@ -1229,7 +1235,8 @@ async def processing_chunks(
       chunks_to_combine,
       file_name,
       additional_instructions,
-      graph
+      graph,
+      max_pages
     )
     latency["entity_extraction"] = f"{time.time() - t1:.2f}"
     successful_steps += 1
@@ -1336,7 +1343,7 @@ def get_chunkId_chunkDoc_list(
             legacy_query = """
                 MATCH (c:Chunk) 
                 WHERE c.fileName = $filename 
-                RETURN c.id as id, c.text as text, c.position as position 
+                RETURN c.id as id, c.text as text, c.position as position, c.page_number as page_number
                 ORDER BY c.position
             """
             existing_chunks = execute_graph_query(graph, legacy_query, params={"filename": file_name})
@@ -1347,9 +1354,14 @@ def get_chunkId_chunkDoc_list(
             # Mevcut chunk'ları kullan, sadece embedding'leri kontrol et ve ekle
             chunkId_chunkDoc_list = []
             for chunk in existing_chunks:
+                # Metadata'ya page_number dahil et
+                metadata = {"id": chunk["id"], "position": chunk["position"]}
+                if chunk.get("page_number") is not None:
+                    metadata["page_number"] = chunk["page_number"]
+                
                 chunk_doc = Document(
                     page_content=chunk["text"],
-                    metadata={"id": chunk["id"], "position": chunk["position"]},
+                    metadata=metadata,
                 )
                 chunkId_chunkDoc_list.append(
                     {"chunk_id": chunk["id"], "chunk_doc": chunk_doc}
@@ -1413,7 +1425,8 @@ def get_chunkId_chunkDoc_list(
                                     graph=graph,
                                     chunks=chunks, 
                                     file_name=file_name,
-                                    page_images=page_images if page_images else []
+                                    page_images=page_images if page_images else [],
+                                    generate_embedding=False  # Emergency durumda embedding oluşturma
                                 )
                                 
                                 logging.info(f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created")
@@ -1459,9 +1472,14 @@ def get_chunkId_chunkDoc_list(
             )
         else:
             for chunk in chunks:
+                # Metadata'ya page_number dahil et
+                metadata = {"id": chunk["id"], "position": chunk["position"]}
+                if chunk.get("page_number") is not None:
+                    metadata["page_number"] = chunk["page_number"]
+                
                 chunk_doc = Document(
                     page_content=chunk["text"],
-                    metadata={"id": chunk["id"], "position": chunk["position"]},
+                    metadata=metadata,
                 )
                 chunkId_chunkDoc_list.append(
                     {"chunk_id": chunk["id"], "chunk_doc": chunk_doc}
@@ -1618,6 +1636,7 @@ def upload_file(
     uri,
     chunk_dir,
     merged_dir,
+    generate_embedding: str = None,
 ):
     # Dosya adını normalize et (Unicode consistency için)
     import unicodedata
@@ -1625,7 +1644,8 @@ def upload_file(
     
     originalname = normalize_file_name(originalname)
     logging.info(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
-    logging.info(f"🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
+    logging.info(f"� Upload config - Model: {model}, Generate Embedding: {generate_embedding}")
+    logging.info(f"�🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
     
     # Chunk boyutu kontrol et
     if hasattr(chunk, 'size'):
@@ -1709,31 +1729,55 @@ def upload_file(
                     # Tek seferde hem text hem image extraction
                     from src.document_sources.local_file import load_document_content
                     
-                    if file_extension == "pdf":
-                        # PDF için: PyMuPDF image + DoclingLoader text (optimize edilmiş)
-                        generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
+                    # S3'te page image'lar var mı kontrol et
+                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                    doc_name = Path(normalized_filename).stem
+                    
+                    existing_images_in_s3 = False
+                    existing_image_names = []
+                    
+                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        from src.document_sources.s3_upload_utils import check_document_images_exist_in_s3
+                        existing_images_in_s3, existing_image_names = check_document_images_exist_in_s3(
+                            doc_name, s3_bucket, aws_access_key_id, aws_secret_access_key
+                        )
+                    
+                    if existing_images_in_s3:
+                        # S3'te image'lar zaten var, tekrar generate etme
+                        logging.info(f"📸 Page images already exist in S3 for {doc_name}, skipping generation")
+                        generated_images = []
+                        page_images = existing_image_names
+                        
+                        # Sadece text extraction yap
                         loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
                         pages = loader.load()
-                        logging.info(f"📖 PDF processed: PyMuPDF images + Docling text")
+                        logging.info(f"📖 {file_extension.upper()} processed: Text only (images exist in S3)")
+                        
                     else:
-                        # Diğer formatlar için: Docling hem text hem image (tek çağrı)
-                        loader, encoding_flag, generated_images = load_document_content(
-                            merged_file_path, generate_images=True, output_dir=images_dir
-                        )
-                        pages = loader.load()
-                        logging.info(f"📖 {file_extension.upper()} processed: Docling combined text+images")
+                        # S3'te image'lar yok, generate et
+                        logging.info(f"📸 No page images found in S3 for {doc_name}, generating new images")
+                        
+                        if file_extension == "pdf":
+                            # PDF için: PyMuPDF image + DoclingLoader text (optimize edilmiş)
+                            generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
+                            loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
+                            pages = loader.load()
+                            logging.info(f"📖 PDF processed: PyMuPDF images + Docling text")
+                        else:
+                            # Diğer formatlar için: Docling hem text hem image (tek çağrı)
+                            loader, encoding_flag, generated_images = load_document_content(
+                                merged_file_path, generate_images=True, output_dir=images_dir
+                            )
+                            pages = loader.load()
+                            logging.info(f"📖 {file_extension.upper()} processed: Docling combined text+images")
                     
                     if generated_images:
                         logging.info(f"✅ Generated {len(generated_images)} page images")
                         
-                        # S3'e upload et
-                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
-                        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-                        
                         if s3_bucket and aws_access_key_id and aws_secret_access_key:
                             # S3 prefix oluştur (dosya adı tabanlı)
-                            doc_name = Path(normalized_filename).stem
                             s3_prefix = f"documents/{doc_name}"
                             
                             # Tüm dosyaları (document + images) upload et
@@ -1772,8 +1816,13 @@ def upload_file(
                                 logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
                         else:
                             logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
+                            page_images = []
+                    elif existing_images_in_s3:
+                        # S3'ten mevcut image isimlerini kullan
+                        logging.info(f"🔄 Using existing {len(page_images)} page images from S3")
                     else:
                         logging.warning(f"⚠️ No page images generated for: {normalized_filename}")
+                        page_images = []
                         
                 except Exception as image_error:
                     logging.error(f"❌ Combined content & image extraction failed for {normalized_filename}: {image_error}")
@@ -1828,17 +1877,27 @@ def upload_file(
                         # Chunk node'ları veritabanına kaydet (extract-compatible format)
                         from src.make_relationships import create_chunks_for_upload
                         
+                        # generate_embedding kontrolü
+                        should_generate_embedding = generate_embedding and generate_embedding.lower() in ['true', '1', 'yes']
+                        
                         chunkId_chunkDoc_list = create_chunks_for_upload(
                             graph=graph,
                             chunks=chunks, 
                             file_name=originalname,
-                            page_images=page_images if page_images else []
+                            page_images=page_images if page_images else [],
+                            generate_embedding=should_generate_embedding
                         )
                         
                         # Source node'daki chunk sayısını güncelle
                         obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
                         
-                        logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
+                        if should_generate_embedding:
+                            logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings for: {originalname}")
+                        else:
+                            logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
+                            logging.info(f"ℹ️ Embedding oluşturma atlandı (generate_embedding={generate_embedding})")
+                            logging.info(f"📊 Embedding'ler extract işlemi sırasında kontrol edilecek")
+                        
                         logging.info(f"📊 Upload created chunks ready for extract processing")
                     else:
                         logging.warning(f"⚠️ No chunks created for: {originalname}")

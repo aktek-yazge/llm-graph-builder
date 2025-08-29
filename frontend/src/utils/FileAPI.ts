@@ -10,7 +10,8 @@ export const uploadAPI = async (
   model: string,
   chunkNumber: number,
   totalChunks: number,
-  originalname: string
+  originalname: string,
+  generateEmbedding?: boolean
 ): Promise<any> => {
   const urlUpload = `${url()}/upload`;
   const method: Method = 'post';
@@ -20,6 +21,7 @@ export const uploadAPI = async (
     chunkNumber,
     totalChunks,
     originalname: normalizeFileName(originalname) || originalname, // Normalize filename before upload
+    generateEmbedding,
   };
   const response = await apiCall(urlUpload, method, additionalParams);
   return response;
@@ -46,7 +48,8 @@ export const extractAPI = async (
   access_token?: string,
   additional_instructions?: string,
   enable_post_processing?: boolean,
-  post_processing_rules?: string
+  post_processing_rules?: string,
+  max_pages?: number  // Sayfa sınırlandırma parametresi
 ): Promise<any> => {
   const urlExtract = `${url()}/extract`;
   const method: Method = 'post';
@@ -68,6 +71,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   } else if (source_type === 'Wikipedia') {
     additionalParams = {
@@ -85,6 +89,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   } else if (source_type === 'gcs bucket') {
     additionalParams = {
@@ -105,6 +110,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   } else if (source_type === 'youtube') {
     additionalParams = {
@@ -121,6 +127,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   } else if (source_type === 'web-url') {
     additionalParams = {
@@ -137,6 +144,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   } else {
     additionalParams = {
@@ -152,6 +160,7 @@ export const extractAPI = async (
       additional_instructions,
       enable_post_processing,
       post_processing_rules,
+      max_pages,
     };
   }
   const response = await apiCall(urlExtract, method, additionalParams);

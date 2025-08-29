@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 import os
 import logging
 from pathlib import Path
@@ -246,16 +247,17 @@ def get_s3_file_info(
     aws_secret_access_key: Optional[str] = None
 ) -> Optional[dict]:
     """
-    S3 object hakkında bilgi alır.
+    S3'te bir dosyanın bilgilerini getirir.
     
     Args:
         bucket_name: S3 bucket name
-        s3_key: S3 object key
+        s3_key: S3 key (file path)
         aws_access_key_id: AWS access key
         aws_secret_access_key: AWS secret key
     
     Returns:
-        Optional[dict]: File bilgileri (başarısızsa None)
+        dict: Dosya bilgileri (size, last_modified, content_type, etag)
+              Dosya yoksa None
     """
     try:
         # S3 client oluştur
@@ -281,3 +283,110 @@ def get_s3_file_info(
     except Exception as e:
         logging.error(f"❌ Failed to get S3 file info for s3://{bucket_name}/{s3_key}: {e}")
         return None
+
+
+def check_s3_file_exists(
+    bucket_name: str,
+    s3_key: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None
+) -> bool:
+    """
+    S3'te bir dosyanın var olup olmadığını kontrol eder.
+    
+    Args:
+        bucket_name: S3 bucket name
+        s3_key: S3 key (file path)
+        aws_access_key_id: AWS access key
+        aws_secret_access_key: AWS secret key
+    
+    Returns:
+        bool: Dosya varsa True, yoksa False
+    """
+    try:
+        # S3 client oluştur
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
+        else:
+            s3_client = boto3.client('s3')
+        
+        # Object'in varlığını kontrol et
+        s3_client.head_object(Bucket=bucket_name, Key=s3_key)
+        return True
+        
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return False
+        else:
+            logging.error(f"❌ Error checking S3 file existence for s3://{bucket_name}/{s3_key}: {e}")
+            return False
+    except Exception as e:
+        logging.error(f"❌ Error checking S3 file existence for s3://{bucket_name}/{s3_key}: {e}")
+        return False
+
+
+def check_document_images_exist_in_s3(
+    document_name: str,
+    bucket_name: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None
+) -> Tuple[bool, List[str]]:
+    """
+    Belgenin S3'te page image'larının var olup olmadığını kontrol eder.
+    
+    Args:
+        document_name: Belge adı (uzantısız)
+        bucket_name: S3 bucket name
+        aws_access_key_id: AWS access key
+        aws_secret_access_key: AWS secret key
+    
+    Returns:
+        Tuple[bool, List[str]]: (images_exist, existing_image_names)
+    """
+    try:
+        # S3 client oluştur
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
+        else:
+            s3_client = boto3.client('s3')
+        
+        # Prefix pattern: documents/doc_name/doc_name_page_*.png
+        s3_prefix = f"documents/{document_name}/"
+        
+        # S3'te bu prefix ile başlayan dosyaları listele
+        response = s3_client.list_objects_v2(
+            Bucket=bucket_name,
+            Prefix=s3_prefix
+        )
+        
+        if 'Contents' not in response:
+            return False, []
+        
+        # Page image dosyalarını filtrele
+        existing_images = []
+        for obj in response['Contents']:
+            key = obj['Key']
+            filename = os.path.basename(key)
+            
+            # Page image pattern'ini kontrol et: doc_name_page_001.png
+            if filename.startswith(f"{document_name}_page_") and filename.endswith('.png'):
+                existing_images.append(filename)
+        
+        if existing_images:
+            logging.info(f"🔍 Found {len(existing_images)} existing page images in S3 for document: {document_name}")
+            return True, existing_images
+        else:
+            logging.info(f"🔍 No page images found in S3 for document: {document_name}")
+            return False, []
+        
+    except Exception as e:
+        logging.error(f"❌ Error checking document images in S3 for {document_name}: {e}")
+        return False, []

@@ -13,7 +13,7 @@ import { normalizeFileName } from '../../../utils/utf8';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
 
 const DropZone: FunctionComponent = () => {
-  const { filesData, setFilesData, model } = useFileContext();
+  const { filesData, setFilesData, model, generateEmbedding } = useFileContext();
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const { userCredentials } = useCredentials();
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -186,7 +186,7 @@ const DropZone: FunctionComponent = () => {
           console.log(
             `📤 Uploading chunk ${chunkNumber}/${totalChunks} for file: ${file.name}, chunk size: ${chunk.size} bytes`
           );
-          const apiResponse = await uploadAPI(chunk, model, chunkNumber, totalChunks, file.name);
+          const apiResponse = await uploadAPI(chunk, model, chunkNumber, totalChunks, file.name, generateEmbedding);
           console.log(
             `📥 Upload API response for chunk ${chunkNumber}/${totalChunks}:`,
             JSON.stringify(apiResponse, null, 2)

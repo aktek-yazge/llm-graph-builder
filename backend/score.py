@@ -574,6 +574,8 @@ async def extract_knowledge_graph_from_file(
     access_token=Form(None),
     retry_condition=Form(None),
     additional_instructions=Form(None),
+    # Sayfa sınırlandırma parametresi
+    max_pages: str = Form(None),  # String olarak al, sonra validate et
     # Post-processing parametreleri
     enable_post_processing=Form(False),
     post_processing_rules=Form(None),  # JSON array: [{"sourceNodeType":"Year","targetNodeType":"Document","relationshipType":"HAS_YEAR","removeExistingRelationships":false}]
@@ -598,6 +600,21 @@ async def extract_knowledge_graph_from_file(
     """
     try:
         start_time = time.time()
+        
+        # max_pages validation - undefined string'i None'a çevir
+        validated_max_pages = None
+        if max_pages is not None and max_pages.strip() not in ['', 'undefined', 'null']:
+            try:
+                validated_max_pages = int(max_pages)
+                if validated_max_pages <= 0:
+                    validated_max_pages = None
+                    logging.info(f"ℹ️ max_pages değeri sıfır veya negatif, None olarak ayarlandı")
+            except (ValueError, TypeError) as e:
+                logging.warning(f"⚠️ max_pages değeri geçersiz '{max_pages}', None olarak ayarlandı: {e}")
+                validated_max_pages = None
+        
+        logging.info(f"📊 max_pages validation: '{max_pages}' -> {validated_max_pages}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)   
         graphDb_data_Access = graphDBdataAccess(graph)
         if source_type == 'local file':
@@ -647,7 +664,7 @@ async def extract_knowledge_graph_from_file(
                     logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
                     raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
             
-            uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+            uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions, enable_post_processing, post_processing_rules, validated_max_pages)
 
         elif source_type == 's3 bucket' and source_url:
             uri_latency, result = await extract_graph_from_file_s3(uri, userName, password, database, model, source_url, aws_access_key_id, aws_secret_access_key, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
@@ -1895,7 +1912,7 @@ async def connect(uri=Form(None), userName=Form(None), password=Form(None), data
 @app.post("/upload")
 async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber=Form(None), totalChunks=Form(None), 
                                         originalname=Form(None), model=Form(None), uri=Form(None), userName=Form(None), 
-                                        password=Form(None), database=Form(None),email=Form(None)):
+                                        password=Form(None), database=Form(None),email=Form(None), generateEmbedding=Form(None)):
     try:
         start = time.time()
         
@@ -1925,9 +1942,10 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
                 logging.warning(f"⚠️ Failed to fix escaped UTF-8: {e}")
         
         logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
+        logging.info(f"🔧 Upload parameters - Model: {model}, GenerateEmbedding: {generateEmbedding}")
         
         graph = create_graph_database_connection(uri, userName, password, database)
-        result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR)
+        result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR, generateEmbedding)
         
         end = time.time()
         elapsed_time = end - start

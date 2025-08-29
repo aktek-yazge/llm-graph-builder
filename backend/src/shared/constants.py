@@ -1136,7 +1136,7 @@ QUERY_TO_GET_CHUNKS = """
             WHERE d.fileName = $filename
             WITH d
             OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-            RETURN c.id as id, c.text as text, c.position as position 
+            RETURN c.id as id, c.text as text, c.position as position, c.page_number as page_number
             ORDER BY c.position
             """
             
