@@ -524,13 +524,24 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        logging.info(f"🔍 Model lower: '{model.lower()}'")
        logging.info(f"🔍 'langextract' in model.lower(): {'langextract' in model.lower()}")
        
+       # Normal LLM processing için combined chunks hazırla
+       combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
+       logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
+       
+       # Başlangıçta chunk kontrolü
+       if len(combined_chunk_document_list) == 0:
+           if len(chunkId_chunkDoc_list) == 0:
+               raise ValueError(f"Hiç chunk bulunamadı. Dosya '{file_name}' yüklendi mi? Chunk'lar oluşturuldu mu?")
+           else:
+               raise ValueError("Chunk'lar var ama combined_chunk_document_list boş. combine işleminde sorun var.")
+       
        if "langextract" in model.lower():
            from src.langextract_llm import get_graph_from_langextract_full_document
            logging.info(f"🔄 LangExtract model tespit edildi: {model}")
            logging.info(f"🚀 FULL DOCUMENT EXTRACTION modunda çalışacak")
            return await get_graph_from_langextract_full_document(
                model=model,
-               chunkId_chunkDoc_list=chunkId_chunkDoc_list,
+               combined_chunk_document_list=combined_chunk_document_list,  # Combined chunks gönder
                allowedNodes=allowedNodes,
                allowedRelationship=allowedRelationship,
                file_name=file_name,
@@ -589,16 +600,6 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
                logging.info(f"    ... ve {len(chunkId_chunkDoc_list) - 3} chunk daha")
        else:
            logging.warning("  ⚠️ chunkId_chunkDoc_list BOŞ! Dosya upload edildi mi?")
-    
-       combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
-       logging.info(f"Combined {len(combined_chunk_document_list)} chunks")
-       
-       # Başlangıçta chunk kontrolü
-       if len(combined_chunk_document_list) == 0:
-           if len(chunkId_chunkDoc_list) == 0:
-               raise ValueError(f"Hiç chunk bulunamadı. Dosya '{file_name}' yüklendi mi? Chunk'lar oluşturuldu mu?")
-           else:
-               raise ValueError("Chunk'lar var ama combined_chunk_document_list boş. combine işleminde sorun var.")
        
        # Sayfa sınırlandırma - Eğer max_pages belirtilmişse sadece belirtilen sayfalardaki chunk'ları kullan
        if max_pages is not None and max_pages > 0:

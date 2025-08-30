@@ -55,9 +55,23 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
   logging.info("creating list of chunks and graph documents in get_chunk_and_graphDocument func")
   lst_chunk_chunkId_document=[]
   for graph_document in graph_document_list:            
-          for chunk_id in graph_document.source.metadata['combined_chunk_ids'] :
+          # Normal LLM metadata formatı: 'combined_chunk_ids'
+          chunk_ids = graph_document.source.metadata.get('combined_chunk_ids')
+          
+          # LangExtract metadata formatı: 'chunk_ids' 
+          if chunk_ids is None:
+              chunk_ids = graph_document.source.metadata.get('chunk_ids')
+          
+          # Eğer ikisi de yoksa boş liste kullan
+          if chunk_ids is None:
+              logging.warning(f"GraphDocument metadata'sında ne 'combined_chunk_ids' ne de 'chunk_ids' bulunamadı: {graph_document.source.metadata}")
+              chunk_ids = []
+          
+          # Her chunk ID için mapping oluştur
+          for chunk_id in chunk_ids:
             lst_chunk_chunkId_document.append({'graph_doc':graph_document,'chunk_id':chunk_id})
                   
+  logging.info(f"✅ Created {len(lst_chunk_chunkId_document)} chunk-graphDocument pairs")
   return lst_chunk_chunkId_document  
                  
 def create_graph_database_connection(uri, userName, password, database):
@@ -139,7 +153,27 @@ def save_graphDocuments_in_neo4j(graph: Neo4jGraph, graph_document_list: List[Gr
    raise RuntimeError("Query execution failed after multiple retries due to deadlock.")
            
 def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDocument]):
-  for graph_document in graph_document_list:
+  logging.info(f"🔍 handle_backticks_nodes_relationship_id_type başlıyor - GraphDocument sayısı: {len(graph_document_list)}")
+  
+  for i, graph_document in enumerate(graph_document_list):
+    logging.info(f"🔍 GraphDocument #{i+1}: {len(graph_document.nodes)} node, {len(graph_document.relationships)} relationship")
+    
+    # Debug: Node'ları detaylı incele
+    for j, node in enumerate(graph_document.nodes):
+      logging.info(f"    Node #{j+1}: id='{node.id}' (strip='{node.id.strip()}'), type='{node.type}' (strip='{node.type.strip()}')")
+    
+    # Clean node id and types
+    cleaned_nodes = []
+    filtered_nodes = 0
+    for node in graph_document.nodes:
+      if node.type.strip() and node.id.strip():
+        node.type = node.type.replace('`', '')
+        cleaned_nodes.append(node)
+      else:
+        filtered_nodes += 1
+        logging.warning(f"⚠️ Node filtrelendi: id='{node.id}', type='{node.type}'")
+    
+    logging.info(f"    Node temizleme: {len(graph_document.nodes)} -> {len(cleaned_nodes)} (filtrelenen: {filtered_nodes})")
     # Clean node id and types
     cleaned_nodes = []
     for node in graph_document.nodes:
@@ -148,14 +182,26 @@ def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDo
         cleaned_nodes.append(node)
     # Clean relationship id types and source/target node id and types
     cleaned_relationships = []
+    filtered_relationships = 0
     for rel in graph_document.relationships:
       if rel.type.strip() and rel.source.id.strip() and rel.source.type.strip() and rel.target.id.strip() and rel.target.type.strip():
         rel.type = rel.type.replace('`', '')
         rel.source.type = rel.source.type.replace('`', '')
         rel.target.type = rel.target.type.replace('`', '')
         cleaned_relationships.append(rel)
+      else:
+        filtered_relationships += 1
+        logging.warning(f"⚠️ Relationship filtrelendi: type='{rel.type}', source='{rel.source.id}' ({rel.source.type}), target='{rel.target.id}' ({rel.target.type})")
+    
+    logging.info(f"    Relationship temizleme: {len(graph_document.relationships)} -> {len(cleaned_relationships)} (filtrelenen: {filtered_relationships})")
+    
     graph_document.relationships = cleaned_relationships
     graph_document.nodes = cleaned_nodes
+  
+  total_nodes = sum(len(doc.nodes) for doc in graph_document_list)
+  total_rels = sum(len(doc.relationships) for doc in graph_document_list)
+  logging.info(f"✅ Temizleme tamamlandı - Toplam: {total_nodes} node, {total_rels} relationship")
+  
   return graph_document_list
 
 def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=3, delay=2):
