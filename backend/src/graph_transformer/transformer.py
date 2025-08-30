@@ -44,7 +44,7 @@ def log_llm_output_incremental(raw_output, chunk_id=None, timestamp=None, docume
         # Log dosyası yolu
         log_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'logs')
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, 'llm_extractions.jsonl')
+        log_file = os.path.join(log_dir, document_filename or 'llm_extractions.jsonl')
         
         # Timestamp oluştur
         if not timestamp:
@@ -56,6 +56,22 @@ def log_llm_output_incremental(raw_output, chunk_id=None, timestamp=None, docume
             content = raw_output.content
         else:
             content = str(raw_output)
+        
+        # DEBUG: raw_output'u JSON olarak logla
+        try:
+            if hasattr(raw_output, '__dict__'):
+                raw_output_json = {
+                    'type': str(type(raw_output)),
+                    'content': content,
+                    'attributes': {k: str(v) for k, v in raw_output.__dict__.items()}
+                }
+                print(f"🔍 DEBUG - raw_output as JSON: {json.dumps(raw_output_json, indent=2, ensure_ascii=False)}")
+            else:
+                print(f"🔍 DEBUG - raw_output (no __dict__): {raw_output}")
+                print(f"🔍 DEBUG - raw_output type: {type(raw_output)}")
+                print(f"🔍 DEBUG - raw_output content: {content}")
+        except Exception as debug_e:
+            print(f"🔍 DEBUG - raw_output debug error: {debug_e}")
         
         try:
             # JSON parse et - backtick'li JSON'u temizle
