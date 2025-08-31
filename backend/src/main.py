@@ -18,6 +18,15 @@ from datetime import datetime
 import logging
 import os
 import time
+
+# OpenTelemetry logging setup - mevcut kodda değişiklik yapmadan tüm logları Loki'ye gönder
+try:
+    from src.otel_logging_setup import initialize_otel_logging
+    # OpenTelemetry'i başlat (environment variable'lar ile yapılandırılır)
+    initialize_otel_logging()
+    logging.info("🔧 OpenTelemetry logging aktif - tüm loglar Loki'ye gönderiliyor")
+except Exception as otel_error:
+    logging.warning(f"⚠️ OpenTelemetry başlatılamadı: {otel_error} - Normal logging devam ediyor")
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.document_sources.local_file import get_documents_from_file_by_path, generate_page_images_with_pymupdf
@@ -385,7 +394,8 @@ async def extract_graph_from_file_local_file(
     if not retry_condition:
         # Extract işlemi artık sadece mevcut chunk'larla çalışır
         # Pages'leri yüklemek gereksiz - chunk'lar upload sırasında oluşturulmuş olmalı
-        logging.info(f"🔄 Starting extract process for: {fileName} (chunks should exist from upload)")
+        logging.info(f"🔄 Graph extraction başlıyor for: {fileName} (chunks should exist from upload)")
+        logging.info(f"🎯 Extract mode: Local file processing")
         
         # Document node'undan page_images'ı al
         page_images = None
@@ -832,7 +842,7 @@ async def processing_source(
     # POLICY EXTRACTION - Eksik policy bilgilerini chunk içeriklerinden çıkar
     if total_chunks > 0:  # Chunk'lar varsa policy extraction yap
         try:
-            logging.info(f"🔍 Policy extraction başlıyor: {file_name}")
+            logging.info(f"🔍 Policy entity extraction başlıyor: {file_name}")
             from src.policy_extraction import extract_missing_policy_info
             
             start_policy_extraction = time.time()
@@ -840,13 +850,13 @@ async def processing_source(
             end_policy_extraction = time.time()
             elapsed_policy_extraction = end_policy_extraction - start_policy_extraction
             
-            logging.info(f"✅ Policy extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye")
-            logging.info(f"📋 Extraction sonucu: {policy_extraction_result}")
+            logging.info(f"✅ Policy entity extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye")
+            logging.info(f"📋 Entity extraction sonucu: {policy_extraction_result}")
             
             uri_latency["policy_extraction"] = f"{elapsed_policy_extraction:.2f}"
             
         except Exception as e:
-            logging.error(f"❌ Policy extraction hatası: {e}")
+            logging.error(f"❌ Policy entity extraction hatası: {e}")
             # Policy extraction başarısız olsa bile ana işleme devam et
             uri_latency["policy_extraction"] = "failed"
 
@@ -1227,6 +1237,7 @@ async def processing_chunks(
   # 2. ask LLM for sub-graph per chunk
   try:
     t1 = time.time()
+    logging.info(f"🚀 LLM Graph Transformer başlıyor - Entity extraction için LLM çağrılıyor")
     graph_documents = await get_graph_from_llm(
       model,
       chunkId_chunkDoc_list,
@@ -1240,10 +1251,10 @@ async def processing_chunks(
     )
     latency["entity_extraction"] = f"{time.time() - t1:.2f}"
     successful_steps += 1
-    logging.info(f"Step 2/7 başarılı: LLM'den entity'ler çıkarıldı")
+    logging.info(f"Step 2/7 başarılı: ✅ LLM entity extraction tamamlandı - {len(graph_documents)} graph document oluşturuldu")
   except Exception as e:
     latency["entity_extraction"] = "FAILED"
-    logging.error(f"Step 2/7 başarısız: LLM entity extraction hatası - {e}")
+    logging.error(f"Step 2/7 başarısız: ❌ LLM entity extraction hatası - {e}")
     # LLM hatası kritik - boş graph_documents ile devam et
     graph_documents = []
 
@@ -1251,44 +1262,47 @@ async def processing_chunks(
   try:
     cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
     successful_steps += 1
-    logging.info(f"Step 3/7 başarılı: Entity'ler normalize edildi")
+    logging.info(f"Step 3/7 başarılı: ✅ Entity'ler normalize edildi - {len(cleaned)} temizlenmiş graph document")
   except Exception as e:
-    logging.error(f"Step 3/7 başarısız: Entity normalization hatası - {e}")
+    logging.error(f"Step 3/7 başarısız: ❌ Entity normalization hatası - {e}")
     cleaned = []
 
   # 4. save nodes & rels into Neo4j
   try:
     t2 = time.time()
+    logging.info(f"🗃️ Entity'ler Neo4j'ye kaydediliyor...")
     save_graphDocuments_in_neo4j(graph, cleaned)
     latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
     successful_steps += 1
-    logging.info(f"Step 4/7 başarılı: Entity'ler Neo4j'ye kaydedildi")
+    logging.info(f"Step 4/7 başarılı: ✅ Entity'ler Neo4j'ye kaydedildi")
   except Exception as e:
     latency["save_graphDocuments"] = "FAILED"
-    logging.error(f"Step 4/7 başarısız: Neo4j'ye kaydetme hatası - {e}")
+    logging.error(f"Step 4/7 başarısız: ❌ Neo4j'ye kaydetme hatası - {e}")
 
   # 5. relate each chunk to its extracted entities (technical tracking)
   try:
     pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
     t3 = time.time()
+    logging.info(f"🔗 Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuluyor...")
     merge_relationship_between_chunk_and_entites(graph, pairs)
     latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
     successful_steps += 1
-    logging.info(f"Step 5/7 başarılı: Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuldu (technical tracking)")
+    logging.info(f"Step 5/7 başarılı: ✅ Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuldu (technical tracking)")
   except Exception as e:
     latency["chunk_entity_rel"] = "FAILED"
-    logging.error(f"Step 5/7 başarısız: Chunk-Entity EXTRACTED_FROM ilişki hatası - {e}")
+    logging.error(f"Step 5/7 başarısız: ❌ Chunk-Entity EXTRACTED_FROM ilişki hatası - {e}")
 
   # 6. Create Policy-Entity relationships (business logic)
   try:
     t4 = time.time()
+    logging.info(f"🏢 Policy-Entity HAS_ENTITY ilişkileri oluşturuluyor...")
     create_policy_entity_relationships(graph, file_name)
     latency["policy_entity_rel"] = f"{time.time() - t4:.2f}"
     successful_steps += 1
-    logging.info(f"Step 6/7 başarılı: Policy-Entity HAS_ENTITY ilişkileri oluşturuldu (business logic)")
+    logging.info(f"Step 6/7 başarılı: ✅ Policy-Entity HAS_ENTITY ilişkileri oluşturuldu (business logic)")
   except Exception as e:
     latency["policy_entity_rel"] = "FAILED"
-    logging.error(f"Step 6/7 başarısız: Policy-Entity HAS_ENTITY ilişki hatası - {e}")
+    logging.error(f"Step 6/7 başarısız: ❌ Policy-Entity HAS_ENTITY ilişki hatası - {e}")
 
   # 6.5. Merge duplicate nodes with upload-time nodes
   try:

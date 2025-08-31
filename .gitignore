@@ -181,3 +181,9 @@ dinkal
 *.out
 temp
 output
+otelcol_0.89.0_darwin_amd64.tar.gz
+.gitignore
+otelcol-contrib_0.133.0_darwin_amd64.tar.gz
+otelcol-contrib
+backend/logs/llm_extractions.jsonl
+backend/logs/simple-logs.jsonl
