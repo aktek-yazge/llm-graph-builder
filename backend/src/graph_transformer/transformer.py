@@ -617,12 +617,24 @@ class UnstructuredRelation(BaseModel):
     )
 
 
+class SSTNode(BaseModel):
+    statement: str = Field(description="Minimal, atomic statement")
+    type: str = Field(description="Node type: PolicyInfo, CustomerInfo, CoverageInfo, PaymentInfo, AssetInfo, ProviderInfo, TemporalInfo")
+
 class SSTEdge(BaseModel):
-    source: str = Field(description="Source statement (must match one of nodes)")
+    source: str = Field(description="Source statement (must match one of node statements)")
     relation: str = Field(description="Relation between statements")
-    target: str = Field(description="Target statement (must match one of nodes)")
+    target: str = Field(description="Target statement (must match one of node statements)")
 
 
+# Enhanced SST Graph with typed nodes
+class EnhancedSSTGraph(BaseModel):
+    nodes: List[SSTNode] = Field(description="List of typed statements for better semantic organization")
+    edges: Optional[List[SSTEdge]] = Field(
+        default=None, description="List of edges connecting statements"
+    )
+
+# Backward compatibility - keep original for existing code
 class SSTGraph(BaseModel):
     nodes: List[str] = Field(description="List of minimal, atomic statements")
     edges: Optional[List[SSTEdge]] = Field(
@@ -818,13 +830,235 @@ def create_unstructured_prompt(
     return chat_prompt
 
 
+def create_insurance_sst_prompt(
+    node_labels: Optional[List[str]] = None,
+    rel_types: Optional[List[str]] = None,
+    additional_instructions: Optional[str] = "",
+) -> ChatPromptTemplate:
+    """
+    Insurance domain specific SST prompt: creates insurance-aware statements
+    for better semantic search and graph navigation in insurance policy analysis.
+    """
+    allowed_relations = (
+        rel_types if rel_types else ["LEADS_TO", "CONTAINS", "EXPRESSES", "NEAR_TO"]
+    )
+    
+    system_parts = [
+        "# Insurance Domain SST Knowledge Graph Expert",
+        "You are an expert in extracting insurance policy information using the Semantic Spacetime (SST) model.",
+        "Your task is to create self-contained, factual statements that provide semantic clues for policy comparison and analysis.",
+        "",
+        "## SST Insurance Node Types:",
+        "",
+        "### PolicyInfo:",
+        "- Policy identifiers: 'Policy N-206968954-0-0 is a Yacht Insurance policy'",
+        "- Policy attributes: 'Policy type is Marine Insurance with comprehensive coverage'",
+        "- Coverage scope: 'Policy includes Yacht Hull Coverage with sum insured of 760,000 EUR'",
+        "",
+        "### CustomerInfo:",
+        "- Policyholder: 'Ahmet Cemal Dördüncü is the policyholder'",
+        "- Contact information: 'Policyholder address is BARBAROS BULVARI 9 BALMUMCU İSTANBUL'",
+        "- Tax numbers: 'Policyholder tax number is 9370017457'",
+        "",
+        "### CoverageInfo:",
+        "- Coverage types: 'Policy includes War/Strike Coverage with sum insured of 760,000 EUR'",
+        "- Deductibles: 'Deductible rate is 0.5 percent of claim amount'", 
+        "- Limits and exclusions: 'Personal Belongings Coverage limited to 20,000 EUR'",
+        "",
+        "### PaymentInfo:",
+        "- Premium amounts: 'Total premium amount is 1900 EUR annually'",
+        "- Payment schedules: 'First installment of 475 EUR is due on 01/07/2020'",
+        "- Payment methods: 'Premium paid via bank transfer'",
+        "",
+        "### AssetInfo:",
+        "- Insured items: 'KIRAZ boat is the insured vessel built in 2019'",
+        "- Asset specifications: 'Yacht built in 2019 with flag TC'",
+        "- Usage details: 'Vessel usage purpose is private recreational boating'",
+        "",
+        "### ProviderInfo:",
+        "- Insurance companies: 'DOGA SIGORTA is the insurance provider'",
+        "- Provider details: 'Insurance provider tax number is 3130573160'",
+        "- Contact information: 'Provider address is BOSTANCI YAZMACI TAHİR SOK İSTANBUL'",
+        "",
+        "### TemporalInfo:",
+        "- Policy periods: 'Policy coverage starts on 01/07/2020'",
+        "- Due dates: 'Policy renewal occurs on 01/07/2021'",
+        "- Process timing: 'Claim processing takes 15 business days'",
+        "",
+        "## SST Relationship Mapping:",
+        f"- LEADS_TO: Temporal sequences, cause-effect, process steps",
+        f"- CONTAINS: Hierarchical inclusion, policy components, coverage items", 
+        f"- EXPRESSES: Permanent attributes, characteristics, properties",
+        f"- NEAR_TO: Similarity judgments, comparable terms, equivalent concepts",
+        f"- STRICT CONSTRAINT: Only use these relations: {allowed_relations}",
+        "",
+        "## Statement Quality Guidelines:",
+        "1. CONTEXT RICH: Include identifying information (names, dates, amounts)",
+        "2. SEARCH OPTIMIZED: Use terms that help semantic search (policy type, customer name, coverage)",
+        "3. AGENT FRIENDLY: Provide clues for graph navigation (policy numbers, dates, locations)",
+        "4. COMPARISON READY: Enable policy comparison (similar terms, amounts, coverage)",
+        "",
+        "## Output Requirements:",
+        "- Each statement must be self-contained and factual",
+        "- Include relevant identifiers for semantic search",
+        "- Maintain insurance domain terminology",
+        "- Connect related statements with appropriate SST relations",
+        "",
+        "Output Schema:",
+        '{\n  "nodes": [\n    {"statement": "Policy N-206968954-0-0 is a Yacht Insurance policy", "type": "PolicyInfo"},\n    {"statement": "Ahmet Cemal Dördüncü is the policyholder", "type": "CustomerInfo"},\n    {"statement": "Total premium amount is 1900 EUR annually", "type": "PaymentInfo"}\n  ],\n  "edges": [\n    {"source": "Policy N-206968954-0-0 is a Yacht Insurance policy", "relation": "LEADS_TO", "target": "Total premium amount is 1900 EUR annually"}\n  ]\n}',
+    ]
+    
+    # Add domain guidance
+    if node_labels:
+        system_parts.append(
+            f"\n## Domain Context Guidance:\nIncorporate these insurance concepts in statements when relevant: {', '.join(node_labels)}"
+        )
+
+    system_message = SystemMessage(content="\n".join(system_parts))
+
+    # Human prompt with insurance focus
+    human_parts = [
+        additional_instructions,
+        "",
+        "## Task: Extract Insurance Policy Information",
+        "Transform the following insurance document text into SST graph format.",
+        "Focus on creating statements that help answer questions like:",
+        "- Policy terms and conditions",
+        "- Payment schedules and amounts", 
+        "- Coverage details and limitations",
+        "- Customer and asset information",
+        "- Temporal relationships (start dates, due dates, expiry)",
+        "",
+        "Use ONLY the allowed SST relations for connecting statements.",
+        "Text: {input}",
+    ]
+    human_prompt = PromptTemplate(
+        template="\n".join([p for p in human_parts if p]),
+        input_variables=["input"],
+    )
+    human_message_prompt = HumanMessagePromptTemplate(prompt=human_prompt)
+    return ChatPromptTemplate.from_messages([system_message, human_message_prompt])
+
+
+def create_turkish_insurance_sst_prompt(
+    node_labels: Optional[List[str]] = None,
+    rel_types: Optional[List[str]] = None,
+    additional_instructions: Optional[str] = "",
+) -> ChatPromptTemplate:
+    """
+    Türkçe sigorta domain'i için SST prompt: anlamlı ifadeler oluşturur
+    ve sigorta poliçesi analizinde semantik arama ve graph navigasyon için optimizedir.
+    """
+    allowed_relations = (
+        rel_types if rel_types else ["LEADS_TO", "CONTAINS", "EXPRESSES", "NEAR_TO"]
+    )
+    
+    system_parts = [
+        "# Sigorta Domain SST Bilgi Grafiği Uzmanı",
+        "Semantic Spacetime (SST) modeli kullanarak sigorta poliçesi bilgilerini çıkaran bir uzmansınız.",
+        "Göreviniz poliçe karşılaştırması ve analizi için semantik ipuçları sağlayan kendi kendine yeten, olgusal ifadeler oluşturmaktır.",
+        "TÜM çıktılarınız TÜRKÇE olacaktır. İngilizce terim kullanmayınız.",
+        "",
+        "## SST Sigorta Node Tipleri:",
+        "",
+        "### PolicyInfo:",
+        "- Poliçe tanımlayıcıları: 'N-123456789-0-0 numaralı poliçe Kasko Sigortası poliçesidir'",
+        "- Poliçe özellikleri: 'Poliçe türü kapsamlı kapsama sahip Konut Sigortasıdır'",
+        "- Kapsam kapsamı: 'Poliçe 500,000 TL sigorta bedeli ile Yangın Teminatı içerir'",
+        "",
+        "### CustomerInfo:",
+        "- Poliçe sahibi: 'Ayşe Yılmaz poliçe sahibidir'",
+        "- İletişim bilgileri: 'Poliçe sahibinin adresi Atatürk Caddesi No:15 Ankara'",
+        "- Vergi numaraları: 'Poliçe sahibinin vergi numarası 12345678901'",
+        "",
+        "### CoverageInfo:",
+        "- Teminat türleri: 'Poliçe 250,000 TL sigorta bedeli ile Hırsızlık Teminatı içerir'",
+        "- Muafiyetler: 'Muafiyet oranı hasar tutarının yüzde 2.5'u'",
+        "- Limitler ve istisnalar: 'Kişisel Eşya Teminatı 15,000 TL ile sınırlı'",
+        "",
+        "### PaymentInfo:",
+        "- Prim tutarları: 'Toplam prim tutarı yıllık 2,400 TL'",
+        "- Ödeme planları: 'İlk taksit 600 TL olup 15/03/2024 tarihinde ödenecek'",
+        "- Ödeme yöntemleri: 'Prim banka havalesi ile ödenmiştir'",
+        "",
+        "### AssetInfo:",
+        "- Sigortalı kalemler: 'Mercedes A180 model araç sigortalı araçtır'",
+        "- Varlık özellikleri: 'Araç 2020 model olup plakası 34ABC123'",
+        "- Kullanım detayları: 'Araç kullanım amacı şahsi ve ticari'",
+        "",
+        "### ProviderInfo:",
+        "- Sigorta şirketleri: 'Anadolu Sigorta sigorta sağlayıcısıdır'",
+        "- Sağlayıcı detayları: 'Sigorta sağlayıcısının vergi numarası 9876543210'",
+        "- İletişim bilgileri: 'Sağlayıcı adresi Maslak Mahallesi Büyükdere Caddesi İstanbul'",
+        "",
+        "### TemporalInfo:",
+        "- Poliçe dönemleri: 'Poliçe kapsamı 01/01/2024 tarihinde başlar'",
+        "- Vade tarihleri: 'Poliçe yenileme tarihi 01/01/2025'",
+        "- Süreç zamanlaması: 'Hasar işleme süresi 10 iş günü'",
+        "",
+        "## SST İlişki Haritalama:",
+        f"- LEADS_TO: Zamansal diziler, neden-sonuç, süreç adımları",
+        f"- CONTAINS: Hiyerarşik dahil etme, poliçe bileşenleri, kapsam kalemleri", 
+        f"- EXPRESSES: Kalıcı özellikler, karakteristikler, özellikler",
+        f"- NEAR_TO: Benzerlik değerlendirmeleri, karşılaştırılabilir terimler, eşdeğer kavramlar",
+        f"- KATI KISIT: Sadece şu ilişkileri kullanın: {allowed_relations}",
+        "",
+        "## İfade Kalite Kılavuzları:",
+        "1. BAĞLAM ZENGİNİ: Tanımlayıcı bilgiler dahil edin (isimler, tarihler, tutarlar)",
+        "2. ARAMA OPTİMİZE: Semantik aramayı destekleyen terimler kullanın (poliçe türü, müşteri adı, kapsam)",
+        "3. AGENT DOSTU: Graph navigasyonu için ipuçları sağlayın (poliçe numaraları, tarihler, konumlar)",
+        "4. KARŞILAŞTIRMA HAZIR: Poliçe karşılaştırması sağlayın (benzer terimler, tutarlar, kapsam)",
+        "",
+        "## Çıktı Gereksinimleri:",
+        "- Her ifade kendi kendine yeten ve olgusal olmalı",
+        "- Semantik arama için ilgili tanımlayıcıları dahil edin",
+        "- Sigorta domain terminolojisini koruyun",
+        "- İlgili ifadeleri uygun SST ilişkileri ile bağlayın",
+        "- TÜM çıktılar TÜRKÇE olmalıdır",
+        "",
+        "Çıktı Şeması:",
+        '{\n  "nodes": [\n    {"statement": "N-123456789-0-0 numaralı poliçe Kasko Sigortası poliçesidir", "type": "PolicyInfo"},\n    {"statement": "Mehmet Özkan poliçe sahibidir", "type": "CustomerInfo"},\n    {"statement": "Toplam prim tutarı yıllık 3,600 TL", "type": "PaymentInfo"}\n  ],\n  "edges": [\n    {"source": "N-123456789-0-0 numaralı poliçe Kasko Sigortası poliçesidir", "relation": "LEADS_TO", "target": "Toplam prim tutarı yıllık 3,600 TL"}\n  ]\n}',
+    ]
+    
+    # Add domain guidance
+    if node_labels:
+        system_parts.append(
+            f"\n## Domain Bağlam Kılavuzu:\nİlgili olduğunda bu sigorta kavramlarını ifadelere dahil edin: {', '.join(node_labels)}"
+        )
+
+    system_message = SystemMessage(content="\n".join(system_parts))
+
+    # Human prompt with insurance focus
+    human_parts = [
+        additional_instructions,
+        "",
+        "## Görev: Sigorta Poliçesi Bilgilerini Çıkar",
+        "Aşağıdaki sigorta belgesi metnini SST graph formatına dönüştürün.",
+        "Şu gibi soruları yanıtlamaya yardımcı olan ifadeler oluşturmaya odaklanın:",
+        "- Poliçe şartları ve koşulları",
+        "- Ödeme planları ve tutarları", 
+        "- Kapsam detayları ve sınırlamaları",
+        "- Müşteri ve varlık bilgileri",
+        "- Zamansal ilişkiler (başlangıç tarihleri, vade tarihleri, bitiş)",
+        "",
+        "İfadeleri bağlamak için SADECE izin verilen SST ilişkilerini kullanın.",
+        "Metin: {input}",
+    ]
+    human_prompt = PromptTemplate(
+        template="\n".join([p for p in human_parts if p]),
+        input_variables=["input"],
+    )
+    human_message_prompt = HumanMessagePromptTemplate(prompt=human_prompt)
+    return ChatPromptTemplate.from_messages([system_message, human_message_prompt])
+
+
 def create_sst_prompt(
     node_labels: Optional[List[str]] = None,
     rel_types: Optional[List[str]] = None,
     additional_instructions: Optional[str] = "",
 ) -> ChatPromptTemplate:
     """
-    SST mode prompt: nodes are minimal statements, edges connect statements.
+    Generic SST mode prompt: nodes are minimal statements, edges connect statements.
     Relations are strictly restricted to provided rel_types (DB), if given.
     """
     allowed_relations = (
@@ -1253,11 +1487,14 @@ def _convert_sst_to_graph_document(
     Nodes are statement strings mapped to Node(type=SST_NODE_TYPE),
     edges connect statements using the given relation.
     """
+    print(f"🔧 DEBUG _convert_sst_to_graph_document started")
     try:
         if raw_schema.get("parsed"):
-            parsed: SSTGraph = raw_schema["parsed"]  # type: ignore
-            stmt_nodes = list(dict.fromkeys(parsed.nodes or []))  # de-dup, keep order
+            parsed: EnhancedSSTGraph = raw_schema["parsed"]  # type: ignore
+            # Extract statement strings and types from enhanced nodes
+            stmt_nodes_data = [(n.statement, n.type) for n in (parsed.nodes or []) if hasattr(n, 'statement')]
             edges = parsed.edges or []
+            print(f"🔧 DEBUG parsed mode (enhanced): nodes={len(stmt_nodes_data)}, edges={len(edges)}")
         else:
             # Fallback: try to parse from provider specific raw
             content = None
@@ -1272,25 +1509,46 @@ def _convert_sst_to_graph_document(
                 return ([], [])
             import json as _json
             payload = _json.loads(content)
-            stmt_nodes = list(dict.fromkeys(payload.get("nodes", [])))
+            
+            # Handle both enhanced and legacy format
+            if payload.get("nodes") and isinstance(payload["nodes"][0], dict):
+                # Enhanced format with typed nodes
+                stmt_nodes_data = [(n["statement"], n["type"]) for n in payload.get("nodes", []) if "statement" in n]
+            else:
+                # Legacy format with simple strings
+                stmt_nodes_data = [(s, SST_NODE_TYPE) for s in payload.get("nodes", [])]
+            
             edges = payload.get("edges", [])
-    except Exception:
+            print(f"🔧 DEBUG fallback mode: nodes={len(stmt_nodes_data)}, edges={len(edges)}")
+    except Exception as e:
+        print(f"❌ DEBUG _convert_sst_to_graph_document exception: {e}")
         return ([], [])
 
     node_map: Dict[str, Node] = {}
     nodes: List[Node] = []
-    for s in stmt_nodes:
-        if isinstance(s, str) and s.strip():
-            n = Node(id=s.strip(), type=SST_NODE_TYPE)
-            node_map[s.strip()] = n
+    # Create nodes with proper types
+    for stmt, node_type in stmt_nodes_data:
+        if isinstance(stmt, str) and stmt.strip():
+            n = Node(id=stmt.strip(), type=node_type)
+            node_map[stmt.strip()] = n
             nodes.append(n)
 
+    print(f"🔧 DEBUG before relationship processing: {len(edges)} edges")
     relationships: List[Relationship] = []
-    for e in edges:
+    for i, e in enumerate(edges):
         try:
-            src = e.source if isinstance(e, SSTEdge) else e.get("source")
-            rel = e.relation if isinstance(e, SSTEdge) else e.get("relation")
-            tgt = e.target if isinstance(e, SSTEdge) else e.get("target")
+            # Check if edge has direct attributes (Pydantic model)
+            if hasattr(e, 'source'):
+                src = e.source
+                rel = e.relation 
+                tgt = e.target
+            elif isinstance(e, dict):
+                src = e.get("source")
+                rel = e.get("relation")
+                tgt = e.get("target")
+            else:
+                continue
+                
             if not (src and rel and tgt):
                 continue
             # Ensure nodes exist
@@ -1305,9 +1563,10 @@ def _convert_sst_to_graph_document(
                     source=node_map[src], target=node_map[tgt], type=str(rel)
                 )
             )
-        except Exception:
+        except Exception as ex:
             continue
 
+    print(f"🔧 DEBUG _convert_sst_to_graph_document finished: nodes={len(nodes)}, relationships={len(relationships)}")
     return nodes, relationships
 
 
@@ -1438,7 +1697,7 @@ class LLMGraphTransformer:
         allowed_nodes: List[str] = [],
         allowed_relationships: Union[List[str], List[Tuple[str, str, str]]] = [],
         prompt: Optional[ChatPromptTemplate] = None,
-        strict_mode: bool = True,
+        strict_mode: bool = False,  # STRICT FILTER İPTAL EDİLDİ
         node_properties: Union[bool, List[str]] = False,
         relationship_properties: Union[bool, List[str]] = False,
         ignore_tool_usage: bool = False,
@@ -1509,7 +1768,8 @@ class LLMGraphTransformer:
             # Prompt seçimi
             if not prompt:
                 if self.use_sst_mode:
-                    prompt = create_sst_prompt(
+                    # Insurance domain için özel Türkçe SST prompt kullan
+                    prompt = create_turkish_insurance_sst_prompt(
                         node_labels=allowed_nodes,
                         rel_types=(allowed_relationships if isinstance(next(iter(allowed_relationships), None), str) else [r for r in []]),
                         additional_instructions=additional_instructions,
@@ -1540,11 +1800,18 @@ class LLMGraphTransformer:
             except AttributeError:
                 llm_type = None
             if self.use_sst_mode:
-                # Structured SST schema
-                # Build relation field with enum when possible
+                # Enhanced SST schema with typed nodes
+                class _SSTNodeModel(BaseModel):
+                    statement: str = Field(
+                        ..., description="Minimal, atomic statement"
+                    )
+                    type: str = Field(
+                        ..., description="Node type: PolicyInfo, CustomerInfo, CoverageInfo, PaymentInfo, AssetInfo, ProviderInfo, TemporalInfo"
+                    )
+
                 class _SSTEdgeModel(BaseModel):
                     source: str = Field(
-                        ..., description="Source statement (must match one of nodes)"
+                        ..., description="Source statement (must match one of node statements)"
                     )
                     relation: str = optional_enum_field(
                         list(allowed_relationships) if isinstance(next(iter(allowed_relationships), None), str) else None,
@@ -1553,12 +1820,12 @@ class LLMGraphTransformer:
                         llm_type=llm_type,
                     )
                     target: str = Field(
-                        ..., description="Target statement (must match one of nodes)"
+                        ..., description="Target statement (must match one of node statements)"
                     )
 
                 class _SSTGraphModel(BaseModel):
-                    nodes: List[str] = Field(
-                        ..., description="List of minimal, atomic statements"
+                    nodes: List[_SSTNodeModel] = Field(
+                        ..., description="List of typed statements for better semantic organization"
                     )
                     edges: Optional[List[_SSTEdgeModel]] = Field(
                         default=None, description="List of edges between statements"
@@ -1568,7 +1835,8 @@ class LLMGraphTransformer:
                     _SSTGraphModel, include_raw=True
                 )
                 if not prompt:
-                    prompt = create_sst_prompt(
+                    # Insurance domain için özel Türkçe SST prompt kullan  
+                    prompt = create_turkish_insurance_sst_prompt(
                         node_labels=allowed_nodes,
                         rel_types=(allowed_relationships if isinstance(next(iter(allowed_relationships), None), str) else None),
                         additional_instructions=additional_instructions,
@@ -1745,13 +2013,13 @@ class LLMGraphTransformer:
             logging.info(f"📥 LLM entity extraction raw sonuç başlangıcı: {str(raw_schema)[:200]}...")
         
         # 🟢 INCREMENTAL JSON LOGGING - LLM çıktısını kaydet
-        log_llm_output_incremental(
-            raw_schema, 
-            chunk_id, 
-            datetime.now().isoformat(),
-            document_filename,
-            self.enable_llm_logging
-        )
+        # log_llm_output_incremental(
+        #     raw_schema, 
+        #     chunk_id, 
+        #     datetime.now().isoformat(),
+        #     document_filename,
+        #     self.enable_llm_logging
+        # )
         
         if self._function_call:
             raw_schema = cast(Dict[Any, Any], raw_schema)
@@ -1805,6 +2073,7 @@ class LLMGraphTransformer:
 
         # Apply filtering based on allowed nodes and relationships
         # Esnek node filtering, katı relationship filtering
+        logging.info(f"🔍 DEBUG: strict_mode={self.strict_mode}, allowed_nodes={len(self.allowed_nodes) if self.allowed_nodes else 0}, allowed_relationships={len(self.allowed_relationships) if self.allowed_relationships else 0}")
         if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
             logging.info("🚧 LLM entity extraction filtreleme uygulanıyor...")
             

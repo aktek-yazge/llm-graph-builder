@@ -214,6 +214,7 @@ async def get_graph_document_list(
             # relationship_properties=relationship_properties,
             # allowed_nodes=allowedNodes,
             # allowed_relationships=allowedRelationship,
+            use_sst_mode=True,  # SST mode
             enable_llm_logging=True,
             ignore_tool_usage=False, 
             use_simple_json_mode=True,  # Simple JSON + Türkçe mod
