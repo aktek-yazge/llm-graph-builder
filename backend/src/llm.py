@@ -207,7 +207,7 @@ async def get_graph_document_list(
         TOOL_SUPPORTED_MODELS = {"qwen3", "deepseek"} 
         model_name = get_llm_model_name(llm)
         ignore_tool_usage = not any(pattern in model_name for pattern in TOOL_SUPPORTED_MODELS)
-        logging.info(f"Keeping ignore tool usage parameter as {ignore_tool_usage}")
+        logging.info(f"🚀 LLM entity extraction için model hazırlığı - ignore_tool_usage: {ignore_tool_usage}")
         llm_transformer = LLMGraphTransformer(
             llm=llm,
             # node_properties=node_properties,
@@ -222,7 +222,7 @@ async def get_graph_document_list(
     
     # Token kullanımı izleme için
     total_chunks = len(combined_chunk_document_list)
-    logging.info(f"📊 Graph extraction başlıyor - Toplam chunk sayısı: {total_chunks}")
+    logging.info(f"📊 LLM Graph Transformer başlıyor - Toplam chunk sayısı: {total_chunks}")
     
     start_time = time.time()
     if isinstance(llm,DiffbotGraphTransformer):
@@ -236,15 +236,15 @@ async def get_graph_document_list(
     total_nodes = sum(len(doc.nodes) for doc in graph_document_list)
     total_relationships = sum(len(doc.relationships) for doc in graph_document_list)
     
-    logging.info(f"📊 Graph extraction tamamlandı:")
+    logging.info(f"✅ LLM entity extraction tamamlandı:")
     logging.info(f"  ⏱️ Toplam süre: {total_processing_time:.2f} saniye")
     logging.info(f"  📄 İşlenen chunk sayısı: {total_chunks}")
-    logging.info(f"  🎯 Çıkarılan node sayısı: {total_nodes}")
-    logging.info(f"  🔗 Çıkarılan relationship sayısı: {total_relationships}")
+    logging.info(f"  🎯 Entity'ler çıkarıldı: {total_nodes}")
+    logging.info(f"  🔗 Relationship'ler çıkarıldı: {total_relationships}")
     
     if total_chunks > 0:
         logging.info(f"  ⚡ Chunk başına ortalama süre: {total_processing_time/total_chunks:.2f} saniye")
-        logging.info(f"  📈 Node/chunk oranı: {total_nodes/total_chunks:.1f}")
+        logging.info(f"  📈 Entity/chunk oranı: {total_nodes/total_chunks:.1f}")
         logging.info(f"  📈 Relationship/chunk oranı: {total_relationships/total_chunks:.1f}")
     else:
         logging.info(f"  ⚠️ Hiç chunk işlenemedi - sayfa filtreleme sonucu tüm chunk'lar elendi")
@@ -551,7 +551,7 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
            )
        
        # Normal LLM processing
-       logging.info(f"🔄 Normal LLM processing modunda çalışacak")
+       logging.info(f"� LLMGraphTransformer normal processing modu başlıyor")
        # Giriş parametrelerini logla
        logging.info(f"=== get_graph_from_llm BAŞLADI ===")
        logging.info(f"Model: {model}")
@@ -560,8 +560,8 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        logging.info(f"Additional instructions var mı: {additional_instructions is not None}")
        
        # Raw giriş değerlerini logla
-       logging.info(f"RAW allowedNodes (tip: {type(allowedNodes)}): '{allowedNodes}'")
-       logging.info(f"RAW allowedRelationship (tip: {type(allowedRelationship)}): '{allowedRelationship}'")
+       logging.info(f"🎯 allowedNodes işleme başlıyor (tip: {type(allowedNodes)}): '{allowedNodes}'")
+       logging.info(f"🔗 allowedRelationship işleme başlıyor (tip: {type(allowedRelationship)}): '{allowedRelationship}'")
        
        # Uzunluk kontrolü
        if allowedNodes:

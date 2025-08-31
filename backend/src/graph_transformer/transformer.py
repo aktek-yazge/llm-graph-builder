@@ -24,6 +24,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field, create_model
 
 DEFAULT_NODE_TYPE = "Node"
+SST_NODE_TYPE = "Statement"
 
 def log_llm_output_incremental(raw_output, chunk_id=None, timestamp=None, document_filename=None, enable_logging=True):
     """
@@ -616,6 +617,19 @@ class UnstructuredRelation(BaseModel):
     )
 
 
+class SSTEdge(BaseModel):
+    source: str = Field(description="Source statement (must match one of nodes)")
+    relation: str = Field(description="Relation between statements")
+    target: str = Field(description="Target statement (must match one of nodes)")
+
+
+class SSTGraph(BaseModel):
+    nodes: List[str] = Field(description="List of minimal, atomic statements")
+    edges: Optional[List[SSTEdge]] = Field(
+        default=None, description="List of edges connecting statements"
+    )
+
+
 def create_json_turkish_prompt(
     node_labels: Optional[List[str]] = None,
     rel_types: Optional[Union[List[str], List[Tuple[str, str, str]]]] = None,
@@ -802,6 +816,54 @@ def create_unstructured_prompt(
         [system_message, human_message_prompt]
     )
     return chat_prompt
+
+
+def create_sst_prompt(
+    node_labels: Optional[List[str]] = None,
+    rel_types: Optional[List[str]] = None,
+    additional_instructions: Optional[str] = "",
+) -> ChatPromptTemplate:
+    """
+    SST mode prompt: nodes are minimal statements, edges connect statements.
+    Relations are strictly restricted to provided rel_types (DB), if given.
+    """
+    allowed_relations = (
+        rel_types if rel_types else ["SIMILARITY", "LEADS_TO", "CONTAINS", "PROPERTY"]
+    )
+    system_parts = [
+        "You are an expert in knowledge representation using the Semantic Spacetime (SST) model.",
+        "Your task is to transform the given text into a knowledge graph where nodes are complete minimal statements (e.g., 'X buys Y'), not just isolated entities.",
+        "Arrows (edges) connect these statement-nodes to show how statements relate in context.",
+        "\nRules:",
+        "1) Each node must be a minimal, self-contained, factual statement.",
+        "2) Use edges only between statements with higher-level relations.",
+        f"   Allowed relations (STRICT): {allowed_relations}",
+        "3) Edges NEVER replace the content of a statement node.",
+        "4) Output must be JSON with two fields: nodes and edges.",
+        "\nOutput Schema:",
+        '{\n  "nodes": ["Statement1", "Statement2", ...],\n  "edges": [\n    {"source": "Statement1", "relation": "LEADS_TO", "target": "Statement2"}\n  ]\n}',
+    ]
+    # Node label guidance: prefer domain terms
+    if node_labels:
+        system_parts.append(
+            "Guidance: Prefer using these domain terms within statements when applicable: "
+            + ", ".join(node_labels)
+        )
+
+    system_message = SystemMessage(content="\n".join(system_parts))
+
+    # Human prompt
+    human_parts = [
+        additional_instructions,
+        "Transform the following text to the SST graph JSON strictly using only the allowed relations.",
+        "Text: {input}",
+    ]
+    human_prompt = PromptTemplate(
+        template="\n".join([p for p in human_parts if p]),
+        input_variables=["input"],
+    )
+    human_message_prompt = HumanMessagePromptTemplate(prompt=human_prompt)
+    return ChatPromptTemplate.from_messages([system_message, human_message_prompt])
 
 
 def create_simple_model(
@@ -1183,6 +1245,108 @@ def _convert_to_graph_document(
     return _format_nodes(nodes, allowed_nodes), _format_relationships(relationships, allowed_nodes)
 
 
+def _convert_sst_to_graph_document(
+    raw_schema: Dict[Any, Any]
+) -> Tuple[List[Node], List[Relationship]]:
+    """
+    Convert SST structured raw output to GraphDocument nodes/relationships.
+    Nodes are statement strings mapped to Node(type=SST_NODE_TYPE),
+    edges connect statements using the given relation.
+    """
+    try:
+        if raw_schema.get("parsed"):
+            parsed: SSTGraph = raw_schema["parsed"]  # type: ignore
+            stmt_nodes = list(dict.fromkeys(parsed.nodes or []))  # de-dup, keep order
+            edges = parsed.edges or []
+        else:
+            # Fallback: try to parse from provider specific raw
+            content = None
+            try:
+                content = raw_schema["raw"].content
+            except Exception:
+                try:
+                    content = str(raw_schema["raw"])
+                except Exception:
+                    content = None
+            if not content:
+                return ([], [])
+            import json as _json
+            payload = _json.loads(content)
+            stmt_nodes = list(dict.fromkeys(payload.get("nodes", [])))
+            edges = payload.get("edges", [])
+    except Exception:
+        return ([], [])
+
+    node_map: Dict[str, Node] = {}
+    nodes: List[Node] = []
+    for s in stmt_nodes:
+        if isinstance(s, str) and s.strip():
+            n = Node(id=s.strip(), type=SST_NODE_TYPE)
+            node_map[s.strip()] = n
+            nodes.append(n)
+
+    relationships: List[Relationship] = []
+    for e in edges:
+        try:
+            src = e.source if isinstance(e, SSTEdge) else e.get("source")
+            rel = e.relation if isinstance(e, SSTEdge) else e.get("relation")
+            tgt = e.target if isinstance(e, SSTEdge) else e.get("target")
+            if not (src and rel and tgt):
+                continue
+            # Ensure nodes exist
+            if src not in node_map:
+                node_map[src] = Node(id=src, type=SST_NODE_TYPE)
+                nodes.append(node_map[src])
+            if tgt not in node_map:
+                node_map[tgt] = Node(id=tgt, type=SST_NODE_TYPE)
+                nodes.append(node_map[tgt])
+            relationships.append(
+                Relationship(
+                    source=node_map[src], target=node_map[tgt], type=str(rel)
+                )
+            )
+        except Exception:
+            continue
+
+    return nodes, relationships
+
+
+def _parse_sst_unstructured(payload: Any) -> Tuple[List[Node], List[Relationship]]:
+    """Parse unstructured SST JSON payload {nodes: [...], edges: [...]}"""
+    try:
+        stmt_nodes = list(dict.fromkeys(payload.get("nodes", [])))
+        edges = payload.get("edges", [])
+    except Exception:
+        return ([], [])
+    nodes_map: Dict[str, Node] = {}
+    nodes: List[Node] = []
+    for s in stmt_nodes:
+        if isinstance(s, str) and s.strip():
+            n = Node(id=s.strip(), type=SST_NODE_TYPE)
+            nodes_map[s.strip()] = n
+            nodes.append(n)
+    relationships: List[Relationship] = []
+    for e in edges:
+        try:
+            src = e.get("source")
+            rel = e.get("relation")
+            tgt = e.get("target")
+            if not (src and rel and tgt):
+                continue
+            if src not in nodes_map:
+                nodes_map[src] = Node(id=src, type=SST_NODE_TYPE)
+                nodes.append(nodes_map[src])
+            if tgt not in nodes_map:
+                nodes_map[tgt] = Node(id=tgt, type=SST_NODE_TYPE)
+                nodes.append(nodes_map[tgt])
+            relationships.append(
+                Relationship(source=nodes_map[src], target=nodes_map[tgt], type=str(rel))
+            )
+        except Exception:
+            continue
+    return nodes, relationships
+
+
 def validate_and_get_relationship_type(
     allowed_relationships: Union[List[str], List[Tuple[str, str, str]]],
     allowed_nodes: Optional[List[str]],
@@ -1283,6 +1447,7 @@ class LLMGraphTransformer:
         use_db_schema: bool = True,  # Yeni parametre: DB schema'sını kullan
         graph: Optional[Any] = None,  # Graph instance'ı dinamik schema için
         enable_llm_logging: bool = True,  # Yeni parametre: LLM extraction logging'i açıp kapat
+        use_sst_mode: bool = False,  # Yeni parametre: SST (statement-node) modu
     ) -> None:
         
         # Eğer allowed_nodes ve allowed_relationships boşsa ve use_db_schema True ise, DB'den çek
@@ -1307,6 +1472,7 @@ class LLMGraphTransformer:
         self.allowed_relationships = allowed_relationships
         self.strict_mode = strict_mode
         self._function_call = not ignore_tool_usage
+        self.use_sst_mode = use_sst_mode
         
         # Graph instance'ını store et ki process_response'da kullanabilelim
         self.graph = graph
@@ -1340,11 +1506,15 @@ class LLMGraphTransformer:
                     "Could not import json_repair python package. "
                     "Please install it with `pip install json-repair`."
                 )
-            
-            # Türkçe prompt kullan
+            # Prompt seçimi
             if not prompt:
-                if use_simple_json_mode:
-                    # Basit JSON + Türkçe prompt modu
+                if self.use_sst_mode:
+                    prompt = create_sst_prompt(
+                        node_labels=allowed_nodes,
+                        rel_types=(allowed_relationships if isinstance(next(iter(allowed_relationships), None), str) else [r for r in []]),
+                        additional_instructions=additional_instructions,
+                    )
+                elif use_simple_json_mode:
                     prompt = create_json_turkish_prompt(
                         allowed_nodes,
                         allowed_relationships,
@@ -1352,7 +1522,6 @@ class LLMGraphTransformer:
                         additional_instructions,
                     )
                 else:
-                    # Mevcut unstructured mod
                     turkish_system_prompt = create_turkish_insurance_prompt(
                         allowed_nodes=allowed_nodes,
                         allowed_relationships=allowed_relationships
@@ -1370,28 +1539,64 @@ class LLMGraphTransformer:
                 llm_type = llm._llm_type  # type: ignore
             except AttributeError:
                 llm_type = None
-            schema = create_simple_model(
-                allowed_nodes,
-                allowed_relationships,
-                node_properties,
-                llm_type,
-                relationship_properties,
-                self._relationship_type,
-            )
-            structured_llm = llm.with_structured_output(schema, include_raw=True)
-            
-            if not prompt:
-                turkish_system_prompt = create_turkish_insurance_prompt(
-                    allowed_nodes=allowed_nodes,
-                    allowed_relationships=allowed_relationships
+            if self.use_sst_mode:
+                # Structured SST schema
+                # Build relation field with enum when possible
+                class _SSTEdgeModel(BaseModel):
+                    source: str = Field(
+                        ..., description="Source statement (must match one of nodes)"
+                    )
+                    relation: str = optional_enum_field(
+                        list(allowed_relationships) if isinstance(next(iter(allowed_relationships), None), str) else None,
+                        description="Relation between statements (STRICT)",
+                        input_type="relationship",
+                        llm_type=llm_type,
+                    )
+                    target: str = Field(
+                        ..., description="Target statement (must match one of nodes)"
+                    )
+
+                class _SSTGraphModel(BaseModel):
+                    nodes: List[str] = Field(
+                        ..., description="List of minimal, atomic statements"
+                    )
+                    edges: Optional[List[_SSTEdgeModel]] = Field(
+                        default=None, description="List of edges between statements"
+                    )
+
+                structured_llm = llm.with_structured_output(
+                    _SSTGraphModel, include_raw=True
                 )
-                prompt = get_default_prompt(
-                    f"{additional_instructions}\n{turkish_system_prompt}",
+                if not prompt:
+                    prompt = create_sst_prompt(
+                        node_labels=allowed_nodes,
+                        rel_types=(allowed_relationships if isinstance(next(iter(allowed_relationships), None), str) else None),
+                        additional_instructions=additional_instructions,
+                    )
+                self.chain = prompt | structured_llm
+            else:
+                schema = create_simple_model(
                     allowed_nodes,
                     allowed_relationships,
+                    node_properties,
+                    llm_type,
+                    relationship_properties,
                     self._relationship_type,
                 )
-            self.chain = prompt | structured_llm
+                structured_llm = llm.with_structured_output(schema, include_raw=True)
+                
+                if not prompt:
+                    turkish_system_prompt = create_turkish_insurance_prompt(
+                        allowed_nodes=allowed_nodes,
+                        allowed_relationships=allowed_relationships
+                    )
+                    prompt = get_default_prompt(
+                        f"{additional_instructions}\n{turkish_system_prompt}",
+                        allowed_nodes,
+                        allowed_relationships,
+                        self._relationship_type,
+                    )
+                self.chain = prompt | structured_llm
 
     def process_response(
         self, document: Document, config: Optional[RunnableConfig] = None
@@ -1423,8 +1628,8 @@ class LLMGraphTransformer:
         if chunk_id and hasattr(self, 'graph') and self.graph:
             existing_context = get_existing_context_for_prompt(self.graph, chunk_id)
             if existing_context:
-                print(f"📋 Context bulundu: {len(existing_context)} karakter")
-                print(f"🔗 Context: {existing_context}...")
+                logging.info(f"📋 LLM entity extraction context bulundu: {len(existing_context)} karakter")
+                logging.info(f"🔗 LLM entity extraction context içeriği: {existing_context[:100]}...")
         
         # Context'i text'e ekle
         if existing_context:
@@ -1433,18 +1638,15 @@ class LLMGraphTransformer:
             enhanced_text = text
         
         # LOG: Input bilgileri
-        print("🚀 LLMGraphTransformer process_response başladı")
-        print(f"📝 Input text uzunluğu: {len(enhanced_text)} karakter")
-        print(f"📝 Input text başlangıcı: {enhanced_text}...")
-        print(f"⚙️ Function call modu: {self._function_call}")
-        print(f"🎯 FULL Allowed nodes: {self.allowed_nodes}")
-        print(f"🔗 FULL Allowed relationships: {self.allowed_relationships}")
-        print(f"🔧 Relationship type: {self._relationship_type}")
+        logging.info("🚀 LLM Graph Transformer process_response başlıyor")
+        logging.info(f"📝 LLM entity extraction input text uzunluğu: {len(enhanced_text)} karakter")
+        logging.info(f"⚙️ LLM entity extraction function call modu: {self._function_call}")
+        logging.info(f"🎯 LLM entity extraction allowed nodes: {self.allowed_nodes}")
+        logging.info(f"🔗 LLM entity extraction allowed relationships: {self.allowed_relationships}")
+        logging.info(f"� LLM entity extraction relationship type: {self._relationship_type}")
         
         # LOG: Kullanılan prompt'u logla
-        print("📋 PROMPT DETAYLARI:")
-        print(f"🎯 Allowed nodes prompt'ta var mı: {'Evet' if self.allowed_nodes else 'Hayır'}")
-        print(f"🔗 Allowed relationships prompt'ta var mı: {'Evet' if self.allowed_relationships else 'Hayır'}")
+        logging.info("📋 LLM entity extraction PROMPT DETAYLARI:")
         
         try:
             if hasattr(self.chain, 'first'):
@@ -1536,11 +1738,11 @@ class LLMGraphTransformer:
         
         
         # LOG: LLM'den dönen raw sonuç
-        print(f"📥 LLM'den dönen raw sonuç tipi: {type(raw_schema)}")
+        logging.info(f"📥 LLM entity extraction raw sonuç tipi: {type(raw_schema)}")
         if hasattr(raw_schema, 'content'):
-            print(f"📥 FULL Raw sonuç content:\n{raw_schema.content}")
+            logging.info(f"📥 LLM entity extraction raw sonuç content başlangıcı: {str(raw_schema.content)[:200]}...")
         else:
-            print(f"📥 FULL Raw sonuç:\n{str(raw_schema)}")
+            logging.info(f"📥 LLM entity extraction raw sonuç başlangıcı: {str(raw_schema)[:200]}...")
         
         # 🟢 INCREMENTAL JSON LOGGING - LLM çıktısını kaydet
         log_llm_output_incremental(
@@ -1553,82 +1755,79 @@ class LLMGraphTransformer:
         
         if self._function_call:
             raw_schema = cast(Dict[Any, Any], raw_schema)
-            print("🔧 Function call modunda - structured output kullanılıyor")
-            nodes, relationships = _convert_to_graph_document(raw_schema, self.allowed_nodes)
+            logging.info("🔧 LLM entity extraction function call modunda - structured output kullanılıyor")
+            if self.use_sst_mode:
+                nodes, relationships = _convert_sst_to_graph_document(raw_schema)
+            else:
+                nodes, relationships = _convert_to_graph_document(raw_schema, self.allowed_nodes)
         else:
-            print("🔧 Unstructured modda - JSON parsing yapılıyor")
-            nodes_set = set()
-            relationships = []
+            logging.info("🔧 LLM entity extraction unstructured modda - JSON parsing yapılıyor")
             if not isinstance(raw_schema, str):
                 raw_schema = raw_schema.content
-            
-            print(f"🔍 FULL Parse edilecek JSON:\n{raw_schema}")
             parsed_json = self.json_repair.loads(raw_schema)
-            print(f"✅ JSON parse edildi, tip: {type(parsed_json)}")
-            print(f"📊 FULL Parse edilen JSON içeriği:\n{parsed_json}")
-            
-            for i, rel in enumerate(parsed_json):
-                # Check if mandatory properties are there
-                if (
-                    not isinstance(rel, dict)
-                    or not rel.get("head")
-                    or not rel.get("tail")
-                    or not rel.get("relation")
-                ):
-                    print(f"❌ Relation {i} eksik property'ler nedeniyle atlandı: {rel}")
-                    continue
-                
-                print(f"✅ Relation {i}: {rel.get('head')} ({rel.get('head_type')}) --[{rel.get('relation')}]--> {rel.get('tail')} ({rel.get('tail_type')})")
-                
-                # Nodes need to be deduplicated using a set
-                # Use default Node label for nodes if missing
-                nodes_set.add((rel["head"], rel.get("head_type", DEFAULT_NODE_TYPE)))
-                nodes_set.add((rel["tail"], rel.get("tail_type", DEFAULT_NODE_TYPE)))
-
-                source_node = Node(
-                    id=rel["head"], type=rel.get("head_type", DEFAULT_NODE_TYPE)
-                )
-                target_node = Node(
-                    id=rel["tail"], type=rel.get("tail_type", DEFAULT_NODE_TYPE)
-                )
-                relationships.append(
-                    Relationship(
-                        source=source_node, target=target_node, type=rel["relation"]
+            logging.info(f"✅ LLM entity extraction JSON parse edildi")
+            if self.use_sst_mode:
+                nodes, relationships = _parse_sst_unstructured(parsed_json)
+            else:
+                nodes_set = set()
+                relationships = []
+                for i, rel in enumerate(parsed_json):
+                    if (
+                        not isinstance(rel, dict)
+                        or not rel.get("head")
+                        or not rel.get("tail")
+                        or not rel.get("relation")
+                    ):
+                        print(f"❌ Relation {i} eksik property'ler nedeniyle atlandı: {rel}")
+                        continue
+                    print(
+                        f"✅ Relation {i}: {rel.get('head')} ({rel.get('head_type')}) --[{rel.get('relation')}]--> {rel.get('tail')} ({rel.get('tail_type')})"
                     )
-                )
-            # Create nodes list
-            nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
+                    nodes_set.add((rel["head"], rel.get("head_type", DEFAULT_NODE_TYPE)))
+                    nodes_set.add((rel["tail"], rel.get("tail_type", DEFAULT_NODE_TYPE)))
+                    source_node = Node(
+                        id=rel["head"], type=rel.get("head_type", DEFAULT_NODE_TYPE)
+                    )
+                    target_node = Node(
+                        id=rel["tail"], type=rel.get("tail_type", DEFAULT_NODE_TYPE)
+                    )
+                    relationships.append(
+                        Relationship(
+                            source=source_node, target=target_node, type=rel["relation"]
+                        )
+                    )
+                nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
 
         # LOG: Filtreleme öncesi durum
-        print(f"🔄 Filtreleme öncesi - Nodes: {len(nodes)}, Relationships: {len(relationships)}")
-        print(f"🔍 Filtreleme öncesi node tipleri: {list(set([node.type for node in nodes]))}")
-        print(f"🔍 Filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
+        logging.info(f"🔄 LLM entity extraction filtreleme öncesi - Entity'ler: {len(nodes)}, Relationship'ler: {len(relationships)}")
+        logging.info(f"🔍 LLM entity extraction filtreleme öncesi entity tipleri: {list(set([node.type for node in nodes]))}")
+        logging.info(f"🔍 LLM entity extraction filtreleme öncesi relationship tipleri: {list(set([rel.type for rel in relationships]))}")
 
         # Apply filtering based on allowed nodes and relationships
         # Esnek node filtering, katı relationship filtering
         if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
-            print("🚧 Filtreleme uygulanıyor...")
+            logging.info("🚧 LLM entity extraction filtreleme uygulanıyor...")
             
             # Node filtreleme - ESNEK (preference-based, tüm node'ları kabul et)
             if self.allowed_nodes:
-                print(f"🎯 Node filtreleme (ESNEK): {self.allowed_nodes}")
+                logging.info(f"🎯 LLM entity extraction node filtreleme (ESNEK): {self.allowed_nodes}")
                 nodes_before = len(nodes)
                 
                 # Esnek filtreleme: preferred ve other node'ları say
                 preferred_count = sum(1 for node in nodes if node.type.lower() in [el.lower() for el in self.allowed_nodes])
                 other_count = len(nodes) - preferred_count
                 
-                print(f"📊 Esnek node analizi - Tercih edilen: {preferred_count}, Diğer: {other_count}, Toplam: {len(nodes)} (hepsi kabul)")
+                logging.info(f"📊 LLM entity extraction esnek node analizi - Tercih edilen: {preferred_count}, Diğer: {other_count}, Toplam: {len(nodes)} (hepsi kabul)")
                 # Node'ları filtreleme - ESNEK yaklaşım, hepsini kabul et
                 
             # Relationship filtreleme - KATI (strict filtering)
             if self.allowed_relationships:
-                print(f"🔗 Relationship filtreleme (KATI): {self.allowed_relationships}")
+                logging.info(f"🔗 LLM entity extraction relationship filtreleme (KATI): {self.allowed_relationships}")
                 relationships_before = len(relationships)
                 
                 # Filter by type and direction
                 if self._relationship_type == "tuple":
-                    print("🔧 Tuple modunda relationship filtresi")
+                    logging.info("🔧 LLM entity extraction tuple modunda relationship filtresi")
                     relationships = [
                         rel
                         for rel in relationships
@@ -1645,7 +1844,7 @@ class LLMGraphTransformer:
                         )
                     ]
                 else:  # Filter by type only
-                    print("🔧 String modunda relationship filtresi")
+                    logging.info("🔧 LLM entity extraction string modunda relationship filtresi")
                     relationships = [
                         rel
                         for rel in relationships
@@ -1653,24 +1852,20 @@ class LLMGraphTransformer:
                         in [el.lower() for el in self.allowed_relationships]  # type: ignore
                     ]
                 
-                print(f"📊 Relationship filtresi sonrası: {relationships_before} -> {len(relationships)}")
+                logging.info(f"📊 LLM entity extraction relationship filtresi sonrası: {relationships_before} -> {len(relationships)}")
         else:
-            print("⚠️ Hiç filtreleme kuralı yok - tüm node ve relationship'ler kabul ediliyor")
+            logging.info("⚠️ LLM entity extraction hiç filtreleme kuralı yok - tüm node ve relationship'ler kabul ediliyor")
 
         # LOG: Final durum
-        print(f"✅ Final sonuç - Nodes: {len(nodes)}, Relationships: {len(relationships)}")
-        print(f"🏷️ Final node tipleri: {list(set([node.type for node in nodes]))}")
-        print(f"🔗 Final relationship tipleri: {list(set([rel.type for rel in relationships]))}")
+        logging.info(f"✅ LLM entity extraction final sonuç - Entity'ler: {len(nodes)}, Relationship'ler: {len(relationships)}")
+        logging.info(f"🏷️ LLM entity extraction final entity tipleri: {list(set([node.type for node in nodes]))}")
+        logging.info(f"🔗 LLM entity extraction final relationship tipleri: {list(set([rel.type for rel in relationships]))}")
         
         if nodes:
-            print("📝 İlk 3 node:")
-            for i, node in enumerate(nodes[:3]):
-                print(f"  {i+1}. {node.id} ({node.type})")
+            logging.info(f"📝 LLM entity extraction ilk 3 entity: {[(node.id, node.type) for node in nodes[:3]]}")
         
         if relationships:
-            print("📝 İlk 3 relationship:")
-            for i, rel in enumerate(relationships[:3]):
-                print(f"  {i+1}. {rel.source.id} ({rel.source.type}) --[{rel.type}]--> {rel.target.id} ({rel.target.type})")
+            logging.info(f"📝 LLM entity extraction ilk 3 relationship: {[(f'{rel.source.id} ({rel.source.type}) --[{rel.type}]--> {rel.target.id} ({rel.target.type})') for rel in relationships[:3]]}")
 
         return GraphDocument(nodes=nodes, relationships=relationships, source=document)
 
@@ -1695,7 +1890,7 @@ class LLMGraphTransformer:
         Asynchronously processes a single document, transforming it into a
         graph document.
         """
-        print(" LLMGraphTransformer aprocess_response (ASYNC) - delegating to sync process_response")
+        logging.info("🔄 LLMGraphTransformer aprocess_response (ASYNC) - delegating to sync process_response")
         
         # Async fonksiyonu sync'e yönlendir - aynı mantığı kullanıyor
         return self.process_response(document, config)

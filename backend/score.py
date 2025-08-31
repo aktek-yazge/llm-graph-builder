@@ -48,6 +48,56 @@ import tempfile
 from pathlib import Path
 from src.intelligent_agent import IntelligentAgent
 from src.alternative_agent import AlternativeAgent
+import time
+import json
+import logging
+
+# HTTP Request Logging Middleware for OpenTelemetry
+class HTTPLoggingMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+        self.logger = logging.getLogger('http_requests')
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        start_time = time.time()
+        
+        # Store response info
+        response_status = 200
+        
+        async def send_wrapper(message):
+            nonlocal response_status
+            if message["type"] == "http.response.start":
+                response_status = message.get("status", 200)
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+        
+        # Calculate duration
+        duration = time.time() - start_time
+        
+        # Log HTTP request with structured data
+        method = scope.get("method", "GET")
+        path = scope.get("path", "/")
+        client_ip = scope.get("client", ["unknown", 0])[0]
+        
+        # Create log message
+        log_message = f"🌐 HTTP {method} {path} - {response_status} ({duration:.3f}s)"
+        
+        self.logger.info(log_message, extra={
+            'component': 'http_server',
+            'operation': 'http_request',
+            'method': method,
+            'path': path,
+            'status_code': response_status,
+            'duration_ms': round(duration * 1000, 2),
+            'client_ip': client_ip,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.%3fZ', time.gmtime())
+        })
 try:
     from docling.document_converter import DocumentConverter
     DOCLING_AVAILABLE = True
@@ -383,6 +433,10 @@ class UTF8JSONResponse:
             await self.app(scope, receive, send)
 
 app = FastAPI()
+
+# Add HTTP logging middleware for OpenTelemetry integration
+app.add_middleware(HTTPLoggingMiddleware)
+
 app.add_middleware(UTF8JSONResponse)
 app.add_middleware(XContentTypeOptions)
 app.add_middleware(XFrame, Option={'X-Frame-Options': 'DENY'})
