@@ -48,6 +48,15 @@ import warnings
 import sys
 import shutil
 import urllib.parse
+
+# Logger helper fonksiyonlarını utils'den import et
+from src.utils.log_helpers import (
+    log_upload, 
+    log_delete, 
+    log_chunking, 
+    log_extraction, 
+    log_processing
+)
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import markdown_to_json
@@ -390,12 +399,12 @@ async def extract_graph_from_file_local_file(
     max_pages=None,  # Sayfa sınırlandırma parametresi
 ):
 
-    logging.info(f"Process file name: {fileName}")
+    log_extraction(f"Process file name: {fileName}")
     if not retry_condition:
         # Extract işlemi artık sadece mevcut chunk'larla çalışır
         # Pages'leri yüklemek gereksiz - chunk'lar upload sırasında oluşturulmuş olmalı
-        logging.info(f"🔄 Graph extraction başlıyor for: {fileName} (chunks should exist from upload)")
-        logging.info(f"🎯 Extract mode: Local file processing")
+        log_extraction(f"🔄 Graph extraction başlıyor for: {fileName} (chunks should exist from upload)")
+        log_extraction(f"🎯 Extract mode: Local file processing")
         
         # Document node'undan page_images'ı al
         page_images = None
@@ -1657,53 +1666,53 @@ def upload_file(
     from src.utf8_utils import normalize_file_name
     
     originalname = normalize_file_name(originalname)
-    logging.info(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
-    logging.info(f"� Upload config - Model: {model}, Generate Embedding: {generate_embedding}")
-    logging.info(f"�🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
+    log_upload(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
+    log_upload(f"⚙️ Upload config - Model: {model}, Generate Embedding: {generate_embedding}")
+    log_upload(f"🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
     
     # Chunk boyutu kontrol et
     if hasattr(chunk, 'size'):
         chunk_size = chunk.size
-        logging.info(f"📏 Chunk size: {chunk_size} bytes")
+        log_upload(f"📏 Chunk size: {chunk_size} bytes")
         if chunk_size == 0:
-            logging.warning(f"⚠️ Received empty chunk for {originalname}, chunk {chunk_number}/{total_chunks}")
+            log_upload(f"⚠️ Received empty chunk for {originalname}, chunk {chunk_number}/{total_chunks}", "warning")
     else:
-        logging.info(f"📏 Chunk size information not available for {originalname}")
+        log_upload(f"📏 Chunk size information not available for {originalname}")
 
     gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
-    logging.info(f"☁️ GCS file cache: {gcs_file_cache}")
+    log_upload(f"☁️ GCS file cache: {gcs_file_cache}")
     
     # Normalize filename early to ensure consistency throughout upload process
     normalized_filename = normalize_file_name(originalname.strip() if isinstance(originalname, str) else originalname)
-    logging.info(f"Upload: Original filename: '{originalname}' -> Normalized: '{normalized_filename}'")
+    log_upload(f"Upload: Original filename: '{originalname}' -> Normalized: '{normalized_filename}'")
 
     if gcs_file_cache == "True":
         folder_name = create_gcs_bucket_folder_name_hashed(uri, normalized_filename)
-        logging.info(f"📁 Uploading chunk to GCS: {folder_name}")
+        log_upload(f"📁 Uploading chunk to GCS: {folder_name}")
         upload_file_to_gcs(
             chunk, chunk_number, normalized_filename, BUCKET_UPLOAD, folder_name
         )
     else:
         if not os.path.exists(chunk_dir):
             os.mkdir(chunk_dir)
-            logging.info(f"📂 Created chunk directory: {chunk_dir}")
+            log_upload(f"📂 Created chunk directory: {chunk_dir}")
 
         chunk_file_path = os.path.join(chunk_dir, f"{normalized_filename}_part_{chunk_number}")
-        logging.info(f"💾 Saving chunk to: {chunk_file_path}")
+        log_upload(f"💾 Saving chunk to: {chunk_file_path}")
 
         with open(chunk_file_path, "wb") as chunk_file:
             chunk_content = chunk.file.read()
             content_size = len(chunk_content)
             chunk_file.write(chunk_content)
-            logging.info(f"✅ Chunk {chunk_number} saved successfully, bytes written: {content_size}")
+            log_upload(f"✅ Chunk {chunk_number} saved successfully, bytes written: {content_size}")
             
             if content_size == 0:
-                logging.warning(f"⚠️ Written chunk is empty for {originalname}, chunk {chunk_number}/{total_chunks}")
+                log_upload(f"⚠️ Written chunk is empty for {originalname}, chunk {chunk_number}/{total_chunks}", "warning")
             else:
-                logging.info(f"📊 Chunk content summary - First 100 chars: {chunk_content[:100] if content_size > 0 else 'EMPTY'}")
+                log_upload(f"📊 Chunk content summary - First 100 chars: {chunk_content[:100] if content_size > 0 else 'EMPTY'}")
 
     if int(chunk_number) == int(total_chunks):
-        logging.info(f"🔗 Last chunk received, starting file merge process for: {originalname}")
+        log_upload(f"🔗 Last chunk received, starting file merge process for: {originalname}")
         # If this is the last chunk, merge all chunks into a single file
         if gcs_file_cache == "True":
             file_size = merge_file_gcs(
@@ -1843,6 +1852,7 @@ def upload_file(
                     # Continue with normal processing even if extraction fails
         
         # Source node oluştur
+        log_upload(f"Creating source node for file: {originalname} (size: {file_size} bytes)")
         file_extension = normalized_filename.split(".")[-1]
         obj_source_node = sourceNode()
         obj_source_node.file_name = normalized_filename  # Already normalized
@@ -1861,15 +1871,18 @@ def upload_file(
         # S3 document link'i ve page images'ı ekle
         if doc_link:
             obj_source_node.doc_link = doc_link
+            log_upload(f"Document link added to source node: {doc_link}")
             logging.info(f"📄 Added doc_link to source node: {doc_link}")
         
         if page_images:
             obj_source_node.page_images = page_images
+            log_upload(f"Added {len(page_images)} page images to source node")
             logging.info(f"🖼️ Added {len(page_images)} page_images to source node")
         
         # Desteklenen belge formatları için chunk node'ları da oluştur (sadece pages varsa)
         if file_extension.lower() in docling_supported_formats and pages:
             try:
+                log_upload(f"Starting chunk creation for supported format: {file_extension}")
                 logging.info(f"🔄 Creating chunk nodes for: {originalname} (using already extracted pages)")
                 
                 # Zaten extract edilmiş pages'leri kullan (tekrar extract etme)
@@ -1906,25 +1919,31 @@ def upload_file(
                         obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
                         
                         if should_generate_embedding:
+                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings")
                             logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings for: {originalname}")
                         else:
+                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes (embeddings will be generated during extract)")
                             logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
                             logging.info(f"ℹ️ Embedding oluşturma atlandı (generate_embedding={generate_embedding})")
                             logging.info(f"📊 Embedding'ler extract işlemi sırasında kontrol edilecek")
                         
                         logging.info(f"📊 Upload created chunks ready for extract processing")
                     else:
+                        log_upload(f"No chunks created during upload", "warning")
                         logging.warning(f"⚠️ No chunks created for: {originalname}")
                 else:
+                    log_upload(f"No pages available for chunking", "warning")
                     logging.warning(f"⚠️ No pages available for chunking: {originalname}")
                     
             except Exception as chunk_error:
+                log_upload(f"Failed to create chunk nodes: {chunk_error}", "error")
                 logging.error(f"❌ Failed to create chunk nodes for {originalname}: {chunk_error}")
                 # Continue without chunk creation
         
         # Source node'u veritabanına kaydet
         graphDb_data_Access = graphDBdataAccess(graph)
         graphDb_data_Access.create_source_node(obj_source_node)
+        log_upload(f"Source node successfully created in database for: {originalname}")
         logging.info(f"📋 Source node created in database for: {originalname}")
         
         # Chunk'ları Document'e bağla (eğer chunk'lar oluşturulmuşsa)

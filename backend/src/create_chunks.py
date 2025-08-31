@@ -5,6 +5,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.text_splitter import MarkdownTextSplitter
 import logging
 from src.document_sources.youtube import get_chunks_with_timestamps, get_calculated_timestamps
+from src.utils.log_helpers import log_chunking
 import re
 import os
 
@@ -26,7 +27,7 @@ class CreateChunksofDocument:
         Returns:
             A list of chunks each of which is a langchain Document.
         """
-        logging.info("Split file into smaller chunks")
+        log_chunking("Split file into smaller chunks")
         text_splitter = TokenTextSplitter(chunk_size=token_chunk_size, chunk_overlap=chunk_overlap)
         MAX_TOKEN_CHUNK_SIZE = int(os.getenv('MAX_TOKEN_CHUNK_SIZE', 10000))
         chunk_to_be_created = int(MAX_TOKEN_CHUNK_SIZE / token_chunk_size)
@@ -72,11 +73,11 @@ class CreateChunksofDocument:
         Returns:
             List of langchain Document objects
         """
-        logging.info("Split whole document using MarkdownTextSplitter")
+        log_chunking("Split whole document using MarkdownTextSplitter")
 
         # If pages look like a youtube transcript (time-based), keep existing behaviour
         if 'length' in self.pages[0].metadata:
-            logging.info("Detected time-based pages (youtube), falling back to token-based timestamp splitting")
+            log_chunking("Detected time-based pages (youtube), falling back to token-based timestamp splitting")
             # reuse logic from split_file_into_chunks to get timestamped chunks
             token_chunk_size = max(1, int(chunk_size))
             MAX_TOKEN_CHUNK_SIZE = int(os.getenv('MAX_TOKEN_CHUNK_SIZE', 10000))
@@ -102,19 +103,20 @@ class CreateChunksofDocument:
             return docs
 
         # Debug: Log page information
-        logging.info(f"DEBUG: Total pages to process: {len(self.pages)}")
-        for i, p in enumerate(self.pages):
-            page_content = p.page_content if hasattr(p, 'page_content') else str(p)
-            logging.info(f"DEBUG: Page {i+1} length: {len(page_content)} chars")
-            if i < 3:  # Log first 3 pages content preview
-                logging.info(f"DEBUG: Page {i+1} preview: {page_content[:100]}...")
+        log_chunking(f"DEBUG: Total pages to process: {len(self.pages)}")
+        
+        for i, page in enumerate(self.pages):
+            page_content = page.page_content
+            log_chunking(f"DEBUG: Page {i+1} length: {len(page_content)} chars")
+            if len(page_content) > 100:
+                log_chunking(f"DEBUG: Page {i+1} preview: {page_content[:100]}...")
 
         # Check if we have single document with [PAGE BREAK] markers
         if (len(self.pages) == 1 and 
             hasattr(self.pages[0], 'page_content') and 
             "[PAGE BREAK]" in self.pages[0].page_content):
             
-            logging.info("🔍 Single document with [PAGE BREAK] markers detected - splitting pages manually")
+            log_chunking("🔍 Single document with [PAGE BREAK] markers detected - splitting pages manually")
             
             # Split by PAGE BREAK markers first
             full_content = self.pages[0].page_content
@@ -131,7 +133,7 @@ class CreateChunksofDocument:
                         metadata=page_metadata
                     ))
             
-            logging.info(f"📄 Created {len(page_documents)} pages from PAGE BREAK markers")
+            log_chunking(f"📄 Created {len(page_documents)} pages from PAGE BREAK markers")
             
             # Now update self.pages for processing
             self.pages = page_documents
@@ -157,18 +159,18 @@ class CreateChunksofDocument:
             if i < len(self.pages) - 1:
                 current_offset += len(separator)
             
-            logging.info(f"DEBUG: Page {i+1} - start: {page_starts[i]}, end: {page_ends[i]}, length: {len(page_text)}")
+            log_chunking(f"DEBUG: Page {i+1} - start: {page_starts[i]}, end: {page_ends[i]}, length: {len(page_text)}")
             if i < 3:  # Log first 3 pages content preview
-                logging.info(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
+                log_chunking(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
 
         # Join pages with markdown page separators (preserving markdown structure)
         full_text = separator.join(page_texts)
-        logging.info(f"DEBUG: Full markdown text length after concatenation: {len(full_text)} chars")
-        logging.info(f"DEBUG: Full markdown text preview: {full_text[:200]}...")
+        log_chunking(f"DEBUG: Full markdown text length after concatenation: {len(full_text)} chars")
+        log_chunking(f"DEBUG: Full markdown text preview: {full_text[:200]}...")
 
         # No max chunks limit for markdown splitting - process entire document
-        logging.info(f"DEBUG: No chunk limit applied, chunk_size: {chunk_size}")
-        logging.info(f"DEBUG: No chunk limit applied, chunk_overlap: {chunk_overlap}")
+        log_chunking(f"DEBUG: No chunk limit applied, chunk_size: {chunk_size}")
+        log_chunking(f"DEBUG: No chunk limit applied, chunk_overlap: {chunk_overlap}")
 
         # Use MarkdownTextSplitter to respect markdown structure
         splitter = MarkdownTextSplitter(
@@ -178,8 +180,8 @@ class CreateChunksofDocument:
 
         # Create documents from the markdown text
         documents = splitter.create_documents([full_text])
-        logging.info(f"DEBUG: Markdown chunks created: {len(documents)}")
-        
+        log_chunking(f"DEBUG: Markdown chunks created: {len(documents)}")
+
         # Add page metadata to each chunk
         for ch_idx, doc in enumerate(documents):
             # Try to find which page(s) this chunk belongs to
@@ -247,7 +249,7 @@ class CreateChunksofDocument:
 
             # Update document metadata
             doc.metadata.update(meta)
-            logging.info(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(chunk_text)}")
+            log_chunking(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(chunk_text)}")
 
-        logging.info(f"DEBUG: Total final documents created with metadata: {len(documents)}")
+        log_chunking(f"DEBUG: Total final documents created with metadata: {len(documents)}")
         return documents
