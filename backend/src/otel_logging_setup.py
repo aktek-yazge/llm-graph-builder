@@ -9,8 +9,84 @@ import json
 from datetime import datetime, timezone
 from io import StringIO
 from dotenv import load_dotenv
+from logging.handlers import RotatingFileHandler
 
 
+class JSONRotatingFileHandler(RotatingFileHandler):
+    """JSON file handler with rotation support - log dosyası büyüdüğünde otomatik rotate eder"""
+    
+    def __init__(self, file_path: str = "logs/simple-logs.jsonl", 
+                 max_bytes: int = 10*1024*1024,  # 10MB
+                 backup_count: int = 5):         # 5 backup dosyası tut
+        super().__init__(file_path, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+        self.last_messages = set()  # Son mesajları takip et (tekrar önlemek için)
+        self.last_cleanup = datetime.now(timezone.utc)
+        # Logs klasörünü oluştur
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    def emit(self, record):
+        """Log record'unu JSON formatında dosyaya yaz"""
+        try:
+            current_time = datetime.now(timezone.utc)
+            
+            # Her 60 saniyede bir deduplication cache'ini temizle
+            if (current_time - self.last_cleanup).seconds > 60:
+                self.last_messages.clear()
+                self.last_cleanup = current_time
+            
+            # Format message güvenli şekilde
+            try:
+                message = self.format(record)
+            except:
+                message = str(record.getMessage())
+            
+            # Tekrar eden mesajları filtrele (aynı mesajın 1 saniye içinde tekrarını engelle)
+            message_key = f"{message[:100]}_{int(current_time.timestamp())}"  # Mesajı kısalt
+            if message_key in self.last_messages:
+                return
+            self.last_messages.add(message_key)
+            
+            # Component ve operation bilgilerini güvenli şekilde extract et
+            component = getattr(record, 'component', 'backend')
+            operation = getattr(record, 'operation', 'general')
+            
+            # HTTP request bilgilerini extract et
+            if hasattr(record, 'method'):
+                component = 'http_server'
+                operation = 'http_request'
+            
+            log_record = {
+                "timestamp": current_time.isoformat() + "Z",
+                "level": record.levelname,
+                "message": message,
+                "component": component,
+                "operation": operation,
+                "logger_name": record.name,
+                "service_name": "llm-graph-builder"
+            }
+            
+            # HTTP request detaylarını ekle
+            if hasattr(record, 'method'):
+                log_record.update({
+                    "method": getattr(record, 'method', ''),
+                    "path": getattr(record, 'path', ''),
+                    "status_code": getattr(record, 'status_code', ''),
+                    "client_ip": getattr(record, 'client_ip', '')
+                })
+            
+            # JSON formatında yaz
+            json_line = json.dumps(log_record, ensure_ascii=False) + '\n'
+            
+            # RotatingFileHandler'ın emit metodunu kullan (otomatik rotation ile)
+            record.msg = json_line.rstrip()  # \n karakterini kaldır, RotatingFileHandler kendi ekleyecek
+            super().emit(record)
+                
+        except Exception as e:
+            # Hata durumunda orijinal dosyaya fallback
+            print(f"JSON log yazma hatası: {e}")
+
+
+# Eski JSONFileHandler'ı yedek olarak tut
 class JSONFileHandler(logging.Handler):
     """Simple JSON file handler that writes logs directly to file"""
     
@@ -146,15 +222,19 @@ def setup_simple_json_logging():
     print(f"🏷️ Service Name: {service_name}")
     print(f"🌍 Environment: {environment}")
     
-    # JSON handler'ı oluştur ve yapılandır
-    json_handler = JSONFileHandler(log_file_path)
+    # Rotating JSON handler'ı oluştur ve yapılandır (10MB boyutunda, 5 backup)
+    json_handler = JSONRotatingFileHandler(
+        log_file_path,
+        max_bytes=10*1024*1024,  # 10MB
+        backup_count=5           # 5 backup dosyası
+    )
     json_handler.setLevel(logging.DEBUG)  # Tüm seviyedeki logları yakala
     
     # Root logger'ı yapılandır
     root_logger = logging.getLogger()
     
     # Mevcut JSON handler'larını temizle (tekrar eden logları önlemek için)
-    existing_json_handlers = [h for h in root_logger.handlers if isinstance(h, JSONFileHandler)]
+    existing_json_handlers = [h for h in root_logger.handlers if isinstance(h, (JSONFileHandler, JSONRotatingFileHandler))]
     for handler_to_remove in existing_json_handlers:
         root_logger.removeHandler(handler_to_remove)
     
