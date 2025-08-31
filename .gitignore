@@ -187,3 +187,5 @@ otelcol-contrib_0.133.0_darwin_amd64.tar.gz
 otelcol-contrib
 backend/logs/llm_extractions.jsonl
 backend/logs/simple-logs.jsonl
+backend/logs/simple-logs.jsonl.*
+backend/logs/test-rotation.jsonl*
