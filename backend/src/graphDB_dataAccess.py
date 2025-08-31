@@ -9,6 +9,7 @@ from src.shared.constants import BUCKET_UPLOAD,NODEREL_COUNT_QUERY_WITH_COMMUNIT
 from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
+from src.utils.log_helpers import log_delete, log_processing
 import json
 from dotenv import load_dotenv
 
@@ -533,14 +534,19 @@ class graphDBdataAccess:
         source_types_list= list(map(str.strip, json.loads(source_types)))
         gcs_file_cache = os.environ.get('GCS_FILE_CACHE')
         
+        log_delete(f"Starting deletion process for {len(filename_list)} files: {filename_list}")
+        log_delete(f"Delete entities mode: {deleteEntities}, Source types: {source_types_list}")
+        
         for (file_name,source_type) in zip(filename_list, source_types_list):
             merged_file_path = os.path.join(merged_dir, file_name)
             if source_type == 'local file' and gcs_file_cache == 'True':
                 folder_name = create_gcs_bucket_folder_name_hashed(uri, file_name)
                 delete_file_from_gcs(BUCKET_UPLOAD,folder_name,file_name)
+                log_delete(f"File deleted from GCS bucket: {file_name}")
             else:
                 logging.info(f'Deleted File Path: {merged_file_path} and Deleted File Name : {file_name}')
                 delete_uploaded_local_file(merged_file_path,file_name)
+                log_delete(f"File deleted from local storage: {file_name}")
                 
         query_to_delete_document="""
             MATCH (d:Document)
@@ -624,11 +630,15 @@ class graphDBdataAccess:
         param = {"filename_list" : filename_list, "source_types_list": source_types_list}
         community_param = {"max_level":MAX_COMMUNITY_LEVELS}
         if deleteEntities == "true":
+            log_delete(f"Executing comprehensive deletion (documents + entities) for {len(filename_list)} files")
             result = self.execute_query(query_to_delete_document_and_entities, param)
             _ = self.execute_query(query_to_delete_communities,community_param)
+            log_delete(f"Successfully deleted {len(filename_list)} documents with entities: {filename_list}")
             logging.info(f"Deleting {len(filename_list)} documents = '{filename_list}' from '{source_types_list}' from database")
         else :
+            log_delete(f"Executing document-only deletion for {len(filename_list)} files")
             result = self.execute_query(query_to_delete_document, param)    
+            log_delete(f"Successfully deleted {len(filename_list)} documents (entities preserved): {filename_list}")
             logging.info(f"Deleting {len(filename_list)} documents = '{filename_list}' from '{source_types_list}' with their entities from database")
         return len(filename_list)
     
@@ -665,12 +675,15 @@ class graphDBdataAccess:
     
     def delete_unconnected_nodes(self,unconnected_entities_list):
         entities_list = list(map(str.strip, json.loads(unconnected_entities_list)))
+        log_delete(f"Starting deletion of {len(entities_list)} unconnected/orphan nodes")
         query = """
         MATCH (e) WHERE elementId(e) IN $elementIds
         DETACH DELETE e
         """
         param = {"elementIds":entities_list}
-        return self.execute_query(query,param)
+        result = self.execute_query(query,param)
+        log_delete(f"Successfully deleted {len(entities_list)} orphan nodes from graph")
+        return result
     
     def get_duplicate_nodes_list(self):
         score_value = float(os.environ.get('DUPLICATE_SCORE_VALUE'))

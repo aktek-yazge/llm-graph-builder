@@ -12,6 +12,30 @@ from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 
 
+class ConsoleHandler(logging.StreamHandler):
+    """Console'a sadece raw mesaj basan özel handler"""
+    
+    def emit(self, record):
+        try:
+            # Orijinal mesajı al (JSON handler değiştirmeden önce)
+            if hasattr(record, 'msg') and record.args:
+                try:
+                    # Format edilmiş mesajı al
+                    message = record.msg % record.args if record.args else record.msg
+                except (TypeError, ValueError):
+                    # Format hatası varsa sadece msg'yi kullan
+                    message = str(record.msg)
+            else:
+                message = str(record.msg)
+            
+            # Direkt console'a yaz
+            self.stream.write(message + '\n')
+            self.flush()
+        except Exception:
+            # Hata durumunda sessizce geç
+            pass
+
+
 class JSONRotatingFileHandler(RotatingFileHandler):
     """JSON file handler with rotation support - log dosyası büyüdüğünde otomatik rotate eder"""
     
@@ -36,9 +60,25 @@ class JSONRotatingFileHandler(RotatingFileHandler):
             
             # Format message güvenli şekilde
             try:
+                # Önce record.getMessage() çağrısını güvenli hale getir
+                try:
+                    message = record.getMessage()
+                except (TypeError, ValueError):
+                    # String formatting hatası varsa, sadece msg'i kullan
+                    message = str(record.msg)
+                    if record.args:
+                        message += f" [args: {record.args}]"
+                
+                # Şimdi format et
                 message = self.format(record)
-            except:
-                message = str(record.getMessage())
+            except Exception as e:
+                # Herhangi bir format hatası varsa, basit format kullan
+                try:
+                    message = str(record.msg)
+                    if record.args:
+                        message += f" [args: {record.args}]"
+                except:
+                    message = f"[Logging Error: {str(e)}]"
             
             # Tekrar eden mesajları filtrele (aynı mesajın 1 saniye içinde tekrarını engelle)
             message_key = f"{message[:100]}_{int(current_time.timestamp())}"  # Mesajı kısalt
@@ -49,8 +89,19 @@ class JSONRotatingFileHandler(RotatingFileHandler):
             # Component ve operation bilgilerini güvenli şekilde extract et
             component = getattr(record, 'component', 'backend')
             operation = getattr(record, 'operation', 'general')
-            
-            # HTTP request bilgilerini extract et
+
+            # Logger name'den component/operation parse et (örn: "upload.file_processing")
+            try:
+                if isinstance(record.name, str) and '.' in record.name:
+                    name_parts = record.name.split('.')
+                    if len(name_parts) >= 2:
+                        component = name_parts[0]
+                        operation = name_parts[1]
+            except Exception:
+                # parsing hatası olursa mevcut component/operation kullan
+                pass
+
+            # HTTP request bilgilerini extract et (öncelik ver)
             if hasattr(record, 'method'):
                 component = 'http_server'
                 operation = 'http_request'
@@ -78,7 +129,9 @@ class JSONRotatingFileHandler(RotatingFileHandler):
             json_line = json.dumps(log_record, ensure_ascii=False) + '\n'
             
             # RotatingFileHandler'ın emit metodunu kullan (otomatik rotation ile)
+            # record.args'ı temizle ki format hatası olmasın
             record.msg = json_line.rstrip()  # \n karakterini kaldır, RotatingFileHandler kendi ekleyecek
+            record.args = None  # args'ı temizle ki string formatting hatası olmasın
             super().emit(record)
                 
         except Exception as e:
@@ -110,9 +163,25 @@ class JSONFileHandler(logging.Handler):
             
             # Format message güvenli şekilde
             try:
+                # Önce record.getMessage() çağrısını güvenli hale getir
+                try:
+                    message = record.getMessage()
+                except (TypeError, ValueError):
+                    # String formatting hatası varsa, sadece msg'i kullan
+                    message = str(record.msg)
+                    if record.args:
+                        message += f" [args: {record.args}]"
+                
+                # Şimdi format et
                 message = self.format(record)
-            except:
-                message = str(record.getMessage())
+            except Exception as e:
+                # Herhangi bir format hatası varsa, basit format kullan
+                try:
+                    message = str(record.msg)
+                    if record.args:
+                        message += f" [args: {record.args}]"
+                except:
+                    message = f"[Logging Error: {str(e)}]"
             
             # Tekrar eden mesajları filtrele (aynı mesajın 1 saniye içinde tekrarını engelle)
             message_key = f"{message[:100]}_{int(current_time.timestamp())}"  # Mesajı kısalt
@@ -228,7 +297,7 @@ def setup_simple_json_logging():
         max_bytes=10*1024*1024,  # 10MB
         backup_count=5           # 5 backup dosyası
     )
-    json_handler.setLevel(logging.DEBUG)  # Tüm seviyedeki logları yakala
+    json_handler.setLevel(logging.INFO)  # INFO ve üzeri logları yakala
     
     # Root logger'ı yapılandır
     root_logger = logging.getLogger()
@@ -238,9 +307,21 @@ def setup_simple_json_logging():
     for handler_to_remove in existing_json_handlers:
         root_logger.removeHandler(handler_to_remove)
     
-    # Yeni handler'ı ekle
+    # Console handler ekle (terminale de basılması için) - JSON handler'dan ÖNCE
+    console_handler = ConsoleHandler()
+    console_handler.setLevel(logging.INFO)  # INFO ve üzeri logları terminale bas
+    
+    # Mevcut console handler'larını temizle (tekrar önlemek için)
+    existing_console_handlers = [h for h in root_logger.handlers if isinstance(h, (logging.StreamHandler, ConsoleHandler)) and hasattr(h, 'stream') and h.stream.name == '<stdout>']
+    for handler_to_remove in existing_console_handlers:
+        root_logger.removeHandler(handler_to_remove)
+    
+    # Console handler'ı ÖNCE ekle
+    root_logger.addHandler(console_handler)
+    
+    # Yeni JSON handler'ı ekle
     root_logger.addHandler(json_handler)
-    root_logger.setLevel(logging.DEBUG)  # Tüm seviyedeki logları yakala
+    root_logger.setLevel(logging.INFO)  # INFO ve üzeri logları yakala
     
     # Gürültülü loggerları sustur (performans için)
     noisy_loggers = [
@@ -259,7 +340,8 @@ def setup_simple_json_logging():
         logging.getLogger(logger_name).setLevel(logging.WARNING)
     
     print("✅ JSON logging başarıyla yapılandırıldı")
-    print("🔇 Gürültülü loggerlar susturuldu")
+    print("�️ Console logging eklendi (INFO+ terminale)")
+    print("�🔇 Gürültülü loggerlar susturuldu")
     return json_handler
     """Print fonksiyonlarını yakalayıp logging'e yönlendiren sınıf"""
     
