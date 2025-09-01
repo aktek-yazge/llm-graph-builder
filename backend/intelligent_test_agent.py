@@ -24,6 +24,18 @@ from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 import neo4j
 from neo4j import GraphDatabase
+from dotenv import load_dotenv
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import openai
+from openai import OpenAI
+
+# Load environment variables
+load_dotenv()
+
+# Import project modules
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from src.graph_query import get_graphDB_driver
 
 # Setup logging
 logging.basicConfig(
@@ -37,20 +49,32 @@ class IntelligentTestAgent:
     """
     🧠 Intelligent Test Agent for Graph Database Analysis
     
-    Bu agent 5 adımda sistematik arama yaparak sorulara cevap bulur:
+    Bu agent 6 adımda sistematik arama yaparak sorulara cevap bulur:
     1. Initial Schema Analysis
     2. Keyword-based Node Search
-    3. Relationship Pattern Discovery
-    4. Deep Graph Traversal
-    5. Contextual Information Synthesis
+    3. Semantic Vector Search (YENİ!)
+    4. Relationship Pattern Discovery
+    5. Deep Graph Traversal
+    6. Contextual Information Synthesis
     """
     
-    def __init__(self, uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "password"):
-        """Initialize the agent with Neo4j connection"""
-        self.driver = GraphDatabase.driver(uri, auth=(user, password))
+    def __init__(self, uri: str = None, user: str = None, password: str = None):
+        """Initialize the agent with Neo4j connection and OpenAI client"""
+        # Use environment variables if parameters not provided
+        self.uri = uri or os.getenv('NEO4J_URI')
+        self.username = user or os.getenv('NEO4J_USERNAME') 
+        self.password = password or os.getenv('NEO4J_PASSWORD')
+        
+        # Use project's connection method
+        self.driver = get_graphDB_driver(self.uri, self.username, self.password)
+        
+        # Initialize OpenAI client for embeddings
+        self.openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        
         self.search_history = []
         self.discovered_patterns = []
         self.context_cache = {}
+        self.embedding_cache = {}  # Cache for embeddings
         
         logger.info("🚀 Intelligent Test Agent başlatılıyor...")
         self._verify_connection()
@@ -68,6 +92,37 @@ class IntelligentTestAgent:
         except Exception as e:
             logger.error(f"❌ Neo4j bağlantı hatası: {e}")
             raise
+    
+    def _clean_data_for_logging(self, data):
+        """Embedding gibi uzun veriyi log'dan temizle"""
+        if isinstance(data, dict):
+            cleaned = {}
+            for key, value in data.items():
+                if key == 'embedding':
+                    cleaned[key] = f"[embedding vector length: {len(value) if isinstance(value, list) else 'unknown'}]"
+                elif key == 'embedding_text':
+                    # embedding_text'i de log'dan çıkar
+                    continue
+                elif key == 'found_nodes':
+                    # found_nodes içindeki her node'un embedding'ini temizle
+                    cleaned[key] = {}
+                    for label, keyword_dict in value.items():
+                        cleaned[key][label] = {}
+                        for keyword, nodes in keyword_dict.items():
+                            cleaned_nodes = []
+                            for node in nodes:
+                                cleaned_node = {k: v for k, v in node.items() if k not in ['embedding', 'embedding_text']}
+                                if 'embedding' in node:
+                                    cleaned_node['embedding'] = f"[{len(node['embedding'])} dims]"
+                                cleaned_nodes.append(cleaned_node)
+                            cleaned[key][label][keyword] = cleaned_nodes
+                else:
+                    cleaned[key] = self._clean_data_for_logging(value)
+            return cleaned
+        elif isinstance(data, list):
+            return [self._clean_data_for_logging(item) for item in data]
+        else:
+            return data
     
     def search_for_answer(self, question: str) -> Dict[str, Any]:
         """
@@ -109,18 +164,18 @@ class IntelligentTestAgent:
             logger.info("✅ Adım 2'de cevap bulundu!")
             return search_session
         
-        # Step 3: Relationship Pattern Discovery
-        step3_result = self._step3_relationship_discovery(question, step1_result, step2_result)
+        # Step 3: Semantic Vector Search (YENİ!)
+        step3_result = self._step3_semantic_search(question, step1_result, step2_result)
         search_session["steps"].append(step3_result)
         
         if step3_result.get("answer_found"):
             search_session["final_answer"] = step3_result.get("answer")
             search_session["confidence"] = step3_result.get("confidence", 0.8)
-            logger.info("✅ Adım 3'te cevap bulundu!")
+            logger.info("✅ Adım 3'te (Semantic Search) cevap bulundu!")
             return search_session
         
-        # Step 4: Deep Graph Traversal
-        step4_result = self._step4_deep_traversal(question, step1_result, step2_result, step3_result)
+        # Step 4: Relationship Pattern Discovery
+        step4_result = self._step4_relationship_discovery(question, step1_result, step2_result, step3_result)
         search_session["steps"].append(step4_result)
         
         if step4_result.get("answer_found"):
@@ -129,25 +184,35 @@ class IntelligentTestAgent:
             logger.info("✅ Adım 4'te cevap bulundu!")
             return search_session
         
-        # Step 5: Contextual Information Synthesis
-        step5_result = self._step5_synthesis(question, search_session["steps"])
+        # Step 5: Deep Graph Traversal
+        step5_result = self._step5_deep_traversal(question, step1_result, step2_result, step3_result, step4_result)
         search_session["steps"].append(step5_result)
-        search_session["final_answer"] = step5_result.get("answer", "Cevap bulunamadı")
-        search_session["confidence"] = step5_result.get("confidence", 0.5)
         
-        logger.info("✅ 5 adımlı arama tamamlandı!")
+        if step5_result.get("answer_found"):
+            search_session["final_answer"] = step5_result.get("answer")
+            search_session["confidence"] = step5_result.get("confidence", 0.8)
+            logger.info("✅ Adım 5'te cevap bulundu!")
+            return search_session
+        
+        # Step 6: Contextual Information Synthesis
+        step6_result = self._step6_synthesis(question, search_session["steps"])
+        search_session["steps"].append(step6_result)
+        search_session["final_answer"] = step6_result.get("answer", "Cevap bulunamadı")
+        search_session["confidence"] = step6_result.get("confidence", 0.5)
+        
+        logger.info("✅ 6 adımlı arama tamamlandı!")
         return search_session
     
     def _step1_schema_analysis(self, question: str) -> Dict[str, Any]:
         """
-        Adım 1: Schema Analysis - Veritabanı yapısını analiz eder
+        Adım 1: Schema Analysis + Count Query Optimization - Veritabanı yapısını analiz eder
         """
-        logger.info("📊 Adım 1: Schema analizi başlıyor...")
+        logger.info("📊 Adım 1: Schema analizi + Count query optimization başlıyor...")
         
         step_result = {
             "step": 1,
-            "name": "Schema Analysis",
-            "description": "Veritabanı yapısı ve node tiplerini analiz et",
+            "name": "Schema Analysis + Count Optimization",
+            "description": "Veritabanı yapısı ve optimized count queries",
             "answer_found": False,
             "data": {},
             "insights": []
@@ -173,32 +238,42 @@ class IntelligentTestAgent:
                     node_counts[label] = count
                 step_result["data"]["node_counts"] = node_counts
                 
-                # Analyze question keywords against schema
+                # COUNT QUERY OPTIMIZATION - Türkçe soru analizi
                 question_lower = question.lower()
+                
+                # "Kaç tane" soruları için özel logic
+                if any(word in question_lower for word in ["kaç", "sayı", "toplam", "count", "number"]):
+                    count_answer = self._handle_count_query(question_lower, node_counts, labels, session)
+                    if count_answer:
+                        step_result["answer_found"] = True
+                        step_result["answer"] = count_answer
+                        step_result["confidence"] = 0.9
+                        step_result["insights"].append("Count query optimization aktif - direkt cevap bulundu")
+                
+                # Analyze question keywords against schema
                 relevant_labels = []
-                for label in labels:
-                    if any(keyword in question_lower for keyword in [
-                        label.lower(), 
-                        "policy" if "poliçe" in question_lower and "Policy" in label else "",
-                        "customer" if "müşteri" in question_lower and "Customer" in label else "",
-                        "payment" if "ödeme" in question_lower and "Payment" in label else "",
-                        "asset" if "varlık" in question_lower and "Asset" in label else "",
-                        "coverage" if "teminat" in question_lower and "Coverage" in label else ""
-                    ]):
-                        if label:  # Only add non-empty labels
-                            relevant_labels.append(label)
+                keyword_mappings = {
+                    "poliçe": ["Policy", "PolicyInfo", "PolicyType"],
+                    "müşteri": ["Customer", "CustomerInfo"],
+                    "ödeme": ["Payment", "PaymentInfo"],
+                    "varlık": ["Asset", "AssetInfo", "InsuredItem"],
+                    "teminat": ["Coverage", "CoverageInfo"],
+                    "entity": ["__Entity__", "Entity"],
+                    "node": labels,  # "node" sorularında tüm labels'ları dahil et
+                    "dokument": ["Document"],
+                    "chunk": ["Chunk"]
+                }
+                
+                for keyword, mapped_labels in keyword_mappings.items():
+                    if keyword in question_lower:
+                        for mapped_label in mapped_labels:
+                            if mapped_label in labels and mapped_label not in relevant_labels:
+                                relevant_labels.append(mapped_label)
                 
                 step_result["data"]["relevant_labels"] = relevant_labels
                 step_result["insights"].append(f"Toplam {len(labels)} node tipi bulundu")
                 step_result["insights"].append(f"Toplam {len(relationships)} relationship tipi bulundu")
                 step_result["insights"].append(f"Soruyla ilgili olabilecek node tipleri: {relevant_labels}")
-                
-                # Simple answer check for basic schema questions
-                if "kaç" in question_lower and any(word in question_lower for word in ["node", "entity", "varlık"]):
-                    total_entities = sum(node_counts.values())
-                    step_result["answer_found"] = True
-                    step_result["answer"] = f"Toplam {total_entities} entity bulundu: {dict(node_counts)}"
-                    step_result["confidence"] = 0.9
                 
         except Exception as e:
             logger.error(f"❌ Adım 1 hatası: {e}")
@@ -206,6 +281,44 @@ class IntelligentTestAgent:
         
         logger.info(f"📊 Adım 1 tamamlandı. Relevant labels: {step_result['data'].get('relevant_labels', [])}")
         return step_result
+    
+    def _handle_count_query(self, question_lower: str, node_counts: dict, labels: list, session) -> str:
+        """Count sorularını optimize ederek cevaplar"""
+        
+        # Genel count soruları
+        if "toplam" in question_lower and any(word in question_lower for word in ["entity", "node", "varlık"]):
+            total_entities = sum(node_counts.values())
+            return f"Toplam {total_entities} entity bulundu: {dict(node_counts)}"
+        
+        # Specific entity count soruları
+        entity_mappings = {
+            "müşteri": ["Customer", "CustomerInfo"],
+            "poliçe": ["Policy", "PolicyInfo", "PolicyType"], 
+            "dokument": ["Document"],
+            "chunk": ["Chunk"],
+            "varlık": ["AssetInfo", "InsuredItem"],
+            "teminat": ["CoverageInfo"]
+        }
+        
+        for entity_word, label_list in entity_mappings.items():
+            if entity_word in question_lower:
+                total_count = sum(node_counts.get(label, 0) for label in label_list)
+                relevant_labels = [label for label in label_list if label in node_counts and node_counts[label] > 0]
+                
+                if total_count > 0:
+                    details = ", ".join([f"{label}: {node_counts[label]}" for label in relevant_labels])
+                    return f"{entity_word.title()} toplam {total_count} adet bulundu ({details})"
+        
+        # Relationship count soruları
+        if "ilişki" in question_lower or "relationship" in question_lower:
+            try:
+                rel_count_result = session.run("MATCH ()-[r]->() RETURN count(r) as total_rels")
+                total_rels = rel_count_result.single()["total_rels"]
+                return f"Toplam {total_rels} relationship bulundu"
+            except:
+                pass
+        
+        return None
     
     def _step2_keyword_search(self, question: str, step1_result: Dict) -> Dict[str, Any]:
         """
@@ -276,17 +389,205 @@ class IntelligentTestAgent:
             logger.error(f"❌ Adım 2 hatası: {e}")
             step_result["error"] = str(e)
         
-        logger.info(f"🔎 Adım 2 tamamlandı. Toplam eşleşme: {step_result['data'].get('found_nodes', {})}")
+        # Embedding'leri temizleyerek log'a yaz
+        cleaned_found_nodes = self._clean_data_for_logging(step_result['data'].get('found_nodes', {}))
+        logger.info(f"🔎 Adım 2 tamamlandı. Toplam eşleşme: {cleaned_found_nodes}")
         return step_result
     
-    def _step3_relationship_discovery(self, question: str, step1_result: Dict, step2_result: Dict) -> Dict[str, Any]:
+    def _step3_semantic_search(self, question: str, step1_result: Dict, step2_result: Dict) -> Dict[str, Any]:
         """
-        Adım 3: Relationship Pattern Discovery - İlişki kalıplarını keşfeder
+        Adım 3: Semantic Vector Search - Önce DB'deki embedding'leri kullan, yoksa gerçek zamanlı oluştur
         """
-        logger.info("🔗 Adım 3: Relationship pattern discovery başlıyor...")
+        logger.info("🔮 Adım 3: Semantic vector search başlıyor...")
         
         step_result = {
             "step": 3,
+            "name": "Semantic Search",
+            "description": "Önce DB embedding'leri, sonra real-time embedding similarity arama",
+            "answer_found": False,
+            "data": {},
+            "insights": []
+        }
+        
+        try:
+            # Generate embedding for the question
+            question_embedding = self._get_text_embedding(question)
+            step_result["data"]["question_embedding_generated"] = True
+            
+            with self.driver.session() as session:
+                # Önce DB'de embedding'li node'ları ara
+                embedding_query = """
+                MATCH (n)
+                WHERE n.embedding IS NOT NULL
+                RETURN n, labels(n)[0] as label, n.embedding as embedding
+                LIMIT 100
+                """
+                
+                result = session.run(embedding_query)
+                db_semantic_matches = []
+                fallback_nodes = []
+                
+                for record in result:
+                    node = dict(record["n"])
+                    label = record["label"]
+                    embedding_list = record["embedding"]
+                    # id alanı zaten metni içeriyor, embedding_text gereksiz
+                    node_text = node.get("id", "")
+                    
+                    if embedding_list and len(embedding_list) == 1536:  # Ada-002 dimension
+                        # DB'den embedding kullan
+                        node_embedding = np.array(embedding_list)
+                        
+                        # Calculate similarity
+                        similarity = self._calculate_cosine_similarity(question_embedding, node_embedding)
+                        
+                        if similarity > 0.7:  # High similarity threshold
+                            db_semantic_matches.append({
+                                "node": node,
+                                "label": label,
+                                "text_content": node_text,
+                                "similarity_score": float(similarity),
+                                "source": "db_embedding"
+                            })
+                    else:
+                        # Embedding eksik, fallback listesine ekle
+                        fallback_nodes.append({
+                            "node": node,
+                            "label": label
+                        })
+                
+                step_result["data"]["db_embeddings_found"] = len(db_semantic_matches)
+                step_result["data"]["fallback_nodes_count"] = len(fallback_nodes)
+                
+                # Fallback: Embedding'i olmayan node'lar için real-time generation
+                realtime_matches = []
+                if len(db_semantic_matches) < 5 and fallback_nodes:  # En az 5 match istiyoruz
+                    step_result["insights"].append(f"DB'de yeterli embedding yok, {len(fallback_nodes)} node için real-time generation")
+                    
+                    for fallback in fallback_nodes[:20]:  # Max 20 node process et
+                        node = fallback["node"]
+                        label = fallback["label"]
+                        
+                        # Extract text content from node
+                        text_content = self._extract_node_text_content(node)
+                        
+                        if text_content and len(text_content.strip()) > 3:
+                            # Get or compute node embedding
+                            node_embedding = self._get_text_embedding(text_content)
+                            
+                            # Calculate similarity
+                            similarity = self._calculate_cosine_similarity(question_embedding, node_embedding)
+                            
+                            if similarity > 0.7:  # High similarity threshold
+                                realtime_matches.append({
+                                    "node": node,
+                                    "label": label,
+                                    "text_content": text_content[:200],  # First 200 chars
+                                    "similarity_score": float(similarity),
+                                    "source": "realtime_embedding"
+                                })
+                
+                # Combine all matches
+                all_semantic_matches = db_semantic_matches + realtime_matches
+                
+                # Sort by similarity score
+                all_semantic_matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+                step_result["data"]["semantic_matches"] = all_semantic_matches[:10]  # Top 10
+                
+                step_result["insights"].append(f"Toplam {len(all_semantic_matches)} semantic match bulundu")
+                step_result["insights"].append(f"DB embedding'den: {len(db_semantic_matches)}")
+                step_result["insights"].append(f"Real-time embedding'den: {len(realtime_matches)}")
+                
+                if all_semantic_matches:
+                    # Create answer from top semantic matches
+                    top_matches = all_semantic_matches[:3]
+                    answer_parts = []
+                    
+                    for match in top_matches:
+                        node_id = match["node"].get("id", match["node"].get("name", "Unknown"))
+                        similarity = match["similarity_score"]
+                        source = match["source"]
+                        answer_parts.append(f"{node_id} (similarity: {similarity:.2f}, {source})")
+                    
+                    step_result["answer_found"] = True
+                    step_result["answer"] = f"Semantic search sonucu: {'; '.join(answer_parts)}"
+                    step_result["confidence"] = 0.85  # High confidence for semantic matches
+                
+        except Exception as e:
+            logger.error(f"❌ Adım 3 hatası: {e}")
+            step_result["error"] = str(e)
+        
+        # Semantic matches'ı temizleyerek log'a yaz
+        semantic_matches = step_result.get('data', {}).get('semantic_matches', [])
+        cleaned_matches = []
+        for match in semantic_matches:
+            cleaned_match = match.copy()
+            if 'node' in cleaned_match and 'embedding' in cleaned_match['node']:
+                cleaned_match['node'] = {k: v for k, v in cleaned_match['node'].items() if k != 'embedding'}
+            cleaned_matches.append(cleaned_match)
+        
+        logger.info(f"🔮 Adım 3 tamamlandı. Semantic matches: {len(semantic_matches)} bulundu")
+        if cleaned_matches:
+            logger.info(f"🔮 Top matches: {[m.get('text_content', '')[:50] + '...' for m in cleaned_matches[:3]]}")
+        return step_result
+    
+    def _get_text_embedding(self, text: str) -> np.ndarray:
+        """Generate text embedding using OpenAI API"""
+        # Check cache first
+        if text in self.embedding_cache:
+            return self.embedding_cache[text]
+        
+        try:
+            response = self.openai_client.embeddings.create(
+                model="text-embedding-ada-002",
+                input=text
+            )
+            embedding = np.array(response.data[0].embedding)
+            
+            # Cache the embedding
+            self.embedding_cache[text] = embedding
+            return embedding
+            
+        except Exception as e:
+            logger.error(f"❌ Embedding generation hatası: {e}")
+            # Return zero vector if embedding fails
+            return np.zeros(1536)  # Ada-002 embedding dimension
+    
+    def _extract_node_text_content(self, node: Dict) -> str:
+        """Extract meaningful text content from a node"""
+        text_parts = []
+        
+        # Common text fields to check
+        text_fields = ["id", "name", "description", "text", "content", "title", "summary"]
+        
+        for field in text_fields:
+            if field in node and node[field]:
+                text_parts.append(str(node[field]))
+        
+        return " ".join(text_parts).strip()
+    
+    def _calculate_cosine_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+        """Calculate cosine similarity between two embeddings"""
+        try:
+            # Reshape for sklearn cosine_similarity
+            emb1 = embedding1.reshape(1, -1)
+            emb2 = embedding2.reshape(1, -1)
+            
+            similarity = cosine_similarity(emb1, emb2)[0][0]
+            return similarity
+            
+        except Exception as e:
+            logger.error(f"❌ Cosine similarity calculation hatası: {e}")
+            return 0.0
+
+    def _step4_relationship_discovery(self, question: str, step1_result: Dict, step2_result: Dict, step3_result: Dict) -> Dict[str, Any]:
+        """
+        Adım 4: Relationship Pattern Discovery - İlişki kalıplarını keşfeder
+        """
+        logger.info("🔗 Adım 4: Relationship pattern discovery başlıyor...")
+        
+        step_result = {
+            "step": 4,
             "name": "Relationship Discovery",
             "description": "Node'lar arası ilişki kalıplarını keşfet",
             "answer_found": False,
@@ -351,17 +652,17 @@ class IntelligentTestAgent:
             logger.error(f"❌ Adım 3 hatası: {e}")
             step_result["error"] = str(e)
         
-        logger.info(f"🔗 Adım 3 tamamlandı. Pattern sayısı: {len(step_result.get('data', {}).get('relationship_patterns', []))}")
+        logger.info(f"🔗 Adım 4 tamamlandı. Pattern sayısı: {len(step_result.get('data', {}).get('relationship_patterns', []))}")
         return step_result
     
-    def _step4_deep_traversal(self, question: str, step1_result: Dict, step2_result: Dict, step3_result: Dict) -> Dict[str, Any]:
+    def _step5_deep_traversal(self, question: str, step1_result: Dict, step2_result: Dict, step3_result: Dict, step4_result: Dict) -> Dict[str, Any]:
         """
-        Adım 4: Deep Graph Traversal - Derin graph gezintisi
+        Adım 5: Deep Graph Traversal - Derin graph gezintisi
         """
-        logger.info("🌊 Adım 4: Deep graph traversal başlıyor...")
+        logger.info("🌊 Adım 5: Deep graph traversal başlıyor...")
         
         step_result = {
-            "step": 4,
+            "step": 5,
             "name": "Deep Traversal",
             "description": "Multi-hop graph traversal ile derin arama",
             "answer_found": False,
@@ -432,17 +733,17 @@ class IntelligentTestAgent:
             logger.error(f"❌ Adım 4 hatası: {e}")
             step_result["error"] = str(e)
         
-        logger.info(f"🌊 Adım 4 tamamlandı. Path sayısı: {len(step_result.get('data', {}).get('discovered_paths', []))}")
+        logger.info(f"🌊 Adım 5 tamamlandı. Path sayısı: {len(step_result.get('data', {}).get('discovered_paths', []))}")
         return step_result
     
-    def _step5_synthesis(self, question: str, previous_steps: List[Dict]) -> Dict[str, Any]:
+    def _step6_synthesis(self, question: str, previous_steps: List[Dict]) -> Dict[str, Any]:
         """
-        Adım 5: Contextual Information Synthesis - Tüm bilgileri sentezler
+        Adım 6: Contextual Information Synthesis - Tüm bilgileri sentezler
         """
-        logger.info("🧬 Adım 5: Information synthesis başlıyor...")
+        logger.info("🧬 Adım 6: Information synthesis başlıyor...")
         
         step_result = {
-            "step": 5,
+            "step": 6,
             "name": "Information Synthesis",
             "description": "Tüm adımlardan toplanan bilgileri sentezle",
             "answer_found": True,  # Always try to provide an answer
@@ -575,17 +876,61 @@ class IntelligentTestAgent:
             self.driver.close()
             logger.info("🔌 Neo4j bağlantısı kapatıldı")
 
+def serialize_neo4j_objects(obj):
+    """Neo4j objelerini JSON'a serialize edilebilir hale getir"""
+    if isinstance(obj, (neo4j.time.DateTime, neo4j.time.Date, neo4j.time.Time)):
+        # Neo4j time objesi
+        return str(obj)
+    elif hasattr(obj, 'items') and callable(getattr(obj, 'items')):
+        # Dict-like object
+        try:
+            return {k: serialize_neo4j_objects(v) for k, v in obj.items()}
+        except:
+            return str(obj)
+    elif isinstance(obj, (list, tuple)):
+        # List-like object
+        return [serialize_neo4j_objects(item) for item in obj]
+    elif hasattr(obj, '__dict__'):
+        # Object with attributes
+        try:
+            return {k: serialize_neo4j_objects(v) for k, v in obj.__dict__.items()}
+        except:
+            return str(obj)
+    else:
+        # Simple types
+        try:
+            # Test if it's JSON serializable
+            json.dumps(obj)
+            return obj
+        except:
+            return str(obj)
+
 def test_intelligent_agent():
     """Test the Intelligent Agent with sample questions"""
     logger.info("🧪 Intelligent Test Agent test başlıyor...")
     
-    # Test questions in Turkish
+    # Test questions in Turkish - Basic and Advanced
     test_questions = [
+        # Basic count/schema questions (Adım 1)
         "Veritabanında kaç tane müşteri var?",
+        "Toplam kaç entity bulunuyor?",
+        
+        # Keyword search questions (Adım 2)
         "Hangi poliçe türleri mevcut?",
-        "Yat sigortası hakkında ne biliyorsun?",
         "Poliçe sahipleri kimler?",
-        "Toplam kaç entity bulunuyor?"
+        
+        # Semantic search questions (Adım 3) - Most important!
+        "Yat sigortası hakkında ne biliyorsun?",
+        "Kiraz isimli yat ile ilgili hangi bilgiler var?",
+        "Ödeme planları nasıl düzenlenmiş?",
+        
+        # Relationship discovery questions (Adım 4)
+        "Müşteriler ile poliçeler arasında nasıl bağlantılar var?",
+        "Yat ve teminatlar arasındaki ilişki nedir?",
+        
+        # Complex multi-hop questions (Adım 5+)
+        "YAPI KREDİ FİNANSALKİRALAMA firmasının hangi varlıkları sigortalı?",
+        "2020 yılında başlayan poliçelerin ödeme detayları neler?"
     ]
     
     agent = IntelligentTestAgent()
@@ -602,12 +947,15 @@ def test_intelligent_agent():
             logger.info(f"📊 Güven skoru: {result.get('confidence', 0.0):.2f}")
             logger.info(f"🔧 Adım sayısı: {len(result.get('steps', []))}")
             
-            # Save detailed results
+            # Save detailed results with proper serialization
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             result_file = f"intelligent_agent_test_{i}_{timestamp}.json"
             
+            # Serialize Neo4j objects before saving
+            serialized_result = serialize_neo4j_objects(result)
+            
             with open(result_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
+                json.dump(serialized_result, f, ensure_ascii=False, indent=2)
             logger.info(f"📁 Detaylı sonuç kaydedildi: {result_file}")
             
     finally:

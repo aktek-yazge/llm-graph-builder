@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Insurance SST Test Script
-DB'deki gerçek Document chunk'ları ile SST extraction'ı test eder
+Insurance SST Test Script with Embedding Integration
+DB'deki gerçek Document chunk'ları ile SST extraction'ı test eder ve embedding'leri node creation sırasında ekler
 """
 
 import os
@@ -9,6 +9,8 @@ import sys
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
+import numpy as np
+from openai import OpenAI
 
 # .env dosyasını yükle
 load_dotenv()
@@ -33,6 +35,64 @@ def setup_test_logging():
     json_file = f"{test_dir}/insurance_sst_results_{timestamp}.json"
     
     return log_file, json_file
+
+class EmbeddingGenerator:
+    """Node embedding'lerini oluşturmak için sınıf"""
+    
+    def __init__(self):
+        self.openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        self.embedding_cache = {}
+    
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        """Text için embedding oluştur"""
+        if not text or len(text.strip()) < 3:
+            return None
+            
+        # Cache kontrolü
+        if text in self.embedding_cache:
+            return self.embedding_cache[text]
+        
+        try:
+            response = self.openai_client.embeddings.create(
+                model="text-embedding-ada-002",
+                input=text
+            )
+            embedding = np.array(response.data[0].embedding)
+            
+            # Cache'e kaydet
+            self.embedding_cache[text] = embedding
+            return embedding
+            
+        except Exception as e:
+            print(f"❌ Embedding generation hatası: {e}")
+            return None
+    
+    def extract_node_text_content(self, node_data: dict) -> str:
+        """Node'dan anlamlı text içerik çıkart"""
+        text_parts = []
+        
+        # Önemli alanları kontrol et
+        text_fields = ["id", "name", "description", "text", "content", "title", "summary"]
+        
+        for field in text_fields:
+            if field in node_data and node_data[field]:
+                text_parts.append(str(node_data[field]))
+        
+        return " ".join(text_parts).strip()
+    
+    def add_embedding_to_node(self, node_data: dict) -> dict:
+        """Node'a embedding ekle"""
+        text_content = self.extract_node_text_content(node_data)
+        
+        if text_content:
+            embedding = self.get_text_embedding(text_content)
+            if embedding is not None:
+                # Embedding'i liste olarak kaydet (Neo4j için)
+                node_data['embedding'] = embedding.tolist()
+                # embedding_text gereksiz - id alanı zaten metni içeriyor
+                print(f"✅ Embedding eklendi: {text_content[:50]}... (Boyut: {len(embedding)})")
+        
+        return node_data
 
 class TestLogger:
     def __init__(self, log_file):
@@ -112,17 +172,21 @@ def get_document_chunks():
         return doc_info, chunks
 
 async def test_insurance_sst_extraction(save_to_db=False):
-    """DB'deki gerçek chunk'lar ile Insurance SST extraction test - Versioned Logging"""
+    """DB'deki gerçek chunk'lar ile Insurance SST extraction test - Versioned Logging with Embeddings"""
     
     # Logging setup
     log_file, json_file = setup_test_logging()
     logger = TestLogger(log_file)
     
-    logger.log("🔬 Insurance SST Extraction Test (DB Chunks) Başlıyor...")
+    # Embedding generator
+    embedding_gen = EmbeddingGenerator()
+    
+    logger.log("🔬 Insurance SST Extraction Test (DB Chunks + Embeddings) Başlıyor...")
     logger.log(f"📁 Log dosyası: {log_file}")
     logger.log(f"📁 JSON sonuç dosyası: {json_file}")
     logger.log(f"⏰ Test zamanı: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.log(f"💾 DB'ye kaydetme: {'✅ Aktif' if save_to_db else '❌ Pasif'}")
+    logger.log(f"🔮 Embedding generation: ✅ Aktif")
     logger.log("")
     
     # DB'den chunk'ları çek
@@ -211,6 +275,28 @@ async def test_insurance_sst_extraction(save_to_db=False):
                 chunk_latency["normalize_entities"] = "SUCCESS"
                 successful_steps += 1
                 logger.log(f"✅ Step 3/7: {len(cleaned)} temizlenmiş graph document")
+                
+                # Embedding generation for nodes
+                logger.log(f"🔮 Step 3.5/7: Node embedding generation başlıyor...")
+                embedding_count = 0
+                for graph_doc in cleaned:
+                    for node in graph_doc.nodes:
+                        # Node'a embedding ekle
+                        node_dict = {
+                            "id": node.id,
+                            "type": node.type,
+                            **node.properties
+                        }
+                        enhanced_node_dict = embedding_gen.add_embedding_to_node(node_dict)
+                        
+                        # Enhanced properties'leri geri node'a koy
+                        if 'embedding' in enhanced_node_dict:
+                            node.properties['embedding'] = enhanced_node_dict['embedding']
+                            # embedding_text gereksiz - id alanı zaten metni içeriyor
+                            embedding_count += 1
+                
+                chunk_latency["embedding_generation"] = f"SUCCESS - {embedding_count} embeddings"
+                logger.log(f"✅ Step 3.5/7: {embedding_count} node'a embedding eklendi")
                 
                 # Test için graph documents'ları biriktir
                 all_graph_documents.extend(cleaned)
