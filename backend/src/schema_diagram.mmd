@@ -1,0 +1,30 @@
+graph TD
+    %% Neo4j Database Schema
+
+    N0[Chunk]
+    N1[Customer]
+    N2[Document]
+    N3[InsuredItem]
+    N4[Policy]
+    N5[PolicyType]
+    N6[PolicyYear]
+
+    N0 -->|NEXT_CHUNK| N0
+    N0 -->|PART_OF| N2
+    N1 -->|HAS_DOC| N2
+    N1 -->|HAS_POLICY| N4
+    N2 -->|FIRST_CHUNK| N0
+    N4 -->|DOCUMENTED_IN| N2
+    N4 -->|HAS_INSURED_ITEM| N3
+    N4 -->|HAS_TYPE| N5
+    N4 -->|HAS_YEAR| N6
+
+    %% Styling
+    classDef nodeClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    class N0 nodeClass
+    class N1 nodeClass
+    class N2 nodeClass
+    class N3 nodeClass
+    class N4 nodeClass
+    class N5 nodeClass
+    class N6 nodeClass
