@@ -396,14 +396,14 @@ class IntelligentTestAgent:
     
     def _step3_semantic_search(self, question: str, step1_result: Dict, step2_result: Dict) -> Dict[str, Any]:
         """
-        Adım 3: Semantic Vector Search - Önce DB'deki embedding'leri kullan, yoksa gerçek zamanlı oluştur
+        Adım 3: Hybrid Semantic Search - Önce chunk-based, sonra node-based semantic search
         """
-        logger.info("🔮 Adım 3: Semantic vector search başlıyor...")
+        logger.info("🔮 Adım 3: Hybrid semantic search başlıyor...")
         
         step_result = {
             "step": 3,
-            "name": "Semantic Search",
-            "description": "Önce DB embedding'leri, sonra real-time embedding similarity arama",
+            "name": "Hybrid Semantic Search", 
+            "description": "Önce chunk-based, sonra node-based semantic search",
             "answer_found": False,
             "data": {},
             "insights": []
@@ -415,121 +415,146 @@ class IntelligentTestAgent:
             step_result["data"]["question_embedding_generated"] = True
             
             with self.driver.session() as session:
-                # Önce DB'de embedding'li node'ları ara
-                embedding_query = """
-                MATCH (n)
-                WHERE n.embedding IS NOT NULL
-                RETURN n, labels(n)[0] as label, n.embedding as embedding
-                LIMIT 100
-                """
+                # PHASE 1: CHUNK-BASED SEMANTIC SEARCH
+                logger.info("📄 Phase 1: Chunk-based semantic search...")
+                chunk_matches = self._search_chunks_semantic(session, question_embedding)
+                step_result["data"]["chunk_matches"] = chunk_matches
+                step_result["insights"].append(f"Chunk search: {len(chunk_matches)} match bulundu")
                 
-                result = session.run(embedding_query)
-                db_semantic_matches = []
-                fallback_nodes = []
+                # PHASE 2: NODE-BASED SEMANTIC SEARCH (eğer chunk'lar yeterli değilse)
+                node_matches = []
+                chunk_threshold = 0.8  # Yüksek kaliteli chunk match threshold'u
+                high_quality_chunks = [m for m in chunk_matches if m["similarity_score"] > chunk_threshold]
                 
-                for record in result:
-                    node = dict(record["n"])
-                    label = record["label"]
-                    embedding_list = record["embedding"]
-                    # id alanı zaten metni içeriyor, embedding_text gereksiz
-                    node_text = node.get("id", "")
-                    
-                    if embedding_list and len(embedding_list) == 1536:  # Ada-002 dimension
-                        # DB'den embedding kullan
-                        node_embedding = np.array(embedding_list)
-                        
-                        # Calculate similarity
-                        similarity = self._calculate_cosine_similarity(question_embedding, node_embedding)
-                        
-                        if similarity > 0.7:  # High similarity threshold
-                            db_semantic_matches.append({
-                                "node": node,
-                                "label": label,
-                                "text_content": node_text,
-                                "similarity_score": float(similarity),
-                                "source": "db_embedding"
-                            })
+                if len(high_quality_chunks) < 3:  # En az 3 kaliteli chunk match istiyoruz
+                    logger.info("🔗 Phase 2: Node-based semantic search (chunk yetersiz)...")
+                    node_matches = self._search_nodes_semantic(session, question_embedding)
+                    step_result["data"]["node_matches"] = node_matches
+                    step_result["insights"].append(f"Node search: {len(node_matches)} match bulundu")
+                else:
+                    step_result["insights"].append("Chunk search yeterli, node search atlandı")
+                
+                # COMBINE AND RANK RESULTS
+                all_matches = chunk_matches + node_matches
+                all_matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+                
+                step_result["data"]["all_semantic_matches"] = all_matches[:10]
+                step_result["insights"].append(f"Toplam combined matches: {len(all_matches)}")
+                
+                # DETERMINE BEST STRATEGY
+                if chunk_matches and node_matches:
+                    best_chunk = max(chunk_matches, key=lambda x: x["similarity_score"])
+                    best_node = max(node_matches, key=lambda x: x["similarity_score"])
+                    if best_chunk["similarity_score"] > best_node["similarity_score"]:
+                        step_result["insights"].append(f"En iyi match: Chunk ({best_chunk['similarity_score']:.3f})")
                     else:
-                        # Embedding eksik, fallback listesine ekle
-                        fallback_nodes.append({
-                            "node": node,
-                            "label": label
-                        })
+                        step_result["insights"].append(f"En iyi match: Node ({best_node['similarity_score']:.3f})")
                 
-                step_result["data"]["db_embeddings_found"] = len(db_semantic_matches)
-                step_result["data"]["fallback_nodes_count"] = len(fallback_nodes)
-                
-                # Fallback: Embedding'i olmayan node'lar için real-time generation
-                realtime_matches = []
-                if len(db_semantic_matches) < 5 and fallback_nodes:  # En az 5 match istiyoruz
-                    step_result["insights"].append(f"DB'de yeterli embedding yok, {len(fallback_nodes)} node için real-time generation")
-                    
-                    for fallback in fallback_nodes[:20]:  # Max 20 node process et
-                        node = fallback["node"]
-                        label = fallback["label"]
-                        
-                        # Extract text content from node
-                        text_content = self._extract_node_text_content(node)
-                        
-                        if text_content and len(text_content.strip()) > 3:
-                            # Get or compute node embedding
-                            node_embedding = self._get_text_embedding(text_content)
-                            
-                            # Calculate similarity
-                            similarity = self._calculate_cosine_similarity(question_embedding, node_embedding)
-                            
-                            if similarity > 0.7:  # High similarity threshold
-                                realtime_matches.append({
-                                    "node": node,
-                                    "label": label,
-                                    "text_content": text_content[:200],  # First 200 chars
-                                    "similarity_score": float(similarity),
-                                    "source": "realtime_embedding"
-                                })
-                
-                # Combine all matches
-                all_semantic_matches = db_semantic_matches + realtime_matches
-                
-                # Sort by similarity score
-                all_semantic_matches.sort(key=lambda x: x["similarity_score"], reverse=True)
-                step_result["data"]["semantic_matches"] = all_semantic_matches[:10]  # Top 10
-                
-                step_result["insights"].append(f"Toplam {len(all_semantic_matches)} semantic match bulundu")
-                step_result["insights"].append(f"DB embedding'den: {len(db_semantic_matches)}")
-                step_result["insights"].append(f"Real-time embedding'den: {len(realtime_matches)}")
-                
-                if all_semantic_matches:
-                    # Create answer from top semantic matches
-                    top_matches = all_semantic_matches[:3]
+                if all_matches:
+                    # Create answer from top matches
+                    top_matches = all_matches[:3]
                     answer_parts = []
                     
                     for match in top_matches:
-                        node_id = match["node"].get("id", match["node"].get("name", "Unknown"))
+                        content = match.get("text_content", "Unknown")[:100]
                         similarity = match["similarity_score"]
                         source = match["source"]
-                        answer_parts.append(f"{node_id} (similarity: {similarity:.2f}, {source})")
+                        answer_parts.append(f"{content}... (sim: {similarity:.3f}, {source})")
                     
                     step_result["answer_found"] = True
-                    step_result["answer"] = f"Semantic search sonucu: {'; '.join(answer_parts)}"
+                    step_result["answer"] = f"Hybrid semantic search sonucu: {'; '.join(answer_parts)}"
                     step_result["confidence"] = 0.85  # High confidence for semantic matches
                 
         except Exception as e:
             logger.error(f"❌ Adım 3 hatası: {e}")
             step_result["error"] = str(e)
         
-        # Semantic matches'ı temizleyerek log'a yaz
-        semantic_matches = step_result.get('data', {}).get('semantic_matches', [])
-        cleaned_matches = []
-        for match in semantic_matches:
-            cleaned_match = match.copy()
-            if 'node' in cleaned_match and 'embedding' in cleaned_match['node']:
-                cleaned_match['node'] = {k: v for k, v in cleaned_match['node'].items() if k != 'embedding'}
-            cleaned_matches.append(cleaned_match)
+        # Clean and log results
+        all_matches = step_result.get('data', {}).get('all_semantic_matches', [])
+        cleaned_matches = self._clean_data_for_logging(all_matches)
         
-        logger.info(f"🔮 Adım 3 tamamlandı. Semantic matches: {len(semantic_matches)} bulundu")
+        logger.info(f"🔮 Adım 3 tamamlandı. Total matches: {len(all_matches)} bulundu")
         if cleaned_matches:
-            logger.info(f"🔮 Top matches: {[m.get('text_content', '')[:50] + '...' for m in cleaned_matches[:3]]}")
+            logger.info(f"🔮 Top 3 matches: {[str(m.get('text_content', ''))[:50] + '...' for m in cleaned_matches[:3]]}")
+        
         return step_result
+    
+    def _search_chunks_semantic(self, session, question_embedding: np.ndarray) -> List[Dict]:
+        """Chunk-based semantic search"""
+        chunk_matches = []
+        
+        # Chunk node'ları ara
+        chunk_query = """
+        MATCH (c:Chunk)
+        WHERE c.embedding IS NOT NULL
+        RETURN c.id as text, c.embedding as embedding, 
+               c.document_name as document, c.chunk_index as index
+        LIMIT 50
+        """
+        
+        chunk_results = session.run(chunk_query)
+        
+        for record in chunk_results:
+            text = record["text"]
+            embedding_list = record["embedding"]
+            document = record["document"]
+            index = record["index"]
+            
+            if embedding_list and len(embedding_list) == 1536:
+                chunk_embedding = np.array(embedding_list)
+                similarity = self._calculate_cosine_similarity(question_embedding, chunk_embedding)
+                
+                if similarity > 0.7:  # Chunk threshold
+                    chunk_matches.append({
+                        "text_content": text[:200] + "..." if len(text) > 200 else text,
+                        "similarity_score": float(similarity),
+                        "source": "chunk_semantic",
+                        "document": document,
+                        "index": index,
+                        "node_type": "Chunk"
+                    })
+        
+        # Sort by similarity
+        chunk_matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return chunk_matches
+    
+    def _search_nodes_semantic(self, session, question_embedding: np.ndarray) -> List[Dict]:
+        """Node-based semantic search"""
+        node_matches = []
+        
+        # Node'ları ara (chunk hariç)
+        node_query = """
+        MATCH (n)
+        WHERE n.embedding IS NOT NULL AND NOT n:Chunk
+        RETURN n, labels(n)[0] as label, n.embedding as embedding
+        LIMIT 50
+        """
+        
+        node_results = session.run(node_query)
+        
+        for record in node_results:
+            node = dict(record["n"])
+            label = record["label"]
+            embedding_list = record["embedding"]
+            node_text = node.get("id", "")
+            
+            if embedding_list and len(embedding_list) == 1536:
+                node_embedding = np.array(embedding_list)
+                similarity = self._calculate_cosine_similarity(question_embedding, node_embedding)
+                
+                if similarity > 0.7:  # Node threshold
+                    node_matches.append({
+                        "text_content": node_text[:200] + "..." if len(node_text) > 200 else node_text,
+                        "similarity_score": float(similarity),
+                        "source": "node_semantic",
+                        "label": label,
+                        "node_type": label,
+                        "node": node
+                    })
+        
+        # Sort by similarity
+        node_matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return node_matches
     
     def _get_text_embedding(self, text: str) -> np.ndarray:
         """Generate text embedding using OpenAI API"""
