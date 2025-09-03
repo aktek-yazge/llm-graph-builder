@@ -99,7 +99,7 @@ class IntelligentAgent:
         self.llm, _ = get_llm(model_name)
         self.embedding_model, _ = load_embedding_model("openai")
         self.max_iterations = 10  # Derinlemesine araştırma için
-        self.max_iterations = 5
+        # self.max_iterations = 5
         self.schema_cache = None
         self.system_prompt_cache = None  # Schema-based system prompt cache - PROMPT güncellendi: vector_search kaldırıldı, domain-agnostic yapıldı
         self.enable_llm_interpretation = enable_llm_interpretation  # LLM yorumlama açık/kapalı
@@ -404,10 +404,15 @@ GÖREV:
             logger.error(f"Belge listesi alma hatası: {e}")
             return []
     
-    def execute_document_filtered_vector_search(self, query_text: str, user_question: str, limit: int = 10) -> Tuple[bool, Any]:
+    def execute_document_filtered_vector_search(self, query_text: str, user_question: str, limit: int = 10, relevant_documents: List[str] = None) -> Tuple[bool, Any]:
         """İlk önce hangi belgelerde arama yapılacağını belirle, sonra vector search yap"""
         try:
-            # Mevcut belgeleri al
+            # Eğer önceki bulgulardan belge listesi varsa direkt kullan
+            if relevant_documents:
+                logger.info(f"Önceki bulgulardan {len(relevant_documents)} belge kullanılıyor: {relevant_documents}")
+                return self.execute_vector_search(query_text, limit, relevant_documents)
+            
+            # Eğer önceki bulgulardan belge yok ise, tüm belgeleri al
             available_docs = self.get_available_documents()
             if not available_docs:
                 logger.warning("Veritabanında belge bulunamadı")
@@ -755,7 +760,8 @@ Anahtar bulgular ve önemli bilgiler nedir?
             "action": action,
             "finding": finding,
             "relevance_score": relevance_score,
-            "timestamp": f"Adım {iteration}"
+            "timestamp": f"Adım {iteration}",
+            "raw_data": raw_data
         }
         self.successful_findings.append(finding_entry)
         
@@ -1556,8 +1562,30 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
                 elif action == "vector_search":
+                    # Önceki Cypher bulgularından ilgili belgeleri çıkar
+                    relevant_documents = []
+                    for finding in self.successful_findings:
+                        if finding.get('action') == 'cypher_query' and finding.get('raw_data'):
+                            # Cypher sorgu sonuçlarından belge adlarını çıkar
+                            raw_data = finding['raw_data']
+                            if isinstance(raw_data, list):
+                                for row in raw_data:
+                                    if isinstance(row, dict) and 'documentFileName' in row:
+                                        doc_name = row['documentFileName']
+                                        if doc_name and doc_name not in relevant_documents:
+                                            relevant_documents.append(doc_name)
+                                    elif isinstance(row, dict) and 'd' in row and isinstance(row['d'], dict):
+                                        doc_name = row['d'].get('fileName')
+                                        if doc_name and doc_name not in relevant_documents:
+                                            relevant_documents.append(doc_name)
+                    
                     # Akıllı belge filtrelemesi ile vector search
-                    success, result = self.execute_document_filtered_vector_search(action_content, user_question, limit=15)
+                    success, result = self.execute_document_filtered_vector_search(
+                        action_content, 
+                        user_question, 
+                        limit=15, 
+                        relevant_documents=relevant_documents if relevant_documents else None
+                    )
                     if success and result:
                         # Vector search sonuçlarını işle
                         doc_names = list(set([chunk['document_name'] for chunk in result if chunk.get('document_name')]))
@@ -1853,17 +1881,18 @@ Content: [Sorgu/arama metni/cevap]
 - Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
 
 **vector_search**: OpenAI embedding ile AKILLI semantic chunk arama
-- LLM önce hangi belgelerde arama yapacağını otomatik belirler
+- ÖNCEKI BULGULARDAN FAYDALAN: Zaten belirli belgeler bulunduysa, o belgelerde spesifik terimler ara
+- LLM önce hangi belgelerde arama yapacağını otomatik belirler (veya önceki bulgulardan alır)
 - Belge içeriklerinde semantic arama yap (seçilen belgelerde)
-- Soruda belirli kişi/poliçe varsa sadece o belgelerde ara
-- Genel sorular için tüm belgelerde ara
+- ARAMA STRATEJİSİ:
+  * Genel kişi/poliçe bilgileri zaten bulunduysa → SPESİFİK terimleri ara (sadece "prim tutarı", "hasar bedeli", "teminat limiti")
+  * Henüz kişi/belge bulunmadıysa → kişi adını da dahil et ("Mehmet'in prim bilgileri")
 - Format: `Action: vector_search` `Content: arama metni`
-- Örnek: "Ayça Dinçkök'ün prim bilgileri" → Sadece Ayça'nın belgelerinde arar
-- Belge içeriklerinde semantic arama yap
-- Chunk embedding'leri ile query embedding'ini karşılaştır
-- Text içeriği, açıklamalar, detaylar için kullan
-- Format: `Action: vector_search` `Content: arama metni`
-- Örnek: "Ayça Dinçkök'ün prim bilgileri", "yangın sigortası detayları"
+- DOĞRU örnekler: 
+  * Cypher'da Ayça'nın poliçeleri bulunduysa → "prim tutarı" (kısa ve spesifik)
+  * Hiç bilgi yoksa → "Ayça Dinçkök'ün prim bilgileri" (kişi dahil)
+- YANLIŞ örnekler:
+  * Ayça zaten bulunduysa → "Ayça Dinçkök'ün prim bilgileri" (gereksiz tekrar)
 
 **final_answer**: 
 - Metadata yeterli ise: cypher_query sonuçlarını organize et
