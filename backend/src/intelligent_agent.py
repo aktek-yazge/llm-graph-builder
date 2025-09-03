@@ -44,7 +44,17 @@ class ChunkInfo:
     split_texts: List[str] = field(default_factory=list)
     split_scores: List[float] = field(default_factory=list)
 
+@dataclass
+class SuccessfulFinding:
+    """Başarılı bulguları tutan data class"""
+    iteration: int
+    action_type: str  # cypher_query, vector_search
+    summary: str
+    relevance_score: float
+    raw_data: Any = None
+
 @dataclass 
+@dataclass
 class AgentState:
     """Agent'ın mevcut durumu ve topladığı bilgileri tutan state"""
     question: str
@@ -52,6 +62,7 @@ class AgentState:
     discovered_entities: List[Dict[str, Any]] = field(default_factory=list)
     discovered_relationships: List[Dict[str, Any]] = field(default_factory=list)
     query_attempts: List[str] = field(default_factory=list)
+    successful_findings: List['SuccessfulFinding'] = field(default_factory=list)  # Başarılı bulgular
     iteration_count: int = 0
     max_chunks_limit: int = 20
     similarity_threshold: float = 0.3
@@ -69,7 +80,7 @@ class IntelligentAgent:
     LLM kendi arama stratejisini belirler ve iteratif olarak doğru veriye ulaşır
     """
     
-    def __init__(self, graph: Neo4jGraph, model_name: str = "openai_gpt_4.1"):
+    def __init__(self, graph: Neo4jGraph, model_name: str = "openai_gpt_4.1", enable_llm_interpretation: bool = False):
         self.graph = graph
         self.llm, _ = get_llm(model_name)
         self.embedding_model, _ = load_embedding_model("openai")
@@ -77,6 +88,7 @@ class IntelligentAgent:
         self.max_iterations = 5
         self.schema_cache = None
         self.system_prompt_cache = None  # Schema-based system prompt cache - VERİ TİPİ güncellenmesi için temizlendi
+        self.enable_llm_interpretation = enable_llm_interpretation  # LLM yorumlama açık/kapalı
         
         # Progress tracking ve context memory
         self.successful_findings = []  # Her iterasyonda başarılı bulunanlar
@@ -92,101 +104,171 @@ class IntelligentAgent:
             separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
         )
     
-    def refresh_schema_cache(self):
-        """Schema cache'i temizle ve yeniden yükle"""
-        logger.info("Schema cache temizleniyor ve yeniden yükleniyor...")
-        self.schema_cache = None
-        self.system_prompt_cache = None
-        # Yeniden yükle
-        self.get_neo4j_schema()
-        
-    def get_neo4j_schema(self) -> Dict[str, Any]:
-        """Neo4j veritabanından schema bilgilerini al - bir kez cache'le"""
-        if self.schema_cache:
-            logger.info("Schema cache'den alınıyor")
-            return self.schema_cache
-            
-        logger.info("Neo4j schema bilgileri veritabanından alınıyor...")
+    def interpret_final_answer_with_llm(self, raw_answer: str, user_question: str, chunks: List[ChunkInfo], cypher_results: Any = None) -> str:
+        """LLM ile final answer'ı yorumla ve zenginleştir"""
         try:
-            # Node labels
-            node_labels_query = "CALL db.labels() YIELD label RETURN collect(label) as labels"
-            node_result = self.graph.query(node_labels_query)
-            node_labels = node_result[0]['labels'] if node_result else []
+            if not self.enable_llm_interpretation:
+                logger.info("LLM yorumlama kapalı, raw data döndürülüyor")
+                return raw_answer
+                
+            logger.info("LLM ile final answer yorumlanıyor...")
             
-            # Relationship types
-            rel_types_query = "CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) as types"
-            rel_result = self.graph.query(rel_types_query)
-            relationship_types = rel_result[0]['types'] if rel_result else []
+            # Chunk'lardan context oluştur
+            context_sources = []
+            if chunks:
+                for i, chunk in enumerate(chunks[:5], 1):  # En iyi 5 chunk
+                    context_sources.append(f"Kaynak {i} ({chunk.document_name}, Sayfa {chunk.page_number}):\n{chunk.text[:300]}...")
             
-            # Node properties (sample from each label with sample values)
-            node_properties = {}
-            for label in node_labels[:10]:  # İlk 10 label için
-                try:
-                    # Properties ve sample values
-                    prop_query = f"MATCH (n:`{label}`) RETURN n LIMIT 1"
-                    prop_result = self.graph.query(prop_query)
-                    if prop_result:
-                        sample_node = prop_result[0]['n']
-                        # Field adları ve sample values
-                        props_with_samples = []
-                        for key, value in sample_node.items():
-                            if value is not None:
-                                # Değer tipini belirle
-                                if isinstance(value, int):
-                                    props_with_samples.append(f"{key} (INTEGER: {value})")
-                                elif isinstance(value, str):
-                                    props_with_samples.append(f"{key} (STRING: \"{value[:20]}{'...' if len(str(value)) > 20 else ''}\")")
-                                elif isinstance(value, bool):
-                                    props_with_samples.append(f"{key} (BOOLEAN: {value})")
-                                elif isinstance(value, float):
-                                    props_with_samples.append(f"{key} (FLOAT: {value})")
-                                else:
-                                    props_with_samples.append(f"{key} ({type(value).__name__}: {str(value)[:20]})")
-                            else:
-                                props_with_samples.append(f"{key}")
-                        node_properties[label] = props_with_samples
-                    else:
-                        node_properties[label] = []
-                except Exception as e:
-                    logger.warning(f"Could not get properties for {label}: {e}")
-                    node_properties[label] = []
+            context_text = "\n\n".join(context_sources) if context_sources else "Kaynak bilgi yok"
             
-            # Sample relationships
-            sample_relationships = []
-            for rel_type in relationship_types[:15]:  # İlk 15 ilişki tipi
-                try:
-                    rel_query = f"""
-                    MATCH (a)-[r:`{rel_type}`]->(b) 
-                    RETURN labels(a)[0] as from_label, type(r) as rel_type, labels(b)[0] as to_label 
-                    LIMIT 1
-                    """
-                    rel_result = self.graph.query(rel_query)
-                    if rel_result:
-                        sample_relationships.append(rel_result[0])
-                except Exception as e:
-                    logger.warning(f"Could not sample relationship {rel_type}: {e}")
+            # Cypher sonuçlarını da ekle
+            raw_data_detail = raw_answer
+            if cypher_results:
+                raw_data_detail += f"\n\nCYPHER SORGU SONUÇLARI:\n{json.dumps(cypher_results, ensure_ascii=False, indent=2)}"
             
-            self.schema_cache = {
-                "node_labels": node_labels,
-                "relationship_types": relationship_types,
-                "node_properties": node_properties,
-                "sample_relationships": sample_relationships
-            }
+            interpretation_prompt = f"""Sen bir uzman analist olarak kullanıcı sorusunu yanıtlayacaksın.
+
+KULLANICI SORUSU: {user_question}
+
+HAM VERİ/BULGULAR:
+{raw_data_detail}
+
+KAYNAK BİLGİLER:
+{context_text}
+
+GÖREV:
+1. Ham veriyi AYNEN analiz et ve yorumla - veri kaybetme!
+2. Sayısal veriler ve isimler varsa MUTLAKA belirt
+3. Kullanıcının sorusuna kapsamlı bir cevap ver
+4. Kaynak bilgileri referans göster
+5. Sonucu net ve anlaşılır şekilde özetle
+
+ÖNEMLİ: Raw data'da gözüken tüm sayısal değerleri ve isimleri/listleri MUTLAKA dahil et!
+
+ÇIKTI FORMAT:
+## Özet
+[Kısa ve net özet]
+
+## Detaylı Analiz  
+[Detaylı yorumlama ve açıklama]
+
+## Kaynaklar
+[Kaynak bilgilerin referansları]
+"""
+
+            messages = [
+                SystemMessage(content="Sen uzman bir veri analisti ve raporlama uzmanısın. Verilen bilgileri analiz ederek kullanıcı dostu, kapsamlı raporlar hazırlarsın."),
+                HumanMessage(content=interpretation_prompt)
+            ]
             
-            # Schema değiştiğinde system prompt'u da güncelle
-            self.system_prompt_cache = self.create_enhanced_system_prompt(self.schema_cache)
-            logger.info(f"Schema ve system prompt cache'lendi: {len(node_labels)} node label, {len(relationship_types)} relationship type")
+            response = self.llm.invoke(messages)
+            interpreted_answer = response.content.strip()
             
-            return self.schema_cache
+            # Token kullanımını logla
+            self.log_token_usage(response, -1, "llm_interpretation")  # -1 iteration: extra step
+            
+            logger.info(f"LLM yorumlama tamamlandı: {len(interpreted_answer)} karakter")
+            return interpreted_answer
             
         except Exception as e:
-            logger.error(f"Schema bilgisi alınamadı: {e}")
-            return {
-                "node_labels": [],
-                "relationship_types": [],
-                "node_properties": {},
-                "sample_relationships": []
-            }
+            logger.error(f"LLM yorumlama hatası: {e}")
+            return raw_answer  # Fallback: raw answer'ı döndür
+    
+    # def refresh_schema_cache(self):
+    #     """Schema cache'i temizle ve yeniden yükle"""
+    #     logger.info("Schema cache temizleniyor ve yeniden yükleniyor...")
+    #     self.schema_cache = None
+    #     self.system_prompt_cache = None
+    #     # Yeniden yükle
+    #     self.get_neo4j_schema()
+        
+    # def get_neo4j_schema(self) -> Dict[str, Any]:
+    #     """Neo4j veritabanından schema bilgilerini al - bir kez cache'le"""
+    #     if self.schema_cache:
+    #         logger.info("Schema cache'den alınıyor")
+    #         return self.schema_cache
+            
+    #     logger.info("Neo4j schema bilgileri veritabanından alınıyor...")
+    #     try:
+    #         # Node labels
+    #         node_labels_query = "CALL db.labels() YIELD label RETURN collect(label) as labels"
+    #         node_result = self.graph.query(node_labels_query)
+    #         node_labels = node_result[0]['labels'] if node_result else []
+            
+    #         # Relationship types
+    #         rel_types_query = "CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) as types"
+    #         rel_result = self.graph.query(rel_types_query)
+    #         relationship_types = rel_result[0]['types'] if rel_result else []
+            
+    #         # Node properties (sample from each label with sample values)
+    #         node_properties = {}
+    #         for label in node_labels[:10]:  # İlk 10 label için
+    #             try:
+    #                 # Properties ve sample values
+    #                 prop_query = f"MATCH (n:`{label}`) RETURN n LIMIT 1"
+    #                 prop_result = self.graph.query(prop_query)
+    #                 if prop_result:
+    #                     sample_node = prop_result[0]['n']
+    #                     # Field adları ve sample values
+    #                     props_with_samples = []
+    #                     for key, value in sample_node.items():
+    #                         if value is not None:
+    #                             # Değer tipini belirle
+    #                             if isinstance(value, int):
+    #                                 props_with_samples.append(f"{key} (INTEGER: {value})")
+    #                             elif isinstance(value, str):
+    #                                 props_with_samples.append(f"{key} (STRING: \"{value[:20]}{'...' if len(str(value)) > 20 else ''}\")")
+    #                             elif isinstance(value, bool):
+    #                                 props_with_samples.append(f"{key} (BOOLEAN: {value})")
+    #                             elif isinstance(value, float):
+    #                                 props_with_samples.append(f"{key} (FLOAT: {value})")
+    #                             else:
+    #                                 props_with_samples.append(f"{key} ({type(value).__name__}: {str(value)[:20]})")
+    #                         else:
+    #                             props_with_samples.append(f"{key}")
+    #                     node_properties[label] = props_with_samples
+    #                 else:
+    #                     node_properties[label] = []
+    #             except Exception as e:
+    #                 logger.warning(f"Could not get properties for {label}: {e}")
+    #                 node_properties[label] = []
+            
+    #         # Sample relationships
+    #         sample_relationships = []
+    #         for rel_type in relationship_types[:15]:  # İlk 15 ilişki tipi
+    #             try:
+    #                 rel_query = f"""
+    #                 MATCH (a)-[r:`{rel_type}`]->(b) 
+    #                 RETURN labels(a)[0] as from_label, type(r) as rel_type, labels(b)[0] as to_label 
+    #                 LIMIT 1
+    #                 """
+    #                 rel_result = self.graph.query(rel_query)
+    #                 if rel_result:
+    #                     sample_relationships.append(rel_result[0])
+    #             except Exception as e:
+    #                 logger.warning(f"Could not sample relationship {rel_type}: {e}")
+            
+    #         self.schema_cache = {
+    #             "node_labels": node_labels,
+    #             "relationship_types": relationship_types,
+    #             "node_properties": node_properties,
+    #             "sample_relationships": sample_relationships
+    #         }
+            
+    #         # Schema değiştiğinde system prompt'u da güncelle
+    #         self.system_prompt_cache = self.create_enhanced_system_prompt(self.schema_cache)
+    #         logger.info(f"Schema ve system prompt cache'lendi: {len(node_labels)} node label, {len(relationship_types)} relationship type")
+            
+    #         return self.schema_cache
+            
+    #     except Exception as e:
+    #         logger.error(f"Schema bilgisi alınamadı: {e}")
+    #         return {
+    #             "node_labels": [],
+    #             "relationship_types": [],
+    #             "node_properties": {},
+    #             "sample_relationships": []
+    #         }
     
     def execute_cypher_query(self, query: str) -> Tuple[bool, Any]:
         """Cypher sorgusunu çalıştır"""
@@ -194,6 +276,12 @@ class IntelligentAgent:
             logger.info(f"Cypher sorgusu çalıştırılıyor: {query}")
             result = self.graph.query(query)
             logger.info(f"Sonuç: {len(result) if result else 0} kayıt")
+            
+            # Sonuç detaylarını logla
+            if result:
+                for i, row in enumerate(result[:3]):  # İlk 3 satırı göster
+                    logger.info(f"Satır {i+1}: {row}")
+            
             return True, result
         except Exception as e:
             logger.error(f"Cypher sorgu hatası: {e}")
@@ -462,8 +550,8 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].relevance_score:.3f}" if result else "Sonuç yok"
             return f"{finding_type}: {str(result)[:100]}..."
 
-    def add_successful_finding(self, iteration: int, action: str, finding: str, relevance_score: float = 0.0):
-        """Başarılı bulguyu context memory'e ekle"""
+    def add_successful_finding(self, iteration: int, action: str, finding: str, relevance_score: float = 0.0, raw_data: Any = None):
+        """Başarılı bulguyu context memory ve state'e ekle"""
         finding_entry = {
             "iteration": iteration,
             "action": action,
@@ -473,10 +561,20 @@ Anahtar bulgular ve önemli bilgiler nedir?
         }
         self.successful_findings.append(finding_entry)
         
+        # State'e de SuccessfulFinding objesi olarak ekle (ham veri ile)
+        state_finding = SuccessfulFinding(
+            iteration=iteration,
+            action_type=action,
+            summary=finding,
+            relevance_score=relevance_score,
+            raw_data=raw_data
+        )
+        # Not: state parametresi burada yok, cypher_query ve vector_search'te ekleyeceğiz
+        
         # Context memory'i güncelle
         self.update_context_memory()
         
-        logger.info(f"Başarılı bulgu eklendi - İterasyon {iteration}: {action} -> {finding[:100]}...")
+        logger.info(f"Başarılı bulgu eklendi - İterasyon {iteration}: {action} -> {finding}...")
     
     def update_context_memory(self):
         """Başarılı bulgulardan context prompt oluştur"""
@@ -496,244 +594,244 @@ Anahtar bulgular ve önemli bilgiler nedir?
         context_prompt += "\n**BU BİLGİLERİ DİKKATE ALARAK SONRAKI ADIMI BELİRLE!**\n\n"
         self.context_memory = context_prompt
     
-    def entity_driven_search(self, search_term: str, state: AgentState) -> List[ChunkInfo]:
-        """
-        Entity-driven arama stratejisi:
-        1. __Entity__ node'larında arama yap
-        2. Bulunan entity'lerden chunk'lara ulaş
-        3. Chunk relationship'lerini takip et
-        4. Embedding ile semantic matching yap
-        """
-        logger.info(f"Entity-driven search başlatılıyor: {search_term}")
+    # def entity_driven_search(self, search_term: str, state: AgentState) -> List[ChunkInfo]:
+    #     """
+    #     Entity-driven arama stratejisi:
+    #     1. __Entity__ node'larında arama yap
+    #     2. Bulunan entity'lerden chunk'lara ulaş
+    #     3. Chunk relationship'lerini takip et
+    #     4. Embedding ile semantic matching yap
+    #     """
+    #     logger.info(f"Entity-driven search başlatılıyor: {search_term}")
         
-        # Adım 1: Entity'lerde arama
-        entities = self.search_entities(search_term)
-        if not entities:
-            logger.info("Hiç entity bulunamadı")
-            return []
+    #     # Adım 1: Entity'lerde arama
+    #     entities = self.search_entities(search_term)
+    #     if not entities:
+    #         logger.info("Hiç entity bulunamadı")
+    #         return []
         
-        logger.info(f"{len(entities)} entity bulundu")
+    #     logger.info(f"{len(entities)} entity bulundu")
         
-        # Entity'leri state'e ekle
-        for entity in entities:
-            state.discovered_entities.append(entity)
+    #     # Entity'leri state'e ekle
+    #     for entity in entities:
+    #         state.discovered_entities.append(entity)
         
-        # Adım 2: Entity'lerden chunk'lara ulaş
-        primary_chunks = self.find_chunks_from_entities([e['id'] for e in entities], state)
+    #     # Adım 2: Entity'lerden chunk'lara ulaş
+    #     primary_chunks = self.find_chunks_from_entities([e['id'] for e in entities], state)
         
-        # Adım 3: İlişkili chunk'ları da bul
-        all_chunks = primary_chunks.copy()
-        for chunk in primary_chunks:
-            related_chunks = self.find_related_chunks(chunk.chunk_id, state)
-            all_chunks.extend(related_chunks)
+    #     # Adım 3: İlişkili chunk'ları da bul
+    #     all_chunks = primary_chunks.copy()
+    #     for chunk in primary_chunks:
+    #         related_chunks = self.find_related_chunks(chunk.chunk_id, state)
+    #         all_chunks.extend(related_chunks)
         
-        # Duplikasyon temizle
-        unique_chunks = {}
-        for chunk in all_chunks:
-            if chunk.chunk_id not in unique_chunks:
-                unique_chunks[chunk.chunk_id] = chunk
+    #     # Duplikasyon temizle
+    #     unique_chunks = {}
+    #     for chunk in all_chunks:
+    #         if chunk.chunk_id not in unique_chunks:
+    #             unique_chunks[chunk.chunk_id] = chunk
         
-        chunks = list(unique_chunks.values())
-        logger.info(f"Toplam {len(chunks)} unique chunk bulundu")
+    #     chunks = list(unique_chunks.values())
+    #     logger.info(f"Toplam {len(chunks)} unique chunk bulundu")
         
-        # Adım 4: Embedding ile semantic matching
-        if chunks:
-            chunks = self.rank_chunks_by_semantic_similarity(chunks, search_term)
+    #     # Adım 4: Embedding ile semantic matching
+    #     if chunks:
+    #         chunks = self.rank_chunks_by_semantic_similarity(chunks, search_term)
         
-        return chunks[:state.max_chunks_limit]
+    #     return chunks[:state.max_chunks_limit]
     
-    def search_entities(self, search_term: str) -> List[Dict[str, Any]]:
-        """Gerçek schema'ya göre entity arama - Customer, Policy, PolicyType vb."""
-        try:
-            # Gerçek node tiplerinde arama stratejileri
-            strategies = [
-                # Customer araması
-                f"""
-                MATCH (c:Customer)
-                WHERE any(prop IN keys(c) WHERE 
-                    prop <> 'embedding' AND 
-                    c[prop] IS NOT NULL AND 
-                    apoc.text.clean(toString(c[prop])) CONTAINS apoc.text.clean('{search_term}'))
-                RETURN c.name as id, 'Customer' as type, labels(c) as labels, c as entity
-                LIMIT 10
-                """,
-                # Policy araması  
-                f"""
-                MATCH (p:Policy)
-                WHERE any(prop IN keys(p) WHERE 
-                    prop <> 'embedding' AND 
-                    p[prop] IS NOT NULL AND 
-                    apoc.text.clean(toString(p[prop])) CONTAINS apoc.text.clean('{search_term}'))
-                RETURN p.policy_number as id, 'Policy' as type, labels(p) as labels, p as entity
-                LIMIT 10
-                """,
-                # PolicyType araması
-                f"""
-                MATCH (pt:PolicyType)
-                WHERE any(prop IN keys(pt) WHERE 
-                    prop <> 'embedding' AND 
-                    pt[prop] IS NOT NULL AND 
-                    apoc.text.clean(toString(pt[prop])) CONTAINS apoc.text.clean('{search_term}'))
-                RETURN pt.name as id, 'PolicyType' as type, labels(pt) as labels, pt as entity
-                LIMIT 10
-                """,
-                # PolicyYear araması
-                f"""
-                MATCH (py:PolicyYear)
-                WHERE py.year CONTAINS '{search_term}'
-                RETURN py.year as id, 'PolicyYear' as type, labels(py) as labels, py as entity
-                LIMIT 10
-                """
-            ]
+    # def search_entities(self, search_term: str) -> List[Dict[str, Any]]:
+    #     """Gerçek schema'ya göre entity arama - Customer, Policy, PolicyType vb."""
+    #     try:
+    #         # Gerçek node tiplerinde arama stratejileri
+    #         strategies = [
+    #             # Customer araması
+    #             f"""
+    #             MATCH (c:Customer)
+    #             WHERE any(prop IN keys(c) WHERE 
+    #                 prop <> 'embedding' AND 
+    #                 c[prop] IS NOT NULL AND 
+    #                 apoc.text.clean(toString(c[prop])) CONTAINS apoc.text.clean('{search_term}'))
+    #             RETURN c.name as id, 'Customer' as type, labels(c) as labels, c as entity
+    #             LIMIT 10
+    #             """,
+    #             # Policy araması  
+    #             f"""
+    #             MATCH (p:Policy)
+    #             WHERE any(prop IN keys(p) WHERE 
+    #                 prop <> 'embedding' AND 
+    #                 p[prop] IS NOT NULL AND 
+    #                 apoc.text.clean(toString(p[prop])) CONTAINS apoc.text.clean('{search_term}'))
+    #             RETURN p.policy_number as id, 'Policy' as type, labels(p) as labels, p as entity
+    #             LIMIT 10
+    #             """,
+    #             # PolicyType araması
+    #             f"""
+    #             MATCH (pt:PolicyType)
+    #             WHERE any(prop IN keys(pt) WHERE 
+    #                 prop <> 'embedding' AND 
+    #                 pt[prop] IS NOT NULL AND 
+    #                 apoc.text.clean(toString(pt[prop])) CONTAINS apoc.text.clean('{search_term}'))
+    #             RETURN pt.name as id, 'PolicyType' as type, labels(pt) as labels, pt as entity
+    #             LIMIT 10
+    #             """,
+    #             # PolicyYear araması
+    #             f"""
+    #             MATCH (py:PolicyYear)
+    #             WHERE py.year CONTAINS '{search_term}'
+    #             RETURN py.year as id, 'PolicyYear' as type, labels(py) as labels, py as entity
+    #             LIMIT 10
+    #             """
+    #         ]
             
-            all_entities = []
-            for strategy in strategies:
-                success, result = self.execute_cypher_query(strategy)
-                if success and result:
-                    all_entities.extend(result)
-                    if len(all_entities) >= 15:  # Yeterince entity bulundu
-                        break
+    #         all_entities = []
+    #         for strategy in strategies:
+    #             success, result = self.execute_cypher_query(strategy)
+    #             if success and result:
+    #                 all_entities.extend(result)
+    #                 if len(all_entities) >= 15:  # Yeterince entity bulundu
+    #                     break
             
-            # Duplikasyon temizle
-            unique_entities = {}
-            for entity in all_entities:
-                entity_id = entity.get('id')
-                if entity_id and entity_id not in unique_entities:
-                    unique_entities[entity_id] = entity
+    #         # Duplikasyon temizle
+    #         unique_entities = {}
+    #         for entity in all_entities:
+    #             entity_id = entity.get('id')
+    #             if entity_id and entity_id not in unique_entities:
+    #                 unique_entities[entity_id] = entity
             
-            logger.info(f"Gerçek schema'da {len(unique_entities)} entity bulundu: {list(unique_entities.keys())[:5]}")
-            return list(unique_entities.values())
+    #         logger.info(f"Gerçek schema'da {len(unique_entities)} entity bulundu: {list(unique_entities.keys())[:5]}")
+    #         return list(unique_entities.values())
             
-        except Exception as e:
-            logger.error(f"Entity arama hatası: {e}")
-            return []
+    #     except Exception as e:
+    #         logger.error(f"Entity arama hatası: {e}")
+    #         return []
     
-    def find_related_chunks(self, chunk_id: str, state: AgentState) -> List[ChunkInfo]:
-        """Bir chunk'ın ilişkili chunk'larını bul - NEXT_CHUNK relationship'ini kullan"""
-        try:
-            # NEXT_CHUNK ilişkileri takip et (sıralı chunk'lar)
-            query = f"""
-            MATCH (c1:Chunk {{chunkId: '{chunk_id}'}})
-            OPTIONAL MATCH (c1)-[:NEXT_CHUNK]->(next:Chunk)
-            OPTIONAL MATCH (prev:Chunk)-[:NEXT_CHUNK]->(c1)
-            WITH collect(DISTINCT next) + collect(DISTINCT prev) as related_chunks
-            UNWIND related_chunks as c2
-            WITH c2 WHERE c2 IS NOT NULL AND c2.chunkId <> '{chunk_id}'
-            OPTIONAL MATCH (c2)-[:PART_OF]->(d:Document)
-            RETURN c2.chunkId as chunk_id, c2.text as text, c2.page_number as page_number,
-                   d.fileName as document_name
-            LIMIT 10
-            """
+    # def find_related_chunks(self, chunk_id: str, state: AgentState) -> List[ChunkInfo]:
+    #     """Bir chunk'ın ilişkili chunk'larını bul - NEXT_CHUNK relationship'ini kullan"""
+    #     try:
+    #         # NEXT_CHUNK ilişkileri takip et (sıralı chunk'lar)
+    #         query = f"""
+    #         MATCH (c1:Chunk {{chunkId: '{chunk_id}'}})
+    #         OPTIONAL MATCH (c1)-[:NEXT_CHUNK]->(next:Chunk)
+    #         OPTIONAL MATCH (prev:Chunk)-[:NEXT_CHUNK]->(c1)
+    #         WITH collect(DISTINCT next) + collect(DISTINCT prev) as related_chunks
+    #         UNWIND related_chunks as c2
+    #         WITH c2 WHERE c2 IS NOT NULL AND c2.chunkId <> '{chunk_id}'
+    #         OPTIONAL MATCH (c2)-[:PART_OF]->(d:Document)
+    #         RETURN c2.chunkId as chunk_id, c2.text as text, c2.page_number as page_number,
+    #                d.fileName as document_name
+    #         LIMIT 10
+    #         """
             
-            success, result = self.execute_cypher_query(query)
-            if not success or not result:
-                logger.info(f"Chunk {chunk_id} için ilişkili chunk bulunamadı")
-                return []
+    #         success, result = self.execute_cypher_query(query)
+    #         if not success or not result:
+    #             logger.info(f"Chunk {chunk_id} için ilişkili chunk bulunamadı")
+    #             return []
             
-            chunks = []
-            for row in result:
-                chunk_info = ChunkInfo(
-                    chunk_id=row['chunk_id'] or "",
-                    text=row['text'] or "",
-                    page_number=row['page_number'],
-                    document_name=row['document_name'] or "Unknown"
-                )
-                chunks.append(chunk_info)
+    #         chunks = []
+    #         for row in result:
+    #             chunk_info = ChunkInfo(
+    #                 chunk_id=row['chunk_id'] or "",
+    #                 text=row['text'] or "",
+    #                 page_number=row['page_number'],
+    #                 document_name=row['document_name'] or "Unknown"
+    #             )
+    #             chunks.append(chunk_info)
             
-            logger.info(f"Chunk {chunk_id} için {len(chunks)} ilişkili chunk bulundu")
-            return chunks
+    #         logger.info(f"Chunk {chunk_id} için {len(chunks)} ilişkili chunk bulundu")
+    #         return chunks
             
-        except Exception as e:
-            logger.error(f"İlişkili chunk arama hatası: {e}")
-            return []
+    #     except Exception as e:
+    #         logger.error(f"İlişkili chunk arama hatası: {e}")
+    #         return []
     
-    def rank_chunks_by_semantic_similarity(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
-        """Chunk'ları semantic similarity'ye göre sırala - Önceden hesaplanmış embedding'leri kullan"""
-        try:
-            if not chunks:
-                return chunks
+    # def rank_chunks_by_semantic_similarity(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
+    #     """Chunk'ları semantic similarity'ye göre sırala - Önceden hesaplanmış embedding'leri kullan"""
+    #     try:
+    #         if not chunks:
+    #             return chunks
             
-            # Query embedding'i al (sadece bir kez)
-            query_embedding = self.embedding_model.embed_query(query)
+    #         # Query embedding'i al (sadece bir kez)
+    #         query_embedding = self.embedding_model.embed_query(query)
             
-            # Chunk'ların Neo4j'den embedding'lerini al
-            chunk_ids = [chunk.chunk_id for chunk in chunks if chunk.chunk_id]
-            if not chunk_ids:
-                return chunks
+    #         # Chunk'ların Neo4j'den embedding'lerini al
+    #         chunk_ids = [chunk.chunk_id for chunk in chunks if chunk.chunk_id]
+    #         if not chunk_ids:
+    #             return chunks
             
-            # Batch olarak embedding'leri çek
-            chunk_ids_str = "', '".join(chunk_ids)
-            embedding_query = f"""
-            MATCH (c:Chunk)
-            WHERE c.chunkId IN ['{chunk_ids_str}']
-            RETURN c.chunkId as chunk_id, c.embedding as embedding
-            """
+    #         # Batch olarak embedding'leri çek
+    #         chunk_ids_str = "', '".join(chunk_ids)
+    #         embedding_query = f"""
+    #         MATCH (c:Chunk)
+    #         WHERE c.chunkId IN ['{chunk_ids_str}']
+    #         RETURN c.chunkId as chunk_id, c.embedding as embedding
+    #         """
             
-            success, embedding_results = self.execute_cypher_query(embedding_query)
-            if not success or not embedding_results:
-                logger.warning("Chunk embedding'leri alınamadı, fallback similarity kullanılıyor")
-                return self._fallback_similarity_ranking(chunks, query)
+    #         success, embedding_results = self.execute_cypher_query(embedding_query)
+    #         if not success or not embedding_results:
+    #             logger.warning("Chunk embedding'leri alınamadı, fallback similarity kullanılıyor")
+    #             return self._fallback_similarity_ranking(chunks, query)
             
-            # Embedding'leri chunk'lara eşle - güvenli erişim
-            embedding_map = {}
-            for result in embedding_results:
-                chunk_id = result.get('chunk_id')
-                embedding = result.get('embedding')
-                if chunk_id and embedding is not None:
-                    # Embedding'in list/array olup olmadığını kontrol et
-                    if isinstance(embedding, (list, tuple, np.ndarray)) and len(embedding) > 0:
-                        embedding_map[chunk_id] = embedding
-                    else:
-                        logger.warning(f"Chunk {chunk_id} için geçersiz embedding: {type(embedding)}")
+    #         # Embedding'leri chunk'lara eşle - güvenli erişim
+    #         embedding_map = {}
+    #         for result in embedding_results:
+    #             chunk_id = result.get('chunk_id')
+    #             embedding = result.get('embedding')
+    #             if chunk_id and embedding is not None:
+    #                 # Embedding'in list/array olup olmadığını kontrol et
+    #                 if isinstance(embedding, (list, tuple, np.ndarray)) and len(embedding) > 0:
+    #                     embedding_map[chunk_id] = embedding
+    #                 else:
+    #                     logger.warning(f"Chunk {chunk_id} için geçersiz embedding: {type(embedding)}")
             
-            # Similarity hesapla
-            for chunk in chunks:
-                if chunk.chunk_id in embedding_map:
-                    chunk_embedding = embedding_map[chunk.chunk_id]
-                    try:
-                        if len(chunk_embedding) == len(query_embedding):
-                            similarity = float(cosine_similarity([query_embedding], [chunk_embedding])[0][0])
-                            chunk.relevance_score = similarity
-                        else:
-                            logger.warning(f"Chunk {chunk.chunk_id} embedding dimension mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
-                            chunk.relevance_score = 0.0
-                    except Exception as embed_error:
-                        logger.warning(f"Chunk {chunk.chunk_id} similarity hesaplama hatası: {embed_error}")
-                        chunk.relevance_score = 0.0
-                else:
-                    chunk.relevance_score = 0.0
+    #         # Similarity hesapla
+    #         for chunk in chunks:
+    #             if chunk.chunk_id in embedding_map:
+    #                 chunk_embedding = embedding_map[chunk.chunk_id]
+    #                 try:
+    #                     if len(chunk_embedding) == len(query_embedding):
+    #                         similarity = float(cosine_similarity([query_embedding], [chunk_embedding])[0][0])
+    #                         chunk.relevance_score = similarity
+    #                     else:
+    #                         logger.warning(f"Chunk {chunk.chunk_id} embedding dimension mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
+    #                         chunk.relevance_score = 0.0
+    #                 except Exception as embed_error:
+    #                     logger.warning(f"Chunk {chunk.chunk_id} similarity hesaplama hatası: {embed_error}")
+    #                     chunk.relevance_score = 0.0
+    #             else:
+    #                 chunk.relevance_score = 0.0
             
-            # Similarity'ye göre sırala
-            chunks.sort(key=lambda x: x.relevance_score, reverse=True)
+    #         # Similarity'ye göre sırala
+    #         chunks.sort(key=lambda x: x.relevance_score, reverse=True)
             
-            logger.info(f"Chunk'lar önceden hesaplanmış embedding'lerle sıralandı. En yüksek score: {chunks[0].relevance_score:.3f}")
-            return chunks
+    #         logger.info(f"Chunk'lar önceden hesaplanmış embedding'lerle sıralandı. En yüksek score: {chunks[0].relevance_score:.3f}")
+    #         return chunks
             
-        except Exception as e:
-            logger.error(f"Semantic ranking hatası: {e}")
-            return self._fallback_similarity_ranking(chunks, query)
+    #     except Exception as e:
+    #         logger.error(f"Semantic ranking hatası: {e}")
+    #         return self._fallback_similarity_ranking(chunks, query)
     
-    def _fallback_similarity_ranking(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
-        """Fallback: Text-based similarity ranking"""
-        try:
-            query_embedding = self.embedding_model.embed_query(query)
+    # def _fallback_similarity_ranking(self, chunks: List[ChunkInfo], query: str) -> List[ChunkInfo]:
+    #     """Fallback: Text-based similarity ranking"""
+    #     try:
+    #         query_embedding = self.embedding_model.embed_query(query)
             
-            for chunk in chunks:
-                if chunk.text:
-                    # Sadece chunk text'inin tamamı için embedding al
-                    text_embedding = self.embedding_model.embed_query(chunk.text)
-                    similarity = float(cosine_similarity([query_embedding], [text_embedding])[0][0])
-                    chunk.relevance_score = similarity
-                else:
-                    chunk.relevance_score = 0.0
+    #         for chunk in chunks:
+    #             if chunk.text:
+    #                 # Sadece chunk text'inin tamamı için embedding al
+    #                 text_embedding = self.embedding_model.embed_query(chunk.text)
+    #                 similarity = float(cosine_similarity([query_embedding], [text_embedding])[0][0])
+    #                 chunk.relevance_score = similarity
+    #             else:
+    #                 chunk.relevance_score = 0.0
             
-            chunks.sort(key=lambda x: x.relevance_score, reverse=True)
-            logger.info(f"Fallback similarity ranking uygulandı. En yüksek score: {chunks[0].relevance_score:.3f}")
-            return chunks
+    #         chunks.sort(key=lambda x: x.relevance_score, reverse=True)
+    #         logger.info(f"Fallback similarity ranking uygulandı. En yüksek score: {chunks[0].relevance_score:.3f}")
+    #         return chunks
             
-        except Exception as e:
-            logger.error(f"Fallback similarity ranking hatası: {e}")
-            return chunks
+    #     except Exception as e:
+    #         logger.error(f"Fallback similarity ranking hatası: {e}")
+    #         return chunks
 
     def find_chunks_from_entities(self, entity_ids: List[str], state: AgentState) -> List[ChunkInfo]:
         """Entity'lerden chunk'lara ulaş - Yeni schema'ya göre"""
@@ -853,49 +951,49 @@ Anahtar bulgular ve önemli bilgiler nedir?
             logger.error(f"Chunk arama hatası: {e}")
             return []
     
-    def find_chunks_by_graph_pattern(self, pattern_query: str, params: Dict = None, state: AgentState = None) -> List[ChunkInfo]:
-        """Graph pattern ile chunk arama"""
-        try:
-            if params is None:
-                params = {}
-            if state is None:
-                state = AgentState("")
+    # def find_chunks_by_graph_pattern(self, pattern_query: str, params: Dict = None, state: AgentState = None) -> List[ChunkInfo]:
+    #     """Graph pattern ile chunk arama"""
+    #     try:
+    #         if params is None:
+    #             params = {}
+    #         if state is None:
+    #             state = AgentState("")
                 
-            # Pattern query'yi chunk'lara yönlendir
-            full_query = f"""
-            {pattern_query}
-            OPTIONAL MATCH (entity)-[:HAS_ENTITY]-(c:Chunk)
-            OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
-            RETURN DISTINCT 
-                c.chunkId as chunk_id,
-                c.text as text,
-                c.page_number as page_number,
-                d.fileName as document_name,
-                d as document_metadata,
-                entity.id as related_entity
-            LIMIT {state.max_chunks_limit}
-            """
+    #         # Pattern query'yi chunk'lara yönlendir
+    #         full_query = f"""
+    #         {pattern_query}
+    #         OPTIONAL MATCH (entity)-[:HAS_ENTITY]-(c:Chunk)
+    #         OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
+    #         RETURN DISTINCT 
+    #             c.chunkId as chunk_id,
+    #             c.text as text,
+    #             c.page_number as page_number,
+    #             d.fileName as document_name,
+    #             d as document_metadata,
+    #             entity.id as related_entity
+    #         LIMIT {state.max_chunks_limit}
+    #         """
             
-            result = self.graph.query(full_query, params)
+    #         result = self.graph.query(full_query, params)
             
-            chunks = []
-            for row in result:
-                if row['chunk_id']:  # Chunk varsa
-                    chunk_info = ChunkInfo(
-                        chunk_id=row['chunk_id'],
-                        text=row['text'] or "",
-                        page_number=row['page_number'],
-                        document_name=row['document_name'] or "Unknown",
-                        document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {}
-                    )
-                    chunks.append(chunk_info)
+    #         chunks = []
+    #         for row in result:
+    #             if row['chunk_id']:  # Chunk varsa
+    #                 chunk_info = ChunkInfo(
+    #                     chunk_id=row['chunk_id'],
+    #                     text=row['text'] or "",
+    #                     page_number=row['page_number'],
+    #                     document_name=row['document_name'] or "Unknown",
+    #                     document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {}
+    #                 )
+    #                 chunks.append(chunk_info)
                     
-            logger.info(f"Graph pattern ile {len(chunks)} chunk bulundu")
-            return chunks
+    #         logger.info(f"Graph pattern ile {len(chunks)} chunk bulundu")
+    #         return chunks
             
-        except Exception as e:
-            logger.error(f"Graph pattern chunk arama hatası: {e}")
-            return []
+    #     except Exception as e:
+    #         logger.error(f"Graph pattern chunk arama hatası: {e}")
+    #         return []
     
     def calculate_text_relevance(self, chunk_info: ChunkInfo, question: str) -> ChunkInfo:
         """Chunk text'ini böl ve soru ile ilişkililik hesapla - Neo4j chunk embedding kullan"""
@@ -1160,32 +1258,57 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 # Token kullanımını action type ile logla
                 self.log_token_usage(response, state.iteration_count, action)
                 
-                logger.info(f"Agent response: {agent_response}...")
-                
                 # DEBUG: LLM response'unu logla
                 logger.info(f"🔍 DEBUG - Raw LLM Response:\n{agent_response}")
-                logger.info(f"🔍 DEBUG - Parsed: Action='{action}', Content='{action_content}...'")
+                logger.info(f"🔍 DEBUG - Parsed: Action='{action}', Content='{action_content}'")
                 
-                logger.info(f"Parse edildi - Action: '{action}', Content: '{action_content}...'")
                 
                 conversation_history.append(f"Thought: {thought}\nAction: {action}\nContent: {action_content}")
                 
                 # Action'ı uygula
                 if action == "final_answer":
-                    # Final answer - chunk'ları organize et
+                    # Final answer - tüm ham verileri birleştir
+                    raw_answer = action_content
+                    
+                    # Ham veri bölümlerini topla
+                    raw_data_sections = []
+                    
+                    # 2. Successful findings (cypher ve vector_search raw sonuçları)
+                    if state.successful_findings:
+                        findings_data = []
+                        for finding in state.successful_findings:
+                            if finding.raw_data:  # Ham JSON data varsa
+                                findings_data.append({
+                                    "action_type": finding.action_type,
+                                    "iteration": finding.iteration,
+                                    "raw_data": finding.raw_data,
+                                    "summary": finding.summary
+                                })
+                        if findings_data:
+                            raw_data_sections.append(f"=== CYPHER & VECTOR SEARCH HAM VERİLER ===\n{json.dumps(findings_data, ensure_ascii=False, indent=2)}")
+                    
+                    # 3. Vector search chunk'ları (varsa)
                     if state.discovered_chunks:
-                        # Chunk'ları relevance'a göre sırala ve organize et
                         sorted_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
-                        
-                        # Chunk text'lerini birleştir
-                        organized_content = []
+                        chunk_content = []
                         for i, chunk in enumerate(sorted_chunks[:10], 1):  # En iyi 10 chunk
-                            organized_content.append(f"[Kaynak {i}: {chunk.document_name}, Sayfa {chunk.page_number}]\n{chunk.text.strip()}")
-                        
-                        # Final answer'ı chunk'larla zenginleştir
-                        final_answer = f"{action_content}\n\n--- KAYNAK BİLGİLER ---\n" + "\n\n".join(organized_content)
+                            chunk_content.append(f"[Kaynak {i}: {chunk.document_name}, Sayfa {chunk.page_number}]\n{chunk.text.strip()}")
+                        raw_data_sections.append(f"=== KAYNAK BİLGİLER ===\n" + "\n\n".join(chunk_content))
+                    
+                    # Raw final answer'ı oluştur
+                    if raw_data_sections:
+                        raw_final_answer = f"{raw_answer}\n\n--- HAM VERİLER ---\n" + "\n\n".join(raw_data_sections)
                     else:
-                        final_answer = action_content
+                        raw_final_answer = raw_answer
+                    
+                    # LLM yorumlama aktifse, ham veriyi yorumla
+                    if self.enable_llm_interpretation:
+                        logger.info("🤖 LLM yorumlama aktif - Ham veriler yorumlanıyor...")
+                        # Ham veriyi LLM'e aktar
+                        final_answer = self.interpret_final_answer_with_llm(raw_final_answer, user_question, state.discovered_chunks)
+                    else:
+                        logger.info("📊 Raw data mode - Tüm ham veriler birlikte döndürülüyor")
+                        final_answer = raw_final_answer
                         
                     current_observation = f"Final answer verildi: {final_answer[:200]}..."
                     logger.info(f"Agent final answer verdi: {final_answer[:200]}...")
@@ -1194,98 +1317,41 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 elif action == "cypher_query":
                     success, result = self.execute_cypher_query(action_content)
                     if success and result:
-                        # Sonuç tipini belirle ve uygun şekilde işle
-                        entity_ids = []
-                        structured_data = []
-                        meaningful_result = None
-                        
-                        for row in result[:20]:  # İlk 20 sonuç
-                            # Anlamlı sonuç kontrolü (COUNT, SUM, yanıt veren datalar)
+                        # Cypher sonuçlarını basit şekilde işle - otomatik chunk arama yapmadan
+                        data_summary = []
+                        for row in result[:5]:  # İlk 5 sonucu özetle
+                            row_summary = []
                             for key, value in row.items():
-                                if (value is not None and 
-                                    (('count' in key.lower() or key.lower().endswith('count') or 
-                                      'sum' in key.lower() or 'total' in key.lower() or
-                                      'avg' in key.lower() or 'max' in key.lower() or 'min' in key.lower()) or
-                                     (isinstance(value, (int, float)) and len(row) == 1))):  # Tek sayısal sonuç
-                                    meaningful_result = (key, value)
-                                    logger.info(f"🎯 Anlamlı sonuç bulundu: {key}={value}")
-                                    break
-                            
-                            if meaningful_result is not None:
-                                break
-                                
-                            # Entity ID'leri çıkar (chunk'lara ulaşmak için)
-                            found_entity = False
-                            for key, value in row.items():
-                                if key.endswith('_id') or key in ['id', 'name', 'policyNumber', 'customer']:
-                                    if isinstance(value, str) and len(value) > 0:
-                                        entity_ids.append(value)
-                                        state.discovered_entities.append({key: value})
-                                        found_entity = True
-                            
-                            # Structured data topla (LLM'e zengin bilgi vermek için)
-                            if found_entity or len(row) > 0:
-                                structured_data.append(row)
-                        
-                        # Sonuç tipine göre farklı response - LLM'e açık karar verme rehberi
-                        if meaningful_result is not None:
-                            # Kesin sonuç bulundu - METADATA SORU TİPİ
-                            key, value = meaningful_result
-                            current_observation = f"✅ METADATA SONUCU: '{key}' = {value}. Bu sayısal/yapısal veri kullanıcının sorusunu tamamen cevaplayıyor. HEMEN final_answer ver, chunk aramaya gerek yok!"
-                            
-                            # Başarılı meaningful result bulgusunu kaydet
-                            summary = self.summarize_finding(f"Cypher Query: {action_content}", [meaningful_result], "structured_data")
-                            self.add_successful_finding(
-                                state.iteration_count,
-                                "cypher_meaningful_result", 
-                                summary,
-                                1.0  # En yüksek değer - LLM karar verebilir
-                            )
-                            
-                        elif entity_ids:
-                            # Entity ID'ler bulundu - chunk'lara ulaş
-                            chunks = self.find_chunks_from_entities(entity_ids, state)
-                            for chunk in chunks:
-                                chunk = self.calculate_text_relevance(chunk, user_question)
-                                state.add_chunk(chunk)
-                            
-                            current_observation = f"Cypher sorgusu başarılı. {len(result)} sonuç bulundu. {len(chunks)} yeni chunk keşfedildi. Toplam chunk: {len(state.discovered_chunks)}"
-                            
-                            # Başarılı cypher sorgu bulgusunu kaydet
-                            if chunks:
-                                avg_relevance = sum([c.relevance_score for c in chunks]) / len(chunks)
-                                summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
-                                self.add_successful_finding(
-                                    state.iteration_count,
-                                    "cypher_query", 
-                                    summary,
-                                    avg_relevance
-                                )
-                        
-                        elif structured_data:
-                            # Structured data bulundu - CONTENT ARO GEREKIYORSA chunk'lara git
-                            data_summary = []
-                            for row in structured_data[:3]:  # İlk 3 sonucu özetle
-                                row_summary = []
-                                for key, value in row.items():
-                                    if value is not None and str(value).strip():
+                                if value is not None and str(value).strip():
+                                    if isinstance(value, list):
+                                        row_summary.append(f"{key}: {', '.join(map(str, value))}")
+                                    else:
                                         row_summary.append(f"{key}: {value}")
-                                if row_summary:
-                                    data_summary.append(", ".join(row_summary))
-                            
-                            current_observation = f"📊 ENTITY SONUÇLARI: {len(result)} kayıt bulundu ({'; '.join(data_summary[:2])}). Bu metadata yeterliyse final_answer ver. Eğer soru detaylı içerik/tutar/açıklama arıyorsa vector_search yap."
-                            
-                            # Structured data bulgusunu kaydet
-                            summary = self.summarize_finding(f"Cypher Query: {action_content}", structured_data, "structured_data")
-                            self.add_successful_finding(
-                                state.iteration_count,
-                                "cypher_structured_data", 
-                                summary,
-                                0.8  # Structured data değerli ama chunk'lar kadar detaylı değil
-                            )
-                            
-                        else:
-                            current_observation = f"Cypher sorgusu başarılı ama kullanılabilir veri bulunamadı. Sonuç: {result[:2]}"
+                            if row_summary:
+                                data_summary.append(", ".join(row_summary))
+                        
+                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}. Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa vector_search yap."
+                        
+                        # Başarılı cypher sorgu bulgusunu kaydet
+                        summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
+                        self.add_successful_finding(
+                            state.iteration_count,
+                            "cypher_query", 
+                            summary,
+                            0.9,  # Yüksek relevance - sonuçlar mevcut
+                            result  # Ham cypher sonuçları
+                        )
+                        
+                        # State'e de SuccessfulFinding objesi ekle
+                        finding_obj = SuccessfulFinding(
+                            iteration=state.iteration_count,
+                            action_type="cypher_query",
+                            summary=summary,
+                            relevance_score=0.9,
+                            raw_data=result
+                        )
+                        state.successful_findings.append(finding_obj)
+                        
                     else:
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
@@ -1298,14 +1364,36 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         best_relevance = max([c.relevance_score for c in chunks])
                         current_observation = f"📄 CHUNK SONUÇLARI: {len(chunks)} chunk toplandı (en yüksek relevance: {best_relevance:.3f}). Artık final_answer ver - chunk text'lerini birleştir, YORUM YAPMA!"
                         
+                        # Chunk'ları serialize edilebilir format'a çevir
+                        chunks_data = []
+                        for chunk in chunks:
+                            chunks_data.append({
+                                "chunk_id": chunk.chunk_id,
+                                "text": chunk.text,
+                                "document_name": chunk.document_name,
+                                "page_number": chunk.page_number,
+                                "relevance_score": chunk.relevance_score
+                            })
+                        
                         # LLM ile özetle ve başarılı bulguyu kaydet
                         summary = self.summarize_finding(f"Vector Search: {action_content}", chunks, "vector_search")
                         self.add_successful_finding(
                             state.iteration_count,
                             "vector_search",
                             summary,
-                            best_relevance
+                            best_relevance,
+                            chunks_data  # Ham chunk verileri
                         )
+                        
+                        # State'e de SuccessfulFinding objesi ekle
+                        finding_obj = SuccessfulFinding(
+                            iteration=state.iteration_count,
+                            action_type="vector_search",
+                            summary=summary,
+                            relevance_score=best_relevance,
+                            raw_data=chunks_data
+                        )
+                        state.successful_findings.append(finding_obj)
                     else:
                         current_observation = "Vector search sonuç bulamadı. Farklı anahtar kelimeler dene."
                         
@@ -1539,7 +1627,8 @@ Content: [Sorgu/anahtar kelime/cevap]
 **final_answer**: 
 - Metadata sorularında: cypher_query sonucu yeterliyse hemen cevapla
 - Content sorularında: chunk'ları topladıktan sonra text'leri birleştir ve döndür
-- YORUM YAPMA, sadece bulunan text'leri organize et
+- RAW DATA modunda: Sadece bulunan verileri organize et (yorumsuz)
+- LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
 
 ### ‼️ ZORUNLU KURALLAR:
 - Her action'da **sadece tek strateji** kullan
@@ -1561,40 +1650,58 @@ def test_agent():
         database=os.getenv("NEO4J_DATABASE", "neo4j")
     )
     
-    # Agent'ı oluştur
-    agent = IntelligentAgent(graph)
+    # Agent'ı oluştur - önce raw data mode, sonra LLM interpretation mode test et
+    test_modes = [
+        {"enable_llm_interpretation": False, "mode_name": "RAW DATA MODE"},
+        {"enable_llm_interpretation": True, "mode_name": "LLM INTERPRETATION MODE"}
+    ]
     
     # Test soruları
     test_questions = [
-        "Ahmet beyin poliçesinin taksit tutarları nedir?",
+        "Kaç poliçe var ve kimin adına",
+        "Ayça Dinçkök'un poliçesini özetle",
         # "Kaç tane müşteri var?",
         # "Sistemde hangi poliçe türleri mevcut?",
         # "DASK poliçeleri hakkında ne tür bilgiler var?",
         # "Galata Residence ile ilgili hangi bilgiler mevcut?"
     ]
     
-    for question in test_questions:
-        print(f"\n{'='*60}")
-        print(f"SORU: {question}")
-        print('='*60)
+    for mode_config in test_modes:
+        print(f"\n{'='*80}")
+        print(f"🔬 TEST MODU: {mode_config['mode_name']}")
+        print(f"LLM Interpretation: {mode_config['enable_llm_interpretation']}")
+        print('='*80)
         
-        result = agent.solve_question(question)
+        # Agent'ı bu mode'da oluşturf
+        agent = IntelligentAgent(graph, enable_llm_interpretation=mode_config['enable_llm_interpretation'])
         
-        # Final answer varsa onu göster
-        if 'final_answer' in result:
-            print(f"🎯 FINAL ANSWER: {result['final_answer']}")
-            print(f"İTERASYON: {result['iterations']}")
-            print(f"CHUNK SAYISI: {result['discovered_chunks']}")
-            print(f"ENTITY SAYISI: {result['discovered_entities']}")
-        else:
-            print(f"İTERASYON: {result['iterations']}")
-            print(f"CHUNK SAYISI: {result['discovered_chunks']}")
-            print(f"ENTITY SAYISI: {result['discovered_entities']}")
+        for question in test_questions:
+            print(f"\n{'-'*60}")
+            print(f"SORU: {question}")
+            print('-'*60)
             
-            print("\nEN İLGİLİ CHUNK'LAR:")
-            for chunk in result['chunk_details']:
-                print(f"- {chunk['document']} (Sayfa {chunk['page']}) - Relevance: {chunk['relevance']:.3f}")
-                print(f"  {chunk['preview']}")
+            result = agent.solve_question(question)
+            
+            # Final answer varsa onu göster
+            if 'final_answer' in result:
+                print(f"🎯 FINAL ANSWER:\n{result['final_answer']}")
+                print(f"\n📊 STATİSTİKLER:")
+                print(f"- İTERASYON: {result['iterations']}")
+                print(f"- CHUNK SAYISI: {result['discovered_chunks']}")
+                print(f"- ENTITY SAYISI: {result['discovered_entities']}")
+                print(f"- TOKEN KULLANIMI: {result['token_usage']['total_tokens']}")
+            else:
+                print(f"📊 STATİSTİKLER:")
+                print(f"- İTERASYON: {result['iterations']}")
+                print(f"- CHUNK SAYISI: {result['discovered_chunks']}")
+                print(f"- ENTITY SAYISI: {result['discovered_entities']}")
+                
+                print("\nEN İLGİLİ CHUNK'LAR:")
+                for chunk in result['chunk_details']:
+                    print(f"- {chunk['document']} (Sayfa {chunk['page']}) - Relevance: {chunk['relevance']:.3f}")
+                    print(f"  {chunk['preview']}")
+        
+        print(f"\n{mode_config['mode_name']} TEST TAMAMLANDI\n")
 
 if __name__ == "__main__":
     test_agent()
