@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from langchain.schema import HumanMessage, SystemMessage
 from langchain_neo4j import Neo4jGraph
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import neo4j.time
 
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
@@ -31,6 +32,19 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def serialize_neo4j_data(obj):
+    """Neo4j özel tiplerini JSON serializable hale getir"""
+    if isinstance(obj, neo4j.time.DateTime):
+        return obj.iso_format()
+    elif isinstance(obj, (neo4j.time.Date, neo4j.time.Time)):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {k: serialize_neo4j_data(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_neo4j_data(item) for item in obj]
+    else:
+        return obj
 
 @dataclass
 class ChunkInfo:
@@ -87,7 +101,7 @@ class IntelligentAgent:
         self.max_iterations = 10  # Derinlemesine araştırma için
         self.max_iterations = 5
         self.schema_cache = None
-        self.system_prompt_cache = None  # Schema-based system prompt cache - VERİ TİPİ güncellenmesi için temizlendi
+        self.system_prompt_cache = None  # Schema-based system prompt cache - PROMPT güncellendi: vector_search kaldırıldı, domain-agnostic yapıldı
         self.enable_llm_interpretation = enable_llm_interpretation  # LLM yorumlama açık/kapalı
         
         # Progress tracking ve context memory
@@ -1278,10 +1292,12 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         findings_data = []
                         for finding in state.successful_findings:
                             if finding.raw_data:  # Ham JSON data varsa
+                                # Neo4j DateTime objelerini serialize edilebilir hale getir
+                                serialized_data = serialize_neo4j_data(finding.raw_data)
                                 findings_data.append({
                                     "action_type": finding.action_type,
                                     "iteration": finding.iteration,
-                                    "raw_data": finding.raw_data,
+                                    "raw_data": serialized_data,
                                     "summary": finding.summary
                                 })
                         if findings_data:
@@ -1356,49 +1372,10 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
                 elif action == "vector_search":
-                    chunks = self.vector_search_with_chunks(action_content, state)
-                    for chunk in chunks:
-                        state.add_chunk(chunk)
-                    
-                    if chunks:
-                        best_relevance = max([c.relevance_score for c in chunks])
-                        current_observation = f"📄 CHUNK SONUÇLARI: {len(chunks)} chunk toplandı (en yüksek relevance: {best_relevance:.3f}). Artık final_answer ver - chunk text'lerini birleştir, YORUM YAPMA!"
-                        
-                        # Chunk'ları serialize edilebilir format'a çevir
-                        chunks_data = []
-                        for chunk in chunks:
-                            chunks_data.append({
-                                "chunk_id": chunk.chunk_id,
-                                "text": chunk.text,
-                                "document_name": chunk.document_name,
-                                "page_number": chunk.page_number,
-                                "relevance_score": chunk.relevance_score
-                            })
-                        
-                        # LLM ile özetle ve başarılı bulguyu kaydet
-                        summary = self.summarize_finding(f"Vector Search: {action_content}", chunks, "vector_search")
-                        self.add_successful_finding(
-                            state.iteration_count,
-                            "vector_search",
-                            summary,
-                            best_relevance,
-                            chunks_data  # Ham chunk verileri
-                        )
-                        
-                        # State'e de SuccessfulFinding objesi ekle
-                        finding_obj = SuccessfulFinding(
-                            iteration=state.iteration_count,
-                            action_type="vector_search",
-                            summary=summary,
-                            relevance_score=best_relevance,
-                            raw_data=chunks_data
-                        )
-                        state.successful_findings.append(finding_obj)
-                    else:
-                        current_observation = "Vector search sonuç bulamadı. Farklı anahtar kelimeler dene."
+                    current_observation = f"Vector search şu anda devre dışı. Chunk'ları almak için cypher_query kullan: entity → document → chunk relationship'lerini takip et."
                         
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, vector_search, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
                 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -1429,7 +1406,8 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 "token_usage": self.token_usage.copy(),
                 "detailed_token_usage": self.detailed_token_usage.copy()
             }
-        
+        # Daha detaylı analiz logu ekle
+        logger.info(f"Final answer yok: Detaylı analiz verileri: {conversation_history}, {state.discovered_chunks}")
         # Final answer yoksa detaylı analiz verileri döndür
         return {
             "iterations": state.iteration_count,
@@ -1599,42 +1577,59 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
    → Node property'leriyle cevaplanabilir → SADECE cypher_query kullan
    
 2. **CONTENT SORULARI**: Belge içeriği, detaylı açıklamalar, text-based bilgiler  
-   → Chunk text'lerinde aranmalı → cypher_query + vector_search kombinasyonu
+   → Chunk text'lerinde aranmalı → cypher_query ile veri araştır ve chunk'ları topla
 
-### ⚡ KARAR VERİCİ KURALLAR:
-- COUNT soruları → SADECE cypher_query, vector_search YAPMA
-- "Kaç", "Ne", "Hangi tip", "Listele" → Node özellikleriyle cevapla
-- "Detaylar", "İçerik", "Açıklama", "Tutar", "Tarih" → Chunk'larda ara
+3. **BELGE ANALİZİ SORULARI**: Belirli entity için tüm belgelerinin detaylı analizi
+   → cypher_query ile entity bul + ilgili chunk'ları topla
+
+### ⚡ LLM-DRIVEN KARAR VERİCİ KURALLAR:
+1. **İLK ADIM**: Her zaman cypher_query ile başla
+   - Node property'lerini ve temel metadata'yı çek
+   - Hangi entity'ler mevcut, hangi belgeler var, chunk'lar nasıl organize?
+   
+2. **İKİNCİ KARAR**: Cypher sonucuna BAK ve şunu sor:
+   - ✅ Soru metadata ile tam cevaplanıyor mu? → final_answer
+   - ❌ Çok fazla veri var mı? Daha spesifik arama gerekli mi? → refined cypher_query
+   - ❌ İçerik detaylarına ihtiyaç var mı? → cypher_query ile chunk'ları topla
+   - ❌ Belge metinlerini okumak gerekli mi? → cypher_query ile chunk relationship'lerini takip et
+   - 5+ belge/poliçe bulunduğunda analiz gerekli ise:
+     * KULLANICIYA SOR: "X adet belge bulundu, hangisinin detayını analiz etmek istiyorsunuz?"
+     * VEYA KENDİ SEÇ: En güncel/önemli 2-3 tanesini analiz et  
+     * Karar senin - çok fazla içerik okumak uzun sürer!
+     
+3. **CHUNK ARAMA**: Gerekirse ikinci cypher_query ile:
+   - Entity'lerden document'lara, oradan chunk'lara ulaş
+   - Chunk text'lerini topla ve organize et
+   - Text içerik analizi için tüm chunk'ları al
 
 ### 📝 ACTION FORMAT:
 ```
-Observation: [Mevcut durum]
-Thought: [Bu hangi tip soru? Metadata mı Content mı?]
-Action: [cypher_query | vector_search | final_answer]
-Content: [Sorgu/anahtar kelime/cevap]
+Observation: [Mevcut durum ve önceki adım sonuçları]
+Thought: [Cypher sonucuna bakarak: Bu yeterli mi? İçerik detayına ihtiyaç var mı?]
+Action: [cypher_query | final_answer]
+Content: [Sorgu/cevap]
 ```
 
 ### 🎯 ACTION STRATEJİLERİ:
 
-**cypher_query**: Schema'daki node/relationship property'lerini kullan
+**cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
 - Node sayıları, liste'ler, ID'ler, tipler için
-- Aggregate fonksiyonlar (COUNT, DISTINCT) kullanabilirsin
-
-**vector_search**: Chunk text'lerinde semantic arama yap  
-- Detaylı açıklamalar, tutarlar, dates, content bilgileri için
-- Sadece anahtar kelimeleri yaz, tam cümle YAZMA
+- Entity'leri bul ve ilişkilerini araştır
+- Chunk'ları topla: entity → document → chunk chain'i takip et
+- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
 
 **final_answer**: 
-- Metadata sorularında: cypher_query sonucu yeterliyse hemen cevapla
-- Content sorularında: chunk'ları topladıktan sonra text'leri birleştir ve döndür
-- RAW DATA modunda: Sadece bulunan verileri organize et (yorumsuz)
+- Metadata yeterli ise: cypher_query sonuçlarını organize et
+- İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
+- RAW DATA modunda: Bulunan verileri organize et (yorumsuz)
 - LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
 
 ### ‼️ ZORUNLU KURALLAR:
-- Her action'da **sadece tek strateji** kullan
+- Her soru için İLK ADIM cypher_query olmalı
+- Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
 - final_answer'da YORUMLAMA yapma, sadece raw data birleştir  
-- Chunk'lardan bilgi toplama aşamasında çıktı üretme
-- Schema'yı analiz ederek soru tipini KENDİN belirle"""
+- Belge analizi: cypher_query (entity bul) → cypher_query (chunk topla) → final_answer
+- Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle"""
 
         return system_prompt
 
@@ -1653,12 +1648,12 @@ def test_agent():
     # Agent'ı oluştur - önce raw data mode, sonra LLM interpretation mode test et
     test_modes = [
         {"enable_llm_interpretation": False, "mode_name": "RAW DATA MODE"},
-        {"enable_llm_interpretation": True, "mode_name": "LLM INTERPRETATION MODE"}
+        # {"enable_llm_interpretation": True, "mode_name": "LLM INTERPRETATION MODE"}
     ]
     
     # Test soruları
     test_questions = [
-        "Kaç poliçe var ve kimin adına",
+        # "Kaç poliçe var ve kimin adına",
         "Ayça Dinçkök'un poliçesini özetle",
         # "Kaç tane müşteri var?",
         # "Sistemde hangi poliçe türleri mevcut?",
