@@ -301,6 +301,176 @@ GÖREV:
             logger.error(f"Cypher sorgu hatası: {e}")
             return False, str(e)
     
+    def execute_vector_search(self, query_text: str, limit: int = 10, document_names: List[str] = None) -> Tuple[bool, Any]:
+        """LLM'in kullanabileceği vector search fonksiyonu - OpenAI embedding ile
+        
+        Args:
+            query_text: Arama sorgusu
+            limit: Maksimum sonuç sayısı
+            document_names: Aramayı sınırlandırmak için belge adları listesi (opsiyonel)
+        """
+        try:
+            scope_info = f" (Belge filtresi: {document_names})" if document_names else " (Tüm DB)"
+            logger.info(f"Vector search çalıştırılıyor: {query_text}{scope_info}")
+            
+            # OpenAI embedding al - dışarıdan sağlanan embedding model kullan
+            normalized_query = normalize_unicode_text(query_text)
+            query_embedding = self.embedding_model.embed_query(normalized_query)
+            
+            # Belge filtresi varsa sınırlandırılmış arama, yoksa tüm DB
+            if document_names and len(document_names) > 0:
+                # Belirli belgelerde sınırlandırılmış arama
+                vector_query = """
+                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
+                YIELD node, score
+                MATCH (node)-[:PART_OF]->(d:Document)
+                WHERE d.fileName IN $document_names
+                RETURN 
+                    node.chunkId as chunk_id,
+                    node.text as text, 
+                    node.page_number as page_number,
+                    d.fileName as document_name,
+                    score
+                ORDER BY score DESC
+                """
+                query_params = {
+                    'query_vector': query_embedding,
+                    'limit': limit,
+                    'document_names': document_names
+                }
+            else:
+                # Tüm veritabanında arama (mevcut davranış)
+                vector_query = """
+                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
+                YIELD node, score
+                OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
+                RETURN 
+                    node.chunkId as chunk_id,
+                    node.text as text, 
+                    node.page_number as page_number,
+                    d.fileName as document_name,
+                    score
+                ORDER BY score DESC
+                """
+                query_params = {
+                    'query_vector': query_embedding,
+                    'limit': limit
+                }
+            
+            result = self.graph.query(vector_query, query_params)
+            
+            if not result:
+                logger.info("Vector search: sonuç bulunamadı")
+                return True, []
+            
+            # Sonuçları formatla
+            formatted_results = []
+            for row in result:
+                formatted_results.append({
+                    'chunk_id': row['chunk_id'],
+                    'text': row['text'] or "",
+                    'page_number': row['page_number'],
+                    'document_name': row['document_name'] or "Unknown",
+                    'relevance_score': float(row['score'])
+                })
+            
+            logger.info(f"Vector search sonucu: {len(formatted_results)} chunk, en yüksek score: {formatted_results[0]['relevance_score']:.3f}")
+            
+            # İlk birkaç sonucu logla
+            for i, row in enumerate(formatted_results[:3], 1):
+                logger.info(f"Vector Sonuç {i} (Score: {row['relevance_score']:.3f}): {row['document_name']} - {row['text'][:100]}...")
+            
+            return True, formatted_results
+            
+        except Exception as e:
+            logger.error(f"Vector search hatası: {e}")
+            return False, str(e)
+    
+    def get_available_documents(self) -> List[str]:
+        """Veritabanında mevcut belgelerin listesini al"""
+        try:
+            query = """
+            MATCH (d:Document)
+            RETURN DISTINCT d.fileName as document_name
+            ORDER BY d.fileName
+            """
+            result = self.graph.query(query)
+            
+            documents = [row['document_name'] for row in result if row['document_name']]
+            logger.info(f"Veritabanında {len(documents)} belge bulundu")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Belge listesi alma hatası: {e}")
+            return []
+    
+    def execute_document_filtered_vector_search(self, query_text: str, user_question: str, limit: int = 10) -> Tuple[bool, Any]:
+        """İlk önce hangi belgelerde arama yapılacağını belirle, sonra vector search yap"""
+        try:
+            # Mevcut belgeleri al
+            available_docs = self.get_available_documents()
+            if not available_docs:
+                logger.warning("Veritabanında belge bulunamadı")
+                return self.execute_vector_search(query_text, limit)
+            
+            # LLM'den hangi belgelerde arama yapacağını sor
+            document_selection_prompt = f"""
+Kullanıcı sorusu: "{user_question}"
+Arama sorgusu: "{query_text}"
+
+Mevcut belgeler:
+{chr(10).join([f"- {doc}" for doc in available_docs])}
+
+GÖREV: Bu sorguyu cevaplamak için hangi belgelerde arama yapılması gerektiğini belirle.
+
+KURALLAR:
+1. Eğer soruda belirli bir kişi/poliçe/dosya adı geçiyorsa, sadece o belgeleri seç
+2. Genel sorular için tüm belgelerde ara (boş liste döndür)
+3. İlgisiz belgeleri dahil etme
+
+CEVAP FORMATI:
+Arama yapılacak belgeler: [belge1.pdf, belge2.pdf] 
+(Eğer tüm belgelerde arama yapılacaksa: [])
+
+Kısa açıklama: ...
+"""
+            
+            response = self.llm.invoke([
+                SystemMessage(content="Sen bir belge analiz uzmanısın. Kullanıcı sorularına göre hangi belgelerde arama yapılması gerektiğini belirlersin."),
+                HumanMessage(content=document_selection_prompt)
+            ])
+            
+            # Cevabı parse et
+            response_text = response.content.strip()
+            logger.info(f"Belge seçim cevabı: {response_text}")
+            
+            # Belge listesini çıkar - basit regex/string parsing
+            selected_docs = []
+            if "[]" in response_text or "tüm belgelerde" in response_text.lower():
+                # Tüm belgelerde ara
+                selected_docs = None
+                logger.info("LLM kararı: Tüm belgelerde arama yap")
+            else:
+                # Belirli belgeleri seç - response'ta geçen belge adlarını bul
+                for doc in available_docs:
+                    if doc in response_text:
+                        selected_docs.append(doc)
+                
+                if not selected_docs:
+                    # Hiç belge bulunamazsa tüm belgelerde ara
+                    selected_docs = None
+                    logger.info("LLM cevabında belirli belge bulunamadı, tüm belgelerde arama yapılacak")
+                else:
+                    logger.info(f"LLM seçimi: {len(selected_docs)} belge - {selected_docs}")
+            
+            # Seçilen belgelerde vector search yap
+            return self.execute_vector_search(query_text, limit, selected_docs)
+            
+        except Exception as e:
+            logger.error(f"Belgeli vector search hatası: {e}")
+            # Fallback: normal vector search
+            return self.execute_vector_search(query_text, limit)
+    
     def log_detailed_token_report(self):
         """Detaylı token kullanım raporunu logla"""
         try:
@@ -530,7 +700,15 @@ Sonuç sayısı: {len(result)}
                     top_chunks = result[:3]  # İlk 3 chunk
                     chunk_info = []
                     for chunk in top_chunks:
-                        chunk_info.append(f"Doc: {chunk.document_name}, Score: {chunk.relevance_score:.3f}, Preview: {chunk.text[:100]}...")
+                        # Dict formatında geliyorsa dict olarak erişim
+                        if isinstance(chunk, dict):
+                            doc_name = chunk.get('document_name', 'Unknown')
+                            score = chunk.get('relevance_score', 0.0)
+                            text = chunk.get('text', '')
+                            chunk_info.append(f"Doc: {doc_name}, Score: {score:.3f}, Preview: {text[:100]}...")
+                        else:
+                            # ChunkInfo objesi ise normal erişim
+                            chunk_info.append(f"Doc: {chunk.document_name}, Score: {chunk.relevance_score:.3f}, Preview: {chunk.text[:100]}...")
                     
                     summary_prompt = f"""
 Bu vector search sonuçlarını kısa ve öz şekilde özetle (max 150 kelime):
@@ -561,7 +739,13 @@ Anahtar bulgular ve önemli bilgiler nedir?
             if finding_type == "structured_data":
                 return f"Structured data: {len(result) if result else 0} kayıt. Örnek: {str(result[:1])[:100]}..." if result else "Sonuç yok"
             elif finding_type == "vector_search":
-                return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].relevance_score:.3f}" if result else "Sonuç yok"
+                # Dict format için güvenli erişim
+                if result and isinstance(result[0], dict):
+                    return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].get('relevance_score', 0.0):.3f}"
+                elif result:
+                    return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].relevance_score:.3f}"
+                else:
+                    return "Vector search: 0 sonuç"
             return f"{finding_type}: {str(result)[:100]}..."
 
     def add_successful_finding(self, iteration: int, action: str, finding: str, relevance_score: float = 0.0, raw_data: Any = None):
@@ -1372,10 +1556,53 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
                 elif action == "vector_search":
-                    current_observation = f"Vector search şu anda devre dışı. Chunk'ları almak için cypher_query kullan: entity → document → chunk relationship'lerini takip et."
+                    # Akıllı belge filtrelemesi ile vector search
+                    success, result = self.execute_document_filtered_vector_search(action_content, user_question, limit=15)
+                    if success and result:
+                        # Vector search sonuçlarını işle
+                        doc_names = list(set([chunk['document_name'] for chunk in result if chunk.get('document_name')]))
+                        doc_info = f" (Belgeler: {', '.join(doc_names[:3])}{'...' if len(doc_names) > 3 else ''})" if doc_names else ""
+                        current_observation = f"Vector search başarılı: {len(result)} chunk bulundu{doc_info}. En yüksek relevance score: {result[0]['relevance_score']:.3f}. Chunk'lar dokümanlarda '{action_content}' ile ilgili bilgileri içeriyor."
+                        
+                        # Başarılı vector search bulgusunu kaydet
+                        summary = self.summarize_finding(f"Vector Search: {action_content}", result, "vector_search")
+                        self.add_successful_finding(
+                            state.iteration_count,
+                            "vector_search", 
+                            summary,
+                            result[0]['relevance_score'] if result else 0.0,
+                            result  # Ham vector search sonuçları
+                        )
+                        
+                        # State'e SuccessfulFinding objesi ekle
+                        finding_obj = SuccessfulFinding(
+                            iteration=state.iteration_count,
+                            action_type="vector_search",
+                            summary=summary,
+                            relevance_score=result[0]['relevance_score'] if result else 0.0,
+                            raw_data=result
+                        )
+                        state.successful_findings.append(finding_obj)
+                        
+                        # State'deki chunk'ları güncelle
+                        for chunk_data in result:
+                            chunk_info = ChunkInfo(
+                                chunk_id=chunk_data['chunk_id'],
+                                text=chunk_data['text'],
+                                page_number=chunk_data['page_number'],
+                                document_name=chunk_data['document_name'],
+                                relevance_score=chunk_data['relevance_score'],
+                                # Eksik alanları varsayılan değerlerle ekle
+                                document_metadata={},
+                                split_texts=[],
+                                split_scores=[]
+                            )
+                            state.discovered_chunks.append(chunk_info)
+                    else:
+                        current_observation = f"Vector search başarısız: {result}. Farklı arama terimleri dene veya cypher_query kullan."
                         
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, vector_search, final_answer"
                 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -1590,24 +1817,31 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
 2. **İKİNCİ KARAR**: Cypher sonucuna BAK ve şunu sor:
    - ✅ Soru metadata ile tam cevaplanıyor mu? → final_answer
    - ❌ Çok fazla veri var mı? Daha spesifik arama gerekli mi? → refined cypher_query
-   - ❌ İçerik detaylarına ihtiyaç var mı? → cypher_query ile chunk'ları topla
-   - ❌ Belge metinlerini okumak gerekli mi? → cypher_query ile chunk relationship'lerini takip et
+   - ❌ İçerik detaylarına ihtiyaç var mı? → vector_search (semantic arama) VEYA cypher_query (chunk'ları topla)
+   - ❌ Belge metinlerini okumak gerekli mi? → vector_search (direkt chunk arama) VEYA cypher_query (relationship takip)
    - 5+ belge/poliçe bulunduğunda analiz gerekli ise:
      * KULLANICIYA SOR: "X adet belge bulundu, hangisinin detayını analiz etmek istiyorsunuz?"
      * VEYA KENDİ SEÇ: En güncel/önemli 2-3 tanesini analiz et  
      * Karar senin - çok fazla içerik okumak uzun sürer!
-     
-3. **CHUNK ARAMA**: Gerekirse ikinci cypher_query ile:
-   - Entity'lerden document'lara, oradan chunk'lara ulaş
-   - Chunk text'lerini topla ve organize et
-   - Text içerik analizi için tüm chunk'ları al
+
+3. **VECTOR SEARCH KULLANIM KARARI**:
+   - Belirli kelimeleri/kavramları chunk'larda aramak için → vector_search
+   - "prim bilgileri", "teminat detayları", "hasar bilgileri" gibi içerik arama → vector_search  
+   - Cypher'da CONTAINS kullanmak yerine → vector_search kullan (daha akıllı arama)
+   - Text'te geçen bilgileri bulmak için → vector_search öncelikli
+   - **ÖNEMLİ**: LLM önce hangi belgelerde arama yapacağını belirler, sonra o belgelerde semantic arama yapar
+   
+4. **CHUNK ARAMA**: İçerik gerekiyorsa:
+   - **Önce vector_search dene**: Semantic olarak ilgili chunk'ları hızlıca bul (akıllı belge seçimi ile)
+   - **Sonra cypher_query**: Entity→document→chunk relationship'leri ile ek chunk'lar topla
+   - Text içerik analizi için vector_search sonuçlarını kullan
 
 ### 📝 ACTION FORMAT:
 ```
 Observation: [Mevcut durum ve önceki adım sonuçları]
 Thought: [Cypher sonucuna bakarak: Bu yeterli mi? İçerik detayına ihtiyaç var mı?]
-Action: [cypher_query | final_answer]
-Content: [Sorgu/cevap]
+Action: [cypher_query | vector_search | final_answer]
+Content: [Sorgu/arama metni/cevap]
 ```
 
 ### 🎯 ACTION STRATEJİLERİ:
@@ -1617,6 +1851,19 @@ Content: [Sorgu/cevap]
 - Entity'leri bul ve ilişkilerini araştır
 - Chunk'ları topla: entity → document → chunk chain'i takip et
 - Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
+
+**vector_search**: OpenAI embedding ile AKILLI semantic chunk arama
+- LLM önce hangi belgelerde arama yapacağını otomatik belirler
+- Belge içeriklerinde semantic arama yap (seçilen belgelerde)
+- Soruda belirli kişi/poliçe varsa sadece o belgelerde ara
+- Genel sorular için tüm belgelerde ara
+- Format: `Action: vector_search` `Content: arama metni`
+- Örnek: "Ayça Dinçkök'ün prim bilgileri" → Sadece Ayça'nın belgelerinde arar
+- Belge içeriklerinde semantic arama yap
+- Chunk embedding'leri ile query embedding'ini karşılaştır
+- Text içeriği, açıklamalar, detaylar için kullan
+- Format: `Action: vector_search` `Content: arama metni`
+- Örnek: "Ayça Dinçkök'ün prim bilgileri", "yangın sigortası detayları"
 
 **final_answer**: 
 - Metadata yeterli ise: cypher_query sonuçlarını organize et
@@ -1654,7 +1901,8 @@ def test_agent():
     # Test soruları
     test_questions = [
         # "Kaç poliçe var ve kimin adına",
-        "Ayça Dinçkök'un poliçesini özetle",
+        # "Ayça Dinçkök'un poliçesini özetle",
+        "ayça dinçkökün konut poliçelerinin prim tutarlarını listele ",
         # "Kaç tane müşteri var?",
         # "Sistemde hangi poliçe türleri mevcut?",
         # "DASK poliçeleri hakkında ne tür bilgiler var?",
