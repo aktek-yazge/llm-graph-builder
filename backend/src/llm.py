@@ -57,7 +57,7 @@ def get_llm(model: str):
         elif "openai" in model:
             model_name, api_key = env_value.split(",")
             logging.info(f"OpenAI model kontrolü: model={model}, model_name={model_name}")
-            if "o3-mini" in model or "gpt-5-mini" in model:
+            if "o3-mini" in model or "gpt_5_mini" in model:
                 logging.info(f"{model_name} tespit edildi, temperature parametresi olmadan LLM oluşturuluyor")
                 llm= ChatOpenAI(
                 api_key=api_key,
