@@ -558,20 +558,16 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
         logging.info(f"DEBUG: Full messages count: {len(messages)}")
         for i, msg in enumerate(messages):
             logging.info(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
-            print(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
 
         logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
         for i, msg in enumerate(human_messages):
             logging.info(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
-            print(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
             
         # UYARI: Eğer human_messages sadece 1 mesaj içeriyorsa (son soru), önceki context kayıp!
         if len(human_messages) <= 1:
             logging.warning(f"WARNING: Only {len(human_messages)} human message(s) found in history!")
             logging.warning("This means previous user questions are missing from the message history.")
             logging.warning("Context transformation may be incomplete. Check frontend message passing.")
-            print(f"WARNING: Only {len(human_messages)} human message(s) found - previous context may be missing!")
-            print("Frontend should send complete conversation history including all user messages.")
         
         handler = CustomCallback()
 
@@ -596,7 +592,6 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 for i, msg in enumerate(messages):
                     msg_type = type(msg).__name__
                     logging.info(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
-                    print(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
 
                 # SADECE kullanıcı mesajlarını filtrele (HumanMessage)
                 # Re-run robust extractor in case message shapes differ here
@@ -629,7 +624,6 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 logging.info(f"DEBUG: Using {len(last_human_messages)} messages for transform (window={transform_window}):")
                 for i, msg in enumerate(last_human_messages):
                     logging.info(f"DEBUG: Transform input {i+1}: {msg.content}")
-                    print(f"DEBUG: Transform input {i+1}: {msg.content}")
 
                 # LLM ve transform prompt hazırla
                 llm, _ = get_llm("openai_gpt_4.1")  # Model parametresi ekle
@@ -646,15 +640,12 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                     formatted_msg = f"Mesaj {i+1}: {msg.content}"
                     messages_for_llm.append(formatted_msg)
                     logging.info(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
-                    print(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
 
                 # Final prompt'u manuel olarak oluştur ve logla (sadece debug amaçlı)
                 combined_messages = "\n".join(messages_for_llm)
                 final_prompt = f"{QUESTION_TRANSFORM_TEMPLATE}\n\nMesajlar:\n{combined_messages}"
                 logging.info(f"DEBUG: Final combined prompt that will be sent to LLM:")
                 logging.info(f"DEBUG: {final_prompt}")
-                print(f"DEBUG: Final combined prompt that will be sent to LLM:")
-                print(f"DEBUG: {final_prompt}")
 
                 # Transform işlemini yap - LLM'e bırakıyoruz; model gereksizse orijinali dönmelidir
                 transformed_question = transform_chain.invoke({"messages": last_human_messages})
@@ -663,15 +654,9 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 logging.info(f"IntelligentAgent TRANSFORM: Original: {user_question}")
                 logging.info(f"IntelligentAgent TRANSFORM: Transformed: {transformed_question}")
                 logging.info(f"IntelligentAgent TRANSFORM: Human message count: {len(last_human_messages)}")
-                print(f"=== INTELLIGENT AGENT QUESTION TRANSFORM ===")
-                print(f"Original: {user_question}")
-                print(f"Transformed: {transformed_question}")
-                print(f"Last {len(last_human_messages)} human messages used (LLM responses excluded)")
-                print("===============================================")
 
             except Exception as e:
                 logging.error(f"IntelligentAgent transform failed: {e}")
-                print(f"IntelligentAgent transform error: {e}")
                 transformed_question = user_question
             
             # Transform edilmiş soruyu IntelligentAgent'a gönder
@@ -680,7 +665,6 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
             # Intelligent Agent response parsing
             if intelligent_result and intelligent_result.get('final_answer'):
                 logging.info(f"IntelligentAgent response received")
-                print(f"IntelligentAgent response received")
                 
                 # IntelligentAgent'in final answer'ını kullan
                 final_answer = intelligent_result.get('final_answer', '')
@@ -731,7 +715,6 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
 
                 final_question = transformed_question
                 logging.info(f"IntelligentAgent returned {len(docs)} documents")
-                print(f"IntelligentAgent returned {len(docs)} documents")
                 
                 # Intelligent agent'in sonucunu agent_result'a ata
                 agent_result = {
@@ -749,7 +732,6 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
             else:
                 # Fallback - boş sonuç
                 logging.info(f"IntelligentAgent - no final answer")
-                print(f"IntelligentAgent - no final answer")
                 
                 # Simple wrapper for expected document shape
                 class SimpleDoc:
@@ -781,31 +763,25 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
             agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
             if agent_token_usage:
                 logging.info(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
-                print(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
 
             # Log agent result summary for debugging (avoid full dump to prevent huge outputs)
             try:
                 keys = list(agent_result.keys()) if isinstance(agent_result, dict) else []
                 logging.info(f"IntelligentAgent result keys: {keys}")
-                print(f"IntelligentAgent result keys: {keys}")
 
                 chunk_count = len(agent_result.get('chunk_details', [])) if isinstance(agent_result, dict) else 0
                 logging.info(f"Agent chunk_details count: {chunk_count}")
-                print(f"Agent chunk_details count: {chunk_count}")
 
                 llm_prompt = agent_result.get('llm_prompt_structure') if isinstance(agent_result, dict) else None
                 if llm_prompt:
                     logging.debug("Agent llm_prompt_structure (truncated): %s", llm_prompt[:1000])
-                    print("Agent llm_prompt_structure (truncated):", llm_prompt[:1000])
 
                 context_mem = agent_result.get('context_memory') if isinstance(agent_result, dict) else None
                 if context_mem:
                     logging.debug("Agent context_memory (truncated): %s", context_mem[:500])
-                    print("Agent context_memory (truncated):", context_mem[:500])
 
             except Exception as e:
                 logging.exception(f"Error while logging agent_result: {e}")
-                print(f"Error while logging agent_result: {e}")
 
             # Simple wrapper for expected document shape
             class SimpleDoc:
@@ -1336,12 +1312,40 @@ def summarize_and_log(history, stored_messages, llm):
             # Özetlemeye gerek yoksa tüm mesajları kullan
             messages_to_add = stored_messages
 
-        with threading.Lock():
+        # Critical: Use session-specific lock to prevent concurrent access
+        session_lock_key = f"session_lock_{history.session_id}" if hasattr(history, 'session_id') else "session_lock_default"
+        
+        # Global session locks dictionary (thread-safe)
+        if not hasattr(summarize_and_log, 'session_locks'):
+            summarize_and_log.session_locks = {}
+        
+        if session_lock_key not in summarize_and_log.session_locks:
+            summarize_and_log.session_locks[session_lock_key] = threading.Lock()
+        
+        session_lock = summarize_and_log.session_locks[session_lock_key]
+        
+        with session_lock:
             def safe_history_update():
                 """Neo4j işlemlerini güvenli şekilde yap"""
-                retry_neo4j_operation(lambda: history.clear())
-                for msg in messages_to_add:
-                    retry_neo4j_operation(lambda: history.add_message(msg))
+                try:
+                    # Session existence check before clearing
+                    if hasattr(history, 'session_id'):
+                        session_check_query = """
+                        MATCH (s:Session {id: $session_id})
+                        RETURN count(s) as session_count
+                        """
+                        session_exists = history.graph.query(session_check_query, {"session_id": history.session_id})
+                        if not session_exists or session_exists[0]['session_count'] == 0:
+                            logging.warning(f"Session {history.session_id} not found during summarization - skipping")
+                            return
+                    
+                    retry_neo4j_operation(lambda: history.clear())
+                    for msg in messages_to_add:
+                        retry_neo4j_operation(lambda: history.add_message(msg))
+                        
+                except Exception as neo4j_error:
+                    logging.error(f"Neo4j session operation error: {neo4j_error}")
+                    raise
             
             # Neo4j işlemlerini retry ile koru
             try:
@@ -1515,15 +1519,55 @@ def process_graph_response(model, graph, question, messages, history):
 
 def create_neo4j_chat_message_history(graph, session_id, write_access=True):
     """
-    Creates and returns a Neo4jChatMessageHistory instance.
-
+    Creates and returns a Neo4jChatMessageHistory instance with session deduplication.
+    Ensures only one Session node exists per session_id.
     """
     try:
-        if write_access: 
+        if write_access:
+            # Check if session already exists
+            existing_session_query = """
+            MATCH (s:Session {id: $session_id})
+            RETURN s LIMIT 1
+            """
+            existing_sessions = graph.query(existing_session_query, {"session_id": session_id})
+            
+            if existing_sessions:
+                logging.info(f"♻️ Using existing session: {session_id}")
+            else:
+                logging.info(f"🆕 Creating new session: {session_id}")
+            
+            # Neo4jChatMessageHistory will handle creation/retrieval internally
             history = Neo4jChatMessageHistory(
                 graph=graph,
                 session_id=session_id
             )
+            
+            # Verify no duplicate sessions were created
+            session_count_query = """
+            MATCH (s:Session {id: $session_id})
+            RETURN count(s) as session_count
+            """
+            session_count_result = graph.query(session_count_query, {"session_id": session_id})
+            session_count = session_count_result[0]['session_count'] if session_count_result else 0
+            
+            if session_count > 1:
+                logging.warning(f"⚠️ Multiple sessions detected for {session_id}: {session_count} - cleaning up...")
+                # Keep the oldest session and remove duplicates
+                cleanup_duplicate_sessions_query = """
+                MATCH (s:Session {id: $session_id})
+                WITH s ORDER BY s.createdAt ASC
+                WITH collect(s) as sessions
+                WITH sessions[0] as keeper, sessions[1..] as duplicates
+                UNWIND duplicates as duplicate
+                OPTIONAL MATCH (duplicate)-[r:LAST_MESSAGE]->(m:Message)
+                DELETE r
+                DELETE duplicate
+                RETURN count(duplicates) as cleaned_count
+                """
+                cleanup_result = graph.query(cleanup_duplicate_sessions_query, {"session_id": session_id})
+                cleaned_count = cleanup_result[0]['cleaned_count'] if cleanup_result else 0
+                logging.info(f"✅ Cleaned up {cleaned_count} duplicate sessions for {session_id}")
+            
             return history
         
         history = get_history_by_session_id(session_id)
@@ -1673,16 +1717,12 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
                 }
             await asyncio.sleep(0.05)
 
-        # Mesajları history'e kaydet
-        ai_response = AIMessage(content=ai_response_content)
-        messages.append(ai_response)
-        # ÖNEMLI: AIMessage'ı session history'sine kaydet
-        history.add_message(ai_response)
-
-        ai_response2 = AIMessage(content=ai_response_content2)
-        messages.append(ai_response2)
-        # ÖNEMLI: AIMessage'ı session history'sine kaydet
-        history.add_message(ai_response2)
+        # Mesajları history'e kaydet - TEK mesaj olarak birleştir
+        combined_ai_content = f"{ai_response_content}\n\n{ai_response_content2}"
+        ai_response_combined = AIMessage(content=combined_ai_content)
+        messages.append(ai_response_combined)
+        # ÖNEMLI: Tek birleştirilmiş AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response_combined)
 
         # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
@@ -2633,16 +2673,12 @@ async def analyze_markdown_with_llm(markdown_content: str, model, question, hist
                 }
             await asyncio.sleep(0.03)
 
-        # Mesajları history'e kaydet
-        ai_response_raw = AIMessage(content=markdown_content)
-        messages.append(ai_response_raw)
-        # ÖNEMLI: AIMessage'ı session history'sine kaydet
-        history.add_message(ai_response_raw)
-
-        ai_response_final = AIMessage(content=ai_response_content)
-        messages.append(ai_response_final)
-        # ÖNEMLI: AIMessage'ı session history'sine kaydet
-        history.add_message(ai_response_final)
+        # Mesajları history'e kaydet - TEK mesaj olarak birleştir
+        combined_ai_content = f"**Belge İçeriği (Markdown):**\n{markdown_content}\n\n**Analiz Sonucu:**\n{ai_response_content}"
+        ai_response_combined = AIMessage(content=combined_ai_content)
+        messages.append(ai_response_combined)
+        # ÖNEMLI: Tek birleştirilmiş AIMessage'ı session history'sine kaydet
+        history.add_message(ai_response_combined)
 
         # Background summarization
         summarization_future = asyncio.get_event_loop().run_in_executor(
