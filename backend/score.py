@@ -5,7 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
-from src.alternative_agent import AlternativeAgent
 from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
@@ -47,7 +46,6 @@ from dotenv import load_dotenv
 import tempfile
 from pathlib import Path
 from src.intelligent_agent import IntelligentAgent
-from src.alternative_agent import AlternativeAgent
 import time
 import json
 import logging
@@ -1512,18 +1510,12 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         
         graph_DB_dataAccess = graphDBdataAccess(graph)
         write_access = graph_DB_dataAccess.check_account_access(database=database)
-        # Try to instantiate IntelligentAgent and AlternativeAgent and pass them to QA_RAG (fallback to None on failure)
+        # Try to instantiate IntelligentAgent and pass them to QA_RAG (fallback to None on failure)
         intelligent_agent = None
         try:
             intelligent_agent = IntelligentAgent(graph)
         except Exception:
             intelligent_agent = None
-        
-        alternative_agent = None
-        try:
-            alternative_agent = AlternativeAgent(graph)
-        except Exception:
-            alternative_agent = None
 
         result = await asyncio.to_thread(
             QA_RAG,
@@ -1535,7 +1527,6 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
             mode=mode,
             write_access=write_access,
             intelligent_agent=intelligent_agent,
-            alternative_agent=alternative_agent,
         )
 
         total_call_time = time.time() - qa_rag_start_time
@@ -1636,13 +1627,6 @@ async def chat_bot_stream(
                 intelligent_agent = IntelligentAgent(graph)
             except Exception:
                 intelligent_agent = None
-                
-            # Instantiate AlternativeAgent for streaming path and pass it through (fallback to None)
-            alternative_agent = None
-            try:
-                alternative_agent = AlternativeAgent(graph)
-            except Exception:
-                alternative_agent = None
 
             async for chunk in QA_RAG_stream(
                 graph=graph,
@@ -1652,8 +1636,7 @@ async def chat_bot_stream(
                 session_id=session_id,
                 mode=mode,
                 write_access=write_access,
-                # intelligent_agent=intelligent_agent,
-                alternative_agent=alternative_agent,
+                intelligent_agent=intelligent_agent,
                 files=downloadedFiles
             ):
                 # Client disconnect kontrolü

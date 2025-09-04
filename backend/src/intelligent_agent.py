@@ -105,7 +105,6 @@ class IntelligentAgent:
         self.enable_llm_interpretation = enable_llm_interpretation  # LLM yorumlama açık/kapalı
         
         # Progress tracking ve context memory
-        self.successful_findings = []  # Her iterasyonda başarılı bulunanlar
         self.context_memory = ""  # Birikimli context prompt
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self.detailed_token_usage = []  # Action bazında detaylı token tracking
@@ -753,19 +752,9 @@ Anahtar bulgular ve önemli bilgiler nedir?
                     return "Vector search: 0 sonuç"
             return f"{finding_type}: {str(result)[:100]}..."
 
-    def add_successful_finding(self, iteration: int, action: str, finding: str, relevance_score: float = 0.0, raw_data: Any = None):
+    def add_successful_finding(self, state: 'AgentState', iteration: int, action: str, finding: str, relevance_score: float = 0.0, raw_data: Any = None):
         """Başarılı bulguyu context memory ve state'e ekle"""
-        finding_entry = {
-            "iteration": iteration,
-            "action": action,
-            "finding": finding,
-            "relevance_score": relevance_score,
-            "timestamp": f"Adım {iteration}",
-            "raw_data": raw_data
-        }
-        self.successful_findings.append(finding_entry)
-        
-        # State'e de SuccessfulFinding objesi olarak ekle (ham veri ile)
+        # State'e SuccessfulFinding objesi olarak ekle (ham veri ile)
         state_finding = SuccessfulFinding(
             iteration=iteration,
             action_type=action,
@@ -773,26 +762,44 @@ Anahtar bulgular ve önemli bilgiler nedir?
             relevance_score=relevance_score,
             raw_data=raw_data
         )
-        # Not: state parametresi burada yok, cypher_query ve vector_search'te ekleyeceğiz
+        state.successful_findings.append(state_finding)
         
         # Context memory'i güncelle
-        self.update_context_memory()
+        self.update_context_memory(state)
         
         logger.info(f"Başarılı bulgu eklendi - İterasyon {iteration}: {action} -> {finding}...")
     
-    def update_context_memory(self):
-        """Başarılı bulgulardan context prompt oluştur"""
-        if not self.successful_findings:
+    def update_context_memory(self, state: 'AgentState'):
+        """Başarılı bulgulardan context prompt oluştur - AgentState ile uyumlu"""
+        if not state.successful_findings:
             self.context_memory = ""
             return
         
         context_prompt = "## DAHA ÖNCE BULUNAN BAŞARILI BİLGİLER:\n\n"
         
-        for finding in self.successful_findings[-5:]:  # Son 5 başarılı bulguyu al
-            context_prompt += f"**{finding['timestamp']} - {finding['action'].upper()}:**\n"
-            context_prompt += f"Bulgu: {finding['finding']}\n"
-            if finding['relevance_score'] > 0:
-                context_prompt += f"Relevance Score: {finding['relevance_score']:.3f}\n"
+        for finding in state.successful_findings[-5:]:  # Son 5 başarılı bulguyu al
+            context_prompt += f"**Adım {finding.iteration} - {finding.action_type.upper()}:**\n"
+            context_prompt += f"{finding.summary}\n"
+            
+            # Önemli ham veri örnekleri ekle (özellikle cypher_query için)
+            if finding.action_type == 'cypher_query' and finding.raw_data:
+                context_prompt += f"\n**HAM VERİ ÖRNEKLERİ (İLK 3 SATIR):**\n"
+                raw_data = finding.raw_data
+                if isinstance(raw_data, list) and len(raw_data) > 0:
+                    for i, row in enumerate(raw_data[:3], 1):  # İlk 3 satır
+                        if isinstance(row, dict):
+                            # Policy bilgilerini özel olarak çıkar
+                            if 'p' in row and isinstance(row['p'], dict):
+                                policy_name = row['p'].get('name', 'Bilinmeyen')
+                                context_prompt += f"  Satır {i}: Poliçe adı: '{policy_name}'\n"
+                            elif 'c' in row and isinstance(row['c'], dict):
+                                customer_name = row['c'].get('fullName', row['c'].get('name', 'Bilinmeyen'))
+                                context_prompt += f"  Satır {i}: Müşteri adı: '{customer_name}'\n"
+                            else:
+                                # Genel dict gösterimi
+                                context_prompt += f"  Satır {i}: {str(row)[:100]}...\n"
+                context_prompt += "\n"
+            
             context_prompt += "---\n"
         
         context_prompt += "\n**BU BİLGİLERİ DİKKATE ALARAK SONRAKI ADIMI BELİRLE!**\n\n"
@@ -1409,7 +1416,6 @@ Anahtar bulgular ve önemli bilgiler nedir?
         """Ana problem çözme fonksiyonu - ReAct pattern ile Chunk-based arama"""
         
         # Her soru için cache'i temizle
-        self.successful_findings = []
         self.context_memory = ""
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self.detailed_token_usage = []  # Detaylı token tracking'i temizle
@@ -1541,6 +1547,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
                         self.add_successful_finding(
+                            state,  # state parametresi eklendi
                             state.iteration_count,
                             "cypher_query", 
                             summary,
@@ -1548,26 +1555,16 @@ Anahtar bulgular ve önemli bilgiler nedir?
                             result  # Ham cypher sonuçları
                         )
                         
-                        # State'e de SuccessfulFinding objesi ekle
-                        finding_obj = SuccessfulFinding(
-                            iteration=state.iteration_count,
-                            action_type="cypher_query",
-                            summary=summary,
-                            relevance_score=0.9,
-                            raw_data=result
-                        )
-                        state.successful_findings.append(finding_obj)
-                        
                     else:
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
                 elif action == "vector_search":
                     # Önceki Cypher bulgularından ilgili belgeleri çıkar
                     relevant_documents = []
-                    for finding in self.successful_findings:
-                        if finding.get('action') == 'cypher_query' and finding.get('raw_data'):
+                    for finding in state.successful_findings:
+                        if finding.action_type == 'cypher_query' and finding.raw_data:
                             # Cypher sorgu sonuçlarından belge adlarını çıkar
-                            raw_data = finding['raw_data']
+                            raw_data = finding.raw_data
                             if isinstance(raw_data, list):
                                 for row in raw_data:
                                     if isinstance(row, dict) and 'documentFileName' in row:
@@ -1595,22 +1592,13 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         # Başarılı vector search bulgusunu kaydet
                         summary = self.summarize_finding(f"Vector Search: {action_content}", result, "vector_search")
                         self.add_successful_finding(
+                            state,  # state parametresi eklendi
                             state.iteration_count,
                             "vector_search", 
                             summary,
                             result[0]['relevance_score'] if result else 0.0,
                             result  # Ham vector search sonuçları
                         )
-                        
-                        # State'e SuccessfulFinding objesi ekle
-                        finding_obj = SuccessfulFinding(
-                            iteration=state.iteration_count,
-                            action_type="vector_search",
-                            summary=summary,
-                            relevance_score=result[0]['relevance_score'] if result else 0.0,
-                            raw_data=result
-                        )
-                        state.successful_findings.append(finding_obj)
                         
                         # State'deki chunk'ları güncelle
                         for chunk_data in result:
@@ -1659,7 +1647,15 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 "discovered_chunks": len(state.discovered_chunks),
                 "discovered_entities": len(state.discovered_entities),
                 "token_usage": self.token_usage.copy(),
-                "detailed_token_usage": self.detailed_token_usage.copy()
+                "detailed_token_usage": self.detailed_token_usage.copy(),
+                "chunk_details": [
+                    {
+                        "document": chunk.document_name,
+                        "page": chunk.page_number,
+                        "relevance": chunk.relevance_score,
+                        "preview": chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text
+                    } for chunk in state.discovered_chunks[:10]  # En iyi 10 chunk
+                ]
             }
         # Daha detaylı analiz logu ekle
         logger.info(f"Final answer yok: Detaylı analiz verileri: {conversation_history}, {state.discovered_chunks}")
@@ -1687,7 +1683,14 @@ Anahtar bulgular ve önemli bilgiler nedir?
             "schema_info": self.schema_cache,
             "token_usage": self.token_usage.copy(),
             "detailed_token_usage": self.detailed_token_usage.copy(),
-            "successful_findings": self.successful_findings.copy(),
+            "successful_findings": [
+                {
+                    "iteration": f.iteration,
+                    "action": f.action_type,
+                    "finding": f.summary,
+                    "relevance_score": f.relevance_score
+                } for f in state.successful_findings
+            ],
             "context_memory": self.context_memory,
             "llm_prompt_structure": self.create_llm_prompt_structure(state, user_question)
         }
@@ -1708,13 +1711,12 @@ Anahtar bulgular ve önemli bilgiler nedir?
 
 ## 🎯 SUCCESSFUL FINDINGS PER ITERATION
 """
-        for i, finding in enumerate(self.successful_findings, 1):
+        for i, finding in enumerate(state.successful_findings, 1):
             prompt_structure += f"""
-### Iteration {finding['iteration']} - {finding['action'].upper()}
-- **Action**: {finding['action']}
-- **Finding**: {finding['finding']}
-- **Relevance Score**: {finding['relevance_score']:.3f}
-- **Timestamp**: {finding['timestamp']}
+### Iteration {finding.iteration} - {finding.action_type.upper()}
+- **Action**: {finding.action_type}
+- **Finding**: {finding.summary}
+- **Relevance Score**: {finding.relevance_score:.3f}
 """
 
         # En yüksek relevance'a sahip chunk'ları listele
@@ -1787,11 +1789,11 @@ Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap 
 """
         
         # Kullanılan stratejileri analiz et
-        strategies_used = set([f['action'] for f in self.successful_findings])
+        strategies_used = set([f.action_type for f in state.successful_findings])
         prompt_structure += f"""
 **Strategies Used**: {', '.join(strategies_used)}
-**Most Effective Strategy**: {max(self.successful_findings, key=lambda x: x['relevance_score'])['action'] if self.successful_findings else 'None'}
-**Best Relevance Score**: {max([f['relevance_score'] for f in self.successful_findings]) if self.successful_findings else 0:.3f}
+**Most Effective Strategy**: {max(state.successful_findings, key=lambda x: x.relevance_score).action_type if state.successful_findings else 'None'}
+**Best Relevance Score**: {max([f.relevance_score for f in state.successful_findings]) if state.successful_findings else 0:.3f}
 """
 
         return prompt_structure
@@ -1931,7 +1933,7 @@ def test_agent():
     test_questions = [
         # "Kaç poliçe var ve kimin adına",
         # "Ayça Dinçkök'un poliçesini özetle",
-        "ayça dinçkökün konut poliçelerinin prim tutarlarını listele ",
+        "Ayça Hanım’ın D5 poliçesinin primi ne kadar?",
         # "Kaç tane müşteri var?",
         # "Sistemde hangi poliçe türleri mevcut?",
         # "DASK poliçeleri hakkında ne tür bilgiler var?",

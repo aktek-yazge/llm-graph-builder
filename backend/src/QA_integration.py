@@ -44,7 +44,6 @@ from src.shared.common_fn import load_embedding_model
 from src.shared.constants import *
 from src.custom_neo4j_vector import CustomNeo4jVector
 from src.intelligent_agent import IntelligentAgent
-from src.alternative_agent import AlternativeAgent
 from src.neo4j_retry import retry_neo4j_operation
 load_dotenv()
 
@@ -511,7 +510,7 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     
     return content, result, total_tokens, formatted_docs
 
-def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None, alternative_agent: AlternativeAgent = None):
+def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None):
 
     start_time = time.time()
     agent_token_usage = None  # Agent token kullanımını saklamak için
@@ -576,9 +575,9 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
         
         handler = CustomCallback()
 
-        # Eğer bir AlternativeAgent verilmişse, onu kullanarak dokümanları oluştur
-        if alternative_agent:
-            # Alternative Agent'tan sonuç al
+        # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
+        if intelligent_agent:
+            # Intelligent Agent'tan sonuç al
             user_question = messages[-1].content if messages else ""
             
             # Eğer message history varsa (birden fazla mesaj), QUESTION_TRANSFORM uygula
@@ -661,33 +660,32 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 transformed_question = transform_chain.invoke({"messages": last_human_messages})
                 transformed_question = transformed_question.strip()
 
-                logging.info(f"AlternativeAgent TRANSFORM: Original: {user_question}")
-                logging.info(f"AlternativeAgent TRANSFORM: Transformed: {transformed_question}")
-                logging.info(f"AlternativeAgent TRANSFORM: Human message count: {len(last_human_messages)}")
-                print(f"=== ALTERNATIVE AGENT QUESTION TRANSFORM ===")
+                logging.info(f"IntelligentAgent TRANSFORM: Original: {user_question}")
+                logging.info(f"IntelligentAgent TRANSFORM: Transformed: {transformed_question}")
+                logging.info(f"IntelligentAgent TRANSFORM: Human message count: {len(last_human_messages)}")
+                print(f"=== INTELLIGENT AGENT QUESTION TRANSFORM ===")
                 print(f"Original: {user_question}")
                 print(f"Transformed: {transformed_question}")
                 print(f"Last {len(last_human_messages)} human messages used (LLM responses excluded)")
                 print("===============================================")
 
             except Exception as e:
-                logging.error(f"AlternativeAgent transform failed: {e}")
-                print(f"AlternativeAgent transform error: {e}")
+                logging.error(f"IntelligentAgent transform failed: {e}")
+                print(f"IntelligentAgent transform error: {e}")
                 transformed_question = user_question
             
-            # Transform edilmiş soruyu AlternativeAgent'a gönder
-            alternative_result = alternative_agent.answer_question(transformed_question)
+            # Transform edilmiş soruyu IntelligentAgent'a gönder
+            intelligent_result = intelligent_agent.solve_question(transformed_question)
 
-            # Alternative Agent response parsing
-            if alternative_result and alternative_result.get('mode') == 'vector':
-                logging.info(f"AlternativeAgent mode: {alternative_result['mode']}")
-                print(f"AlternativeAgent mode: {alternative_result['mode']}")
+            # Intelligent Agent response parsing
+            if intelligent_result and intelligent_result.get('final_answer'):
+                logging.info(f"IntelligentAgent response received")
+                print(f"IntelligentAgent response received")
                 
-                # AlternativeAgent'in tam sayfa formatını kullan (response_text)
-                # Bu test'teki gibi tam sayfa içeriklerini içerir
-                full_page_content = alternative_result.get('response_text', '')
+                # IntelligentAgent'in final answer'ını kullan
+                final_answer = intelligent_result.get('final_answer', '')
                 
-                # Simple wrapper for expected document shape - tam sayfa içeriği ile
+                # Simple wrapper for expected document shape
                 class SimpleDoc:
                     def __init__(self, page_content, metadata, state=None):
                         self.page_content = page_content
@@ -695,46 +693,63 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                         self.state = state or {}
 
                 docs = []
-                chunks = alternative_result.get('meta', {}).get('chunks', [])
+                chunk_details = intelligent_result.get('chunk_details', [])
                 
-                # Eğer chunks varsa, tam sayfa içeriğini tek bir document olarak döndür
-                if chunks:
-                    # İlk chunk'tan document adını al
-                    first_chunk = chunks[0]
-                    doc_name = first_chunk.get('document', 'unknown')
-                    
-                    # Ortalama score hesapla
-                    avg_score = sum(chunk.get('score', 0.0) for chunk in chunks) / len(chunks) if chunks else 0.0
+                # Final answer varsa, chunks olsun olmasın doküman oluştur
+                if final_answer:
+                    # Eğer chunks varsa, onlardan meta bilgi al
+                    if chunk_details:
+                        # İlk chunk'tan document adını al
+                        first_chunk = chunk_details[0]
+                        doc_name = first_chunk.get('document', 'unknown')
+                        
+                        # Ortalama relevance hesapla
+                        avg_relevance = sum(chunk.get('relevance', 0.0) for chunk in chunk_details) / len(chunk_details) if chunk_details else 0.0
+                        chunk_sources = list(set(chunk.get('document', '') for chunk in chunk_details))
+                    else:
+                        # Chunks yoksa varsayılan değerler kullan
+                        doc_name = 'IntelligentAgent_Result'
+                        avg_relevance = 0.95  # High relevance for final answer
+                        chunk_sources = ['IntelligentAgent']
                     
                     metadata = {
                         'source': doc_name,
                         'chunkdetails': [{
-                            'id': f"{doc_name}::full_page_content",
-                            'score': avg_score
+                            'id': f"{doc_name}::intelligent_agent_result",
+                            'score': avg_relevance
                         }],
-                        'alternative_agent_mode': alternative_result['mode'],
-                        'alternative_agent_filters': alternative_result.get('meta', {}).get('filters'),
-                        'total_chunks_found': len(chunks),
-                        'chunk_sources': list(set(chunk.get('document', '') for chunk in chunks))
+                        'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
+                        'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
+                        'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
+                        'total_chunks_found': len(chunk_details),
+                        'chunk_sources': chunk_sources
                     }
 
-                    state = {'query_similarity_score': avg_score}
-                    # Tam sayfa içeriğini (response_text) page_content olarak kullan
-                    docs.append(SimpleDoc(page_content=full_page_content, metadata=metadata, state=state))
+                    state = {'query_similarity_score': avg_relevance}
+                    # Final answer'ı page_content olarak kullan
+                    docs.append(SimpleDoc(page_content=final_answer, metadata=metadata, state=state))
 
                 final_question = transformed_question
-                logging.info(f"AlternativeAgent vector search returned {len(docs)} documents (full page format)")
-                print(f"AlternativeAgent vector search returned {len(docs)} documents (full page format)")
+                logging.info(f"IntelligentAgent returned {len(docs)} documents")
+                print(f"IntelligentAgent returned {len(docs)} documents")
                 
-                # Alternative agent'in sonucunu agent_result'a ata (vector mode)
-                agent_result = alternative_result
+                # Intelligent agent'in sonucunu agent_result'a ata
+                agent_result = {
+                    'mode': 'intelligent_agent',
+                    'final_answer': final_answer,
+                    'iterations': intelligent_result.get('iterations', 0),
+                    'chunks': intelligent_result.get('discovered_chunks', 0),
+                    'entities': intelligent_result.get('discovered_entities', 0),
+                    'token_usage': intelligent_result.get('token_usage', {}),
+                    'meta': {
+                        'chunk_details': chunk_details
+                    }
+                }
                 
             else:
-                # Count mode veya fallback - tam sayfa formatını kullan
-                full_page_content = alternative_result.get('response_text', '')
-                
-                logging.info(f"AlternativeAgent mode: {alternative_result.get('mode', 'unknown')} - no vector search")
-                print(f"AlternativeAgent mode: {alternative_result.get('mode', 'unknown')} - no vector search")
+                # Fallback - boş sonuç
+                logging.info(f"IntelligentAgent - no final answer")
+                print(f"IntelligentAgent - no final answer")
                 
                 # Simple wrapper for expected document shape
                 class SimpleDoc:
@@ -743,32 +758,18 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                         self.metadata = metadata
                         self.state = state or {}
                 
-                # Count/fallback mode için de response_text içeriğini document olarak döndür
+                # Fallback için boş sonuç
                 docs = []
-                if full_page_content.strip():  # Eğer içerik varsa
-                    mode = alternative_result.get('mode', 'unknown')
-                    metadata = {
-                        'source': f'AlternativeAgent_{mode}_Result',
-                        'chunkdetails': [{
-                            'id': f'alternative_agent::{mode}',
-                            'score': 1.0  # Count/fallback için sabit score
-                        }],
-                        'alternative_agent_mode': mode,
-                        'alternative_agent_filters': alternative_result.get('meta', {}).get('filters'),
-                        'document_count': alternative_result.get('meta', {}).get('count', 0),
-                        'documents_found': alternative_result.get('meta', {}).get('documents', [])
-                    }
-                    
-                    state = {'query_similarity_score': 1.0}
-                    docs.append(SimpleDoc(page_content=full_page_content, metadata=metadata, state=state))
-                    
-                    logging.info(f"AlternativeAgent {mode} mode returned full content document")
-                    print(f"AlternativeAgent {mode} mode returned full content document")
-                
                 final_question = transformed_question
-                
-                # Alternative agent'in cevabını metadata olarak sakla (count/fallback mode)
-                agent_result = alternative_result
+                agent_result = {
+                    'mode': 'intelligent_agent_no_result',
+                    'final_answer': 'No result from Intelligent Agent',
+                    'iterations': 0,
+                    'chunks': 0,
+                    'entities': 0,
+                    'token_usage': {},
+                    'meta': {}
+                }
                 
         # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
         elif intelligent_agent:
@@ -1092,7 +1093,7 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
     
     return llm, doc_retriever, model_name
 
-def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None, alternative_agent=None):
+def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None):
     agent_token_usage = None  # Agent token kullanımını saklamak için
     agent_result = None  # Agent sonuçlarını saklamak için
     
@@ -1105,13 +1106,6 @@ def process_chat_response(messages, history, question, model, graph, document_na
                 intelligent_agent = IntelligentAgent(graph)
             except Exception:
                 intelligent_agent = None
-        
-        # Eğer alternative_agent parametre olarak gelmemişse, oluştur
-        if alternative_agent is None:
-            try:
-                alternative_agent = AlternativeAgent(graph)
-            except Exception:
-                alternative_agent = None
         
         # Günlük konuşma tespiti yap
         if is_casual_conversation(question, llm):
@@ -1141,43 +1135,42 @@ def process_chat_response(messages, history, question, model, graph, document_na
             
         else:
             # Normal işlem: document retrieval yap
-            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent)  
+            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent)  
 
-            # AlternativeAgent count mode sonuçlarını kontrol et
-            alternative_context = ""
+            # IntelligentAgent sonuçlarını kontrol et
+            intelligent_context = ""
             if (agent_result and isinstance(agent_result, dict) and 
-                agent_result.get('mode') in ['count', 'cypher_fallback'] and 
-                agent_result.get('response_text')):
+                agent_result.get('final_answer')):
                 
-                # AlternativeAgent'in cevabını context olarak kullan
-                alternative_context = f"AlternativeAgent Sonucu:\n{agent_result.get('response_text', '')}\n\n"
-                logging.info(f"AlternativeAgent {agent_result.get('mode')} sonucu context olarak eklendi")
+                # IntelligentAgent'ın cevabını context olarak kullan
+                intelligent_context = f"IntelligentAgent Sonucu:\n{agent_result.get('final_answer', '')}\n\n"
+                logging.info(f"IntelligentAgent {agent_result.get('mode')} sonucu context olarak eklendi")
                 
                 # Docs boşsa bile RAG chain'e geçir
                 if not docs:
-                    # Boş docs ile devam et, context alternative_context'den gelecek
+                    # Boş docs ile devam et, context intelligent_context'den gelecek
                     pass
 
             if docs:
                 content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
                 
-                # AlternativeAgent context'ini formatted_docs'a ekle
-                if alternative_context:
-                    formatted_docs = alternative_context + formatted_docs
+                # IntelligentAgent context'ini formatted_docs'a ekle
+                if intelligent_context:
+                    formatted_docs = intelligent_context + formatted_docs
                     
-            elif alternative_context:
-                # Docs yok ama AlternativeAgent sonucu var, RAG chain'e context olarak ver
+            elif intelligent_context:
+                # Docs yok ama IntelligentAgent sonucu var, RAG chain'e context olarak ver
                 rag_chain = get_rag_chain(llm=llm)
                 
                 ai_response = rag_chain.invoke({
                     "messages": messages[:-1],
-                    "context": alternative_context,
+                    "context": intelligent_context,
                     "input": question
                 })
                 
                 content = ai_response.content
                 total_tokens = get_total_tokens(ai_response, llm)
-                formatted_docs = alternative_context
+                formatted_docs = intelligent_context
                 
                 # Boş result yapısı ama agent bilgileriyle
                 result = {
@@ -1228,27 +1221,30 @@ def process_chat_response(messages, history, question, model, graph, document_na
             response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
             logging.info(f"Response Agent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
         
-        # IntelligentAgent ve AlternativeAgent bilgilerini ekle
+        # IntelligentAgent bilgilerini ekle
         if agent_result:
-            # Hem IntelligentAgent hem de AlternativeAgent için uyumlu bilgiler
-            if agent_result.get('mode') in ['count', 'cypher_fallback', 'vector']:
-                # AlternativeAgent sonucu
-                response_info["alternative_agent_mode"] = agent_result.get('mode')
-                response_info["alternative_agent_meta"] = agent_result.get('meta', {})
-                response_info["alternative_agent_response"] = agent_result.get('response_text', '')
+            # IntelligentAgent için bilgiler
+            if agent_result.get('final_answer'):
+                # IntelligentAgent sonucu
+                response_info["intelligent_agent_mode"] = agent_result.get('mode', 'intelligent_agent')
+                response_info["intelligent_agent_meta"] = agent_result.get('meta', {})
+                response_info["intelligent_agent_response"] = agent_result.get('final_answer', '')
                 
-                # AlternativeAgent'tan gelen chunk bilgileri varsa ekle
-                if agent_result.get('meta', {}).get('chunks'):
-                    response_info["agent_chunk_details"] = agent_result.get('meta', {}).get('chunks', [])
+                # IntelligentAgent'tan gelen chunk bilgileri varsa ekle
+                if agent_result.get('meta', {}).get('chunk_details'):
+                    response_info["agent_chunk_details"] = agent_result.get('meta', {}).get('chunk_details', [])
                 
-                # AlternativeAgent entities (eğer varsa)
-                if agent_result.get('meta', {}).get('filters'):
-                    response_info["alternative_agent_filters"] = agent_result.get('meta', {}).get('filters')
+                # IntelligentAgent entities (eğer varsa)
+                response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+                response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+                response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+                response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+                response_info["agent_iterations"] = agent_result.get('iterations', 0)
                 
-                logging.info(f"AlternativeAgent Found - Mode: {agent_result.get('mode')}, Meta: {len(str(agent_result.get('meta', {})))}")
+                logging.info(f"IntelligentAgent Found - Mode: {agent_result.get('mode')}, Iterations: {agent_result.get('iterations', 0)}")
                 
             else:
-                # IntelligentAgent sonucu
+                # IntelligentAgent diğer sonuçlar
                 response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
                 response_info["agent_entity_details"] = agent_result.get('entity_details', [])
                 response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
@@ -1834,7 +1830,7 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
 #         }
 
     
-def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None, alternative_agent=None):
+def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
     logging.info(f"Chat Mode: {mode}")
 
     history = create_neo4j_chat_message_history(graph, session_id, write_access)
@@ -1868,7 +1864,7 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
               "user": "chatbot"
             }
         else:
-            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent)
+            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent)
 
     result["session_id"] = session_id
     
@@ -2702,7 +2698,7 @@ async def analyze_files_with_docling(files: Dict[str, List[Dict[str, str]]], mod
             "user": "chatbot"
         }
 
-async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None, alternative_agent=None):
+async def QA_RAG_stream(graph, model, question, document_names, session_id, mode, files, write_access=True, intelligent_agent=None):
     """
     Asenkron streaming QA_RAG implementasyonu
     LLM'den token-by-token cevap alır ve frontend'e streamer
@@ -2779,7 +2775,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                     return
                     
                 async for chunk in process_chat_response_stream(
-                    messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent, alternative_agent=alternative_agent
+                    messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=intelligent_agent
                 ):
                     yield chunk
                 
@@ -2793,7 +2789,7 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
             "user": "chatbot"
         }
 
-async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=None, alternative_agent=None):
+async def process_chat_response_stream(messages, history, question, model, graph, document_names, chat_mode_settings, session_id, intelligent_agent=None):
     """
     Streaming chat response işleme fonksiyonu
     LLM'den gelen her token'i anında frontend'e gönderir
@@ -2845,33 +2841,26 @@ async def process_chat_response_stream(messages, history, question, model, graph
             except Exception:
                 intelligent_agent = None
 
-            # Instantiate alternative agent for streaming path as well
-            alternative_agent = None
-            try:
-                alternative_agent = AlternativeAgent(graph)
-            except Exception:
-                alternative_agent = None
-
+            # Intelligent agent'ı kullan
             docs, transformed_question, agent_token_usage, agent_result = await asyncio.get_event_loop().run_in_executor(
-                None, retrieve_documents, doc_retriever, messages, intelligent_agent, alternative_agent
+                None, retrieve_documents, doc_retriever, messages, intelligent_agent
             )
             
-            # AlternativeAgent'tan gelen sonuçları kontrol et ve formatted_docs'a ekle
-            alternative_context = ""
+            # IntelligentAgent'tan gelen sonuçları kontrol et ve formatted_docs'a ekle
+            intelligent_context = ""
             if (agent_result and isinstance(agent_result, dict) and 
-                agent_result.get('mode') in ['count', 'cypher_fallback'] and 
-                agent_result.get('response_text')):
+                agent_result.get('final_answer')):
                 
                 yield {
                     "type": "status",
                     "session_id": session_id,
-                    "message": f"AlternativeAgent {agent_result.get('mode')} sonuçları alındı...",
+                    "message": f"IntelligentAgent sonuçları alındı...",
                     "user": "chatbot"
                 }
                 
-                # AlternativeAgent'in cevabını context olarak kullan
-                alternative_context = f"AlternativeAgent Sonucu:\n{agent_result.get('response_text', '')}\n\n"
-                # Docs'u boş bırak çünkü AlternativeAgent direkt cevap verdi
+                # IntelligentAgent'in cevabını context olarak kullan
+                intelligent_context = f"IntelligentAgent Sonucu:\n{agent_result.get('final_answer', '')}\n\n"
+                # Docs'u boş bırak çünkü IntelligentAgent direkt cevap verdi
                 docs = []
             
             if docs:
@@ -2905,15 +2894,15 @@ async def process_chat_response_stream(messages, history, question, model, graph
                     sources = sources_and_chunks['sources']
                     nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
             else:
-                # Docs yoksa (AlternativeAgent count mode durumu) boş formatted_docs başlat
+                # Docs yoksa (IntelligentAgent direkt cevap durumu) boş formatted_docs başlat
                 formatted_docs = ""
             
-            # AlternativeAgent context'ini formatted_docs'a ekle
-            if alternative_context:
-                formatted_docs = alternative_context + formatted_docs
-                print(f"========== ALTERNATIVE AGENT CONTEXT ADDED ==========")
-                print(f"Alternative Context: {alternative_context[:200]}...")
-                print("====================================================")
+            # IntelligentAgent context'ini formatted_docs'a ekle
+            if intelligent_context:
+                formatted_docs = intelligent_context + formatted_docs
+                print(f"========== INTELLIGENT AGENT CONTEXT ADDED ==========")
+                print(f"Intelligent Context: {intelligent_context[:200]}...")
+                print("======================================================")
         
         # Streaming response başlat
         yield {
@@ -2994,30 +2983,25 @@ async def process_chat_response_stream(messages, history, question, model, graph
             response_info["agent_output_tokens"] = agent_token_usage.get('output_tokens', 0)
             response_info["agent_total_tokens"] = agent_token_usage.get('total_tokens', 0)
         
-        # IntelligentAgent ve AlternativeAgent bilgilerini ekle
+        # IntelligentAgent bilgilerini ekle
         if agent_result:
-            # Hem IntelligentAgent hem de AlternativeAgent için uyumlu bilgiler
-            if agent_result.get('mode') in ['count', 'cypher_fallback', 'vector']:
-                # AlternativeAgent sonucu
-                response_info["alternative_agent_mode"] = agent_result.get('mode')
-                response_info["alternative_agent_meta"] = agent_result.get('meta', {})
-                response_info["alternative_agent_response"] = agent_result.get('response_text', '')
-                
-                # AlternativeAgent'tan gelen chunk bilgileri varsa ekle
-                if agent_result.get('meta', {}).get('chunks'):
-                    response_info["agent_chunk_details"] = agent_result.get('meta', {}).get('chunks', [])
-                
-                # AlternativeAgent entities (eğer varsa)
-                if agent_result.get('meta', {}).get('filters'):
-                    response_info["alternative_agent_filters"] = agent_result.get('meta', {}).get('filters')
-                
-            else:
+            # IntelligentAgent için bilgiler
+            if agent_result.get('final_answer'):
                 # IntelligentAgent sonucu
-                response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
-                response_info["agent_entity_details"] = agent_result.get('entity_details', [])
-                response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
-                response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
-                response_info["agent_iterations"] = agent_result.get('iterations', 0)
+                response_info["intelligent_agent_mode"] = agent_result.get('mode', 'intelligent_agent')
+                response_info["intelligent_agent_meta"] = agent_result.get('meta', {})
+                response_info["intelligent_agent_response"] = agent_result.get('final_answer', '')
+                
+                # IntelligentAgent'tan gelen chunk bilgileri varsa ekle
+                if agent_result.get('chunk_details'):
+                    response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+                
+            # IntelligentAgent diğer sonuçlar
+            response_info["agent_chunk_details"] = agent_result.get('chunk_details', [])
+            response_info["agent_entity_details"] = agent_result.get('entity_details', [])
+            response_info["agent_discovered_entities"] = agent_result.get('discovered_entities', 0)
+            response_info["agent_discovered_chunks"] = agent_result.get('discovered_chunks', 0)
+            response_info["agent_iterations"] = agent_result.get('iterations', 0)
             
             # Agent entity detaylarını entities formatına çevir
             if agent_result.get('entity_details', []):
