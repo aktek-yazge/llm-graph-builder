@@ -833,18 +833,20 @@ DOCUMENT TİPLERİ:
     def answer_question(self, question: str) -> Dict[str, Any]:
         """Kullanıcı sorusunu alır, kurallara göre işlem yapar ve sonuç döner.
 
-        Yeni basit kural: Count sorusu değilse vector araması yap, fallback yok.
+        LLM'in kararına göre: count sorusu ise graph-only, detay sorusu ise vector search.
         
         Dönen sözlükte en azından: { 'mode': 'count'|'vector', 'response_text': str, 'meta': {...} }
         """
         question = question.strip()
         logger.info(f"Answering question: {question}")
 
-        # 1) Eğer kesin bir count query ise graph-only yolunu zorla
-        if self.is_count_query(question):
-            logger.info("Detected count query - using graph-only counting (no chunk vector search)")
-            # İlk önce LLM ile filtre çıkarmaya çalış
-            llm_decision = self.ask_llm_for_decision(question)
+        # 1) İlk önce LLM'den karar al
+        llm_decision = self.ask_llm_for_decision(question)
+        logger.info(f"LLM decision: {llm_decision}")
+        
+        # 2) Eğer LLM use_vector: false diyorsa count query olarak işle
+        if not llm_decision.get('use_vector', True):
+            logger.info("LLM decided this is a count query - using graph-only counting (no vector search)")
             filters = SimpleFilters()
             if isinstance(llm_decision, dict):
                 f = llm_decision.get('filters', {}) or {}
@@ -867,7 +869,7 @@ DOCUMENT TİPLERİ:
                 }
             }
 
-        # 2) Intelligent graph search dene
+        # 3) Intelligent graph search dene
         logger.info("Trying intelligent graph search first")
         filters_dict = self.extract_filters_from_question(question)
         
@@ -877,6 +879,41 @@ DOCUMENT TİPLERİ:
             chunks = self.intelligent_graph_search(question, filters_dict)
             
             if chunks and len(chunks) >= 3:  # Yeterli sonuç varsa intelligent search kullan
+                # LLM'den gelen decision'da use_vector true ise bulunan belgelerde vector search yap
+                decision = self.ask_llm_for_decision(question)
+                if decision.get('use_vector', False):
+                    logger.info("LLM decided to perform vector search in found documents")
+                    # Bulunan chunk'lardaki doküman isimlerini çıkar
+                    document_names = list(set([chunk.get('document_name', '').replace('.pdf', '') for chunk in chunks if chunk.get('document_name')]))
+                    logger.info(f"Performing vector search in documents: {document_names}")
+                    
+                    # IntelligentAgent'ın document_filtered_vector_search methodunu kullan
+                    from .intelligent_agent import IntelligentAgent
+                    intelligent_agent = IntelligentAgent(self.graph)
+                    success, vector_result = intelligent_agent.execute_document_filtered_vector_search(
+                        query_text=question,
+                        user_question=question,
+                        limit=10,
+                        relevant_documents=document_names
+                    )
+                    
+                    if success and vector_result:
+                        logger.info(f"Vector search successful, found {len(vector_result)} additional chunks")
+                        # Vector sonuçlarını chunks listesine ekle (veya değiştir)
+                        if isinstance(vector_result, list) and len(vector_result) > 0:
+                            # Vector sonuçlarını intelligent_graph formatına çevir
+                            for i, doc in enumerate(vector_result):
+                                if hasattr(doc, 'page_content') and hasattr(doc, 'metadata'):
+                                    chunk_dict = {
+                                        'id': f'vector_search_{i}',
+                                        'text': doc.page_content,
+                                        'score': 1.0,
+                                        'document_name': doc.metadata.get('source', ''),
+                                        'page_number': doc.metadata.get('page_number', 1),
+                                        'metadata': doc.metadata
+                                    }
+                                    chunks.append(chunk_dict)
+                
                 text = self.format_chunk_response(chunks, SimpleFilters(), question, mode="intelligent_graph")
                 return {
                     'mode': 'intelligent_graph',
