@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import SideNav from './SideNav';
 import DrawerDropzone from './DrawerDropzone';
 import DrawerChatbot from './DrawerChatbot';
@@ -333,9 +334,19 @@ const PageLayout: React.FC = () => {
       setClearHistoryData(true);
       setIsDeleteChatLoading(true);
       cancel();
-      const response = await clearChatAPI(sessionStorage.getItem('session_id') ?? '');
+      
+      // Mevcut session ID'yi al
+      const currentSessionId = sessionStorage.getItem('session_id') ?? '';
+      const response = await clearChatAPI(currentSessionId);
+      
       setIsDeleteChatLoading(false);
       if (response.data.status === 'Success') {
+        // ⚠️ FIX: Clear chat'ten sonra yeni UUID session ID yarat
+        sessionStorage.removeItem('session_id');
+        const newSessionId = uuidv4();
+        sessionStorage.setItem('session_id', newSessionId);
+        console.log(`🆕 New UUID session ID created after clear chat: ${newSessionId}`);
+        
         const date = new Date();
         setMessages([
           {

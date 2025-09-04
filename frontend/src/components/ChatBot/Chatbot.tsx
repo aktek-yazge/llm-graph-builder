@@ -45,13 +45,18 @@ import Loader from '../../utils/Loader';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 const InfoModal = lazy(() => import('./ChatInfoModal'));
-if (typeof window !== 'undefined') {
-  if (!sessionStorage.getItem('session_id')) {
-    const id = uuidv4();
-    sessionStorage.setItem('session_id', id);
+
+// Session ID'yi initialize et
+const initializeSessionId = () => {
+  if (typeof window !== 'undefined') {
+    if (!sessionStorage.getItem('session_id')) {
+      const id = uuidv4();
+      sessionStorage.setItem('session_id', id);
+    }
+    return sessionStorage.getItem('session_id') ?? '';
   }
-}
-const sessionId = sessionStorage.getItem('session_id') ?? '';
+  return '';
+};
 
 const Chatbot: FC<ChatbotProps> = (props) => {
   const {
@@ -63,6 +68,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     isChatOnly,
     isDeleteChatLoading,
   } = props;
+  
+  // ⚠️ FIX: Session ID'yi state olarak yönet (clear chat'ten sonra güncellenmesi için)
+  const [sessionId, setSessionId] = useState<string>(() => initializeSessionId());
+  
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState<boolean>(isLoading);
   const { model, chatModes, selectedRows, filesData } = useFileContext();
@@ -114,6 +123,34 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const [activeChat, setActiveChat] = useState<Messages | null>(null);
   const [multiModelMetrics, setMultiModelMetrics] = useState<multimodelmetric[]>([]);
   const [isStreamingEnabled, setIsStreamingEnabled] = useState<boolean>(false);
+
+  // ⚠️ FIX: Session ID değişikliklerini dinle (clear chat'ten sonra güncellenmesi için)
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const newSessionId = sessionStorage.getItem('session_id') ?? '';
+      if (newSessionId !== sessionId) {
+        setSessionId(newSessionId);
+        console.log(`🔄 Session ID updated from storage: ${newSessionId}`);
+      }
+    };
+    
+    // Storage change event'ini dinle
+    window.addEventListener('storage', handleStorageChange);
+    
+    // Interval ile de kontrol et (aynı tab içindeki değişiklikler için)
+    const interval = setInterval(() => {
+      const currentSessionId = sessionStorage.getItem('session_id') ?? '';
+      if (currentSessionId !== sessionId) {
+        setSessionId(currentSessionId);
+        console.log(`🔄 Session ID updated via interval: ${currentSessionId}`);
+      }
+    }, 1000);
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      clearInterval(interval);
+    };
+  }, [sessionId]);
 
   const [_, copy] = useCopyToClipboard();
   const { speak, cancel, speaking } = useSpeechSynthesis({
