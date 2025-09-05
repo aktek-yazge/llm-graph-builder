@@ -459,19 +459,24 @@ if is_gemini_enabled:
 app.add_api_route("/health", health([healthy_condition, healthy]))
 
 
-@app.get("/files/{file_name}")
+@app.get("/files/{file_name:path}")
 async def serve_document_file(file_name: str):
     """
     S3'ten document dosyalarını serve eder.
+    URL encoding sorununu çözmek için file_name:path kullanıyoruz.
     """
     try:
+        # URL decode işlemi
+        import urllib.parse
+        decoded_file_name = urllib.parse.unquote(file_name, encoding='utf-8')
+        
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
             raise HTTPException(status_code=503, detail="S3 configuration not available")
         
         # S3 key'ini tahmin et
         from pathlib import Path
-        doc_name = Path(file_name).stem
-        s3_key = f"documents/{doc_name}/{file_name}"
+        doc_name = Path(decoded_file_name).stem
+        s3_key = f"documents/{doc_name}/{decoded_file_name}"
         
         # Presigned URL oluştur
         from src.document_sources.s3_upload_utils import generate_s3_presigned_url
@@ -491,24 +496,29 @@ async def serve_document_file(file_name: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/images/{image_name}")
+@app.get("/images/{image_name:path}")
 async def serve_page_image(image_name: str):
     """
     S3'ten page image dosyalarını serve eder.
+    URL encoding sorununu çözmek için image_name:path kullanıyoruz.
     """
     try:
+        # URL decode işlemi
+        import urllib.parse
+        decoded_image_name = urllib.parse.unquote(image_name, encoding='utf-8')
+        
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
             raise HTTPException(status_code=503, detail="S3 configuration not available")
         
         # S3 key'ini tahmin et (image name'den document adını çıkar)
         # Format: "doc_name_page_001.png"
         import re
-        match = re.match(r'(.+)_page_\d+\.png$', image_name)
+        match = re.match(r'(.+)_page_\d+\.png$', decoded_image_name)
         if not match:
             raise HTTPException(status_code=400, detail="Invalid image name format")
         
         doc_name = match.group(1)
-        s3_key = f"documents/{doc_name}/{image_name}"
+        s3_key = f"documents/{doc_name}/{decoded_image_name}"
         
         # Presigned URL oluştur
         from src.document_sources.s3_upload_utils import generate_s3_presigned_url

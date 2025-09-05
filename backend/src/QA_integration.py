@@ -681,37 +681,55 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 
                 # Final answer varsa, chunks olsun olmasın doküman oluştur
                 if final_answer:
-                    # Eğer chunks varsa, onlardan meta bilgi al
+                    # Eğer chunks varsa, her chunk için ayrı doküman oluştur
                     if chunk_details:
-                        # İlk chunk'tan document adını al
-                        first_chunk = chunk_details[0]
-                        doc_name = first_chunk.get('document', 'unknown')
-                        
-                        # Ortalama relevance hesapla
-                        avg_relevance = sum(chunk.get('relevance', 0.0) for chunk in chunk_details) / len(chunk_details) if chunk_details else 0.0
-                        chunk_sources = list(set(chunk.get('document', '') for chunk in chunk_details))
+                        for i, chunk in enumerate(chunk_details):
+                            doc_name = chunk.get('document', f'unknown_doc_{i}')
+                            page_number = chunk.get('page', i)
+                            relevance = chunk.get('relevance', 0.0)
+                            preview = chunk.get('preview', '')
+                            chunk_id = chunk.get('id', f"{doc_name}::{page_number}")
+                            
+                            # Her chunk için ayrı metadata
+                            chunk_metadata = {
+                                'source': doc_name,
+                                'chunkdetails': [{
+                                    'id': chunk_id,
+                                    'score': relevance
+                                }],
+                                'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
+                                'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
+                                'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
+                                'chunk_index': i,
+                                'page_number': page_number,
+                                'original_chunk_data': chunk  # Ham chunk verisini de sakla
+                            }
+                            
+                            state = {'query_similarity_score': relevance}
+                            # Preview varsa onu kullan, yoksa final_answer'ın bir kısmını kullan
+                            content = preview if preview else final_answer
+                            docs.append(SimpleDoc(page_content=content, metadata=chunk_metadata, state=state))
                     else:
-                        # Chunks yoksa varsayılan değerler kullan
-                        doc_name = 'IntelligentAgent_Result'
-                        avg_relevance = 0.95  # High relevance for final answer
-                        chunk_sources = ['IntelligentAgent']
-                    
-                    metadata = {
-                        'source': doc_name,
-                        'chunkdetails': [{
-                            'id': f"{doc_name}::intelligent_agent_result",
-                            'score': avg_relevance
-                        }],
-                        'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
-                        'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
-                        'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
-                        'total_chunks_found': len(chunk_details),
-                        'chunk_sources': chunk_sources
-                    }
-
-                    state = {'query_similarity_score': avg_relevance}
-                    # Final answer'ı page_content olarak kullan
-                    docs.append(SimpleDoc(page_content=final_answer, metadata=metadata, state=state))
+                        # Chunks yoksa tek bir final answer dokümanı oluştur
+                        # Ama yine de intelligent_result'tan gelen gerçek verileri kullan
+                        metadata = {
+                            'source': f"IntelligentAgent_Query_{intelligent_result.get('iterations', 0)}",
+                            'chunkdetails': [{
+                                'id': f"intelligent_agent::final_answer::{intelligent_result.get('iterations', 0)}",
+                                'score': 0.95
+                            }],
+                            'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
+                            'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
+                            'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
+                            'total_chunks_found': len(chunk_details),
+                            'chunk_sources': [f"IntelligentAgent_Direct_Answer_Iteration_{intelligent_result.get('iterations', 0)}"],
+                            'final_answer_mode': True,
+                            'token_usage': intelligent_result.get('token_usage', {}),
+                            'transform_used': transformed_question != user_question
+                        }
+                        
+                        state = {'query_similarity_score': 0.95}
+                        docs.append(SimpleDoc(page_content=final_answer, metadata=metadata, state=state))
 
                 final_question = transformed_question
                 logging.info(f"IntelligentAgent returned {len(docs)} documents")
@@ -1074,8 +1092,8 @@ def process_chat_response(messages, history, question, model, graph, document_na
     agent_result = None  # Agent sonuçlarını saklamak için
     
     try:
-        llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
-        
+        # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        llm, model_name = get_llm(model=model)
         # Eğer agent parametre olarak gelmemişse, oluştur
         if intelligent_agent is None:
             try:
@@ -2842,7 +2860,8 @@ async def process_chat_response_stream(messages, history, question, model, graph
             "user": "chatbot"
         }
         
-        llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        llm, model_version = get_llm(model=model)
         
         # Casual conversation kontrolü
         yield {
@@ -2873,72 +2892,80 @@ async def process_chat_response_stream(messages, history, question, model, graph
             # Instantiate intelligent agent for streaming path as well
             intelligent_agent = None
             try:
-                intelligent_agent = IntelligentAgent(graph)
+                # Temiz cevap + referans modu - gereksiz LLM yorumlama yok
+                intelligent_agent = IntelligentAgent(graph, enable_llm_interpretation=False)
             except Exception:
                 intelligent_agent = None
 
-            # Intelligent agent'ı kullan
-            docs, transformed_question, agent_token_usage, agent_result = await asyncio.get_event_loop().run_in_executor(
-                None, retrieve_documents, doc_retriever, messages, intelligent_agent
-            )
+            # IntelligentAgent'ı direkt kullan - retriever'a gerek yok
+            if intelligent_agent:
+                # IntelligentAgent'tan direkt sonuç al
+                user_question = messages[-1].content if messages else question
+                agent_result = await asyncio.get_event_loop().run_in_executor(
+                    None, intelligent_agent.solve_question, user_question
+                )
+                
+                # Token bilgilerini çıkar
+                agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
+                
+                # Docs boş - IntelligentAgent direkt cevap veriyor
+                docs = []
+                transformed_question = user_question
+            else:
+                # Fallback - agent yoksa boş değerler
+                docs = []
+                transformed_question = question
+                agent_token_usage = None
+                agent_result = None
             
-            # IntelligentAgent'tan gelen sonuçları kontrol et ve formatted_docs'a ekle
-            intelligent_context = ""
+            # IntelligentAgent'tan gelen sonuçları kontrol et
             if (agent_result and isinstance(agent_result, dict) and 
                 agent_result.get('final_answer')):
                 
                 yield {
                     "type": "status",
                     "session_id": session_id,
-                    "message": f"IntelligentAgent sonuçları alındı...",
+                    "message": f"IntelligentAgent sonuçları alındı, direkt kullanılıyor...",
                     "user": "chatbot"
                 }
                 
-                # IntelligentAgent'in cevabını context olarak kullan
-                intelligent_context = f"IntelligentAgent Sonucu:\n{agent_result.get('final_answer', '')}\n\n"
-                # Docs'u boş bırak çünkü IntelligentAgent direkt cevap verdi
-                docs = []
-            
-            if docs:
-                yield {
-                    "type": "status",
-                    "session_id": session_id,
-                    "message": "Bağlam hazırlanıyor...",
-                    "user": "chatbot"
-                }
-                
-                formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
-                sources = sources_list
-                entities = entities_dict
-                
-                print(f"========== STREAMING FORMATTED DOCUMENTS ==========")
-                print(f"Total Documents Formatted: {len(docs)}")
-                print(f"Sources Found: {sources}")
-                print(f"Entity Details: {entities}")
-                print(f"Communities: {communities}")
-                print("--- FORMATTED CONTEXT FOR STREAMING LLM ---")
-                print(f"{formatted_docs[:1000]}...")  # İlk 1000 karakteri göster
-                print("--- END OF FORMATTED CONTEXT ---")
-                print("==================================================")
-                
-                if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
-                    nodedetails["entitydetails"] = entities_dict
-                elif chat_mode_settings["mode"] == CHAT_GLOBAL_VECTOR_FULLTEXT_MODE:
-                    nodedetails["communitydetails"] = communities
-                else:
-                    sources_and_chunks = get_sources_and_chunks(sources, docs)
-                    sources = sources_and_chunks['sources']
-                    nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
-            else:
-                # Docs yoksa (IntelligentAgent direkt cevap durumu) boş formatted_docs başlat
+                # IntelligentAgent direkt cevap verdiği için formatted_docs'a gerek yok
                 formatted_docs = ""
-            
-            # IntelligentAgent context'ini formatted_docs'a ekle
-            if intelligent_context:
-                formatted_docs = intelligent_context + formatted_docs
-                print(f"========== INTELLIGENT AGENT CONTEXT ADDED ==========")
-                print(f"Intelligent Context: {intelligent_context[:200]}...")
-                print("======================================================")
+            else:
+                # IntelligentAgent final_answer yoksa normal RAG flow
+                if docs:
+                    yield {
+                        "type": "status",
+                        "session_id": session_id,
+                        "message": "Bağlam hazırlanıyor...",
+                        "user": "chatbot"
+                    }
+                    
+                    formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
+                    sources = sources_list
+                    entities = entities_dict
+                    
+                    print(f"========== STREAMING FORMATTED DOCUMENTS ==========")
+                    print(f"Total Documents Formatted: {len(docs)}")
+                    print(f"Sources Found: {sources}")
+                    print(f"Entity Details: {entities}")
+                    print(f"Communities: {communities}")
+                    print("--- FORMATTED CONTEXT FOR STREAMING LLM ---")
+                    print(f"{formatted_docs[:1000]}...")  # İlk 1000 karakteri göster
+                    print("--- END OF FORMATTED CONTEXT ---")
+                    print("==================================================")
+                    
+                    if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
+                        nodedetails["entitydetails"] = entities_dict
+                    elif chat_mode_settings["mode"] == CHAT_GLOBAL_VECTOR_FULLTEXT_MODE:
+                        nodedetails["communitydetails"] = communities
+                    else:
+                        sources_and_chunks = get_sources_and_chunks(sources, docs)
+                        sources = sources_and_chunks['sources']
+                        nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
+                else:
+                    # Docs yoksa boş formatted_docs başlat
+                    formatted_docs = ""
         
         # Streaming response başlat
         yield {
@@ -2948,32 +2975,76 @@ async def process_chat_response_stream(messages, history, question, model, graph
             "user": "chatbot"
         }
         
-        # RAG Chain ile streaming
-        rag_chain = get_rag_chain_stream(llm=llm)
-        
         full_response = ""
         total_tokens_count = 0
         
-        async for chunk in rag_chain.astream({
-            "messages": messages[:-1],
-            "context": formatted_docs,
-            "input": question
-        }):
-            if hasattr(chunk, 'content') and chunk.content:
-                content_chunk = chunk.content
-                full_response += content_chunk
-                
-                # Token count estimation (yaklaşık)
-                total_tokens_count += len(content_chunk.split())
-                
-                yield {
-                    "type": "message_chunk",
-                    "session_id": session_id,
-                    "content": content_chunk,
-                    "full_message": full_response,
-                    "is_complete": False,
-                    "user": "chatbot"
-                }
+        # IntelligentAgent'tan final_answer varsa direkt kullan
+        if (agent_result and isinstance(agent_result, dict) and 
+            agent_result.get('final_answer')):
+            
+            # IntelligentAgent'ın final_answer'ını direkt stream'le
+            full_response = agent_result.get('final_answer', '')
+            
+            # Agent'tan gelen token kullanımını kullan
+            if agent_token_usage:
+                total_tokens_count = agent_token_usage.get('total_tokens', 0)
+            else:
+                # Fallback: kelime sayısından tahmin et
+                total_tokens_count = len(full_response.split())
+            
+            # Streaming efekti - IntelligentAgent cevabını chunk'lar halinde gönder
+            tokens = re.findall(r'\S+|\n+', full_response)
+            streamed_content = ""
+            
+            for i, token in enumerate(tokens):
+                if token.startswith('\n'):
+                    # Newline karakterleri için
+                    streamed_content += token
+                    yield {
+                        "type": "message_chunk",
+                        "session_id": session_id,
+                        "content": token,
+                        "full_message": streamed_content,
+                        "is_complete": i == len(tokens) - 1,
+                        "user": "chatbot"
+                    }
+                else:
+                    # Normal kelimeler için
+                    streamed_content += token + " "
+                    yield {
+                        "type": "message_chunk",
+                        "session_id": session_id,
+                        "content": token + " ",
+                        "full_message": streamed_content.rstrip(),
+                        "is_complete": i == len(tokens) - 1,
+                        "user": "chatbot"
+                    }
+                await asyncio.sleep(0.03)
+        
+        else:
+            # IntelligentAgent final_answer yoksa fallback: RAG Chain ile streaming
+            rag_chain = get_rag_chain_stream(llm=llm)
+            
+            async for chunk in rag_chain.astream({
+                "messages": messages[:-1],
+                "context": formatted_docs,
+                "input": question
+            }):
+                if hasattr(chunk, 'content') and chunk.content:
+                    content_chunk = chunk.content
+                    full_response += content_chunk
+                    
+                    # Token count estimation (yaklaşık)
+                    total_tokens_count += len(content_chunk.split())
+                    
+                    yield {
+                        "type": "message_chunk",
+                        "session_id": session_id,
+                        "content": content_chunk,
+                        "full_message": full_response,
+                        "is_complete": False,
+                        "user": "chatbot"
+                    }
         
         # Chat history'ye ekleme
         ai_response = AIMessage(content=full_response)
@@ -3021,6 +3092,47 @@ async def process_chat_response_stream(messages, history, question, model, graph
         
         # IntelligentAgent bilgilerini ekle
         if agent_result:
+            # IntelligentAgent chunk ve entity detaylarını nodedetails'e ekle
+            if agent_result.get('chunk_details'):
+                # Agent'tan gelen chunk detaylarını nodedetails formatına çevir
+                agent_chunks = agent_result.get('chunk_details', [])
+                if agent_chunks:
+                    # IntelligentAgent chunk formatını standart chunk formatına çevir
+                    converted_chunks = []
+                    for chunk in agent_chunks:
+                        converted_chunk = {
+                            'chunkId': chunk.get('chunk_id', f"agent-chunk-{len(converted_chunks)}"),
+                            'text': chunk.get('preview', chunk.get('text', '')),
+                            'score': chunk.get('relevance', 0.0),
+                            'source': chunk.get('document', 'IntelligentAgent'),
+                            'page_number': chunk.get('page', 1),
+                            'document_name': chunk.get('document', 'IntelligentAgent')
+                        }
+                        converted_chunks.append(converted_chunk)
+                    
+                    nodedetails["chunkdetails"] = converted_chunks
+                    
+                    # Ayrıca sources olarak da ekle
+                    if not sources:
+                        sources = list(set([chunk.get('document', 'IntelligentAgent') for chunk in agent_chunks]))
+            
+            if agent_result.get('entity_details'):
+                # Agent'tan gelen entity detaylarını nodedetails'e ekle  
+                agent_entities = agent_result.get('entity_details', [])
+                if agent_entities:
+                    # IntelligentAgent entity formatını standart entity formatına çevir
+                    converted_entities = []
+                    for entity in agent_entities:
+                        converted_entity = {
+                            'id': entity.get('id', ''),
+                            'type': entity.get('type', ''),
+                            'labels': entity.get('labels', []),
+                            'properties': entity
+                        }
+                        converted_entities.append(converted_entity)
+                    
+                    nodedetails["entitydetails"] = converted_entities
+            
             # IntelligentAgent için bilgiler
             if agent_result.get('final_answer'):
                 # IntelligentAgent sonucu
