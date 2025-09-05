@@ -30,16 +30,25 @@ def upload_files_to_s3(
         Tuple[List[str], List[str]]: (uploaded_s3_urls, failed_files)
     """
     try:
+        from botocore.config import Config
+        
+        # S3 config with signature version 4
+        config = Config(
+            signature_version='s3v4',
+            region_name='us-east-1'  # Default region
+        )
+        
         # S3 client oluştur
         if aws_access_key_id and aws_secret_access_key:
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key
+                aws_secret_access_key=aws_secret_access_key,
+                config=config
             )
         else:
             # Environment variables veya AWS profile kullan
-            s3_client = boto3.client('s3')
+            s3_client = boto3.client('s3', config=config)
         
         uploaded_urls = []
         failed_files = []
@@ -194,6 +203,45 @@ def cleanup_local_files(directory_path: str):
         logging.error(f"❌ Failed to cleanup directory {directory_path}: {e}")
 
 
+def get_bucket_region(bucket_name: str, aws_access_key_id: Optional[str] = None, aws_secret_access_key: Optional[str] = None) -> str:
+    """
+    S3 bucket'ın region'ını tespit eder.
+    
+    Args:
+        bucket_name: S3 bucket name
+        aws_access_key_id: AWS access key
+        aws_secret_access_key: AWS secret key
+    
+    Returns:
+        str: Bucket region (default: us-east-1)
+    """
+    try:
+        # S3 client oluştur (region-agnostic)
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
+        else:
+            s3_client = boto3.client('s3')
+        
+        # Bucket location constraint al
+        response = s3_client.get_bucket_location(Bucket=bucket_name)
+        region = response.get('LocationConstraint')
+        
+        # us-east-1 için LocationConstraint None gelir
+        if region is None:
+            region = 'us-east-1'
+            
+        logging.info(f"🌍 Detected bucket {bucket_name} region: {region}")
+        return region
+        
+    except Exception as e:
+        logging.warning(f"⚠️ Could not detect bucket region for {bucket_name}: {e}, using us-east-1")
+        return 'us-east-1'
+
+
 def generate_s3_presigned_url(
     bucket_name: str,
     s3_key: str,
@@ -215,15 +263,27 @@ def generate_s3_presigned_url(
         Optional[str]: Presigned URL (başarısızsa None)
     """
     try:
+        from botocore.config import Config
+        
+        # Bucket'ın region'ını tespit et
+        bucket_region = get_bucket_region(bucket_name, aws_access_key_id, aws_secret_access_key)
+        
+        # S3 config with signature version 4 and correct region
+        config = Config(
+            signature_version='s3v4',
+            region_name=bucket_region
+        )
+        
         # S3 client oluştur
         if aws_access_key_id and aws_secret_access_key:
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key
+                aws_secret_access_key=aws_secret_access_key,
+                config=config
             )
         else:
-            s3_client = boto3.client('s3')
+            s3_client = boto3.client('s3', config=config)
         
         # Presigned URL oluştur
         presigned_url = s3_client.generate_presigned_url(

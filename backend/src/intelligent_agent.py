@@ -28,6 +28,12 @@ from dataclasses import dataclass, field
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
+# Load environment variables
+load_dotenv()
+
+# Base URL for reference links
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -67,19 +73,19 @@ class SuccessfulFinding:
     relevance_score: float
     raw_data: Any = None
 
-@dataclass 
 @dataclass
 class AgentState:
     """Agent'ın mevcut durumu ve topladığı bilgileri tutan state"""
-    question: str
+    question: str  # Bu tek non-default field, en başta olmalı
+    original_question: str = ""  # Orijinal kullanıcı sorusu (referans tipi analizi için)
+    iteration_count: int = 0
+    max_chunks_limit: int = 20
+    similarity_threshold: float = 0.3
     discovered_chunks: List[ChunkInfo] = field(default_factory=list)
     discovered_entities: List[Dict[str, Any]] = field(default_factory=list)
     discovered_relationships: List[Dict[str, Any]] = field(default_factory=list)
     query_attempts: List[str] = field(default_factory=list)
     successful_findings: List['SuccessfulFinding'] = field(default_factory=list)  # Başarılı bulgular
-    iteration_count: int = 0
-    max_chunks_limit: int = 20
-    similarity_threshold: float = 0.3
     
     def add_chunk(self, chunk_info: ChunkInfo):
         """Yeni chunk bilgisi ekle"""
@@ -156,14 +162,10 @@ GÖREV:
 4. Kaynak bilgileri referans göster
 5. Sonucu net ve anlaşılır şekilde özetle
 
-ÖNEMLİ: Raw data'da gözüken tüm sayısal değerleri ve isimleri/listleri MUTLAKA dahil et!
-
 ÇIKTI FORMAT:
-## Özet
-[Kısa ve net özet]
 
-## Detaylı Analiz  
-[Detaylı yorumlama ve açıklama]
+## Bulgular
+[Bulunan sonuçlar]
 
 ## Kaynaklar
 [Kaynak bilgilerin referansları]
@@ -186,6 +188,209 @@ GÖREV:
         except Exception as e:
             logger.error(f"LLM yorumlama hatası: {e}")
             return raw_answer  # Fallback: raw answer'ı döndür
+    
+    def format_final_answer_with_references(self, clean_answer: str, state: 'AgentState') -> str:
+        """
+        Temiz cevabı alır, bağlamsal olarak uygun referans tipini seçer ve ekler
+        """
+        try:
+            logger.info("📝 Final answer'a referans bilgileri ekleniyor...")
+            
+            # Ana cevabı başlat
+            formatted_answer = clean_answer.strip()
+            
+            # LLM ile referans tipini belirle
+            reference_type = self._determine_reference_type(clean_answer, state.original_question)
+            logger.info(f"🎯 Belirlenen referans tipi: {reference_type}")
+            
+            # Referans bilgileri ekle
+            references = []
+            referenced_docs = set()
+            
+            # 1. Discovered chunks'dan referanslar (eğer varsa)
+            if state.discovered_chunks and reference_type == "pages":
+                unique_docs = {}
+                for chunk in state.discovered_chunks[:10]:  # En relevan 10 chunk
+                    doc_name = chunk.document_name
+                    if doc_name not in unique_docs:
+                        unique_docs[doc_name] = []
+                    unique_docs[doc_name].append(chunk.page_number)
+                    referenced_docs.add(doc_name)
+                
+                if unique_docs:
+                    for doc_name, pages in unique_docs.items():
+                        page_list = ", ".join(map(str, sorted(set(pages))))
+                        # Page image linklerini oluştur
+                        for page_num in sorted(set(pages))[:3]:  # Her belgeden max 3 sayfa
+                            image_name = f"{doc_name.replace('.pdf', '')}_page_{page_num:03d}.png"
+                            # URL encode the image name for proper handling of Turkish characters
+                            import urllib.parse
+                            encoded_image_name = urllib.parse.quote(image_name, safe='', encoding='utf-8')
+                            image_link = f"{BASE_URL}/images/{encoded_image_name}"
+                            references.append(f"- [Sayfa {page_num} - {doc_name}]({image_link})")
+            
+            # 2. Successful findings'den belge referansları (cypher_query sonuçlarından)
+            if state.successful_findings:
+                logger.info(f"🔍 DEBUG - Successful findings'den referans ekleniyor: {len(state.successful_findings)} finding")
+                for finding in state.successful_findings:
+                    logger.info(f"🔍 DEBUG - Finding: action_type={finding.action_type}, raw_data={bool(finding.raw_data)}")
+                    if finding.action_type == 'cypher_query' and finding.raw_data:
+                        # Cypher sonuçlarından Customer ve Policy bilgilerini çıkar
+                        logger.info(f"🔍 DEBUG - Raw data: {finding.raw_data}")
+                        for row in finding.raw_data:
+                            logger.info(f"🔍 DEBUG - Row: {row}")
+                            if isinstance(row, dict):
+                                # Customer ismi varsa ona bağlı belgeleri bul
+                                customer_name = None
+                                if 'customer' in row:
+                                    customer_name = row['customer']
+                                elif 'fullName' in row:
+                                    customer_name = row['fullName']
+                                elif 'customerName' in row:
+                                    customer_name = row['customerName']
+                                
+                                logger.info(f"🔍 DEBUG - Customer name found: {customer_name}")
+                                if customer_name:
+                                    if reference_type == "documents":
+                                        # PDF belgeleri döndür
+                                        doc_query = """
+                                        MATCH (c:Customer {fullName: $customer_name})-[:HAS_DOC]->(d:Document)
+                                        RETURN DISTINCT d.fileName as file_name
+                                        ORDER BY d.fileName
+                                        """
+                                        try:
+                                            doc_results = self.graph.query(doc_query, {"customer_name": customer_name})
+                                            logger.info(f"🔍 DEBUG - Document query results: {doc_results}")
+                                            for doc_row in doc_results:
+                                                file_name = doc_row.get('file_name')
+                                                if file_name and file_name.endswith('.pdf'):
+                                                    # URL encode the filename for proper handling of Turkish characters
+                                                    import urllib.parse
+                                                    encoded_filename = urllib.parse.quote(file_name, safe='', encoding='utf-8')
+                                                    pdf_link = f"{BASE_URL}/files/{encoded_filename}"
+                                                    doc_ref = f"- [{file_name}]({pdf_link})"
+                                                    if doc_ref not in references:
+                                                        references.append(doc_ref)
+                                                        referenced_docs.add(file_name)
+                                        except Exception as e:
+                                            logger.error(f"Document arama hatası: {e}")
+                                    
+                                    elif reference_type == "pages":
+                                        # Page image'ları döndür
+                                        chunk_query = """
+                                        MATCH (c:Customer {fullName: $customer_name})-[:HAS_DOC]->(d:Document)-[:FIRST_CHUNK]->(ch:Chunk)
+                                        OPTIONAL MATCH (ch)-[:NEXT_CHUNK*]->(ch2:Chunk)
+                                        WITH collect(ch) + collect(ch2) as all_chunks
+                                        UNWIND all_chunks as chunk
+                                        WITH chunk
+                                        WHERE chunk.page_link IS NOT NULL
+                                        RETURN DISTINCT chunk.page_link as page_link, chunk.page_number as page_number, chunk.fileName as file_name
+                                        ORDER BY chunk.page_number
+                                        LIMIT 10
+                                        """
+                                        try:
+                                            chunk_results = self.graph.query(chunk_query, {"customer_name": customer_name})
+                                            logger.info(f"🔍 DEBUG - Chunk query results: {chunk_results}")
+                                            for chunk_row in chunk_results:
+                                                page_link = chunk_row.get('page_link')
+                                                page_number = chunk_row.get('page_number')
+                                                file_name = chunk_row.get('file_name')
+                                                
+                                                if page_link:
+                                                    # Page link'ten image name'i çıkar (path'in son kısmı)
+                                                    import os
+                                                    import urllib.parse
+                                                    image_name = os.path.basename(page_link)
+                                                    
+                                                    # URL encode the image name for proper handling of Turkish characters
+                                                    encoded_image_name = urllib.parse.quote(image_name, safe='', encoding='utf-8')
+                                                    image_link = f"{BASE_URL}/images/{encoded_image_name}"
+                                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({image_link})"
+                                                    if page_ref not in references:
+                                                        references.append(page_ref)
+                                                        referenced_docs.add(f"{file_name}_page_{page_number}")
+                                        except Exception as e:
+                                            logger.error(f"Chunk arama hatası: {e}")
+            
+            # Referansları cevaba ekle - sadece belgeler varsa
+            if references:
+                formatted_answer += "\n\n**📋 Kaynaklar:**\n" + "\n".join(references)
+                logger.info(f"📝 Referans ekleme tamamlandı: {len(references)} referans")
+            else:
+                logger.info("📝 Referans ekleme tamamlandı: 0 referans")
+            
+            return formatted_answer
+            
+        except Exception as e:
+            logger.error(f"Referans ekleme hatası: {e}")
+            return clean_answer  # Fallback: sadece temiz cevabı döndür
+    
+    def _determine_reference_type(self, answer: str, question: str) -> str:
+        """
+        LLM ile cevap ve soru bağlamında hangi tip referans döndürüleceğini belirle
+        Returns: "documents" (PDF belgeleri) veya "pages" (sayfa görselleri)
+        """
+        try:
+            analysis_prompt = f"""Sen bir belge referans analizci asistanısın. Kullanıcının sorusu ve verilen cevabı analiz ederek, en uygun referans tipini belirle.
+
+SORU: "{question}"
+CEVAP: "{answer}"
+
+Referans tipleri:
+1. "documents" - Genel bilgi, sayısal veriler, özet bilgiler için PDF belgelerinin tamamı
+2. "pages" - Spesifik detaylar, madde detayları, tablolar, formlar için sayfa görselleri
+
+Analiz kriterleri:
+- Eğer cevap sayısal bilgi, özet, genel bilgi içeriyorsa -> "documents"
+- Eğer cevap spesifik madde, taksit, detay bilgi içeriyorsa -> "pages"
+- Eğer soru "kaç", "toplam", "sayısı" gibi kelimeler içeriyorsa -> "documents"
+- Eğer soru spesifik poliçe numarası, madde detayı içeriyorsa -> "pages"
+
+Sadece "documents" veya "pages" olarak yanıtla."""
+
+            try:
+                llm = self.llm  # IntelligentAgent sınıfında zaten var olan LLM instance'ı kullan
+                result = llm.invoke(analysis_prompt)
+                
+                if hasattr(result, 'content'):
+                    response = result.content.strip().lower()
+                else:
+                    response = str(result).strip().lower()
+                
+                if "documents" in response:
+                    return "documents"
+                elif "pages" in response:
+                    return "pages"
+                else:
+                    # Fallback: eğer belirsizse, keyword analizi yap
+                    question_lower = question.lower()
+                    answer_lower = answer.lower()
+                    
+                    # Sayısal/özet soruları için documents
+                    summary_keywords = ["kaç", "toplam", "sayısı", "adet", "liste", "hangi", "kimler"]
+                    if any(keyword in question_lower for keyword in summary_keywords):
+                        return "documents"
+                    
+                    # Detay soruları için pages
+                    detail_keywords = ["taksit", "madde", "detay", "içerik", "bilgi", "şart"]
+                    if any(keyword in question_lower for keyword in detail_keywords):
+                        return "pages"
+                    
+                    # Default: documents
+                    return "documents"
+                    
+            except Exception as llm_error:
+                logger.error(f"LLM referans tipi belirlemede hata: {llm_error}")
+                # Fallback: basit keyword analizi
+                question_lower = question.lower()
+                summary_keywords = ["kaç", "toplam", "sayısı", "adet", "liste"]
+                if any(keyword in question_lower for keyword in summary_keywords):
+                    return "documents"
+                return "pages"
+                
+        except Exception as e:
+            logger.error(f"Referans tipi belirleme hatası: {e}")
+            return "documents"  # Safe fallback
     
     # def refresh_schema_cache(self):
     #     """Schema cache'i temizle ve yeniden yükle"""
@@ -1378,7 +1583,9 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 action_content = line.replace('Answer:', '').strip()
             elif line.startswith('Content:') or line.startswith('**Content:**'):
                 # "Content:" prefix'ini kaldır ve action_content'e ekle
-                action_content = line.replace('**Content:**', '').replace('Content:', '').strip()
+                content_on_same_line = line.replace('**Content:**', '').replace('Content:', '').strip()
+                if content_on_same_line:
+                    action_content = content_on_same_line
                 current_section = 'content'  # Content section'a geç
             elif current_section and line and not line.startswith('```'):
                 # Kod blokları hariç
@@ -1401,10 +1608,10 @@ Anahtar bulgular ve önemli bilgiler nedir?
                                 action_content += ' ' + line
                 elif current_section == 'content':
                     # Content section'dayken tüm satırları action_content'e ekle
-                    if 'MATCH' in line or 'RETURN' in line or 'WHERE' in line or 'WITH' in line or 'OPTIONAL' in line:
-                        action_content += ' ' + line
-                    elif action_content and not line.startswith('```'):
-                        action_content += ' ' + line
+                    if action_content:
+                        action_content += '\n' + line  # Çok satırlı content için yeni satır ekle
+                    else:
+                        action_content = line  # İlk content satırı
         
         # Kod bloklarını temizle
         if action_content:
@@ -1423,7 +1630,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
         logger.info(f"Soru çözülüyor: {user_question}")
         
         # Agent state'i başlat
-        state = AgentState(question=user_question)
+        state = AgentState(question=user_question, original_question=user_question)
         
         # Schema-based system prompt'u al (cache'den veya oluştur)
         system_prompt = self.get_system_prompt()
@@ -1477,50 +1684,52 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 
                 # Action'ı uygula
                 if action == "final_answer":
-                    # Final answer - tüm ham verileri birleştir
-                    raw_answer = action_content
+                    # Final answer - temiz cevabı direkt kullan, sadece referansları ekle
+                    clean_answer = action_content.strip()
                     
-                    # Ham veri bölümlerini topla
-                    raw_data_sections = []
-                    
-                    # 2. Successful findings (cypher ve vector_search raw sonuçları)
-                    if state.successful_findings:
-                        findings_data = []
-                        for finding in state.successful_findings:
-                            if finding.raw_data:  # Ham JSON data varsa
-                                # Neo4j DateTime objelerini serialize edilebilir hale getir
-                                serialized_data = serialize_neo4j_data(finding.raw_data)
-                                findings_data.append({
-                                    "action_type": finding.action_type,
-                                    "iteration": finding.iteration,
-                                    "raw_data": serialized_data,
-                                    "summary": finding.summary
-                                })
-                        if findings_data:
-                            raw_data_sections.append(f"=== CYPHER & VECTOR SEARCH HAM VERİLER ===\n{json.dumps(findings_data, ensure_ascii=False, indent=2)}")
-                    
-                    # 3. Vector search chunk'ları (varsa)
-                    if state.discovered_chunks:
-                        sorted_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
-                        chunk_content = []
-                        for i, chunk in enumerate(sorted_chunks[:10], 1):  # En iyi 10 chunk
-                            chunk_content.append(f"[Kaynak {i}: {chunk.document_name}, Sayfa {chunk.page_number}]\n{chunk.text.strip()}")
-                        raw_data_sections.append(f"=== KAYNAK BİLGİLER ===\n" + "\n\n".join(chunk_content))
-                    
-                    # Raw final answer'ı oluştur
-                    if raw_data_sections:
-                        raw_final_answer = f"{raw_answer}\n\n--- HAM VERİLER ---\n" + "\n\n".join(raw_data_sections)
-                    else:
-                        raw_final_answer = raw_answer
-                    
-                    # LLM yorumlama aktifse, ham veriyi yorumla
+                    # LLM yorumlama aktifse eski metodu kullan, değilse sadece referans ekle
                     if self.enable_llm_interpretation:
                         logger.info("🤖 LLM yorumlama aktif - Ham veriler yorumlanıyor...")
+                        
+                        # Ham veri bölümlerini topla (eski yöntem için)
+                        raw_data_sections = []
+                        
+                        # Successful findings (cypher ve vector_search raw sonuçları)
+                        if state.successful_findings:
+                            findings_data = []
+                            for finding in state.successful_findings:
+                                if finding.raw_data:  # Ham JSON data varsa
+                                    # Neo4j DateTime objelerini serialize edilebilir hale getir
+                                    serialized_data = serialize_neo4j_data(finding.raw_data)
+                                    findings_data.append({
+                                        "action_type": finding.action_type,
+                                        "iteration": finding.iteration,
+                                        "raw_data": serialized_data,
+                                        "summary": finding.summary
+                                    })
+                            if findings_data:
+                                raw_data_sections.append(f"=== CYPHER & VECTOR SEARCH HAM VERİLER ===\n{json.dumps(findings_data, ensure_ascii=False, indent=2)}")
+                        
+                        # Vector search chunk'ları (varsa)
+                        if state.discovered_chunks:
+                            sorted_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
+                            chunk_content = []
+                            for i, chunk in enumerate(sorted_chunks[:10], 1):  # En iyi 10 chunk
+                                chunk_content.append(f"[Kaynak {i}: {chunk.document_name}, Sayfa {chunk.page_number}]\n{chunk.text.strip()}")
+                            raw_data_sections.append(f"=== KAYNAK BİLGİLER ===\n" + "\n\n".join(chunk_content))
+                        
+                        # Raw final answer'ı oluştur
+                        if raw_data_sections:
+                            raw_final_answer = f"{clean_answer}\n\n--- HAM VERİLER ---\n" + "\n\n".join(raw_data_sections)
+                        else:
+                            raw_final_answer = clean_answer
+                        
                         # Ham veriyi LLM'e aktar
                         final_answer = self.interpret_final_answer_with_llm(raw_final_answer, user_question, state.discovered_chunks)
                     else:
-                        logger.info("📊 Raw data mode - Tüm ham veriler birlikte döndürülüyor")
-                        final_answer = raw_final_answer
+                        logger.info("� Temiz cevap + referans modu - Gereksiz LLM çağrısı yok")
+                        # Sadece temiz cevabı kullan ve referansları ekle
+                        final_answer = self.format_final_answer_with_references(clean_answer, state)
                         
                     current_observation = f"Final answer verildi: {final_answer[:200]}..."
                     logger.info(f"Agent final answer verdi: {final_answer[:200]}...")
@@ -1901,11 +2110,12 @@ Content: [Sorgu/arama metni/cevap]
 - İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
 - RAW DATA modunda: Bulunan verileri organize et (yorumsuz)
 - LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
+- CEVAP FORMATI: Normal, doğal konuşma tarzında yanıt ver (liste formatı değil)
 
 ### ‼️ ZORUNLU KURALLAR:
 - Her soru için İLK ADIM cypher_query olmalı
 - Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
-- final_answer'da YORUMLAMA yapma, sadece raw data birleştir  
+- final_answer'da doğal konuşma tarzında cevap ver (liste formatı YASAK)  
 - Belge analizi: cypher_query (entity bul) → cypher_query (chunk topla) → final_answer
 - Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle"""
 
