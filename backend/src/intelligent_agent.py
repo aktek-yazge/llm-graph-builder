@@ -587,6 +587,41 @@ Kısa açıklama: ...
             # Fallback: normal vector search
             return self.execute_vector_search(query_text, limit)
     
+    def generate_embedding_for_query(self, query_text: str) -> Tuple[bool, Any]:
+        """Query için embedding oluştur - LLM'in function call tool'u olarak kullanacağı
+        
+        Args:
+            query_text: Embedding oluşturulacak text
+            
+        Returns:
+            Tuple[bool, Any]: (success, embedding_vector veya error_message)
+        """
+        try:
+            logger.info(f"🔧 Embedding oluşturuluyor: {query_text}")
+            
+            # Text'i normalize et
+            normalized_query = normalize_unicode_text(query_text)
+            logger.info(f"   📝 Normalize edilmiş text: {normalized_query}")
+            
+            # Embedding oluştur
+            try:
+                query_embedding = self.embedding_model.embed_query(normalized_query)
+                logger.info(f"   ✅ Embedding başarıyla oluşturuldu: {len(query_embedding)} boyut")
+                
+                # İlk birkaç değeri göster (debug için)
+                preview = [round(x, 4) for x in query_embedding[:5]]
+                logger.info(f"   📊 Embedding preview: {preview}...")
+                
+                return True, query_embedding
+                
+            except Exception as e:
+                logger.error(f"   ❌ Embedding oluşturma hatası: {e}")
+                return False, f"Embedding model hatası: {e}"
+                
+        except Exception as e:
+            logger.error(f"❌ generate_embedding_for_query genel hatası: {e}")
+            return False, str(e)
+    
     def log_detailed_token_report(self):
         """Detaylı token kullanım raporunu logla"""
         try:
@@ -797,18 +832,30 @@ SYSTEM PROMPT ÖZET:
                 logger.warning("   ⚠️ Schema bilgisi system prompt'ta bulunamadı!")
                 file_content += "- ⚠️ Schema bilgisi system prompt'ta bulunamadı!\n"
             
-            # User prompt özeti
+            # User prompt özeti ve conversation history analizi
             user_lines = user_prompt.split('\n')
+            
+            # Conversation history analizi
+            conv_history_count = 0
+            last_messages = []
+            if "## 📝 ÖNCEKI KONUŞMA:" in user_prompt:
+                conv_lines = user_prompt.split("## 📝 ÖNCEKI KONUŞMA:")[1].split("Kullanıcı sorusu:")[0].strip().split('\n')
+                conv_lines = [line.strip() for line in conv_lines if line.strip() and line.strip() != ""]
+                conv_history_count = len([line for line in conv_lines if line.startswith(('Human:', 'AI:'))])
+                last_messages = conv_lines[-11:] if len(conv_lines) >= 11 else conv_lines  # Son 11 satır
+
             logger.info(f"📨 USER PROMPT ÖZET:")
             logger.info(f"   - Toplam satır: {len(user_lines)}")
             logger.info(f"   - Toplam karakter: {len(user_prompt)}")
-            logger.info(f"   - İlk 3 satır: {user_lines[:3]}")
+            logger.info(f"   - Conversation history: {conv_history_count} mesaj")
+            logger.info(f"   - Son mesajlar: {last_messages}")
             
             file_content += f"""
 USER PROMPT ÖZET:
 - Toplam satır: {len(user_lines)}
 - Toplam karakter: {len(user_prompt)}
-- İlk 3 satır: {user_lines[:3]}
+- Conversation history: {conv_history_count} mesaj
+- Son mesajlar: {last_messages}
 """
             
             # Context memory kontrol
@@ -902,7 +949,7 @@ ANALYSIS SUMMARY:
         except Exception as e:
             logger.error(f"LLM prompt logging hatası: {e}")
     
-    def log_llm_response(self, response_content: str, iteration: int, action: str, action_content: str):
+    def log_llm_response(self, response_content: str, iteration: int, action: str, action_content: str, will_write: bool = True):
         """LLM response'unu dosyaya kaydet"""
         try:
             # Dosya adı
@@ -911,8 +958,9 @@ ANALYSIS SUMMARY:
             log_file = f"llm_response_{session_info}_{timestamp}_iter_{iteration}.txt"
             log_path = f"context_memory_logs/{log_file}"
             
-            # Dizin yoksa oluştur
-            os.makedirs("context_memory_logs", exist_ok=True)
+            # Dizin yoksa oluştur (sadece yazacaksak)
+            if will_write:
+                os.makedirs("context_memory_logs", exist_ok=True)
             
             # Response içeriğini hazırla
             file_content = f"""{'='*80}
@@ -937,13 +985,16 @@ PARSED ACTION CONTENT:
 {action_content}
 """
             
-            # Dosyaya yaz
-            try:
-                with open(log_path, 'w', encoding='utf-8') as f:
-                    f.write(file_content)
-                logger.info(f"📁 LLM response dosyaya kaydedildi: {log_path}")
-            except Exception as file_error:
-                logger.error(f"Response dosya yazma hatası: {file_error}")
+            # Dosyaya yaz (sadece will_write True ise)
+            if will_write:
+                try:
+                    with open(log_path, 'w', encoding='utf-8') as f:
+                        f.write(file_content)
+                    logger.info(f"📁 LLM response dosyaya kaydedildi: {log_path}")
+                except Exception as file_error:
+                    logger.error(f"Response dosya yazma hatası: {file_error}")
+            else:
+                logger.info(f"📁 LLM response loglama atlandı (will_write=False): {log_file}")
                 
         except Exception as e:
             logger.error(f"LLM response logging hatası: {e}")
@@ -1508,7 +1559,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 observation, thought, (action, action_content) = self.parse_agent_response(agent_response)
                 
                 # LLM response'unu dosyaya kaydet
-                self.log_llm_response(agent_response, state.iteration_count, action, action_content)
+                self.log_llm_response(agent_response, state.iteration_count, action, action_content,False)  # will_write=False ile sadece debug log
                 
                 # Token kullanımını action type ile logla
                 self.log_token_usage(response, state.iteration_count, action)
