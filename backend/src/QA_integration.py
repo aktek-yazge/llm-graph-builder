@@ -189,6 +189,8 @@ EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL)
 
 class SessionChatHistory:
     history_dict = {}
+    neo4j_sessions = {}  # session_id -> Neo4jChatMessageHistory instance
+    _lock = threading.Lock()  # Thread safety için
 
     @classmethod
     def get_chat_history(cls, session_id):
@@ -199,6 +201,87 @@ class SessionChatHistory:
         else:
             logging.info(f"Retrieved existing ChatMessageHistory Local for session ID: {session_id}")
         return cls.history_dict[session_id]
+    
+    @classmethod
+    def get_or_create_neo4j_session(cls, graph, session_id, write_access=True):
+        """
+        Session ID için Neo4jChatMessageHistory instance'ını getir veya oluştur.
+        In-Memory cache kullanarak performansı optimize eder.
+        Server restart sonrası existing session'ları duplicate etmeden kullanır.
+        
+        Args:
+            graph: Neo4j graph connection
+            session_id: Session identifier
+            write_access: Whether to allow write operations
+            
+        Returns:
+            Neo4jChatMessageHistory instance
+        """
+        with cls._lock:
+            if session_id not in cls.neo4j_sessions:
+                logging.info(f"Session not in cache, checking Neo4j for session ID: {session_id}")
+                
+                if write_access:
+                    # LOCAL CACHE BOŞ İSE: Neo4j'de session var mı kontrol et
+                    try:
+                        result = graph.query(
+                            "MATCH (s:Session {id: $session_id}) RETURN s.id as session_id LIMIT 1",
+                            {"session_id": session_id}
+                        )
+                        session_exists = len(result) > 0
+                        
+                        if session_exists:
+                            logging.info(f"Existing session found in Neo4j, using existing for: {session_id}")
+                            # Existing session için yeni instance oluştur (duplicate yaratmaz)
+                            cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
+                                graph=graph,
+                                session_id=session_id,
+                                window=50  # 50 * 2 = 100 mesaj almak için
+                            )
+                        else:
+                            logging.info(f"Creating new session in Neo4j for: {session_id}")
+                            cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
+                                graph=graph,
+                                session_id=session_id,
+                                window=50  # 50 * 2 = 100 mesaj almak için
+                            )
+                            
+                    except Exception as e:
+                        logging.warning(f"Error checking session existence: {e}")
+                        # Hata durumunda normal flow ile devam et
+                        cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
+                            graph=graph,
+                            session_id=session_id,
+                            window=50  # 50 * 2 = 100 mesaj almak için
+                        )
+                else:
+                    # Write access olmadığında local history kullan
+                    return cls.get_chat_history(session_id)
+            else:
+                logging.info(f"Retrieved cached Neo4jChatMessageHistory for session ID: {session_id}")
+            
+            return cls.neo4j_sessions[session_id]
+    
+    @classmethod
+    def clear_neo4j_session(cls, session_id):
+        """Belirli bir Neo4j session'ını cache'den temizle."""
+        with cls._lock:
+            if session_id in cls.neo4j_sessions:
+                logging.info(f"Clearing cached Neo4j session: {session_id}")
+                del cls.neo4j_sessions[session_id]
+    
+    @classmethod
+    def clear_all_neo4j_sessions(cls):
+        """Tüm Neo4j session cache'ini temizle."""
+        with cls._lock:
+            logging.info(f"Clearing all cached Neo4j sessions: {len(cls.neo4j_sessions)} sessions")
+            cls.neo4j_sessions.clear()
+    
+    @classmethod
+    def get_active_neo4j_sessions(cls):
+        """Aktif Neo4j session sayısını döndür."""
+        with cls._lock:
+            return list(cls.neo4j_sessions.keys())
 
 class CustomCallback(BaseCallbackHandler):
 
@@ -227,31 +310,30 @@ class CustomCallback(BaseCallbackHandler):
             print(f"First document preview: {documents[0].page_content[:100]}...")
         print("===========================================")
 
-def is_casual_conversation(question, llm):
+def get_history_by_session_id(session_id, graph=None, write_access=False):
     """
-    LLM kullanarak kullanıcının mesajının günlük konuşma mı 
-    yoksa bilgi gerektiren bir soru mu olduğunu tespit eder.
+    Session ID'ye göre chat history'sini getir.
+    Eğer graph verilirse Neo4j cache'ini kullan, yoksa local cache kullan.
+    
+    Args:
+        session_id: Session identifier
+        graph: Neo4j graph connection (opsiyonel)
+        write_access: Neo4j session için write access
+        
+    Returns:
+        ChatMessageHistory veya Neo4jChatMessageHistory instance
     """
     try:
-        casual_detection_prompt = ChatPromptTemplate.from_messages([
-            ("human", CASUAL_CONVERSATION_DETECTION_TEMPLATE.format(user_message=question))
-        ])
-        
-        chain = casual_detection_prompt | llm | StrOutputParser()
-        result = chain.invoke({}).strip().upper()
-        
-        logging.info(f"Casual conversation detection result: {result} for question: '{question[:50]}...'")
-        
-        return result == "CASUAL"
-        
-    except Exception as e:
-        logging.error(f"Error in casual conversation detection: {e}")
-        # Hata durumunda güvenli tarafta kalıp normal işlemi yapalım
-        return False
-
-def get_history_by_session_id(session_id):
-    try:
-        return SessionChatHistory.get_chat_history(session_id)
+        if graph:
+            # Neo4j cache'den getir veya oluştur
+            return SessionChatHistory.get_or_create_neo4j_session(
+                graph=graph, 
+                session_id=session_id, 
+                write_access=write_access
+            )
+        else:
+            # Local cache'den getir
+            return SessionChatHistory.get_chat_history(session_id)
     except Exception as e:
         logging.error(f"Failed to get history for session ID '{session_id}': {e}")
         raise
@@ -285,14 +367,17 @@ def get_total_tokens(ai_response, llm):
 
     return total_tokens
 
-def clear_chat_history(graph, session_id,local=False):
+def clear_chat_history(graph, session_id, local=False):
     try:
         if not local:
-            history = Neo4jChatMessageHistory(
+            # Cache'den Neo4j session'ını al (yeni oluşturmak yerine)
+            history = SessionChatHistory.get_or_create_neo4j_session(
                 graph=graph,
-                session_id=session_id
+                session_id=session_id,
+                write_access=True
             )
         else:
+            # Local history al
             history = get_history_by_session_id(session_id)
         
         # Neo4j işlemini retry ile koru
@@ -300,6 +385,11 @@ def clear_chat_history(graph, session_id,local=False):
             retry_neo4j_operation(lambda: history.clear())
         else:
             history.clear()
+
+        # Cache'den de session'ı temizle
+        if not local:
+            SessionChatHistory.clear_neo4j_session(session_id)
+        logging.info(f"Cleared session {session_id} from cache and database")
 
         return {
             "session_id": session_id, 
@@ -510,7 +600,7 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     
     return content, result, total_tokens, formatted_docs
 
-def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None):
+def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None, session_id: str = None):
 
     start_time = time.time()
     agent_token_usage = None  # Agent token kullanımını saklamak için
@@ -660,7 +750,7 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
                 transformed_question = user_question
             
             # Transform edilmiş soruyu IntelligentAgent'a gönder
-            intelligent_result = intelligent_agent.solve_question(transformed_question)
+            intelligent_result = intelligent_agent.solve_question(transformed_question, session_id)
 
             # Intelligent Agent response parsing
             if intelligent_result and intelligent_result.get('final_answer'):
@@ -775,7 +865,7 @@ def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAg
         elif intelligent_agent:
             # Agent'tan sonuç al
             user_question = messages[-1].content if messages else ""
-            agent_result = intelligent_agent.solve_question(user_question)
+            agent_result = intelligent_agent.solve_question(user_question, session_id)
 
             # Agent token bilgilerini çıkar
             agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
@@ -1087,7 +1177,7 @@ def setup_chat(model, graph, document_names, chat_mode_settings):
     
     return llm, doc_retriever, model_name
 
-def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None):
+def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None, session_id=None):
     agent_token_usage = None  # Agent token kullanımını saklamak için
     agent_result = None  # Agent sonuçlarını saklamak için
     
@@ -1101,83 +1191,66 @@ def process_chat_response(messages, history, question, model, graph, document_na
             except Exception:
                 intelligent_agent = None
         
-        # Günlük konuşma tespiti yap
-        if is_casual_conversation(question, llm):
-            logging.info(f"Casual conversation detected for question: '{question}'. Skipping document retrieval.")
+        
+        # Normal işlem: IntelligentAgent kullan
+        docs = []
+        transformed_question = question
+        agent_token_usage = None
+        agent_result = None
+        
+        # IntelligentAgent kullan
+        if intelligent_agent:
+            user_question = messages[-1].content if messages else question
+            agent_result = intelligent_agent.solve_question(user_question, session_id)
+            agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None  
+
+        # IntelligentAgent sonuçlarını kontrol et
+        intelligent_context = ""
+        if (agent_result and isinstance(agent_result, dict) and 
+            agent_result.get('final_answer')):
             
-            # Günlük konuşma için retriever kullanmadan direkt cevap ver
+            # IntelligentAgent'ın cevabını context olarak kullan
+            intelligent_context = f"IntelligentAgent Sonucu:\n{agent_result.get('final_answer', '')}\n\n"
+            logging.info(f"IntelligentAgent {agent_result.get('mode')} sonucu context olarak eklendi")
+            
+            # Docs boşsa bile RAG chain'e geçir
+            if not docs:
+                # Boş docs ile devam et, context intelligent_context'den gelecek
+                pass
+
+        if docs:
+            content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
+            
+            # IntelligentAgent context'ini formatted_docs'a ekle
+            if intelligent_context:
+                formatted_docs = intelligent_context + formatted_docs
+                
+        elif intelligent_context:
+            # Docs yok ama IntelligentAgent sonucu var, RAG chain'e context olarak ver
             rag_chain = get_rag_chain(llm=llm)
             
-            # Boş bağlam ile cevap üret
             ai_response = rag_chain.invoke({
                 "messages": messages[:-1],
-                "context": "",  # Boş bağlam
+                "context": intelligent_context,
                 "input": question
             })
             
             content = ai_response.content
             total_tokens = get_total_tokens(ai_response, llm)
+            formatted_docs = intelligent_context
             
-            # Boş result yapısı
+            # Boş result yapısı ama agent bilgileriyle
             result = {
                 'sources': [], 
                 'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
                 'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}
             }
-            formatted_docs = ""
-            agent_token_usage = None  # Casual conversation'da agent kullanılmıyor
             
         else:
-            # Normal işlem: document retrieval yap
-            docs, transformed_question, agent_token_usage, agent_result = retrieve_documents(doc_retriever, messages, intelligent_agent=intelligent_agent)  
-
-            # IntelligentAgent sonuçlarını kontrol et
-            intelligent_context = ""
-            if (agent_result and isinstance(agent_result, dict) and 
-                agent_result.get('final_answer')):
-                
-                # IntelligentAgent'ın cevabını context olarak kullan
-                intelligent_context = f"IntelligentAgent Sonucu:\n{agent_result.get('final_answer', '')}\n\n"
-                logging.info(f"IntelligentAgent {agent_result.get('mode')} sonucu context olarak eklendi")
-                
-                # Docs boşsa bile RAG chain'e geçir
-                if not docs:
-                    # Boş docs ile devam et, context intelligent_context'den gelecek
-                    pass
-
-            if docs:
-                content, result, total_tokens, formatted_docs = process_documents(docs, question, messages, llm, model, chat_mode_settings)
-                
-                # IntelligentAgent context'ini formatted_docs'a ekle
-                if intelligent_context:
-                    formatted_docs = intelligent_context + formatted_docs
-                    
-            elif intelligent_context:
-                # Docs yok ama IntelligentAgent sonucu var, RAG chain'e context olarak ver
-                rag_chain = get_rag_chain(llm=llm)
-                
-                ai_response = rag_chain.invoke({
-                    "messages": messages[:-1],
-                    "context": intelligent_context,
-                    "input": question
-                })
-                
-                content = ai_response.content
-                total_tokens = get_total_tokens(ai_response, llm)
-                formatted_docs = intelligent_context
-                
-                # Boş result yapısı ama agent bilgileriyle
-                result = {
-                    'sources': [], 
-                    'nodedetails': {"chunkdetails": [], "entitydetails": [], "communitydetails": []}, 
-                    'entities': {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}
-                }
-                
-            else:
-                content = "Sorunuza cevap verebilecek ilgili doküman bulamadım."
-                result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}}
-                total_tokens = 0
-                formatted_docs = ""
+            content = "Sorunuza cevap verebilecek ilgili doküman bulamadım."
+            result = {"sources": list(), "nodedetails": list(), "entities": {'entityids': [], "relationshipids": [], 'personPolicyInfo': [], 'documentList': [], 'totalDocuments': 0}}
+            total_tokens = 0
+            formatted_docs = ""
         
         ai_response = AIMessage(content=content)
         messages.append(ai_response)
@@ -1195,7 +1268,7 @@ def process_chat_response(messages, history, question, model, graph, document_na
         response_info = {
             # "metrics" : metrics,
             "sources": result["sources"],
-            "model": model_version,
+            "model": model,
             "nodedetails": result["nodedetails"],
             "total_tokens": total_tokens,
             "response_time": 0,
@@ -1537,58 +1610,16 @@ def process_graph_response(model, graph, question, messages, history):
 
 def create_neo4j_chat_message_history(graph, session_id, write_access=True):
     """
-    Creates and returns a Neo4jChatMessageHistory instance with session deduplication.
-    Ensures only one Session node exists per session_id.
+    Creates and returns a Neo4jChatMessageHistory instance using in-memory cache.
+    Bu fonksiyon artık cache kullanarak performansı optimize eder.
     """
     try:
-        if write_access:
-            # Check if session already exists
-            existing_session_query = """
-            MATCH (s:Session {id: $session_id})
-            RETURN s LIMIT 1
-            """
-            existing_sessions = graph.query(existing_session_query, {"session_id": session_id})
-            
-            if existing_sessions:
-                logging.info(f"♻️ Using existing session: {session_id}")
-            else:
-                logging.info(f"🆕 Creating new session: {session_id}")
-            
-            # Neo4jChatMessageHistory will handle creation/retrieval internally
-            history = Neo4jChatMessageHistory(
-                graph=graph,
-                session_id=session_id
-            )
-            
-            # Verify no duplicate sessions were created
-            session_count_query = """
-            MATCH (s:Session {id: $session_id})
-            RETURN count(s) as session_count
-            """
-            session_count_result = graph.query(session_count_query, {"session_id": session_id})
-            session_count = session_count_result[0]['session_count'] if session_count_result else 0
-            
-            if session_count > 1:
-                logging.warning(f"⚠️ Multiple sessions detected for {session_id}: {session_count} - cleaning up...")
-                # Keep the oldest session and remove duplicates
-                cleanup_duplicate_sessions_query = """
-                MATCH (s:Session {id: $session_id})
-                WITH s ORDER BY s.createdAt ASC
-                WITH collect(s) as sessions
-                WITH sessions[0] as keeper, sessions[1..] as duplicates
-                UNWIND duplicates as duplicate
-                OPTIONAL MATCH (duplicate)-[r:LAST_MESSAGE]->(m:Message)
-                DELETE r
-                DELETE duplicate
-                RETURN count(duplicates) as cleaned_count
-                """
-                cleanup_result = graph.query(cleanup_duplicate_sessions_query, {"session_id": session_id})
-                cleaned_count = cleanup_result[0]['cleaned_count'] if cleanup_result else 0
-                logging.info(f"✅ Cleaned up {cleaned_count} duplicate sessions for {session_id}")
-            
-            return history
-        
-        history = get_history_by_session_id(session_id)
+        # Cache'den session'ı getir veya oluştur
+        history = SessionChatHistory.get_or_create_neo4j_session(
+            graph=graph, 
+            session_id=session_id, 
+            write_access=write_access
+        )
         return history
 
     except Exception as e:
@@ -1922,7 +1953,7 @@ def QA_RAG(graph,model, question, document_names, session_id, mode, write_access
               "user": "chatbot"
             }
         else:
-            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent)
+            result = process_chat_response(messages,history, question, model, graph, document_names,chat_mode_settings, intelligent_agent=intelligent_agent, session_id=session_id)
 
     result["session_id"] = session_id
     
@@ -2863,109 +2894,104 @@ async def process_chat_response_stream(messages, history, question, model, graph
         # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         llm, model_version = get_llm(model=model)
         
-        # Casual conversation kontrolü
+        # Direkt document retrieval'a geç
         yield {
             "type": "status",
             "session_id": session_id, 
-            "message": "Soru analiz ediliyor...",
+            "message": "İlgili dokümanlar aranıyor...",
             "user": "chatbot"
         }
-        
-        is_casual = await asyncio.get_event_loop().run_in_executor(
-            None, is_casual_conversation, question, llm
-        )
         
         formatted_docs = ""
         sources = []
         entities = {'entityids': [], "relationshipids": []}
         nodedetails = {"chunkdetails": [], "entitydetails": [], "communitydetails": []}
         
-        if not is_casual:
-            # Document retrieval
+        # Document retrieval
+        yield {
+            "type": "status",
+            "session_id": session_id,
+            "message": "İlgili dokümanlar aranıyor...",
+            "user": "chatbot"
+        }
+        
+        # Instantiate intelligent agent for streaming path as well
+        intelligent_agent = None
+        try:
+            # Temiz cevap + referans modu - gereksiz LLM yorumlama yok
+            intelligent_agent = IntelligentAgent(graph, enable_llm_interpretation=False)
+        except Exception:
+            intelligent_agent = None
+
+        # IntelligentAgent'ı direkt kullan - retriever'a gerek yok
+        if intelligent_agent:
+            # IntelligentAgent'tan direkt sonuç al
+            user_question = messages[-1].content if messages else question
+            agent_result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: intelligent_agent.solve_question(user_question, session_id)
+            )
+            
+            # Token bilgilerini çıkar
+            agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
+            
+            # Docs boş - IntelligentAgent direkt cevap veriyor
+            docs = []
+            transformed_question = user_question
+        else:
+            # Fallback - agent yoksa boş değerler
+            docs = []
+            transformed_question = question
+            agent_token_usage = None
+            agent_result = None
+        
+        # IntelligentAgent'tan gelen sonuçları kontrol et
+        if (agent_result and isinstance(agent_result, dict) and 
+            agent_result.get('final_answer')):
+            
             yield {
                 "type": "status",
                 "session_id": session_id,
-                "message": "İlgili dokümanlar aranıyor...",
+                "message": f"IntelligentAgent sonuçları alındı, direkt kullanılıyor...",
                 "user": "chatbot"
             }
             
-            # Instantiate intelligent agent for streaming path as well
-            intelligent_agent = None
-            try:
-                # Temiz cevap + referans modu - gereksiz LLM yorumlama yok
-                intelligent_agent = IntelligentAgent(graph, enable_llm_interpretation=False)
-            except Exception:
-                intelligent_agent = None
-
-            # IntelligentAgent'ı direkt kullan - retriever'a gerek yok
-            if intelligent_agent:
-                # IntelligentAgent'tan direkt sonuç al
-                user_question = messages[-1].content if messages else question
-                agent_result = await asyncio.get_event_loop().run_in_executor(
-                    None, intelligent_agent.solve_question, user_question
-                )
-                
-                # Token bilgilerini çıkar
-                agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
-                
-                # Docs boş - IntelligentAgent direkt cevap veriyor
-                docs = []
-                transformed_question = user_question
-            else:
-                # Fallback - agent yoksa boş değerler
-                docs = []
-                transformed_question = question
-                agent_token_usage = None
-                agent_result = None
-            
-            # IntelligentAgent'tan gelen sonuçları kontrol et
-            if (agent_result and isinstance(agent_result, dict) and 
-                agent_result.get('final_answer')):
-                
+            # IntelligentAgent direkt cevap verdiği için formatted_docs'a gerek yok
+            formatted_docs = ""
+        else:
+            # IntelligentAgent final_answer yoksa normal RAG flow
+            if docs:
                 yield {
                     "type": "status",
                     "session_id": session_id,
-                    "message": f"IntelligentAgent sonuçları alındı, direkt kullanılıyor...",
+                    "message": "Bağlam hazırlanıyor...",
                     "user": "chatbot"
                 }
                 
-                # IntelligentAgent direkt cevap verdiği için formatted_docs'a gerek yok
-                formatted_docs = ""
-            else:
-                # IntelligentAgent final_answer yoksa normal RAG flow
-                if docs:
-                    yield {
-                        "type": "status",
-                        "session_id": session_id,
-                        "message": "Bağlam hazırlanıyor...",
-                        "user": "chatbot"
-                    }
-                    
-                    formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
-                    sources = sources_list
-                    entities = entities_dict
-                    
-                    print(f"========== STREAMING FORMATTED DOCUMENTS ==========")
-                    print(f"Total Documents Formatted: {len(docs)}")
-                    print(f"Sources Found: {sources}")
-                    print(f"Entity Details: {entities}")
-                    print(f"Communities: {communities}")
-                    print("--- FORMATTED CONTEXT FOR STREAMING LLM ---")
-                    print(f"{formatted_docs[:1000]}...")  # İlk 1000 karakteri göster
-                    print("--- END OF FORMATTED CONTEXT ---")
-                    print("==================================================")
-                    
-                    if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
-                        nodedetails["entitydetails"] = entities_dict
-                    elif chat_mode_settings["mode"] == CHAT_GLOBAL_VECTOR_FULLTEXT_MODE:
-                        nodedetails["communitydetails"] = communities
-                    else:
-                        sources_and_chunks = get_sources_and_chunks(sources, docs)
-                        sources = sources_and_chunks['sources']
-                        nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
+                formatted_docs, sources_list, entities_dict, communities = format_documents(docs, model, chat_mode_settings)
+                sources = sources_list
+                entities = entities_dict
+                
+                print(f"========== STREAMING FORMATTED DOCUMENTS ==========")
+                print(f"Total Documents Formatted: {len(docs)}")
+                print(f"Sources Found: {sources}")
+                print(f"Entity Details: {entities}")
+                print(f"Communities: {communities}")
+                print("--- FORMATTED CONTEXT FOR STREAMING LLM ---")
+                print(f"{formatted_docs[:1000]}...")  # İlk 1000 karakteri göster
+                print("--- END OF FORMATTED CONTEXT ---")
+                print("==================================================")
+                
+                if chat_mode_settings["mode"] == CHAT_ENTITY_VECTOR_MODE:
+                    nodedetails["entitydetails"] = entities_dict
+                elif chat_mode_settings["mode"] == CHAT_GLOBAL_VECTOR_FULLTEXT_MODE:
+                    nodedetails["communitydetails"] = communities
                 else:
-                    # Docs yoksa boş formatted_docs başlat
-                    formatted_docs = ""
+                    sources_and_chunks = get_sources_and_chunks(sources, docs)
+                    sources = sources_and_chunks['sources']
+                    nodedetails["chunkdetails"] = sources_and_chunks["chunkdetails"]
+            else:
+                # Docs yoksa boş formatted_docs başlat
+                formatted_docs = ""
         
         # Streaming response başlat
         yield {
