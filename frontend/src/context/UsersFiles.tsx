@@ -49,7 +49,7 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
   const [selectedChunk_overlap, setSelectedChunk_overlap] = useState<number>(chunkOverlap);
   const [selectedChunks_to_combine, setSelectedChunks_to_combine] = useState<number>(chunksToCombine);
   const [selectedMaxPages, setSelectedMaxPages] = useState<number | undefined>(undefined);
-  const [generateEmbedding, setGenerateEmbedding] = useState<boolean>(false);
+  const [generateEmbedding, setGenerateEmbedding] = useState<boolean>(true);
   const [selectedSchemas, setSelectedSchemas] = useState<readonly OptionType[]>(getStoredSchema);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [selectedRows, setSelectedRows] = useState<string[]>([]);

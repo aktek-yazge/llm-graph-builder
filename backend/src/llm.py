@@ -59,7 +59,7 @@ def get_llm(model: str):
             logging.info(f"OpenAI model kontrolü: model={model}, model_name={model_name}")
 
             # Reasoning modelleri için özel kontrol (o5-mini, o4-mini, o3-mini, vb.)
-            if any(reasoning_model in model_name.lower() for reasoning_model in ["o5-mini","o4-mini", "o3-mini", "o1-mini", "o1-preview"]):
+            if any(reasoning_model in model_name.lower() for reasoning_model in ["gpt-5-mini","o4-mini", "o3-mini", "o1-mini", "o1-preview"]):
                 logging.info(f"{model_name} reasoning model tespit edildi, reasoning parametreleri ile LLM oluşturuluyor")
                 
                 # Reasoning parametrelerini environment'tan veya default'tan al
