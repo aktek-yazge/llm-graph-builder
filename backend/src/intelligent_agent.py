@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import ToolMessage
 from langchain_neo4j import Neo4jGraph
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import neo4j.time
@@ -21,7 +22,7 @@ import neo4j.time
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
 
-from src.llm import get_llm
+from src.llm import get_llm, get_reasoning_response_text, get_full_reasoning_response, is_reasoning_model
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from dotenv import load_dotenv
@@ -108,7 +109,7 @@ class IntelligentAgent:
         self.max_iterations = 10  # Derinlemesine araştırma için
         # self.max_iterations = 5
         self.schema_cache = None
-        self.system_prompt_cache = None  # Schema-based system prompt cache - PROMPT güncellendi: vector_search kaldırıldı, domain-agnostic yapıldı
+        self.system_prompt_cache = None  # Schema-based system prompt cache - PROMPT güncellendi: Genel analiz kuralı eklendi
         self.enable_llm_interpretation = enable_llm_interpretation  # LLM yorumlama açık/kapalı
         
         # Progress tracking ve context memory
@@ -214,7 +215,13 @@ GÖREV:
             # 1. Discovered chunks'dan referanslar (eğer varsa)
             if state.discovered_chunks and reference_type == "pages":
                 unique_docs = {}
-                for chunk in state.discovered_chunks[:10]:  # En relevan 10 chunk
+                # Sadece yüksek relevance score'lu chunk'ları al (0.85 üzeri)
+                relevant_chunks = [chunk for chunk in state.discovered_chunks if chunk.relevance_score >= 0.85]
+                # Eğer hiç yüksek score'lu chunk yoksa, en yüksek 5 tanesini al
+                if not relevant_chunks:
+                    relevant_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)[:5]
+                
+                for chunk in relevant_chunks[:10]:  # En relevan 10 chunk'tan max
                     doc_name = chunk.document_name
                     if doc_name not in unique_docs:
                         unique_docs[doc_name] = []
@@ -224,7 +231,7 @@ GÖREV:
                 if unique_docs:
                     for doc_name, pages in unique_docs.items():
                         page_list = ", ".join(map(str, sorted(set(pages))))
-                        # Page image linklerini oluştur
+                        # Page image linklerini oluştur - sadece gerçekten kullanılan sayfalar
                         for page_num in sorted(set(pages))[:3]:  # Her belgeden max 3 sayfa
                             image_name = f"{doc_name.replace('.pdf', '')}_page_{page_num:03d}.png"
                             # URL encode the image name for proper handling of Turkish characters
@@ -396,16 +403,65 @@ Sadece "documents" veya "pages" olarak yanıtla."""
             logger.error(f"Referans tipi belirleme hatası: {e}")
             return "documents"  # Safe fallback
     def execute_cypher_query(self, query: str) -> Tuple[bool, Any]:
-        """Cypher sorgusunu çalıştır"""
+        """Cypher sorgusunu çalıştır - Saklanan embedding'leri parametrelere ekle"""
         try:
             logger.info(f"Cypher sorgusu çalıştırılıyor: {query}")
-            result = self.graph.query(query)
+            
+            # Query parametrelerini hazırla
+            query_params = {}
+            
+            # Eğer query'de $embedding_vector parametresi varsa, saklanan embedding'i kullan
+            if '$embedding_vector' in query:
+                available_embeddings = getattr(self, '_cypher_embeddings', {})
+                
+                if available_embeddings:
+                    # Son oluşturulan embedding'i kullan
+                    latest_embedding_key = list(available_embeddings.keys())[-1]
+                    embedding_vector = available_embeddings[latest_embedding_key]
+                    query_params['embedding_vector'] = embedding_vector
+                    
+                    logger.info(f"✅ Cypher query'ye embedding eklendi: {latest_embedding_key}")
+                    logger.info(f"📊 Embedding dimensions: {len(embedding_vector)}")
+                else:
+                    logger.warning("❌ Query'de $embedding_vector var ama saklanan embedding bulunamadı")
+                    return False, "Query'de $embedding_vector parametresi var ama embedding oluşturulmamış. Önce generate_embeddings_for_cypher tool'unu çağır."
+            
+            # Cypher sorgusunu çalıştır
+            result = self.graph.query(query, query_params)
             logger.info(f"Sonuç: {len(result) if result else 0} kayıt")
             
-            # Sonuç detaylarını logla
+            # Sonuç detaylarını logla - özellikle chunk bilgileri için
             if result:
-                for i, row in enumerate(result[:3]):  # İlk 3 satırı göster
-                    logger.info(f"Satır {i+1}: {row}")
+                logger.info(f"🔍 CYPHER QUERY SONUÇLARI:")
+                for i, row in enumerate(result[:5]):  # İlk 5 satırı göster
+                    logger.info(f"📄 Satır {i+1}:")
+                    
+                    # Chunk bilgileri varsa detaylı logla
+                    if 'node.text' in row or 'text' in row:
+                        text_content = row.get('node.text') or row.get('text', '')
+                        score = row.get('score', 'N/A')
+                        
+                        # Chunk metadata'sını bul
+                        chunk_id = row.get('node.chunkId') or row.get('chunkId', 'N/A')
+                        page_number = row.get('node.page_number') or row.get('page_number', 'N/A')
+                        position = row.get('node.position') or row.get('position', 'N/A')
+                        
+                        logger.info(f"   📊 Chunk ID: {chunk_id}")
+                        logger.info(f"   📄 Sayfa: {page_number}")
+                        logger.info(f"   🎯 Position: {position}")
+                        logger.info(f"   📈 Score: {score}")
+                        logger.info(f"   💬 Text: {text_content[:150]}...")
+                        
+                        # Sonunda kesik mi diye kontrol et
+                        if text_content and (text_content.endswith('|') or 
+                                           text_content.endswith('-') or 
+                                           text_content.endswith(',') or
+                                           len(text_content) > 800):  # Uzun chunk ise kesilmiş olabilir
+                            logger.info(f"   ⚠️  Bu chunk'ta bilgi eksik kalmiş olabilir - sonraki chunk'lara bakılmalı")
+                    else:
+                        logger.info(f"   📋 Row data: {row}")
+                    
+                    logger.info("   " + "="*60)
             
             return True, result
         except Exception as e:
@@ -495,6 +551,115 @@ Sadece "documents" veya "pages" olarak yanıtla."""
             
         except Exception as e:
             logger.error(f"Vector search hatası: {e}")
+            return False, str(e)
+    
+    def generate_embeddings_for_cypher(self, text: str) -> Tuple[bool, Any]:
+        """Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
+        
+        Bu fonksiyon LLM'in tool olarak çağırdığı ve embedding'leri sakladığı fonksiyondur.
+        LLM bu embedding'leri Cypher'da $embedding_vector değişkeni olarak kullanır.
+        
+        Args:
+            text: Embedding oluşturulacak text
+            
+        Returns:
+            Tuple[bool, list]: Başarı durumu ve embedding vektörü
+        """
+        try:
+            logger.info(f"🧠 Cypher için embedding oluşturuluyor: {text}")
+            
+            # Text'i normalize et
+            normalized_text = normalize_unicode_text(text)
+            logger.info(f"🧹 Normalize edilmiş text: {normalized_text}")
+            
+            # OpenAI embedding oluştur
+            embedding_vector = self.embedding_model.embed_query(normalized_text)
+            
+            logger.info(f"✅ Cypher embedding oluşturuldu: {len(embedding_vector)} boyutlu vektör")
+            return True, embedding_vector
+            
+        except Exception as e:
+            logger.error(f"❌ Cypher embedding oluşturma hatası: {e}")
+            return False, str(e)
+
+    def execute_vector_search_with_embeddings(self, embeddings: List[float], limit: int = 10, document_names: List[str] = None) -> Tuple[bool, Any]:
+        """Önceden oluşturulmuş embedding'lerle vector search yapar
+        
+        Bu fonksiyon LLM'in create_query_embeddings tool'undan aldığı embedding'leri
+        kullanarak arama yapar.
+        
+        Args:
+            embeddings: Önceden oluşturulmuş embedding vektörü
+            limit: Maksimum sonuç sayısı  
+            document_names: Aramayı sınırlandırmak için belge adları listesi (opsiyonel)
+        """
+        try:
+            scope_info = f" (Belge filtresi: {document_names})" if document_names else " (Tüm DB)"
+            logger.info(f"🔍 Vector search embedding'lerle çalıştırılıyor{scope_info}")
+            
+            # Belge filtresi varsa sınırlandırılmış arama, yoksa tüm DB
+            if document_names and len(document_names) > 0:
+                # Belirli belgelerde sınırlandırılmış arama
+                vector_query = """
+                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
+                YIELD node, score
+                MATCH (node)-[:PART_OF]->(d:Document)
+                WHERE d.fileName IN $document_names
+                RETURN 
+                    node.chunkId as chunk_id,
+                    node.text as text, 
+                    node.page_number as page_number,
+                    d.fileName as document_name,
+                    score
+                ORDER BY score DESC
+                """
+                query_params = {
+                    'query_vector': embeddings,
+                    'limit': limit,
+                    'document_names': document_names
+                }
+            else:
+                # Tüm veritabanında arama (mevcut davranış)
+                vector_query = """
+                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
+                YIELD node, score
+                OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
+                RETURN 
+                    node.chunkId as chunk_id,
+                    node.text as text, 
+                    node.page_number as page_number,
+                    d.fileName as document_name,
+                    score
+                ORDER BY score DESC
+                """
+                query_params = {
+                    'query_vector': embeddings,
+                    'limit': limit
+                }
+            
+            result = self.graph.query(vector_query, query_params)
+            
+            if not result:
+                logger.info("Vector search: sonuç bulunamadı")
+                return True, []
+            
+            # Sonuçları formatla
+            formatted_results = []
+            for row in result:
+                formatted_results.append({
+                    'chunk_id': row['chunk_id'],
+                    'text': row['text'] or "",
+                    'page_number': row['page_number'],
+                    'document_name': row['document_name'] or "Unknown",
+                    'relevance_score': float(row['score'])
+                })
+            
+            logger.info(f"✅ Vector search sonucu: {len(formatted_results)} chunk, en yüksek score: {formatted_results[0]['relevance_score']:.3f}")
+            
+            return True, formatted_results
+            
+        except Exception as e:
+            logger.error(f"❌ Vector search embedding hatası: {e}")
             return False, str(e)
     
     def get_available_documents(self) -> List[str]:
@@ -1447,12 +1612,186 @@ Anahtar bulgular ve önemli bilgiler nedir?
                     else:
                         action_content = line  # İlk content satırı
         
-        # Kod bloklarını temizle
+        # Kod bloklarını ve gereksiz karakterleri temizle
         if action_content:
             action_content = action_content.replace('```cypher', '').replace('```', '').strip()
+            # Başında pipe (|) karakteri varsa kaldır (YAML multiline format)
+            if action_content.startswith('|'):
+                action_content = action_content[1:].strip()
+            # Başında newline varsa kaldır
+            action_content = action_content.lstrip('\n').strip()
         
         return observation.strip(), thought.strip(), (action.strip(), action_content.strip())
     
+    def get_available_tools(self) -> List[Dict[str, Any]]:
+        """LLM için kullanılabilir tool'ların tanımını döndürür (OpenAI Function Calling formatında)"""
+        tools = [
+            {
+                "type": "function", 
+                "function": {
+                    "name": "generate_embeddings_for_cypher",
+                    "description": "Cypher sorgusunda kullanmak üzere text'ten embedding oluşturur. LLM bu embedding'leri Cypher query'sinde $embedding_vector değişkeni olarak kullanır.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Embedding oluşturulacak text (metadata temizlenmiş anahtar kelimeler)"
+                            }
+                        },
+                        "required": ["text"]
+                    }
+                }
+            }
+        ]
+        return tools
+    
+    def handle_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
+        """LLM'den gelen tool call'ları işler ve sonuçları döndürür"""
+        tool_results = []
+        
+        for tool_call in tool_calls:
+            try:
+                # Debug: tool_call structure'ını logla
+                logger.info(f"🔍 DEBUG Tool Call Structure: {type(tool_call)}")
+                logger.info(f"🔍 DEBUG Tool Call Dir: {dir(tool_call)}")
+                
+                # OpenAI tool call format'ını handle et (object, dict, veya LangChain format)
+                if hasattr(tool_call, 'function'):
+                    # Object format (LangChain wrapper)
+                    function_name = tool_call.function.name
+                    function_args = json.loads(tool_call.function.arguments)
+                    tool_call_id = tool_call.id
+                elif isinstance(tool_call, dict) and "function" in tool_call:
+                    # Dict format (direct OpenAI response)
+                    function_name = tool_call["function"]["name"]
+                    # Arguments might be string or already parsed
+                    args = tool_call["function"]["arguments"]
+                    if isinstance(args, str):
+                        function_args = json.loads(args)
+                    else:
+                        function_args = args
+                    tool_call_id = tool_call["id"]
+                elif isinstance(tool_call, dict) and "name" in tool_call and "args" in tool_call:
+                    # LangChain format
+                    function_name = tool_call["name"]
+                    function_args = tool_call["args"]
+                    tool_call_id = tool_call["id"]
+                else:
+                    logger.error(f"❌ Bilinmeyen tool call format'ı: {type(tool_call)}, content: {tool_call}")
+                    continue
+                
+                logger.info(f"🔧 Tool çağrısı: {function_name} - Args: {function_args}")
+                
+                if function_name == "generate_embeddings_for_cypher":
+                    # Parameter mapping - 'text' veya 'query' parametrelerini destekle
+                    if "text" in function_args:
+                        text = function_args["text"]
+                    elif "query" in function_args:
+                        text = function_args["query"]
+                    else:
+                        logger.error(f"❌ generate_embeddings_for_cypher için gerekli parameter bulunamadı: {function_args}")
+                        tool_result = {
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: Required parameter 'text' or 'query' not found in {function_args}"
+                        }
+                        tool_results.append(tool_result)
+                        continue
+                    
+                    logger.info(f"🧠 Embedding oluşturulacak text: {text}")
+                    success, result = self.generate_embeddings_for_cypher(text)
+                    
+                    if success:
+                        # Embedding'i saklama - LLM'e SADECE referans ver
+                        embedding_id = f"embedding_{tool_call_id}"
+                        if not hasattr(self, '_cypher_embeddings'):
+                            self._cypher_embeddings = {}
+                        self._cypher_embeddings[embedding_id] = result
+                        
+                        # LLM'e sadece referans bilgisi gönder
+                        tool_result_content = f"Embedding başarıyla oluşturuldu. Cypher sorgunda '$embedding_vector' değişkeni olarak kullanabilirsin. Text: '{text}'"
+                        tool_result = {
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": tool_result_content
+                        }
+                        
+                        # Embedding vektörünün ilk 20 karakterini logla
+                        embedding_str = str(result)
+                        logger.info(f"🔍 LLM'e dönen tool result: {tool_result_content}")
+                        logger.info(f"🔍 Embedding vektörü (ilk 20 karakter): {embedding_str[:20]}...")
+                        logger.info(f"✅ Embedding oluşturuldu ve saklandı: {embedding_id}")
+                        
+                    else:
+                        tool_result = {
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: {result}"
+                        }
+                    
+                else:
+                    tool_result = {
+                        "tool_call_id": tool_call_id,
+                        "role": "tool",
+                        "name": function_name, 
+                        "content": f"Error: Unknown function {function_name}"
+                    }
+                    
+                tool_results.append(tool_result)
+                logger.info(f"✅ Tool sonucu: {function_name} - Success: {success if 'success' in locals() else 'N/A'}")
+                
+            except Exception as e:
+                logger.error(f"❌ Tool çalıştırma hatası: {e}")
+                logger.error(f"❌ Tool call debug info: {tool_call}")
+                # Güvenli bir tool_call_id al
+                try:
+                    if hasattr(tool_call, 'id'):
+                        tool_call_id = tool_call.id
+                    elif isinstance(tool_call, dict) and 'id' in tool_call:
+                        tool_call_id = tool_call['id']
+                    else:
+                        tool_call_id = f"error_{len(tool_results)}"
+                        
+                    tool_result = {
+                        "tool_call_id": tool_call_id,
+                        "role": "tool",
+                        "name": "error",
+                        "content": f"Error: {str(e)}"
+                    }
+                    tool_results.append(tool_result)
+                except Exception as inner_e:
+                    logger.error(f"❌ Tool result oluşturma hatası: {inner_e}")
+        
+        return tool_results
+        
+        return tool_results
+    
+    def is_openai_model(self) -> bool:
+        """Kullanılan modelin OpenAI modeli olup olmadığını kontrol eder"""
+        # LLM tipini kontrol et
+        if hasattr(self.llm, '__class__'):
+            class_name = self.llm.__class__.__name__
+            if 'OpenAI' in class_name or 'ChatOpenAI' in class_name:
+                return True
+        
+        # Model adını kontrol et
+        if hasattr(self.llm, 'model_name'):
+            model_name = str(self.llm.model_name).lower()
+            if 'gpt' in model_name or 'openai' in model_name:
+                return True
+        
+        # Model property'sini kontrol et
+        if hasattr(self.llm, 'model'):
+            model = str(self.llm.model).lower()
+            if 'gpt' in model or 'openai' in model:
+                return True
+                
+        return False
+
     def solve_question(self, user_question: str, session_id: str = None) -> Dict[str, Any]:
         """Ana problem çözme fonksiyonu - ReAct pattern ile Chunk-based arama"""
         
@@ -1518,6 +1857,12 @@ Anahtar bulgular ve önemli bilgiler nedir?
         # Agent state'i başlat
         state = AgentState(question=user_question, original_question=user_question)
         
+        # Embedding storage için
+        self._current_embeddings = {}
+        
+        # Cypher embedding storage
+        self._cypher_embeddings = {}
+        
         # Schema-based system prompt'u al (cache'den veya oluştur)
         system_prompt = self.get_system_prompt()
         
@@ -1535,6 +1880,15 @@ Anahtar bulgular ve önemli bilgiler nedir?
             context_info = ""
             if state.discovered_chunks:
                 context_info = f"\n\nMevcut Durum:\n- {len(state.discovered_chunks)} chunk keşfedildi\n- En yüksek relevance: {max([c.relevance_score for c in state.discovered_chunks]):.3f}\n- Toplanan dokümalar: {list(set([c.document_name for c in state.discovered_chunks]))}"
+                
+                # CRITICAL: Chunk içeriklerini de LLM'e ver ki analiz edebilsin!
+                sorted_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
+                chunk_contents = "\n\n**KEŞFEDİLEN CHUNK İÇERİKLERİ (MUTLAKA ANALİZ ET!):**\n"
+                for i, chunk in enumerate(sorted_chunks[:15], 1):  # Top 15 chunk
+                    chunk_contents += f"\n--- Chunk {i} (Relevance: {chunk.relevance_score:.3f}, Sayfa: {chunk.page_number}) ---\n"
+                    chunk_contents += f"{chunk.text}\n"
+                
+                context_info += chunk_contents
             
             # Context memory, conversation context ve mevcut durum bilgilerini birleştir
             prompt = f"{conversation_context}{self.context_memory}{current_observation}{context_info}\n\nBu duruma göre next action'ını belirle:"
@@ -1552,8 +1906,80 @@ Anahtar bulgular ve önemli bilgiler nedir?
             self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
             
             try:
-                response = self.llm.invoke(messages)
-                agent_response = response.content
+                # OpenAI model kontrolü ve tool calling desteği
+                if self.is_openai_model():
+                    # OpenAI tool calling desteği ekle
+                    tools = self.get_available_tools()
+                    response = self.llm.invoke(messages, tools=tools)
+                    
+                    # Tool call var mı kontrol et
+                    if hasattr(response, 'tool_calls') and response.tool_calls:
+                        logger.info(f"🔧 {len(response.tool_calls)} tool call algılandı")
+                        
+                        # Tool call'ları işle
+                        tool_results = self.handle_tool_calls(response.tool_calls)
+                        
+                        # Tool sonuçlarını conversation'a ekle ve tekrar LLM'e gönder
+                        messages.append(response)  # Assistant response'u ekle
+                        
+                        # Tool result'larını ekle
+                        for tool_result in tool_results:
+                            from langchain_core.messages import ToolMessage
+                            messages.append(ToolMessage(
+                                content=tool_result["content"], 
+                                tool_call_id=tool_result["tool_call_id"]
+                            ))
+                        
+                        # Tool call'lardan ham veriyi state'e ekle - Şimdilik yok
+                        # Çünkü tool sadece embedding oluşturuyor, sonuç Cypher'da kullanılıyor
+                        
+                        # Tool sonuçları ile tekrar LLM'e sor
+                        response = self.llm.invoke(messages)
+                        
+                        # Reasoning model kontrolü
+                        if is_reasoning_model(self.llm):
+                            agent_response = get_reasoning_response_text(response)
+                            # Reasoning bilgileri varsa logla
+                            full_response = get_full_reasoning_response(response)
+                            if full_response["has_reasoning"]:
+                                logger.info("🧠 Reasoning model düşünce süreci:")
+                                for reasoning_text in full_response["reasoning"]:
+                                    logger.info(f"   {reasoning_text}")
+                        else:
+                            agent_response = response.content
+                        
+                        # Tool call'lar tamamlandı observation'ı
+                        embedding_count = len(getattr(self, '_cypher_embeddings', {}))
+                        current_observation = f"Tool calls tamamlandı: {len(response.tool_calls)} tool çağrısı, {embedding_count} embedding oluşturuldu. Cypher'da $embedding_vector kullanabilirsin."
+                        
+                        logger.info("✅ Tool call'lar işlendi ve final response alındı")
+                    else:
+                        # Reasoning model kontrolü
+                        if is_reasoning_model(self.llm):
+                            agent_response = get_reasoning_response_text(response)
+                            # Reasoning bilgileri varsa logla
+                            full_response = get_full_reasoning_response(response)
+                            if full_response["has_reasoning"]:
+                                logger.info("🧠 Reasoning model düşünce süreci:")
+                                for reasoning_text in full_response["reasoning"]:
+                                    logger.info(f"   {reasoning_text}")
+                        else:
+                            agent_response = response.content
+                else:
+                    # Non-OpenAI modeller için standart invoke
+                    response = self.llm.invoke(messages)
+                    
+                    # Reasoning model kontrolü (Non-OpenAI reasoning modeller için)
+                    if is_reasoning_model(self.llm):
+                        agent_response = get_reasoning_response_text(response)
+                        # Reasoning bilgileri varsa logla
+                        full_response = get_full_reasoning_response(response)
+                        if full_response["has_reasoning"]:
+                            logger.info("🧠 Reasoning model düşünce süreci:")
+                            for reasoning_text in full_response["reasoning"]:
+                                logger.info(f"   {reasoning_text}")
+                    else:
+                        agent_response = response.content
                 
                 # Response'u parse et - action type'ını almak için önce parse
                 observation, thought, (action, action_content) = self.parse_agent_response(agent_response)
@@ -1640,7 +2066,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                             if row_summary:
                                 data_summary.append(", ".join(row_summary))
                         
-                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}. Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa vector_search yap."
+                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}. Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
                         
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
@@ -1653,10 +2079,144 @@ Anahtar bulgular ve önemli bilgiler nedir?
                             result  # Ham cypher sonuçları
                         )
                         
+                        # Cypher sonuçlarından chunk bilgilerini çıkar ve discovered_chunks'a ekle
+                        chunks_found = 0
+                        for row in result:
+                            # Chunk bilgilerini içeren sonuçları ara
+                            if isinstance(row, dict):
+                                chunk_text = None
+                                chunk_id = None
+                                page_number = None
+                                document_name = None
+                                
+                                # Farklı chunk field'larını kontrol et
+                                if 'text' in row:
+                                    chunk_text = row['text']
+                                    chunk_id = row.get('chunkId', row.get('chunk_id', f"cypher_{state.iteration_count}_{chunks_found}"))
+                                    page_number = row.get('pageNumber', row.get('page_number', 0))
+                                    document_name = row.get('documentFileName', row.get('document_name', 'Unknown'))
+                                elif 'c.text' in row:  # Direct field return (c.text, c.chunkId, etc.)
+                                    chunk_text = row['c.text']
+                                    chunk_id = row.get('c.chunkId', f"cypher_{state.iteration_count}_{chunks_found}")
+                                    page_number = row.get('c.page_number', 0)
+                                    # Document name'i çeşitli alanlardan almaya çalış
+                                    document_name = row.get('document_name') or row.get('d.fileName') or row.get('fileName')
+                                    
+                                    # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
+                                    if not document_name and chunk_id:
+                                        try:
+                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_result = self.graph.query(doc_query, {"chunk_id": chunk_id})
+                                            if doc_result and len(doc_result) > 0:
+                                                document_name = doc_result[0].get('fileName', 'Unknown')
+                                            else:
+                                                document_name = 'Unknown'
+                                        except Exception as e:
+                                            logger.warning(f"Document name alınamadı chunk {chunk_id} için: {e}")
+                                            document_name = 'Unknown'
+                                    else:
+                                        document_name = document_name or 'Unknown'
+                                elif 'node.text' in row:  # Vector search return (node.text, node.chunkId, etc.)
+                                    chunk_text = row['node.text']
+                                    chunk_id = row.get('node.chunkId', f"cypher_{state.iteration_count}_{chunks_found}")
+                                    page_number = row.get('node.page_number', 0)
+                                    document_name = row.get('document_name') or row.get('d.fileName') or row.get('fileName')
+                                    
+                                    # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
+                                    if not document_name and chunk_id:
+                                        try:
+                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_result = self.graph.query(doc_query, {"chunk_id": chunk_id})
+                                            if doc_result and len(doc_result) > 0:
+                                                document_name = doc_result[0].get('fileName', 'Unknown')
+                                            else:
+                                                document_name = 'Unknown'
+                                        except Exception as e:
+                                            logger.warning(f"Document name alınamadı chunk {chunk_id} için: {e}")
+                                            document_name = 'Unknown'
+                                    else:
+                                        document_name = document_name or 'Unknown'
+                                elif 'c' in row and isinstance(row['c'], dict):
+                                    chunk_data = row['c']
+                                    chunk_text = chunk_data.get('text')
+                                    chunk_id = chunk_data.get('chunkId', f"cypher_{state.iteration_count}_{chunks_found}")
+                                    page_number = chunk_data.get('pageNumber', 0)
+                                    document_name = chunk_data.get('fileName')
+                                    
+                                    # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
+                                    if not document_name and chunk_id:
+                                        try:
+                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_result = self.graph.query(doc_query, {"chunk_id": chunk_id})
+                                            if doc_result and len(doc_result) > 0:
+                                                document_name = doc_result[0].get('fileName', 'Unknown')
+                                            else:
+                                                document_name = 'Unknown'
+                                        except Exception as e:
+                                            logger.warning(f"Document name alınamadı chunk {chunk_id} için: {e}")
+                                            document_name = 'Unknown'
+                                    else:
+                                        document_name = document_name or 'Unknown'
+                                elif 'chunk' in row and isinstance(row['chunk'], dict):
+                                    chunk_data = row['chunk']
+                                    chunk_text = chunk_data.get('text')
+                                    chunk_id = chunk_data.get('chunkId', f"cypher_{state.iteration_count}_{chunks_found}")
+                                    page_number = chunk_data.get('pageNumber', 0)
+                                    document_name = chunk_data.get('fileName')
+                                    
+                                    # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
+                                    if not document_name and chunk_id:
+                                        try:
+                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_result = self.graph.query(doc_query, {"chunk_id": chunk_id})
+                                            if doc_result and len(doc_result) > 0:
+                                                document_name = doc_result[0].get('fileName', 'Unknown')
+                                            else:
+                                                document_name = 'Unknown'
+                                        except Exception as e:
+                                            logger.warning(f"Document name alınamadı chunk {chunk_id} için: {e}")
+                                            document_name = 'Unknown'
+                                    else:
+                                        document_name = document_name or 'Unknown'
+                                
+                                # Geçerli chunk bulunursa discovered_chunks'a ekle
+                                if chunk_text and len(chunk_text.strip()) > 10:  # Minimum uzunluk kontrolü
+                                    chunk_info = ChunkInfo(
+                                        chunk_id=chunk_id,
+                                        text=chunk_text,
+                                        page_number=page_number,
+                                        document_name=document_name,
+                                        relevance_score=0.9,  # Cypher sonuçları yüksek relevance
+                                        document_metadata={},
+                                        split_texts=[],
+                                        split_scores=[]
+                                    )
+                                    state.discovered_chunks.append(chunk_info)
+                                    chunks_found += 1
+                        
+                        if chunks_found > 0:
+                            logger.info(f"🔍 Cypher query'den {chunks_found} chunk discovered_chunks'a eklendi")
+                            current_observation += f" ({chunks_found} chunk discovered_chunks'a eklendi)"
+                        
                     else:
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
                         
                 elif action == "vector_search":
+                    # Vector search için mevcut Cypher embedding'lerini kontrol et
+                    available_embeddings = getattr(self, '_cypher_embeddings', {})
+                    
+                    if not available_embeddings:
+                        current_observation = f"❌ Vector search için önce generate_embeddings_for_cypher tool'unu çağırmalısın. Arama terimi: '{action_content}'"
+                        logger.warning("Vector search denendi ama embedding bulunamadı")
+                        continue
+                    
+                    # Son oluşturulan embedding'i kullan (veya tek varsa onu)
+                    latest_embedding_key = list(available_embeddings.keys())[-1]
+                    query_embedding = available_embeddings[latest_embedding_key]
+                    
+                    logger.info(f"🔍 Vector search yapılıyor - Embedding ID: {latest_embedding_key}")
+                    logger.info(f"📊 Mevcut embedding'ler: {list(available_embeddings.keys())}")
+                    
                     # Önceki Cypher bulgularından ilgili belgeleri çıkar
                     relevant_documents = []
                     for finding in state.successful_findings:
@@ -1674,12 +2234,11 @@ Anahtar bulgular ve önemli bilgiler nedir?
                                         if doc_name and doc_name not in relevant_documents:
                                             relevant_documents.append(doc_name)
                     
-                    # Akıllı belge filtrelemesi ile vector search
-                    success, result = self.execute_document_filtered_vector_search(
-                        action_content, 
-                        user_question, 
+                    # Saklanan embedding ile vector search yap
+                    success, result = self.execute_vector_search_with_embeddings(
+                        query_embedding,
                         limit=15, 
-                        relevant_documents=relevant_documents if relevant_documents else None
+                        document_names=relevant_documents if relevant_documents else None
                     )
                     if success and result:
                         # Vector search sonuçlarını işle
@@ -1898,6 +2457,9 @@ Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap 
             
     def get_system_prompt(self) -> str:
         """System prompt'u cache'den al veya oluştur - token-optimized"""
+        # Cache'i temizle ki güncel prompt kullanılsın
+        self.system_prompt_cache = None
+        
         if self.system_prompt_cache:
             logger.info("📋 System prompt cache'den alınıyor")
             return self.system_prompt_cache
@@ -1925,6 +2487,12 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
 
         system_prompt = f"""Sen bir graph veritabanı analiz uzmanısın. Kullanıcı sorularını analiz ederek en uygun arama stratejisini KENDI KARAR VER.
 
+⚠️ **ZORUNLU CYPHER KURALLARI:**
+1. **CONTAINS OPERATÖRÜ ZORUNLU**: String aramalarında = operatörü YASAK, sadece CONTAINS kullan
+2. **apoc.text.clean() ZORUNLU**: Her string aramada mutlaka apoc.text.clean() kullan
+3. **toLower() ZORUNLU**: Her string aramada mutlaka toLower() kullan
+4. **ÖRNEK ZORUNLU FORMAT**: `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("d4"))`
+
 {schema_text}## 🧠 DECISION FRAMEWORK:
 
 ### 🔍 SORU TİPİ ANALİZİ:
@@ -1945,31 +2513,72 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
 2. **İKİNCİ KARAR**: Cypher sonucuna BAK ve şunu sor:
    - ✅ Soru metadata ile tam cevaplanıyor mu? → final_answer
    - ❌ Çok fazla veri var mı? Daha spesifik arama gerekli mi? → refined cypher_query
-   - ❌ İçerik detaylarına ihtiyaç var mı? → vector_search (semantic arama) VEYA cypher_query (chunk'ları topla)
-   - ❌ Belge metinlerini okumak gerekli mi? → vector_search (direkt chunk arama) VEYA cypher_query (relationship takip)
+   - ❌ İçerik detaylarına ihtiyaç var mı? → cypher_query ile chunk'ları ara
+   - ❌ Belge metinlerini okumak gerekli mi? → cypher_query ile chunk'ları relationship takip ederek ara
+   - **⚠️ KRİTİK: Document.total_chunks=0 veya processed_chunk=0 görsen bile MUTLAKA chunk arama yap! Metadata güncel olmayabilir, chunk'lar var olabilir!**
+   - **📋 CHUNK ANALİZİ**: Gelen chunk'larda eksik bilgi var mı?
+     * Tablo yarıda kesmişse → sonraki chunk'ları getir
+     * Cümle eksikse → position+1, position+2 chunk'larını getir  
+     * "P 12.02.2020" gibi başlangıç varsa → tam taksit tablosunu getir
    - 5+ belge/poliçe bulunduğunda analiz gerekli ise:
      * KULLANICIYA SOR: "X adet belge bulundu, hangisinin detayını analiz etmek istiyorsunuz?"
      * VEYA KENDİ SEÇ: En güncel/önemli 2-3 tanesini analiz et  
      * Karar senin - çok fazla içerik okumak uzun sürer!
 
-3. **VECTOR SEARCH KULLANIM KARARI**:
-   - Belirli kelimeleri/kavramları chunk'larda aramak için → vector_search
-   - "prim bilgileri", "teminat detayları", "hasar bilgileri" gibi içerik arama → vector_search  
-   - Cypher'da CONTAINS kullanmak yerine → vector_search kullan (daha akıllı arama)
-   - Text'te geçen bilgileri bulmak için → vector_search öncelikli
-   - **ÖNEMLİ**: LLM önce hangi belgelerde arama yapacağını belirler, sonra o belgelerde semantic arama yapar
-   
-4. **CHUNK ARAMA**: İçerik gerekiyorsa:
-   - **Önce vector_search dene**: Semantic olarak ilgili chunk'ları hızlıca bul (akıllı belge seçimi ile)
-   - **Sonra cypher_query**: Entity→document→chunk relationship'leri ile ek chunk'lar topla
-   - Text içerik analizi için vector_search sonuçlarını kullan
+3. **CHUNK ARAMA**: İçerik gerekiyorsa:
+   - **cypher_query ile chunk arama**: Entity→document→chunk relationship'leri ile chunk'lar topla
+   - **Pozisyon-based arama**: Belirli pozisyonlardaki chunk'ları manuel olarak ara
+   - **MATCH (c:Chunk)-[:PART_OF]->(d:Document)**: Direct chunk araması
+   - Text içerik analizi için Cypher sonuçlarını kullan
 
-### 📝 ACTION FORMAT:
+### � AVAILABLE TOOLS (OpenAI Function Calling):
+
+**generate_embeddings_for_cypher(text)**: 
+- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
+- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
+- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
+- KULLANIM: Tool çağır → Cypher'da "CALL db.index.vector.queryNodes('vector', 10, $embedding_vector)" kullan
+
+**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
+- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
+- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
+- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
+- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
+- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
+
+**EMBEDDING METNI ÖRNEKLERİ:**
+- Kullanıcı: "d4 ün taksitleri neler" → Embedding: "taksit tutarları ödeme planı"
+- Kullanıcı: "hasar bedeli ne kadar" → Embedding: "hasar bedeli tazminat tutarı"
+- Kullanıcı: "prim ne kadar" → Embedding: "prim tutarı sigorta bedeli"
+
+### �📝 ACTION FORMAT:
 ```
 Observation: [Mevcut durum ve önceki adım sonuçları]
 Thought: [Cypher sonucuna bakarak: Bu yeterli mi? İçerik detayına ihtiyaç var mı?]
-Action: [cypher_query | vector_search | final_answer]
+Action: [cypher_query | final_answer]
 Content: [Sorgu/arama metni/cevap]
+```
+
+**⚠️ YASAKLI FORMATLAR:**
+- ❌ `Content: |` (YAML pipe syntax kullanma)
+- ❌ `Content: >` (YAML fold syntax kullanma)
+- ❌ Çok satırlı content'te pipe karakteri kullanma
+- ✅ Doğru: `Content: CALL db.index.vector.queryNodes(...)`
+- ✅ Çok satırlı için sadece doğrudan yaz
+
+**TOOL CALL EXAMPLE**:
+```
+Observation: Ayça Dinçkök'ün 2 poliçesi bulundu, şimdi prim bilgilerini bulmak için vector search gerekli
+Thought: Cypher ile vector search yapacağım, önce "prim tutarı" için embedding oluşturayım
+Action: TOOL_CALL
+Content: generate_embeddings_for_cypher("prim tutarı")
+
+# Sonrasında Cypher - ZORUNLU apoc.text.clean VE CONTAINS kullanımı:
+Action: cypher_query
+Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD node, score 
+         MATCH (node)-[:PART_OF]->(d:Document) 
+         WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("Ayça_Dinçkök"))
+         RETURN node.text, score ORDER BY score DESC
 ```
 
 ### 🎯 ACTION STRATEJİLERİ:
@@ -1978,21 +2587,52 @@ Content: [Sorgu/arama metni/cevap]
 - Node sayıları, liste'ler, ID'ler, tipler için
 - Entity'leri bul ve ilişkilerini araştır
 - Chunk'ları topla: entity → document → chunk chain'i takip et
-- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
+- **Vector Search Cypher**: `CALL db.index.vector.queryNodes('vector', limit, $embedding_vector)` kullan
+- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür
+- **STRING ARAMA ZORUNLU KURALLARI:**
+  * ❌ `d.fileName = "xyz"` → Exact match YASAK
+  * ❌ `d.fileName CONTAINS "xyz"` → Temizlenmemiş arama YASAK
+  * ✅ `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("xyz"))` → ZORUNLU FORMAT
+  * ✅ Her string aramada mutlaka CONTAINS operatörü kullan
+  * ✅ Her string aramada mutlaka apoc.text.clean() fonksiyonu kullan
+  * ✅ Her string aramada mutlaka toLower() fonksiyonu kullan
 
-**vector_search**: OpenAI embedding ile AKILLI semantic chunk arama
-- ÖNCEKI BULGULARDAN FAYDALAN: Zaten belirli belgeler bulunduysa, o belgelerde spesifik terimler ara
-- LLM önce hangi belgelerde arama yapacağını otomatik belirler (veya önceki bulgulardan alır)
-- Belge içeriklerinde semantic arama yap (seçilen belgelerde)
-- ARAMA STRATEJİSİ:
-  * Genel kişi/poliçe bilgileri zaten bulunduysa → SPESİFİK terimleri ara (sadece "prim tutarı", "hasar bedeli", "teminat limiti")
-  * Henüz kişi/belge bulunmadıysa → kişi adını da dahil et ("Mehmet'in prim bilgileri")
-- Format: `Action: vector_search` `Content: arama metni`
-- DOĞRU örnekler: 
-  * Cypher'da Ayça'nın poliçeleri bulunduysa → "prim tutarı" (kısa ve spesifik)
-  * Hiç bilgi yoksa → "Ayça Dinçkök'ün prim bilgileri" (kişi dahil)
-- YANLIŞ örnekler:
-  * Ayça zaten bulunduysa → "Ayça Dinçkök'ün prim bilgileri" (gereksiz tekrar)
+⚠️ **CHUNK ANALİZ ZORUNLU KURALI:**
+- **TÜM CHUNK'LARI DETAYLI ANALİZ ET**: Birden fazla chunk geldiğinde her birini tek tek oku
+- **İÇERİK BÜTÜNLÜĞÜ**: Tablolar, listeler, sayısal veriler birden fazla chunk'a yayılabilir
+- **DEVAM KONTROL**: Bir chunk'ta kesik/eksik bilgi varsa, sonraki position'lardaki chunk'ları da kontrol et
+- **ZORUNLU**: final_answer vermeden önce TÜM chunk'ları analiz et ve tüm bulguları dahil et
+- **TABLO ANALİZİ**: Taksit tabloları, ödeme planları gibi yapısal veriler birden fazla chunk'ta dağıtılmış olabilir - HEPSİNİ BİRLEŞTİR!
+- **KEŞFEDİLEN CHUNK İÇERİKLERİ bölümündeki tüm text'leri mutlaka analiz et - bunlar sana verilen en önemli veri!**
+
+**🔤 TEXT ARAMA ZORUNLU KURALLARI:**
+- ❌ `d.fileName CONTAINS "d4"` → Büyük/küçük harf duyarlı
+- ✅ `apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("d4")` → Temizlenmiş text arama (ZORUNLU)
+- ✅ `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("d4"))` → Case-insensitive temizlenmiş arama
+- ✅ `c.fullName =~ "(?i).*ayça.*"` → Regex ile case-insensitive
+- ✅ **TÜM STRİNG EŞLEŞTİRMELERDE apoc.text.clean() VE toLower() KULLAN**
+- ⚠️ **MUTLAKA CONTAINS KULLAN, = OPERATÖRÜ YASAK**
+
+- **AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
+  sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
+- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
+- **ÖRNEK AKILLI QUERY**:
+  ```cypher
+  // İlk arama - ZORUNLU FORMAT
+  CALL db.index.vector.queryNodes('vector', 5, $embedding_vector) YIELD node, score
+  MATCH (node)-[:PART_OF]->(d:Document)
+  WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge"))
+  RETURN node.text, node.chunkId, node.page_number, node.position, score
+  
+  // Entity arama - ZORUNLU FORMAT  
+  MATCH (c:Customer)
+  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))
+  
+  // Eğer 1. chunk'ta eksik bilgi varsa, sonraki chunk'ları da getir
+  MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+  WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge")) AND c.position IN [12, 13, 14]  // position'ları manuel belirt
+  RETURN c.text, c.chunkId, c.page_number, c.position
+  ```
 
 **final_answer**: 
 - Metadata yeterli ise: cypher_query sonuçlarını organize et
@@ -2000,13 +2640,37 @@ Content: [Sorgu/arama metni/cevap]
 - RAW DATA modunda: Bulunan verileri organize et (yorumsuz)
 - LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
 - CEVAP FORMATI: Normal, doğal konuşma tarzında yanıt ver (liste formatı değil)
+- **⚠️ ZORUNLU ANALİZ KURALI:**
+  * TÜM chunk'ları detaylı oku ve analiz et
+  * Tablolar, listeler ve yapılandırılmış veriler birden fazla chunk'a yayılabilir
+  * Sayısal veriler, tarihler, tutarlar gibi ilişkili bilgileri birlikte değerlendir
+  * Eksik bilgi bırakma - tüm bulguları dahil et
 
 ### ‼️ ZORUNLU KURALLAR:
 - Her soru için İLK ADIM cypher_query olmalı
 - Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
+- **İÇERİK SORUSU ANALİZİ**: Kullanıcı "taksit", "ödeme planı", "prim", "hasar" gibi içerik soruyorsa MUTLAKA chunk arama YAP!
+- **total_chunks=0 GÖRSEN BİLE**: Bu sadece metadata, gerçek chunk'lar var olabilir - MUTLAKA ara!
 - final_answer'da doğal konuşma tarzında cevap ver (liste formatı YASAK)  
 - Belge analizi: cypher_query (entity bul) → cypher_query (chunk topla) → final_answer
-- Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle"""
+- Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle
+- **TEXT ARAMA ZORUNLU FORMATı:**
+  * `toLower(apoc.text.clean(property)) CONTAINS toLower(apoc.text.clean("arama_terimi"))`
+  * MUTLAKA CONTAINS operatörü kullan (= operatörü YASAK)
+  * MUTLAKA apoc.text.clean() fonksiyonu kullan  
+  * MUTLAKA toLower() fonksiyonu kullan
+
+### 🎯 SEMANTIC SEARCH BAŞARISIZLIK PROTOKOLİ:
+**EĞER İLK VECTOR SEARCH YANLIŞ SONUÇ VERDİYSE:**
+1. **ALTERNATİF EMBEDDING**: Farklı anahtar kelimelerle yeni embedding oluştur
+   - "taksit" → "ödeme planı tablosu", "taksit vadesi", "prim taksitleri"
+   - "prim" → "sigorta bedeli", "prim tutarı", "ödeme miktarı"
+2. **SİSTEMATİK BELGE TARAMA**: 
+   - Position 1-15 chunk'larını manuel ara (belgeler genelde başta tablo içerir)
+   - Sayısal veri içeren chunk'ları ara (pattern: "TL", "₺", tarih formatları)
+3. **GENIŞ POZISYON ARAMI**: 
+   - İlk arama position 20+ verdiyse → Position 1-20 arası da kontrol et
+   - Tablolar ve listeler genelde belge başında yer alır"""
 
         return system_prompt
 
