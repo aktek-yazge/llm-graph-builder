@@ -20,13 +20,14 @@ import os
 import time
 
 # OpenTelemetry logging setup - mevcut kodda değişiklik yapmadan tüm logları Loki'ye gönder
-try:
-    from src.otel_logging_setup import initialize_otel_logging
-    # OpenTelemetry'i başlat (environment variable'lar ile yapılandırılır)
-    initialize_otel_logging()
-    logging.info("🔧 OpenTelemetry logging aktif - tüm loglar Loki'ye gönderiliyor")
-except Exception as otel_error:
-    logging.warning(f"⚠️ OpenTelemetry başlatılamadı: {otel_error} - Normal logging devam ediyor")
+# OpenTelemetry ve Loki entegrasyonu şimdilik comment yapıldı
+# try:
+#     from src.otel_logging_setup import initialize_otel_logging
+#     # OpenTelemetry'i başlat (environment variable'lar ile yapılandırılır)
+#     initialize_otel_logging()
+#     logging.info("🔧 OpenTelemetry logging aktif - tüm loglar Loki'ye gönderiliyor")
+# except Exception as otel_error:
+#     logging.warning(f"⚠️ OpenTelemetry başlatılamadı: {otel_error} - Normal logging devam ediyor")
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.document_sources.local_file import get_documents_from_file_by_path, generate_page_images_with_pymupdf
