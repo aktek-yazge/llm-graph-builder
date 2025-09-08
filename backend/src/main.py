@@ -1919,6 +1919,17 @@ def upload_file(
                         # Source node'daki chunk sayısını güncelle
                         obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
                         
+                        # Vector index oluştur/kontrol et (embedding varsa)
+                        if should_generate_embedding:
+                            try:
+                                from src.make_relationships import create_chunk_vector_index
+                                create_chunk_vector_index(graph)
+                                log_upload(f"Vector index checked/created after chunk creation")
+                                logging.info(f"✅ Vector index checked/created for embeddings")
+                            except Exception as vector_error:
+                                log_upload(f"Vector index creation warning: {vector_error}", "warning")
+                                logging.warning(f"⚠️ Vector index creation warning: {vector_error}")
+                        
                         if should_generate_embedding:
                             log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings")
                             logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings for: {originalname}")
