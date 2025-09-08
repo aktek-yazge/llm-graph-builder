@@ -869,6 +869,7 @@ class graphDBdataAccess:
     def create_policy_node_from_document(self, file_name: str):
         """
         Document file isminden Policy node oluşturur ve Policy ile Document arasında DOCUMENTED_IN ilişkisi kurar.
+        ENDORSEMENT (zeyilname) belgeleri için ana poliçeyi bulup HAS_ENDORSEMENT ile bağlar.
         """
         try:
             # Dosya isminden poliçe bilgilerini çıkar
@@ -878,6 +879,34 @@ class graphDBdataAccess:
                 logging.info(f"Dosya isminden poliçe bilgisi çıkarılamadı: {file_name}")
                 return
             
+            doc_type = policy_info.get('document_type', 'MAIN_POLICY')
+            
+            # Document'a docType ve year ekle
+            update_document_query = """
+                MATCH (d:Document {fileName: $file_name})
+                SET d.docType = $doc_type,
+                    d.year = $policy_year,
+                    d.updatedAt = datetime()
+                RETURN d.fileName as updated_file
+            """
+            
+            self.graph.query(update_document_query, {
+                "file_name": file_name,
+                "doc_type": doc_type,
+                "policy_year": policy_info.get('year', '')
+            }, session_params={"database": self.graph._database})
+            
+            # ENDORSEMENT (zeyilname) ise ana poliçeyi bul ve bağla, kendi Policy node'u oluşturma
+            if doc_type == 'ENDORSEMENT':
+                logging.info(f"🔗 Zeyilname tespit edildi, ana poliçe aranıyor: {file_name}")
+                success = self._link_endorsement_to_main_policy(file_name, policy_info)
+                if success:
+                    logging.info(f"✅ Zeyilname ana poliçeye başarıyla bağlandı: {file_name}")
+                else:
+                    logging.warning(f"⚠️ Zeyilname ana poliçeye bağlanamadı: {file_name}")
+                return  # Zeyilname için Policy node oluşturma, sadece bağlantı yap
+            
+            # Ana poliçe, yenileme, iptal vs. için kendi Policy node'unu oluştur
             policy_id = policy_info['policy_id']
             
             # Policy node'unu oluştur
@@ -918,20 +947,6 @@ class graphDBdataAccess:
             if result:
                 logging.info(f"Policy node oluşturuldu: {policy_id}")
                 
-                # Document'a docType ekle
-                update_document_query = """
-                    MATCH (d:Document {fileName: $file_name})
-                    SET d.docType = $doc_type,
-                        d.updatedAt = datetime()
-                    RETURN d.fileName as updated_file
-                """
-                
-                doc_type = policy_info.get('document_type', 'MAIN_POLICY')
-                self.graph.query(update_document_query, {
-                    "file_name": file_name,
-                    "doc_type": doc_type
-                }, session_params={"database": self.graph._database})
-                
                 # Belge türüne göre farklı ilişkiler kur
                 if doc_type == 'MAIN_POLICY':
                     link_query = """
@@ -943,16 +958,6 @@ class graphDBdataAccess:
                         RETURN count(r) as links_created
                     """
                     relationship_type = "DOCUMENTED_IN"
-                elif doc_type == 'ENDORSEMENT':
-                    link_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (p)-[r:HAS_ENDORSEMENT]->(d)
-                        SET r.created_at = datetime(),
-                            r.source = 'filename_extraction'
-                        RETURN count(r) as links_created
-                    """
-                    relationship_type = "HAS_ENDORSEMENT"
                 elif doc_type == 'RENEWAL':
                     link_query = """
                         MATCH (d:Document {fileName: $file_name})
@@ -1213,8 +1218,7 @@ class graphDBdataAccess:
 
     def extract_policy_info_from_filename(self, file_name: str) -> dict:
         """
-        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
-        Fallback yok - LLM başarısız olursa hata fırlatır.
+        LLM kullanarak önce dosya isminden, başarısız olursa poliçe görselinden bilgileri çıkarır.
         
         Örnek: "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf"
         """
@@ -1229,24 +1233,123 @@ class graphDBdataAccess:
             from src.utf8_utils import normalize_unicode_text
             base_name = normalize_unicode_text(base_name)
             
-            # LLM'den poliçe bilgilerini al
-            policy_info = self._extract_policy_info_with_llm(base_name)
+            logging.info(f"📝 Dosya isminden poliçe bilgisi çıkarma denemesi: {file_name}")
             
-            if not policy_info:
-                error_msg = f"LLM dosya isminden poliçe bilgisi çıkaramadı: {file_name}"
-                logging.error(error_msg)
-                raise ValueError(error_msg)
+            try:
+                # İlk olarak dosya isminden LLM ile çıkarma dene
+                policy_info = self._extract_policy_info_with_llm(base_name)
+                
+                if policy_info and policy_info.get('customer_name'):
+                    # Policy ID'yi oluştur
+                    policy_id = base_name.strip()
+                    policy_info['policy_id'] = policy_id
+                    policy_info['policy_name'] = policy_id
+                    policy_info['extraction_method'] = 'filename'
+                    
+                    # Zorunlu alanları kontrol et: sadece customer_name ve document_type
+                    required_fields = ['customer_name', 'document_type']
+                    missing_fields = []
+                    
+                    for field in required_fields:
+                        if not policy_info.get(field, '').strip():
+                            missing_fields.append(field)
+                    
+                    if missing_fields:
+                        logging.info(f"📝 Dosya isminden çıkarıldı ama eksik alanlar var: {missing_fields}")
+                        # Eksik alanlar için görsel analizi yap
+                    else:
+                        logging.info(f"✅ Dosya isminden LLM ile tam çıkarım başarılı ama görsel analizi de yapılacak: {policy_info}")
+                        # Tam çıkarım başarılı olsa da, görsel analizini yap (daha detaylı ve güvenilir bilgi için)
+                else:
+                    logging.info(f"📝 Dosya isminden çıkarım başarısız veya eksik")
+                    policy_info = {}  # Boş dict, image extraction için
+                    
+            except Exception as filename_error:
+                logging.warning(f"⚠️ Dosya isminden çıkarma başarısız: {filename_error}")
             
-            # Policy ID'yi oluştur
-            policy_id = base_name.strip()
-            policy_info['policy_id'] = policy_id
-            policy_info['policy_name'] = policy_id
+            # Dosya isminden başarısız olduysa veya eksik alanlar varsa, görsel analizi dene
+            logging.info(f"🖼️ Poliçe görselinden eksik bilgileri tamamlama denemesi: {file_name}")
             
-            logging.info(f"LLM ile çıkarılan poliçe bilgisi: {policy_info}")
-            return policy_info
+            # İlk sayfa görsel yolunu al
+            first_page_path = self._get_first_page_image_path(file_name)
+            
+            if first_page_path:
+                # Görseldan LLM ile çıkarma dene
+                image_policy_info = self._extract_policy_info_from_image(first_page_path, file_name)
+                
+                if image_policy_info and not image_policy_info.get('extraction_failed'):
+                    # Dosya isminden çıkarılan bilgiler varsa, dosya ismi bilgilerini öncelikli tut
+                    if policy_info and policy_info.get('customer_name'):
+                        logging.info(f"📝 Dosya isminden mevcut bilgiler: {policy_info}")
+                        logging.info(f"🖼️ Görseldan çıkarılan bilgiler: {image_policy_info}")
+                        
+                        # Dosya ismi bilgilerini öncelikli tut, görsel bilgileri ile tamamla
+                        final_info = policy_info.copy()
+                        
+                        # Policy number'ı mutlaka görseldan al (dosya isminde aranmaz)
+                        if image_policy_info.get('policy_number', '').strip():
+                            final_info['policy_number'] = image_policy_info['policy_number']
+                            logging.info(f"✅ Policy number görseldan alındı: {image_policy_info['policy_number']}")
+                        
+                        # Dosya isminde eksik olan diğer alanları görseldan tamamla
+                        image_fields = ['policy_type', 'year', 'document_type', 'insured_item']
+                        for field in image_fields:
+                            if not final_info.get(field, '').strip() and image_policy_info.get(field, '').strip():
+                                final_info[field] = image_policy_info[field]
+                                logging.info(f"✅ Eksik alan görseldan tamamlandı - {field}: {image_policy_info[field]}")
+                        
+                        # Extraction method'u güncelle
+                        final_info['extraction_method'] = 'filename+image'
+                        
+                        # Hala eksik olan önemli alanları default değerlerle doldur
+                        if not final_info.get('policy_type', '').strip():
+                            final_info['policy_type'] = 'Sigorta Poliçesi'
+                            logging.info(f"⚙️ Policy type default atandı: {final_info['policy_type']}")
+                        
+                        if not final_info.get('document_type', '').strip():
+                            final_info['document_type'] = 'MAIN_POLICY'
+                            logging.info(f"⚙️ Document type default atandı: {final_info['document_type']}")
+                        
+                        if not final_info.get('year', '').strip():
+                            final_info['year'] = '2024'
+                            logging.info(f"⚙️ Year default atandı: {final_info['year']}")
+                        
+                        logging.info(f"✅ Final bilgiler (dosya ismi öncelikli + görsel tamamlama): {final_info}")
+                        return final_info
+                    else:
+                        # Dosya isminden hiç bilgi çıkarılamamışsa, görsel bilgilerini kullan
+                        if image_policy_info.get('customer_name'):
+                            # Policy ID'yi oluştur
+                            policy_id = base_name.strip()
+                            image_policy_info['policy_id'] = policy_id
+                            image_policy_info['policy_name'] = policy_id
+                            image_policy_info['extraction_method'] = 'image_vision'
+                            
+                            logging.info(f"✅ Görseldan Vision LLM ile başarıyla çıkarıldı: {image_policy_info}")
+                            return image_policy_info
+                else:
+                    logging.warning(f"⚠️ Görseldan çıkarma başarısız veya eksik bilgi")
+            else:
+                logging.warning(f"⚠️ İlk sayfa görseli bulunamadı: {file_name}")
+            
+            # Her iki yöntem de başarısız olduysa, fallback bilgileri oluştur
+            logging.warning(f"⚠️ Hem dosya ismi hem görsel analizi başarısız, fallback bilgiler oluşturuluyor")
+            
+            # Dosya isminden en azından customer_name çıkarmaya çalış
+            fallback_info = {
+                'policy_id': base_name.strip(),
+                'policy_name': base_name.strip(),
+                'customer_name': base_name.strip(),  # Fallback: file name as customer
+                'policy_type': 'Sigorta Poliçesi',
+                'document_type': 'MAIN_POLICY',
+                'extraction_method': 'fallback'
+            }
+            
+            logging.info(f"⚙️ Fallback bilgiler oluşturuldu: {fallback_info}")
+            return fallback_info
             
         except Exception as e:
-            error_msg = f"Dosya isminden poliçe bilgisi çıkarma hatası ({file_name}): {e}"
+            error_msg = f"Poliçe bilgisi çıkarma hatası ({file_name}): {e}"
             logging.error(error_msg)
             raise Exception(error_msg)
 
@@ -1266,23 +1369,46 @@ Verilen dosya isminden sigorta poliçesi bilgilerini çıkar ve JSON formatında
 
 Dosya ismi: "{file_name}"
 
-Çıkarılacak bilgiler:
-- customer_name: Müşteri ismi (ad soyad)
-- year: Poliçe yılı (varsa)
-- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, vb.)
-- insured_item: Sigortalanan eşya/konum (ev adresi, araç, vb.)
-- policy_number: Poliçe numarası (varsa)
-- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION)
+Çıkarılacak bilgiler (ZORUNLU alanlar işaretli):
+- customer_name: Müşteri ismi (ad soyad veya kurum ismi) - ZORUNLU (dosya isminde net olarak varsa)
+- year: Poliçe yılı - ZORUNLU (dosya isminde açıkça belirtilmişse, yoksa boş bırak)
+- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, Ortak Alan, vb.) - ZORUNLU (dosya isminde belirtilmişse)
+- insured_item: Sigortalanan eşya/konum (ev adresi, araç, vb.) - (varsa, net olarak belirtilmişse)
+- policy_number: Poliçe numarası (dosya isminde yoksa boş bırak)
+- renewal_number: Yenileme/ana poliçe numarası (zeyilnameler için, varsa)
+- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION) - ZORUNLU
 
-Belge türü belirleme kuralları:
-- MAIN_POLICY: Ana poliçe (zeyilname, yenileme, iptal belirtisi yoksa)
-- ENDORSEMENT: Zeyilname (dosya isminde "zeyilname", "ek", "tadilat" varsa)
-- RENEWAL: Yenileme (dosya isminde "yenileme", "renewal" varsa)
-- CANCELLATION: İptal (dosya isminde "iptal", "fesih" varsa)
+Poliçe türü belirleme kuralları:
+- "Konut", "Residence", "Apartman" → "Konut Sigortası"
+- "DASK", "Deprem" → "DASK Sigortası"
+- "Kasko" → "Kasko Sigortası"
+- "Trafik" → "Trafik Sigortası"
+- "Ortak Alan", "Ortak", "Sitesi" → "Ortak Alan Sigortası"
+- "Sağlık", "Health" → "Sağlık Sigortası"
+- "Hayat", "Life" → "Hayat Sigortası"
+- Belirtilmemişse → "Sigorta Poliçesi"
+
+Belge türü belirleme kuralları (ÖNEMLİ - Kesin uygula):
+- ENDORSEMENT: Zeyilname/Ek belge (dosya isminde şu kelimeler varsa MUTLAKA ENDORSEMENT): 
+  * "zeyilname", "zeyl", "zeyli", "zeyil"
+  * "ek", "ilave", "lave", "eklem"
+  * "tadilat", "değişiklik", "düzeltme"
+  * "teminat", "endorsement", "addendum"
+  * "YMM", "İlave Zeyli", "Ek Teminat"
+- RENEWAL: Yenileme (dosya isminde "yenileme", "renewal", "galileme" varsa)
+- CANCELLATION: İptal (dosya isminde "iptal", "fesih", "cancellation" varsa)
+- MAIN_POLICY: Ana poliçe (yukarıdaki hiçbiri yoksa)
 
 Örnekler:
 - "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf" → customer_name: "Ayça Dinçkök", year: "2020", policy_type: "Konut Sigortası", insured_item: "Galata Residance D6", document_type: "MAIN_POLICY"
 - "Mehmet Yılmaz BMW X5 Kasko Zeyilname 2023.pdf" → customer_name: "Mehmet Yılmaz", year: "2023", policy_type: "Kasko Sigortası", insured_item: "BMW X5", document_type: "ENDORSEMENT"
+- "Asude Sitesi Yönetimi Ortak Alan Poliçesi.pdf" → customer_name: "Asude Sitesi Yönetimi", policy_type: "Ortak Alan Sigortası", insured_item: "Asude Sitesi", document_type: "MAIN_POLICY"
+
+UYARI: 
+- Dosya isminde NET OLARAK belirtilmeyen bilgileri UYDURMA
+- Emin olmadığın alanları boş bırak
+- Sadece dosya isminde AÇIKÇA görünen bilgileri çıkar
+- ZORUNLU alanlar (customer_name, document_type) dosya isminden çıkarılamazsa boş JSON döndür
 
 Sadece JSON formatında yanıt ver, başka açıklama ekleme:
 {{
@@ -1291,6 +1417,7 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
     "policy_type": "...",
     "insured_item": "...",
     "policy_number": "...",
+    "renewal_number": "...",
     "document_type": "..."
 }}
 """
@@ -1319,14 +1446,17 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
                     
                     logging.info(f"✅ LLM başarıyla poliçe bilgilerini çıkardı (UTF-8 normalized): {cleaned_info}")
                     
-                    # Minimum gerekli alanları kontrol et
-                    required_fields = ['customer_name', 'policy_type', 'document_type']
-                    missing_fields = [field for field in required_fields if not cleaned_info.get(field, '').strip()]
+                    # Zorunlu alanları kontrol et: sadece customer_name ve document_type (diğerleri varsa çıkar, yoksa boş)
+                    required_fields = ['customer_name', 'document_type']
+                    missing_fields = []
+                    
+                    for field in required_fields:
+                        if not cleaned_info.get(field, '').strip():
+                            missing_fields.append(field)
                     
                     if missing_fields:
-                        error_msg = f"LLM eksik bilgi döndürdü. Eksik alanlar: {missing_fields}"
-                        logging.error(error_msg)
-                        raise ValueError(error_msg)
+                        logging.warning(f"LLM zorunlu alanları çıkaramadı - Eksik alanlar: {missing_fields}")
+                        return {}  # Boş dict döndür, üst seviyede image extraction yapılacak
                     
                     return cleaned_info
                 else:
@@ -1345,6 +1475,209 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             error_msg = f"LLM ile poliçe bilgisi çıkarma hatası: {e}"
             logging.error(error_msg)
             raise Exception(error_msg)
+
+    def _extract_policy_info_from_image(self, image_path: str, file_name: str) -> dict:
+        """
+        LLM kullanarak poliçe sayfa görselinden poliçe bilgilerini çıkarır.
+        """
+        try:
+            from src.llm import get_llm
+            import base64
+            import os
+            import requests
+            import urllib.parse
+            
+            # Vision model kullan
+            llm, _ = get_llm('openai_gpt_4o_mini')
+            
+            # Image'ı base64'e çevir
+            image_base64 = None
+            
+            # Önce local dosya sisteminde dene
+            if os.path.exists(image_path):
+                with open(image_path, "rb") as image_file:
+                    image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+                logging.info(f"Resim local dosya sisteminden okundu: {image_path}")
+            else:
+                # Local dosya bulunamazsa, images endpoint'ini kullan
+                try:
+                    # Image path'den dosya adını çıkar
+                    image_filename = os.path.basename(image_path)
+                    # URL encode et
+                    encoded_image_name = urllib.parse.quote(image_filename, safe='')
+                    # Images endpoint URL'i oluştur
+                    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+                    image_url = f"{base_url}/images/{encoded_image_name}"
+                    
+                    # HTTP isteği ile resmi al
+                    response = requests.get(image_url, timeout=30)
+                    if response.status_code == 200:
+                        image_base64 = base64.b64encode(response.content).decode('utf-8')
+                        logging.info(f"Resim images endpoint'inden okundu: {image_url}")
+                    else:
+                        logging.error(f"Images endpoint'den resim alınamadı: {image_url} (Status: {response.status_code})")
+                        return {}
+                except Exception as e:
+                    logging.error(f"Images endpoint'den resim okuma hatası: {e}")
+                    return {}
+            
+            if not image_base64:
+                logging.error(f"Resim okunamadı: {image_path}")
+                return {}
+            
+            # Prompt oluştur
+            prompt = f"""
+Bu bir sigorta poliçesi belgesinin ilk sayfasıdır. Görüntüden poliçe bilgilerini çıkar ve JSON formatında döndür.
+
+Dosya ismi referansı: "{file_name}"
+
+Çıkarılacak bilgiler (ZORUNLU alanlar işaretli):
+- customer_name: Poliçe sahibinin tam ismi (ad soyad veya kurum ismi) - ZORUNLU
+- year: Poliçe yılı (Tanzim tarihi, Başlangıç tarihi, Başlama tarihi, Yürürlük tarihi'nden çıkar - sadece yılı al) - ZORUNLU
+- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, Ortak Alan Sigortası, vb.) - ZORUNLU
+- insured_item: Sigortalanan eşya/konum (ev adresi, araç plakası/modeli, vb.) - ZORUNLU
+- policy_number: Poliçe numarası - ZORUNLU (belgede mutlaka bulunur, "Poliçe No", "Policy No", "Poliçe Numarası" gibi alanları ara)
+- renewal_number: Yenileme/ana poliçe numarası (zeyilnameler için, varsa)
+- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION) - ZORUNLU
+
+ÖNEMLİ - Year (Yıl) Çıkarımı İçin:
+- "Tanzim Tarihi", "Başlangıç Tarihi", "Başlama Tarihi", "Yürürlük Tarihi", "Poliçe Başlangıcı" gibi alanları ara
+- Bu tarihlerden sadece YIL kısmını al (örn: 15.03.2023 tarihinden sadece "2023")
+- Doğum tarihi, kayıt tarihi gibi kişisel tarihleri kullanma
+- Belge üzerinde birden fazla tarih varsa, poliçe başlangıç/tanzim tarihini öncelikle
+
+Poliçe türü belirleme kuralları:
+- Konut/Residence/Apartman sigortası → "Konut Sigortası"
+- DASK/Deprem sigortası → "DASK Sigortası"
+- Kasko sigortası → "Kasko Sigortası"
+- Trafik sigortası → "Trafik Sigortası"
+- Ortak Alan/Site sigortası → "Ortak Alan Sigortası"
+- Sağlık sigortası → "Sağlık Sigortası"
+- Hayat sigortası → "Hayat Sigortası"
+- Belirsizse → "Sigorta Poliçesi"
+
+Belge türü belirleme:
+- Ana poliçe belgesi ise → "MAIN_POLICY"
+- Zeyilname/Ek/Tadilat ise → "ENDORSEMENT"
+- Yenileme belgesi ise → "RENEWAL"
+- İptal/Fesih belgesi ise → "CANCELLATION"
+
+Metin NET OKUNMUYORSA veya ZORUNLU alanlar (customer_name, year, policy_type, insured_item, policy_number, document_type) çıkarılamazsa, boş bir JSON döndür: {{"extraction_failed": true}}
+
+UYARI: policy_number çıkarılamazsa extraction_failed: true döndür.
+
+Sadece JSON formatında yanıt ver:
+{{
+    "customer_name": "...",
+    "year": "...",
+    "policy_type": "...",
+    "insured_item": "...",
+    "policy_number": "...",
+    "renewal_number": "...",
+    "document_type": "..."
+}}
+"""
+            
+            # Vision API çağrısı
+            from langchain_core.messages import HumanMessage
+            
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}"
+                        }
+                    }
+                ]
+            )
+            
+            response = llm.invoke([message])
+            response_text = response.content.strip()
+            
+            # JSON parse et
+            try:
+                if '{' in response_text and '}' in response_text:
+                    start_idx = response_text.find('{')
+                    end_idx = response_text.rfind('}') + 1
+                    json_text = response_text[start_idx:end_idx]
+                    policy_info = json.loads(json_text)
+                    
+                    # Extraction failed kontrolü
+                    if policy_info.get('extraction_failed'):
+                        logging.warning(f"Vision LLM görüntüden bilgi çıkaramadı: {image_path}")
+                        return {}
+                    
+                    # Boş değerleri temizle ve UTF-8 normalize et
+                    cleaned_info = {}
+                    for key, value in policy_info.items():
+                        if value and value.strip() and value.strip() != "...":
+                            from src.utf8_utils import normalize_unicode_text
+                            normalized_value = normalize_unicode_text(value.strip())
+                            cleaned_info[key] = normalized_value
+                    
+                    # Zorunlu alanları kontrol et: customer_name, policy_type, year, document_type, policy_number
+                    required_fields = ['customer_name', 'policy_type', 'year', 'document_type', 'policy_number']
+                    missing_fields = []
+                    
+                    for field in required_fields:
+                        if not cleaned_info.get(field, '').strip():
+                            missing_fields.append(field)
+                    
+                    if missing_fields:
+                        logging.warning(f"Vision LLM zorunlu alanları çıkaramadı - Eksik alanlar: {missing_fields}")
+                        return {}  # Boş dict döndür
+                    
+                    logging.info(f"✅ Vision LLM başarıyla poliçe bilgilerini çıkardı: {cleaned_info}")
+                    return cleaned_info
+                else:
+                    logging.error(f"Vision LLM yanıtında JSON formatı bulunamadı: {response_text}")
+                    return {}
+                    
+            except json.JSONDecodeError as e:
+                logging.error(f"Vision LLM yanıtı JSON parse edilemedi: {e}")
+                return {}
+                
+        except Exception as e:
+            logging.error(f"Vision LLM ile poliçe bilgisi çıkarma hatası: {e}")
+            return {}
+
+    def _get_first_page_image_path(self, file_name: str) -> str:
+        """
+        Document node'dan ilk sayfa görsel dosyasının yolunu alır.
+        Local dosya yoksa images endpoint için dosya adını döndürür.
+        """
+        try:
+            # Document node'dan page_images listesini al
+            query = """
+                MATCH (d:Document {fileName: $file_name}) 
+                RETURN d.page_images AS page_images
+            """
+            
+            result = self.execute_query(query, {"file_name": file_name})
+            
+            if result and len(result) > 0 and result[0].get('page_images'):
+                page_images = result[0]['page_images']
+                if isinstance(page_images, list) and len(page_images) > 0:
+                    first_page_path = page_images[0]
+                    # Path'in var olduğunu kontrol et
+                    import os
+                    if os.path.exists(first_page_path):
+                        logging.info(f"İlk sayfa görsel dosyası bulundu: {first_page_path}")
+                        return first_page_path
+                    else:
+                        # Local dosya yoksa, images endpoint için dosya adını döndür
+                        # Bu durumda path sadece dosya adı olacak (S3'ten)
+                        logging.info(f"İlk sayfa görsel dosyası local'da yok, images endpoint kullanılacak: {first_page_path}")
+                        return first_page_path
+                        
+            logging.warning(f"Document için page_images bulunamadı: {file_name}")
+            return None
+            
+        except Exception as e:
+            logging.error(f"İlk sayfa görsel yolu alma hatası: {e}")
+            return None
 
     def get_websource_url(self,file_name):
         logging.info("Checking if same title with different URL exist in db ")
@@ -1395,3 +1728,121 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
                 
         except Exception as e:
             logging.error(f"Token bilgisi kaydetme hatası ({file_name}): {e}")
+
+    def _link_endorsement_to_main_policy(self, file_name: str, policy_info: dict):
+        """
+        Zeyilname dosyasını, policy_info'daki policy_number veya yenileme numarası ile 
+        veritabanında bulunan mevcut ana poliçe Policy node'una HAS_ENDORSEMENT ilişkisiyle bağlar.
+        """
+        try:
+            policy_number = policy_info.get('policy_number', '').strip()
+            renewal_number = policy_info.get('renewal_number', '').strip()
+            customer_name = policy_info.get('customer_name', '').strip()
+            
+            logging.info(f"🔗 Zeyilname ana poliçe bağlantısı aranıyor: {file_name}")
+            logging.info(f"   Policy Number: {policy_number}")
+            logging.info(f"   Renewal Number: {renewal_number}")
+            logging.info(f"   Customer: {customer_name}")
+            
+            # Ana poliçeyi bulma stratejileri (öncelik sırasıyla)
+            main_policy = None
+            
+            # 1. Policy Number ile ara
+            if policy_number:
+                find_policy_query = """
+                    MATCH (p:Policy)
+                    WHERE p.policyNumber = $policy_number
+                    RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number
+                    LIMIT 1
+                """
+                result = self.graph.query(find_policy_query, {
+                    "policy_number": policy_number
+                }, session_params={"database": self.graph._database})
+                
+                if result:
+                    main_policy = result[0]
+                    logging.info(f"✅ Policy Number ile ana poliçe bulundu: {main_policy['policy_id']}")
+            
+            # 2. Renewal Number ile ara (eğer policy number ile bulunamadıysa)
+            if not main_policy and renewal_number:
+                find_policy_query = """
+                    MATCH (p:Policy)
+                    WHERE p.policyNumber = $renewal_number OR p.id CONTAINS $renewal_number
+                    RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number
+                    LIMIT 1
+                """
+                result = self.graph.query(find_policy_query, {
+                    "renewal_number": renewal_number
+                }, session_params={"database": self.graph._database})
+                
+                if result:
+                    main_policy = result[0]
+                    logging.info(f"✅ Renewal Number ile ana poliçe bulundu: {main_policy['policy_id']}")
+            
+            # 3. Customer name ve benzer policy pattern ile ara (son çare)
+            if not main_policy and customer_name:
+                find_policy_query = """
+                    MATCH (c:Customer {name: $customer_name})-[:HAS_POLICY]->(p:Policy)
+                    WHERE NOT EXISTS {
+                        (p)-[:HAS_ENDORSEMENT]->(:Document)
+                    }
+                    RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number
+                    ORDER BY p.createdAt DESC
+                    LIMIT 1
+                """
+                result = self.graph.query(find_policy_query, {
+                    "customer_name": customer_name
+                }, session_params={"database": self.graph._database})
+                
+                if result:
+                    main_policy = result[0]
+                    logging.info(f"✅ Customer pattern ile ana poliçe bulundu: {main_policy['policy_id']}")
+            
+            if main_policy:
+                # Ana poliçe bulundu, zeyilnameyi bağla
+                link_endorsement_query = """
+                    MATCH (d:Document {fileName: $file_name})
+                    MATCH (p:Policy {id: $main_policy_id})
+                    MERGE (p)-[r:HAS_ENDORSEMENT]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'endorsement_linking',
+                        r.endorsement_type = 'automatic_link'
+                    RETURN count(r) as links_created
+                """
+                
+                link_result = self.graph.query(link_endorsement_query, {
+                    "file_name": file_name,
+                    "main_policy_id": main_policy['policy_id']
+                }, session_params={"database": self.graph._database})
+                
+                if link_result and link_result[0]['links_created'] > 0:
+                    logging.info(f"✅ Zeyilname ana poliçeye bağlandı: {main_policy['policy_id']} -> {file_name}")
+                    
+                    # Document'a endorsement bilgisi ve year ekle
+                    update_document_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        SET d.docType = 'ENDORSEMENT',
+                            d.linkedMainPolicy = $main_policy_id,
+                            d.year = $policy_year,
+                            d.updatedAt = datetime()
+                        RETURN d.fileName as updated_file
+                    """
+                    
+                    self.graph.query(update_document_query, {
+                        "file_name": file_name,
+                        "main_policy_id": main_policy['policy_id'],
+                        "policy_year": policy_info.get('year', '')
+                    }, session_params={"database": self.graph._database})
+                    
+                    return True
+                else:
+                    logging.warning(f"⚠️ Zeyilname bağlantısı oluşturulamadı: {file_name}")
+                    return False
+            else:
+                logging.warning(f"⚠️ Ana poliçe bulunamadı. Zeyilname bağımsız kalacak: {file_name}")
+                logging.warning(f"   Aranan kriteler - Policy Number: {policy_number}, Renewal: {renewal_number}, Customer: {customer_name}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Zeyilname ana poliçe bağlantı hatası ({file_name}): {e}")
+            return False
