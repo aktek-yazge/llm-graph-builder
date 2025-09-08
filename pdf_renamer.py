@@ -9,7 +9,7 @@ from pathlib import Path
 import argparse
 
 
-def find_and_rename_pdfs(root_directory, dry_run=False):
+def find_and_rename_pdfs(root_directory, dry_run=False, file_extension=None):
     """
     Belirtilen dizinin altındaki tüm PDF dosyalarını bulur ve 
     dosya adının sonuna bulunduğu klasörün adını ekler.
@@ -17,6 +17,7 @@ def find_and_rename_pdfs(root_directory, dry_run=False):
     Args:
         root_directory (str): Aranacak ana dizin
         dry_run (bool): Sadece ne yapılacağını göster, gerçek işlem yapma
+        file_extension (str): Spesifik dosya uzantısı (örn: '.PDF', '.pdf', '.Pdf')
     
     Returns:
         list: İşlem yapılan dosyaların listesi
@@ -28,7 +29,17 @@ def find_and_rename_pdfs(root_directory, dry_run=False):
         return []
     
     # PDF dosyalarını bul
-    pdf_files = list(root_path.rglob("*.pdf"))
+    pdf_files = []
+    for file_path in root_path.rglob("*"):
+        if file_path.is_file():
+            if file_extension:
+                # Kullanıcı spesifik uzantı belirtmişse, tam eşleşme ara
+                if file_path.suffix == file_extension:
+                    pdf_files.append(file_path)
+            else:
+                # Uzantı belirtilmemişse, büyük-küçük harf duyarsız PDF ara
+                if file_path.suffix.lower() == '.pdf':
+                    pdf_files.append(file_path)
     
     if not pdf_files:
         print("📁 Hiç PDF dosyası bulunamadı.")
@@ -101,6 +112,10 @@ def main():
         help="Aranacak ana dizin yolu"
     )
     parser.add_argument(
+        "--extension", "-e",
+        help="Spesifik dosya uzantısı (örn: .PDF, .pdf, .Pdf). Belirtilmezse tüm PDF uzantıları işlenir"
+    )
+    parser.add_argument(
         "--dry-run", 
         action="store_true",
         help="Sadece ne yapılacağını göster, gerçek işlem yapma"
@@ -117,12 +132,13 @@ def main():
     print("🔍 PDF Dosya Yeniden Adlandırma Aracı")
     print("=" * 60)
     print(f"📁 Ana Dizin: {args.directory}")
-    print(f"🔄 Recursive: {args.recursive}")
+    print(f"� Dosya Uzantısı: {args.extension if args.extension else 'Tümü (.pdf, .PDF, .Pdf, vb.)'}")
+    print(f"�🔄 Recursive: {args.recursive}")
     print(f"🔍 Dry Run: {args.dry_run}")
     print("=" * 60)
     
     # İşlemi başlat
-    processed = find_and_rename_pdfs(args.directory, args.dry_run)
+    processed = find_and_rename_pdfs(args.directory, args.dry_run, args.extension)
     
     print(f"\n📊 İşlem Özeti:")
     print(f"✅ İşlenen dosya sayısı: {len(processed)}")
@@ -139,6 +155,8 @@ if __name__ == "__main__":
         print("Kullanım örnekleri:")
         print("python pdf_renamer.py /path/to/directory")
         print("python pdf_renamer.py /path/to/directory --dry-run")
+        print("python pdf_renamer.py /path/to/directory --extension .PDF")
+        print("python pdf_renamer.py /path/to/directory --extension .pdf")
         print()
         
         # Mevcut dizinde örnek çalıştır
