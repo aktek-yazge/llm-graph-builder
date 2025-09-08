@@ -57,17 +57,45 @@ def get_llm(model: str):
         elif "openai" in model:
             model_name, api_key = env_value.split(",")
             logging.info(f"OpenAI model kontrolü: model={model}, model_name={model_name}")
-            if "o3-mini" in model or "gpt_5_mini" in model:
+
+            # Reasoning modelleri için özel kontrol (o5-mini, o4-mini, o3-mini, vb.)
+            if any(reasoning_model in model_name.lower() for reasoning_model in ["o5-mini","o4-mini", "o3-mini", "o1-mini", "o1-preview"]):
+                logging.info(f"{model_name} reasoning model tespit edildi, reasoning parametreleri ile LLM oluşturuluyor")
+                
+                # Reasoning parametrelerini environment'tan veya default'tan al
+                reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", "low")  # 'low', 'medium', 'high'
+                reasoning_summary = os.environ.get("OPENAI_REASONING_SUMMARY", "auto")  # 'detailed', 'auto', None
+                output_version = os.environ.get("OPENAI_OUTPUT_VERSION", "responses/v1")
+                
+                # None string'ini gerçek None'a çevir
+                if reasoning_summary.lower() == "none":
+                    reasoning_summary = None
+                
+                reasoning = {
+                    "effort": reasoning_effort,
+                    "summary": reasoning_summary,
+                }
+                
+                logging.info(f"Reasoning parametreleri: effort={reasoning_effort}, summary={reasoning_summary}, output_version={output_version}")
+                
+                llm = ChatOpenAI(
+                    api_key=api_key,
+                    model=model_name,
+                    reasoning=reasoning,
+                    output_version=output_version
+                )
+            elif "o3-mini" in model or "gpt_5_mini" in model:
                 logging.info(f"{model_name} tespit edildi, temperature parametresi olmadan LLM oluşturuluyor")
-                llm= ChatOpenAI(
-                api_key=api_key,
-                model=model_name)
+                llm = ChatOpenAI(
+                    api_key=api_key,
+                    model=model_name
+                )
             else:
                 logging.info("Normal OpenAI model, temperature=0 ile LLM oluşturuluyor")
                 llm = ChatOpenAI(
-                api_key=api_key,
-                model=model_name,
-                temperature=0,
+                    api_key=api_key,
+                    model=model_name,
+                    temperature=0,
                 )
 
         elif "azure" in model:
@@ -150,6 +178,80 @@ def get_llm_model_name(llm):
             return model_name.lower()
     print("Could not determine model name; defaulting to empty string")
     return ""
+
+def get_reasoning_response_text(response):
+    """Extract text from reasoning model responses with proper handling"""
+    try:
+        # Reasoning model'leri için önce response.text() dene
+        if hasattr(response, 'text') and callable(response.text):
+            return response.text()
+        
+        # Eğer response.content bir list ise (reasoning model format'ı)
+        if hasattr(response, 'content') and isinstance(response.content, list):
+            text_content = ""
+            for block in response.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_content += block.get("text", "")
+            return text_content if text_content else str(response.content)
+        
+        # Normal content attribute
+        elif hasattr(response, 'content'):
+            return response.content
+        elif hasattr(response, 'message') and hasattr(response.message, 'content'):
+            return response.message.content
+        else:
+            # Fallback: response'u string'e çevir
+            return str(response)
+    except Exception as e:
+        logging.warning(f"Reasoning response text extraction hatası: {e}")
+        # Fallback: direkt content attribute'unu dene
+        return getattr(response, 'content', str(response))
+
+def extract_reasoning_summary(response):
+    """Extract reasoning summary from reasoning model responses"""
+    try:
+        if not hasattr(response, 'content') or not isinstance(response.content, list):
+            return None
+        
+        reasoning_summaries = []
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "reasoning":
+                if "summary" in block:
+                    for summary in block["summary"]:
+                        if isinstance(summary, dict) and "text" in summary:
+                            reasoning_summaries.append(summary["text"])
+        
+        return reasoning_summaries if reasoning_summaries else None
+    except Exception as e:
+        logging.warning(f"Reasoning summary extraction hatası: {e}")
+        return None
+
+def get_full_reasoning_response(response):
+    """Get both text and reasoning from reasoning model responses"""
+    try:
+        result = {
+            "text": get_reasoning_response_text(response),
+            "reasoning": extract_reasoning_summary(response),
+            "has_reasoning": False
+        }
+        
+        if result["reasoning"]:
+            result["has_reasoning"] = True
+            
+        return result
+    except Exception as e:
+        logging.warning(f"Full reasoning response extraction hatası: {e}")
+        return {
+            "text": str(response),
+            "reasoning": None,
+            "has_reasoning": False
+        }
+
+def is_reasoning_model(llm):
+    """Check if the LLM is a reasoning model (o5-mini, o4-mini, o3-mini, etc.)"""
+    model_name = get_llm_model_name(llm)
+    reasoning_models = ["o5-mini", "o4-mini", "o3-mini", "o1-mini", "o1-preview"]
+    return any(reasoning_model in model_name for reasoning_model in reasoning_models)
 
 def get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine):
     combined_chunk_document_list = []
