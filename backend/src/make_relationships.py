@@ -781,6 +781,14 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
             # Embedding oluşturma için mevcut fonksiyonu kullan
             create_chunk_embeddings_immediate(graph, lst_chunks_including_hash, file_name)
             logging.info(f"✅ Upload sırasında {len(lst_chunks_including_hash)} chunk için embedding oluşturuldu")
+            
+            # Embedding'ler oluşturulduktan sonra vector index'i kontrol et/oluştur
+            try:
+                create_chunk_vector_index(graph)
+                logging.info(f"✅ Vector index checked/created after upload embeddings")
+            except Exception as vector_error:
+                logging.warning(f"⚠️ Vector index creation warning after upload: {vector_error}")
+                
         except Exception as e:
             logging.error(f"❌ Upload sırasında embedding oluşturma hatası: {e}")
             # Embedding hatası chunk oluşturmayı durdurmasın
