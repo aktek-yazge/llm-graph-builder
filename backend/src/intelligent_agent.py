@@ -2,7 +2,7 @@
 """
 Intelligent Neo4j ReAct Agent
 Bu agent kullanıcı sorularını analiz eder, Neo4j schema'sını kullanarak
-Cypher sorguları oluşturur ve gerekirse vector search yapar.
+Cypher sorguları oluşturur ve veritabanını sorgular.
 """
 
 import logging
@@ -65,12 +65,13 @@ class ChunkInfo:
     relevance_score: float = 0.0
     split_texts: List[str] = field(default_factory=list)
     split_scores: List[float] = field(default_factory=list)
+    page_link: Optional[str] = None
 
 @dataclass
 class SuccessfulFinding:
     """Başarılı bulguları tutan data class"""
     iteration: int
-    action_type: str  # cypher_query, vector_search
+    action_type: str  # cypher_query
     summary: str
     relevance_score: float
     raw_data: Any = None
@@ -88,13 +89,6 @@ class AgentState:
     discovered_relationships: List[Dict[str, Any]] = field(default_factory=list)
     query_attempts: List[str] = field(default_factory=list)
     successful_findings: List['SuccessfulFinding'] = field(default_factory=list)  # Başarılı bulgular
-    
-    def add_chunk(self, chunk_info: ChunkInfo):
-        """Yeni chunk bilgisi ekle"""
-        # Duplikasyon kontrolü
-        existing_ids = [c.chunk_id for c in self.discovered_chunks]
-        if chunk_info.chunk_id not in existing_ids:
-            self.discovered_chunks.append(chunk_info)
 
 class IntelligentAgent:
     """
@@ -214,27 +208,42 @@ GÖREV:
             
             # 1. Discovered chunks'dan referanslar (eğer varsa)
             if state.discovered_chunks and reference_type == "pages":
-                unique_docs = {}
+                unique_chunks = {}
                 # Sadece yüksek relevance score'lu chunk'ları al (0.85 üzeri)
                 relevant_chunks = [chunk for chunk in state.discovered_chunks if chunk.relevance_score >= 0.85]
                 # Eğer hiç yüksek score'lu chunk yoksa, en yüksek 5 tanesini al
                 if not relevant_chunks:
                     relevant_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)[:5]
                 
+                # Chunk'lar için page_link bilgisini Neo4j'den al
                 for chunk in relevant_chunks[:10]:  # En relevan 10 chunk'tan max
-                    doc_name = chunk.document_name
-                    if doc_name not in unique_docs:
-                        unique_docs[doc_name] = []
-                    unique_docs[doc_name].append(chunk.page_number)
-                    referenced_docs.add(doc_name)
-                
-                if unique_docs:
-                    for doc_name, pages in unique_docs.items():
-                        page_list = ", ".join(map(str, sorted(set(pages))))
-                        # Page image linklerini oluştur - sadece gerçekten kullanılan sayfalar
-                        for page_num in sorted(set(pages))[:3]:  # Her belgeden max 3 sayfa
+                    chunk_id = chunk.chunk_id
+                    if chunk_id not in unique_chunks:
+                        # Neo4j'den page_link bilgisini al
+                        try:
+                            page_link_query = """
+                            MATCH (c:Chunk {chunkId: $chunk_id})
+                            RETURN c.page_link as page_link, c.page_number as page_number, c.fileName as file_name
+                            """
+                            link_result = self.graph.query(page_link_query, {"chunk_id": chunk_id})
+                            if link_result and len(link_result) > 0:
+                                page_link = link_result[0].get('page_link')
+                                page_number = link_result[0].get('page_number') or chunk.page_number
+                                file_name = link_result[0].get('file_name') or chunk.document_name
+                                
+                                if page_link:
+                                    # page_link'i direkt kullan
+                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({page_link})"
+                                    if page_ref not in references:
+                                        references.append(page_ref)
+                                        unique_chunks[chunk_id] = True
+                                        referenced_docs.add(f"{file_name}_page_{page_number}")
+                        except Exception as e:
+                            logger.warning(f"Page link alınamadı chunk {chunk_id} için: {e}")
+                            # Fallback: eski yöntem
+                            doc_name = chunk.document_name
+                            page_num = chunk.page_number
                             image_name = f"{doc_name.replace('.pdf', '')}_page_{page_num:03d}.png"
-                            # URL encode the image name for proper handling of Turkish characters
                             import urllib.parse
                             encoded_image_name = urllib.parse.quote(image_name, safe='', encoding='utf-8')
                             image_link = f"{BASE_URL}/images/{encoded_image_name}"
@@ -468,91 +477,6 @@ Sadece "documents" veya "pages" olarak yanıtla."""
             logger.error(f"Cypher sorgu hatası: {e}")
             return False, str(e)
     
-    def execute_vector_search(self, query_text: str, limit: int = 10, document_names: List[str] = None) -> Tuple[bool, Any]:
-        """LLM'in kullanabileceği vector search fonksiyonu - OpenAI embedding ile
-        
-        Args:
-            query_text: Arama sorgusu
-            limit: Maksimum sonuç sayısı
-            document_names: Aramayı sınırlandırmak için belge adları listesi (opsiyonel)
-        """
-        try:
-            scope_info = f" (Belge filtresi: {document_names})" if document_names else " (Tüm DB)"
-            logger.info(f"Vector search çalıştırılıyor: {query_text}{scope_info}")
-            
-            # OpenAI embedding al - dışarıdan sağlanan embedding model kullan
-            normalized_query = normalize_unicode_text(query_text)
-            query_embedding = self.embedding_model.embed_query(normalized_query)
-            
-            # Belge filtresi varsa sınırlandırılmış arama, yoksa tüm DB
-            if document_names and len(document_names) > 0:
-                # Belirli belgelerde sınırlandırılmış arama
-                vector_query = """
-                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
-                YIELD node, score
-                MATCH (node)-[:PART_OF]->(d:Document)
-                WHERE d.fileName IN $document_names
-                RETURN 
-                    node.chunkId as chunk_id,
-                    node.text as text, 
-                    node.page_number as page_number,
-                    d.fileName as document_name,
-                    score
-                ORDER BY score DESC
-                """
-                query_params = {
-                    'query_vector': query_embedding,
-                    'limit': limit,
-                    'document_names': document_names
-                }
-            else:
-                # Tüm veritabanında arama (mevcut davranış)
-                vector_query = """
-                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
-                YIELD node, score
-                OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
-                RETURN 
-                    node.chunkId as chunk_id,
-                    node.text as text, 
-                    node.page_number as page_number,
-                    d.fileName as document_name,
-                    score
-                ORDER BY score DESC
-                """
-                query_params = {
-                    'query_vector': query_embedding,
-                    'limit': limit
-                }
-            
-            result = self.graph.query(vector_query, query_params)
-            
-            if not result:
-                logger.info("Vector search: sonuç bulunamadı")
-                return True, []
-            
-            # Sonuçları formatla
-            formatted_results = []
-            for row in result:
-                formatted_results.append({
-                    'chunk_id': row['chunk_id'],
-                    'text': row['text'] or "",
-                    'page_number': row['page_number'],
-                    'document_name': row['document_name'] or "Unknown",
-                    'relevance_score': float(row['score'])
-                })
-            
-            logger.info(f"Vector search sonucu: {len(formatted_results)} chunk, en yüksek score: {formatted_results[0]['relevance_score']:.3f}")
-            
-            # İlk birkaç sonucu logla
-            for i, row in enumerate(formatted_results[:3], 1):
-                logger.info(f"Vector Sonuç {i} (Score: {row['relevance_score']:.3f}): {row['document_name']} - {row['text'][:100]}...")
-            
-            return True, formatted_results
-            
-        except Exception as e:
-            logger.error(f"Vector search hatası: {e}")
-            return False, str(e)
-    
     def generate_embeddings_for_cypher(self, text: str) -> Tuple[bool, Any]:
         """Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
         
@@ -582,86 +506,6 @@ Sadece "documents" veya "pages" olarak yanıtla."""
             logger.error(f"❌ Cypher embedding oluşturma hatası: {e}")
             return False, str(e)
 
-    def execute_vector_search_with_embeddings(self, embeddings: List[float], limit: int = 10, document_names: List[str] = None) -> Tuple[bool, Any]:
-        """Önceden oluşturulmuş embedding'lerle vector search yapar
-        
-        Bu fonksiyon LLM'in create_query_embeddings tool'undan aldığı embedding'leri
-        kullanarak arama yapar.
-        
-        Args:
-            embeddings: Önceden oluşturulmuş embedding vektörü
-            limit: Maksimum sonuç sayısı  
-            document_names: Aramayı sınırlandırmak için belge adları listesi (opsiyonel)
-        """
-        try:
-            scope_info = f" (Belge filtresi: {document_names})" if document_names else " (Tüm DB)"
-            logger.info(f"🔍 Vector search embedding'lerle çalıştırılıyor{scope_info}")
-            
-            # Belge filtresi varsa sınırlandırılmış arama, yoksa tüm DB
-            if document_names and len(document_names) > 0:
-                # Belirli belgelerde sınırlandırılmış arama
-                vector_query = """
-                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
-                YIELD node, score
-                MATCH (node)-[:PART_OF]->(d:Document)
-                WHERE d.fileName IN $document_names
-                RETURN 
-                    node.chunkId as chunk_id,
-                    node.text as text, 
-                    node.page_number as page_number,
-                    d.fileName as document_name,
-                    score
-                ORDER BY score DESC
-                """
-                query_params = {
-                    'query_vector': embeddings,
-                    'limit': limit,
-                    'document_names': document_names
-                }
-            else:
-                # Tüm veritabanında arama (mevcut davranış)
-                vector_query = """
-                CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
-                YIELD node, score
-                OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
-                RETURN 
-                    node.chunkId as chunk_id,
-                    node.text as text, 
-                    node.page_number as page_number,
-                    d.fileName as document_name,
-                    score
-                ORDER BY score DESC
-                """
-                query_params = {
-                    'query_vector': embeddings,
-                    'limit': limit
-                }
-            
-            result = self.graph.query(vector_query, query_params)
-            
-            if not result:
-                logger.info("Vector search: sonuç bulunamadı")
-                return True, []
-            
-            # Sonuçları formatla
-            formatted_results = []
-            for row in result:
-                formatted_results.append({
-                    'chunk_id': row['chunk_id'],
-                    'text': row['text'] or "",
-                    'page_number': row['page_number'],
-                    'document_name': row['document_name'] or "Unknown",
-                    'relevance_score': float(row['score'])
-                })
-            
-            logger.info(f"✅ Vector search sonucu: {len(formatted_results)} chunk, en yüksek score: {formatted_results[0]['relevance_score']:.3f}")
-            
-            return True, formatted_results
-            
-        except Exception as e:
-            logger.error(f"❌ Vector search embedding hatası: {e}")
-            return False, str(e)
-    
     def get_available_documents(self) -> List[str]:
         """Veritabanında mevcut belgelerin listesini al"""
         try:
@@ -679,113 +523,6 @@ Sadece "documents" veya "pages" olarak yanıtla."""
         except Exception as e:
             logger.error(f"Belge listesi alma hatası: {e}")
             return []
-    
-    def execute_document_filtered_vector_search(self, query_text: str, user_question: str, limit: int = 10, relevant_documents: List[str] = None) -> Tuple[bool, Any]:
-        """İlk önce hangi belgelerde arama yapılacağını belirle, sonra vector search yap"""
-        try:
-            # Eğer önceki bulgulardan belge listesi varsa direkt kullan
-            if relevant_documents:
-                logger.info(f"Önceki bulgulardan {len(relevant_documents)} belge kullanılıyor: {relevant_documents}")
-                return self.execute_vector_search(query_text, limit, relevant_documents)
-            
-            # Eğer önceki bulgulardan belge yok ise, tüm belgeleri al
-            available_docs = self.get_available_documents()
-            if not available_docs:
-                logger.warning("Veritabanında belge bulunamadı")
-                return self.execute_vector_search(query_text, limit)
-            
-            # LLM'den hangi belgelerde arama yapacağını sor
-            document_selection_prompt = f"""
-Kullanıcı sorusu: "{user_question}"
-Arama sorgusu: "{query_text}"
-
-Mevcut belgeler:
-{chr(10).join([f"- {doc}" for doc in available_docs])}
-
-GÖREV: Bu sorguyu cevaplamak için hangi belgelerde arama yapılması gerektiğini belirle.
-
-KURALLAR:
-1. Eğer soruda belirli bir kişi/poliçe/dosya adı geçiyorsa, sadece o belgeleri seç
-2. Genel sorular için tüm belgelerde ara (boş liste döndür)
-3. İlgisiz belgeleri dahil etme
-
-CEVAP FORMATI:
-Arama yapılacak belgeler: [belge1.pdf, belge2.pdf] 
-(Eğer tüm belgelerde arama yapılacaksa: [])
-
-Kısa açıklama: ...
-"""
-            
-            response = self.llm.invoke([
-                SystemMessage(content="Sen bir belge analiz uzmanısın. Kullanıcı sorularına göre hangi belgelerde arama yapılması gerektiğini belirlersin."),
-                HumanMessage(content=document_selection_prompt)
-            ])
-            
-            # Cevabı parse et
-            response_text = response.content.strip()
-            logger.info(f"Belge seçim cevabı: {response_text}")
-            
-            # Belge listesini çıkar - basit regex/string parsing
-            selected_docs = []
-            if "[]" in response_text or "tüm belgelerde" in response_text.lower():
-                # Tüm belgelerde ara
-                selected_docs = None
-                logger.info("LLM kararı: Tüm belgelerde arama yap")
-            else:
-                # Belirli belgeleri seç - response'ta geçen belge adlarını bul
-                for doc in available_docs:
-                    if doc in response_text:
-                        selected_docs.append(doc)
-                
-                if not selected_docs:
-                    # Hiç belge bulunamazsa tüm belgelerde ara
-                    selected_docs = None
-                    logger.info("LLM cevabında belirli belge bulunamadı, tüm belgelerde arama yapılacak")
-                else:
-                    logger.info(f"LLM seçimi: {len(selected_docs)} belge - {selected_docs}")
-            
-            # Seçilen belgelerde vector search yap
-            return self.execute_vector_search(query_text, limit, selected_docs)
-            
-        except Exception as e:
-            logger.error(f"Belgeli vector search hatası: {e}")
-            # Fallback: normal vector search
-            return self.execute_vector_search(query_text, limit)
-    
-    def generate_embedding_for_query(self, query_text: str) -> Tuple[bool, Any]:
-        """Query için embedding oluştur - LLM'in function call tool'u olarak kullanacağı
-        
-        Args:
-            query_text: Embedding oluşturulacak text
-            
-        Returns:
-            Tuple[bool, Any]: (success, embedding_vector veya error_message)
-        """
-        try:
-            logger.info(f"🔧 Embedding oluşturuluyor: {query_text}")
-            
-            # Text'i normalize et
-            normalized_query = normalize_unicode_text(query_text)
-            logger.info(f"   📝 Normalize edilmiş text: {normalized_query}")
-            
-            # Embedding oluştur
-            try:
-                query_embedding = self.embedding_model.embed_query(normalized_query)
-                logger.info(f"   ✅ Embedding başarıyla oluşturuldu: {len(query_embedding)} boyut")
-                
-                # İlk birkaç değeri göster (debug için)
-                preview = [round(x, 4) for x in query_embedding[:5]]
-                logger.info(f"   📊 Embedding preview: {preview}...")
-                
-                return True, query_embedding
-                
-            except Exception as e:
-                logger.error(f"   ❌ Embedding oluşturma hatası: {e}")
-                return False, f"Embedding model hatası: {e}"
-                
-        except Exception as e:
-            logger.error(f"❌ generate_embedding_for_query genel hatası: {e}")
-            return False, str(e)
     
     def log_detailed_token_report(self):
         """Detaylı token kullanım raporunu logla"""
@@ -1184,34 +921,6 @@ Sonuç sayısı: {len(result)}
 """
                 else:
                     return f"Structured data: {len(result) if result else 0} kayıt"
-                    
-            elif finding_type == "vector_search":
-                if isinstance(result, list) and len(result) > 0:
-                    top_chunks = result[:3]  # İlk 3 chunk
-                    chunk_info = []
-                    for chunk in top_chunks:
-                        # Dict formatında geliyorsa dict olarak erişim
-                        if isinstance(chunk, dict):
-                            doc_name = chunk.get('document_name', 'Unknown')
-                            score = chunk.get('relevance_score', 0.0)
-                            text = chunk.get('text', '')
-                            chunk_info.append(f"Doc: {doc_name}, Score: {score:.3f}, Preview: {text[:100]}...")
-                        else:
-                            # ChunkInfo objesi ise normal erişim
-                            chunk_info.append(f"Doc: {chunk.document_name}, Score: {chunk.relevance_score:.3f}, Preview: {chunk.text[:100]}...")
-                    
-                    summary_prompt = f"""
-Bu vector search sonuçlarını kısa ve öz şekilde özetle (max 150 kelime):
-
-Search: {action_description}
-Toplam chunk: {len(result)}
-En iyi sonuçlar:
-{chr(10).join(chunk_info)}
-
-Anahtar bulgular ve önemli bilgiler nedir?
-"""
-                else:
-                    return f"Vector search: 0 sonuç"
             else:
                 return f"{finding_type}: {str(result)[:200]}..."
             
@@ -1228,14 +937,6 @@ Anahtar bulgular ve önemli bilgiler nedir?
             # Fallback: basit özet
             if finding_type == "structured_data":
                 return f"Structured data: {len(result) if result else 0} kayıt. Örnek: {str(result[:1])[:100]}..." if result else "Sonuç yok"
-            elif finding_type == "vector_search":
-                # Dict format için güvenli erişim
-                if result and isinstance(result[0], dict):
-                    return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].get('relevance_score', 0.0):.3f}"
-                elif result:
-                    return f"Vector search: {len(result)} chunk. En iyi relevance: {result[0].relevance_score:.3f}"
-                else:
-                    return "Vector search: 0 sonuç"
             return f"{finding_type}: {str(result)[:100]}..."
 
     def add_successful_finding(self, state: 'AgentState', iteration: int, action: str, finding: str, relevance_score: float = 0.0, raw_data: Any = None):
@@ -1291,124 +992,6 @@ Anahtar bulgular ve önemli bilgiler nedir?
         context_prompt += "\n**BU BİLGİLERİ DİKKATE ALARAK SONRAKI ADIMI BELİRLE!**\n\n"
         self.context_memory = context_prompt
     
-
-    def find_chunks_from_entities(self, entity_ids: List[str], state: AgentState) -> List[ChunkInfo]:
-        """Entity'lerden chunk'lara ulaş - Yeni schema'ya göre"""
-        try:
-            if not entity_ids:
-                return []
-                
-            # Yeni schema'da entity'lerden document'lara, oradan chunk'lara ulaşma stratejisi
-            strategies = [
-                # Customer → Policy → Document → Chunk
-                """
-                UNWIND $entity_ids as entity_id
-                MATCH (c:Customer) WHERE c.name = entity_id
-                MATCH (c)-[:HAS_POLICY]->(p:Policy)-[:DOCUMENTED_IN]->(d:Document)
-                MATCH (d)-[:FIRST_CHUNK]->(first:Chunk)
-                MATCH (first)-[:NEXT_CHUNK*0..20]->(chunks:Chunk)
-                RETURN DISTINCT 
-                    chunks.chunkId as chunk_id,
-                    chunks.text as text,
-                    chunks.page_number as page_number,
-                    d.fileName as document_name,
-                    d as document_metadata
-                LIMIT $limit
-                """,
-                
-                # Policy direkt → Document → Chunk
-                """
-                UNWIND $entity_ids as entity_id
-                MATCH (p:Policy) WHERE p.policy_number = entity_id OR p.name = entity_id
-                MATCH (p)-[:DOCUMENTED_IN]->(d:Document)
-                MATCH (d)-[:FIRST_CHUNK]->(first:Chunk)
-                MATCH (first)-[:NEXT_CHUNK*0..20]->(chunks:Chunk)
-                RETURN DISTINCT 
-                    chunks.chunkId as chunk_id,
-                    chunks.text as text,
-                    chunks.page_number as page_number,
-                    d.fileName as document_name,
-                    d as document_metadata
-                LIMIT $limit
-                """,
-                
-                # PolicyType → Policy → Document → Chunk
-                """
-                UNWIND $entity_ids as entity_id
-                MATCH (pt:PolicyType) WHERE pt.name = entity_id
-                MATCH (p:Policy)-[:HAS_TYPE]->(pt)
-                MATCH (p)-[:DOCUMENTED_IN]->(d:Document)
-                MATCH (d)-[:FIRST_CHUNK]->(first:Chunk)
-                MATCH (first)-[:NEXT_CHUNK*0..10]->(chunks:Chunk)
-                RETURN DISTINCT 
-                    chunks.chunkId as chunk_id,
-                    chunks.text as text,
-                    chunks.page_number as page_number,
-                    d.fileName as document_name,
-                    d as document_metadata
-                LIMIT $limit
-                """
-            ]
-            
-            all_chunks = []
-            for strategy in strategies:
-                result = self.graph.query(strategy, {
-                    'entity_ids': entity_ids,
-                    'limit': state.max_chunks_limit
-                })
-                
-                if result:
-                    for row in result:
-                        chunk_info = ChunkInfo(
-                            chunk_id=row['chunk_id'],
-                            text=row['text'] or "",
-                            page_number=row['page_number'],
-                            document_name=row['document_name'] or "Unknown",
-                            document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {}
-                        )
-                        all_chunks.append(chunk_info)
-                    
-                    logger.info(f"Entity strategy başarılı: {len(result)} chunk bulundu")
-                    break  # İlk başarılı strategy ile devam et
-            
-            # Eğer hiç sonuç bulunamazsa, chunk text'inde entity araması yap
-            if not all_chunks:
-                logger.info("Entity relationship'leri ile chunk bulunamadı, text araması yapılıyor...")
-                fallback_query = """
-                UNWIND $entity_ids as entity_id
-                MATCH (c:Chunk)
-                WHERE c.text CONTAINS entity_id
-                OPTIONAL MATCH (c)-[:PART_OF]->(d:Document)
-                RETURN DISTINCT 
-                    c.chunkId as chunk_id,
-                    c.text as text,
-                    c.page_number as page_number,
-                    d.fileName as document_name,
-                    d as document_metadata
-                LIMIT $limit
-                """
-                
-                result = self.graph.query(fallback_query, {
-                    'entity_ids': entity_ids,
-                    'limit': state.max_chunks_limit
-                })
-                
-                for row in result:
-                    chunk_info = ChunkInfo(
-                        chunk_id=row['chunk_id'],
-                        text=row['text'] or "",
-                        page_number=row['page_number'],
-                        document_name=row['document_name'] or "Unknown",
-                        document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {}
-                    )
-                    all_chunks.append(chunk_info)
-                    
-            logger.info(f"Entity'lerden toplam {len(all_chunks)} chunk bulundu")
-            return all_chunks
-            
-        except Exception as e:
-            logger.error(f"Chunk arama hatası: {e}")
-            return []
     
     def calculate_text_relevance(self, chunk_info: ChunkInfo, question: str) -> ChunkInfo:
         """Chunk text'ini böl ve soru ile ilişkililik hesapla - Neo4j chunk embedding kullan"""
@@ -1484,75 +1067,6 @@ Anahtar bulgular ve önemli bilgiler nedir?
             chunk_info.relevance_score = 0.0
             return chunk_info
     
-    def vector_search_with_chunks(self, query_text: str, state: AgentState, limit: int = 10) -> List[ChunkInfo]:
-        """Vector search yap ve chunk bilgilerini döndür - Neo4j chunk embedding kullan"""
-        try:
-            logger.info(f"Vector search: {query_text}")
-            normalized_query = normalize_unicode_text(query_text)
-            query_embedding = self.embedding_model.embed_query(normalized_query)
-            
-            # Neo4j vector index'ini kullanarak chunk embedding'leri ile karşılaştır
-            vector_query = """
-            CALL db.index.vector.queryNodes('vector', $limit, $query_vector) 
-            YIELD node, score
-            OPTIONAL MATCH (node)-[:PART_OF]->(d:Document)
-            RETURN 
-                node.chunkId as chunk_id,
-                node.text as text, 
-                node.page_number as page_number,
-                node.embedding as chunk_embedding,
-                d.fileName as document_name,
-                d as document_metadata,
-                score
-            ORDER BY score DESC
-            """
-            
-            result = self.graph.query(vector_query, {
-                'query_vector': query_embedding,
-                'limit': limit
-            })
-            
-            if not result:
-                return []
-            
-            # Chunk bilgilerini hazırla
-            chunks = []
-            for row in result:
-                chunk_info = ChunkInfo(
-                    chunk_id=row['chunk_id'],
-                    text=row['text'] or "",
-                    page_number=row['page_number'],
-                    document_name=row['document_name'] or "Unknown",
-                    document_metadata=dict(row['document_metadata']) if row['document_metadata'] else {},
-                    relevance_score=float(row['score'])  # Neo4j vector search score'unu kullan
-                )
-                chunks.append(chunk_info)
-            
-            # Artık text relevance hesaplama yapmıyoruz çünkü Neo4j vector search'ü chunk embedding'leri kullanıyor
-            logger.info(f"Vector search'ten {len(chunks)} chunk alındı (Neo4j chunk embeddings kullanıldı)")
-            
-            # Bulunan chunk'ları detaylı logla
-            logger.info(f"🔍 VECTOR SEARCH SONUÇLARI:")
-            for i, chunk in enumerate(chunks[:5], 1):  # İlk 5 chunk'ı göster
-                logger.info(f"📄 Chunk {i} (Score: {chunk.relevance_score:.3f}):")
-                logger.info(f"   - Document: {chunk.document_name}")
-                logger.info(f"   - Page: {chunk.page_number}")
-                logger.info(f"   - Chunk ID: {chunk.chunk_id}")
-                logger.info(f"   - Text Length: {len(chunk.text)} karakter")
-                logger.info(f"   - FULL TEXT:")
-                logger.info(f"     {chunk.text}")
-                logger.info("   " + "="*80)
-                    
-            # Relevance'a göre sırala ve döndür (zaten sıralı ama emin olmak için)
-            chunks.sort(key=lambda x: x.relevance_score, reverse=True)
-            
-            logger.info(f"Vector search sonucu: {len(chunks)} chunk")
-            return chunks
-            
-        except Exception as e:
-            logger.error(f"Vector search hatası: {e}")
-            return []
-
     def parse_agent_response(self, response: str) -> Tuple[str, str, str]:
         """Agent cevabını parse et - yıldızlı formatları da destekle"""
         # Observation, Thought, Action'ı ayır
@@ -2009,7 +1523,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         # Ham veri bölümlerini topla (eski yöntem için)
                         raw_data_sections = []
                         
-                        # Successful findings (cypher ve vector_search raw sonuçları)
+                        # Successful findings (cypher raw sonuçları)
                         if state.successful_findings:
                             findings_data = []
                             for finding in state.successful_findings:
@@ -2023,9 +1537,9 @@ Anahtar bulgular ve önemli bilgiler nedir?
                                         "summary": finding.summary
                                     })
                             if findings_data:
-                                raw_data_sections.append(f"=== CYPHER & VECTOR SEARCH HAM VERİLER ===\n{json.dumps(findings_data, ensure_ascii=False, indent=2)}")
+                                raw_data_sections.append(f"=== CYPHER HAM VERİLER ===\n{json.dumps(findings_data, ensure_ascii=False, indent=2)}")
                         
-                        # Vector search chunk'ları (varsa)
+                        # Chunk'ları (varsa)
                         if state.discovered_chunks:
                             sorted_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)
                             chunk_content = []
@@ -2116,7 +1630,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                                             document_name = 'Unknown'
                                     else:
                                         document_name = document_name or 'Unknown'
-                                elif 'node.text' in row:  # Vector search return (node.text, node.chunkId, etc.)
+                                elif 'node.text' in row:  # Neo4j return (node.text, node.chunkId, etc.)
                                     chunk_text = row['node.text']
                                     chunk_id = row.get('node.chunkId', f"cypher_{state.iteration_count}_{chunks_found}")
                                     page_number = row.get('node.page_number', 0)
@@ -2200,79 +1714,6 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         
                     else:
                         current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
-                        
-                elif action == "vector_search":
-                    # Vector search için mevcut Cypher embedding'lerini kontrol et
-                    available_embeddings = getattr(self, '_cypher_embeddings', {})
-                    
-                    if not available_embeddings:
-                        current_observation = f"❌ Vector search için önce generate_embeddings_for_cypher tool'unu çağırmalısın. Arama terimi: '{action_content}'"
-                        logger.warning("Vector search denendi ama embedding bulunamadı")
-                        continue
-                    
-                    # Son oluşturulan embedding'i kullan (veya tek varsa onu)
-                    latest_embedding_key = list(available_embeddings.keys())[-1]
-                    query_embedding = available_embeddings[latest_embedding_key]
-                    
-                    logger.info(f"🔍 Vector search yapılıyor - Embedding ID: {latest_embedding_key}")
-                    logger.info(f"📊 Mevcut embedding'ler: {list(available_embeddings.keys())}")
-                    
-                    # Önceki Cypher bulgularından ilgili belgeleri çıkar
-                    relevant_documents = []
-                    for finding in state.successful_findings:
-                        if finding.action_type == 'cypher_query' and finding.raw_data:
-                            # Cypher sorgu sonuçlarından belge adlarını çıkar
-                            raw_data = finding.raw_data
-                            if isinstance(raw_data, list):
-                                for row in raw_data:
-                                    if isinstance(row, dict) and 'documentFileName' in row:
-                                        doc_name = row['documentFileName']
-                                        if doc_name and doc_name not in relevant_documents:
-                                            relevant_documents.append(doc_name)
-                                    elif isinstance(row, dict) and 'd' in row and isinstance(row['d'], dict):
-                                        doc_name = row['d'].get('fileName')
-                                        if doc_name and doc_name not in relevant_documents:
-                                            relevant_documents.append(doc_name)
-                    
-                    # Saklanan embedding ile vector search yap
-                    success, result = self.execute_vector_search_with_embeddings(
-                        query_embedding,
-                        limit=15, 
-                        document_names=relevant_documents if relevant_documents else None
-                    )
-                    if success and result:
-                        # Vector search sonuçlarını işle
-                        doc_names = list(set([chunk['document_name'] for chunk in result if chunk.get('document_name')]))
-                        doc_info = f" (Belgeler: {', '.join(doc_names[:3])}{'...' if len(doc_names) > 3 else ''})" if doc_names else ""
-                        current_observation = f"Vector search başarılı: {len(result)} chunk bulundu{doc_info}. En yüksek relevance score: {result[0]['relevance_score']:.3f}. Chunk'lar dokümanlarda '{action_content}' ile ilgili bilgileri içeriyor."
-                        
-                        # Başarılı vector search bulgusunu kaydet
-                        summary = self.summarize_finding(f"Vector Search: {action_content}", result, "vector_search")
-                        self.add_successful_finding(
-                            state,  # state parametresi eklendi
-                            state.iteration_count,
-                            "vector_search", 
-                            summary,
-                            result[0]['relevance_score'] if result else 0.0,
-                            result  # Ham vector search sonuçları
-                        )
-                        
-                        # State'deki chunk'ları güncelle
-                        for chunk_data in result:
-                            chunk_info = ChunkInfo(
-                                chunk_id=chunk_data['chunk_id'],
-                                text=chunk_data['text'],
-                                page_number=chunk_data['page_number'],
-                                document_name=chunk_data['document_name'],
-                                relevance_score=chunk_data['relevance_score'],
-                                # Eksik alanları varsayılan değerlerle ekle
-                                document_metadata={},
-                                split_texts=[],
-                                split_scores=[]
-                            )
-                            state.discovered_chunks.append(chunk_info)
-                    else:
-                        current_observation = f"Vector search başarısız: {result}. Farklı arama terimleri dene veya cypher_query kullan."
                         
                 else:
                     current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
@@ -2568,8 +2009,8 @@ Content: [Sorgu/arama metni/cevap]
 
 **TOOL CALL EXAMPLE**:
 ```
-Observation: Ayça Dinçkök'ün 2 poliçesi bulundu, şimdi prim bilgilerini bulmak için vector search gerekli
-Thought: Cypher ile vector search yapacağım, önce "prim tutarı" için embedding oluşturayım
+Observation: Ayça Dinçkök'ün 2 poliçesi bulundu, şimdi prim bilgilerini bulmak için ilgili chunk'ları araştıralım
+Thought: Cypher ile chunk araması yapacağım, önce "prim tutarı" için embedding oluşturayım
 Action: TOOL_CALL
 Content: generate_embeddings_for_cypher("prim tutarı")
 
@@ -2587,7 +2028,7 @@ Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD 
 - Node sayıları, liste'ler, ID'ler, tipler için
 - Entity'leri bul ve ilişkilerini araştır
 - Chunk'ları topla: entity → document → chunk chain'i takip et
-- **Vector Search Cypher**: `CALL db.index.vector.queryNodes('vector', limit, $embedding_vector)` kullan
+- **Semantic Search Cypher**: `CALL db.index.vector.queryNodes('vector', limit, $embedding_vector)` kullan
 - **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür
 - **STRING ARAMA ZORUNLU KURALLARI:**
   * ❌ `d.fileName = "xyz"` → Exact match YASAK
@@ -2661,7 +2102,7 @@ Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD 
   * MUTLAKA toLower() fonksiyonu kullan
 
 ### 🎯 SEMANTIC SEARCH BAŞARISIZLIK PROTOKOLİ:
-**EĞER İLK VECTOR SEARCH YANLIŞ SONUÇ VERDİYSE:**
+**EĞER İLK SEMANTIC ARAMA YANLIŞ SONUÇ VERDİYSE:**
 1. **ALTERNATİF EMBEDDING**: Farklı anahtar kelimelerle yeni embedding oluştur
    - "taksit" → "ödeme planı tablosu", "taksit vadesi", "prim taksitleri"
    - "prim" → "sigorta bedeli", "prim tutarı", "ödeme miktarı"
