@@ -1903,7 +1903,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                 messages.append(HumanMessage(content=entry))
             
             # LLM prompt'unu logla - tam mesajlar ile birlikte
-            self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
+            # self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
             
             try:
                 # OpenAI model kontrolü ve tool calling desteği
@@ -2275,7 +2275,7 @@ Anahtar bulgular ve önemli bilgiler nedir?
                         current_observation = f"Vector search başarısız: {result}. Farklı arama terimleri dene veya cypher_query kullan."
                         
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, vector_search, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
                 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
