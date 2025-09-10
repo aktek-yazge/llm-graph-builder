@@ -25,6 +25,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
 from src.llm import get_llm, get_reasoning_response_text, get_full_reasoning_response, is_reasoning_model
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
+from src.schema_extractor import get_compact_schema
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from sklearn.metrics.pairwise import cosine_similarity
@@ -414,7 +415,7 @@ Sadece "documents" veya "pages" olarak yanıtla."""
     def execute_cypher_query(self, query: str) -> Tuple[bool, Any]:
         """Cypher sorgusunu çalıştır - Saklanan embedding'leri parametrelere ekle"""
         try:
-            logger.info(f"Cypher sorgusu çalıştırılıyor: {query}")
+            # logger.info(f"Cypher sorgusu çalıştırılıyor: {query}")
             
             # Query parametrelerini hazırla
             query_params = {}
@@ -1506,7 +1507,6 @@ Sonuç sayısı: {len(result)}
                 
                 # DEBUG: LLM response'unu logla
                 logger.info(f"🔍 DEBUG - Raw LLM Response:\n{agent_response}")
-                logger.info(f"🔍 DEBUG - Parsed: Action='{action}', Content='{action_content}'")
                 
                 
                 conversation_history.append(f"Thought: {thought}\nAction: {action}\nContent: {action_content}")
@@ -1914,63 +1914,72 @@ Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap 
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
         """Token-optimized system prompt - domain-agnostic decision making"""
         
-        # Kısa schema formatı - token tasarrufu için
-        schema_text = """## 🗄️ Neo4j Schema Yapısı:
-Nodes: Document(errorMessage:string, model:string, fileType:string, communityNodeCount:integer, docType:string, status:string, page_images:string[], processingTime:integer, total_chunks:integer, fileSource:string, chunkRelCount:integer, entityNodeCount:integer, is_cancelled:boolean, fileSize:integer, updatedAt:datetime, entityEntityRelCount:integer, relationshipCount:integer, chunkNodeCount:integer, createdAt:datetime, processed_chunk:integer, fileName:string, communityRelCount:integer, nodeCount:integer); Chunk(position:integer, id:string, text:string, content_offset:integer, fileName:string, page_number:integer, length:integer, chunkId:string, embedding:float[], page_link:string); Policy(id:string, insuredItem:string, source_file:string, createdAt:datetime, name:string, year:string, policyNumber:string, extraction_method:string, type:string, customer:string); PolicyType(typeName:string, policyCount:integer, createdAt:datetime, name:string); InsuredItem(policyCount:integer, createdAt:datetime, description:string, name:string); PolicyYear(policyCount:integer, createdAt:datetime, name:string, year:integer); Customer(policyCount:integer, createdAt:datetime, name:string, fullName:string)
-Rels: PART_OF; FIRST_CHUNK; NEXT_CHUNK; HAS_YEAR(created_at:datetime); HAS_TYPE(created_at:datetime); HAS_POLICY(created_at:datetime); MENTIONS; HAS_MEMBER; DOCUMENTED_IN(source:string, created_at:datetime); RELATES_TO; HAS_DOC(created_at:datetime); HAS_INSURED_ITEM(created_at:datetime)
-Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Customer)-[HAS_DOC]->(Document); (Customer)-[HAS_POLICY]->(Policy); (Document)-[FIRST_CHUNK]->(Chunk); (Policy)-[DOCUMENTED_IN]->(Document); (Policy)-[HAS_INSURED_ITEM]->(InsuredItem); (Policy)-[HAS_TYPE]->(PolicyType); (Policy)-[HAS_YEAR]->(PolicyYear)
+        # Schema'yı dinamik olarak Neo4j'den çek - token tasarrufu için compact format
+        try:
+            # Mevcut graph connection'ı kullan
+            from src.schema_extractor import Neo4jSchemaExtractor
+            extractor = Neo4jSchemaExtractor()
+            extractor.graph = self.graph  # Mevcut graph'ı kullan
+            
+            # Compact schema + field type kuralları
+            compact_schema = get_compact_schema(self.graph)
+            
+            schema_text = f"""## 🗄️ Neo4j Schema Yapısı:
+{compact_schema}
 
 ## 📊 DOMAIN ARCHITECTURE:
 - **Document**: Policy'lerin metadata'larını içeren ana kaynak belgeler
 - **Chunk**: Document'lerin parçalara bölünmüş text içerikleri (semantic search için)
 - **Policy/Customer/PolicyType**: Yapılandırılmış business entity'leri
 """
+        except Exception as e:
+            logger.warning(f"Schema çekme hatası: {e}")
+            # Fallback: Sabit schema kullan
+            schema_text = """## 🗄️ Neo4j Schema Yapısı:
+Nodes: Graph Db Nodes bulunamadı uyarısı ver
+Rels: Graph Db Rels bulunamadı uyarısı ver
+Patterns: Graph Db patterns bulunamadı uyarısı ver
+
+⚠️ DOMAIN: Document→Chunk (text içerik), Policy/Customer (yapısal data)
+"""
 
         system_prompt = f"""Sen bir graph veritabanı analiz uzmanısın. Kullanıcı sorularını analiz ederek en uygun arama stratejisini KENDI KARAR VER.
 
-⚠️ **ZORUNLU CYPHER KURALLARI:**
-1. **CONTAINS OPERATÖRÜ ZORUNLU**: String aramalarında = operatörü YASAK, sadece CONTAINS kullan
-2. **apoc.text.clean() ZORUNLU**: Her string aramada mutlaka apoc.text.clean() kullan
-3. **toLower() ZORUNLU**: Her string aramada mutlaka toLower() kullan
-4. **ÖRNEK ZORUNLU FORMAT**: `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("d4"))`
+⚠️ **MASTER CYPHER KURALLARI:**
+1. **FIELD TİP KONTROLÜ**: Schema'dan field tipini kontrol et
+2. **INTEGER**: `field = value` | **STRING**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
+3. **CONTAINS sadece STRING'de, = sadece INTEGER'da kullan**
+
+🔤 **STRING MASTER RULE**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
 
 {schema_text}## 🧠 DECISION FRAMEWORK:
 
-### 🔍 SORU TİPİ ANALİZİ:
-1. **METADATA SORULARI**: Sayısal/yapısal veriler (count, ID, tip, liste)
-   → Node property'leriyle cevaplanabilir → SADECE cypher_query kullan
-   
-2. **CONTENT SORULARI**: Belge içeriği, detaylı açıklamalar, text-based bilgiler  
-   → Chunk text'lerinde aranmalı → cypher_query ile veri araştır ve chunk'ları topla
+### 🎯 FIELD TİP KURALLARI:
+- **Integer**: `field = value` | **String**: MASTER RULE | **Boolean**: `field = true/false`
 
-3. **BELGE ANALİZİ SORULARI**: Belirli entity için tüm belgelerinin detaylı analizi
-   → cypher_query ile entity bul + ilgili chunk'ları topla
+### 🔍 AKILLI ARAMA STRATEJİSİ:
+**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
+**METADATA SORULARI için entity araması** (count, liste, ID, tip, genel bilgi)
+**MÜŞTERİ ADI ARAMA: Customer node → filename search → semantic search chain**
 
-### ⚡ LLM-DRIVEN KARAR VERİCİ KURALLAR:
-1. **İLK ADIM**: Her zaman cypher_query ile başla
-   - Node property'lerini ve temel metadata'yı çek
-   - Hangi entity'ler mevcut, hangi belgeler var, chunk'lar nasıl organize?
+### ⚡ OPTİMİZE EDİLMİŞ KARAR VERİCİ:
+1. **AKILLI İLK ADIM** - Soru tipini algıla:
+   - 📋 **İçerik/Detay aranıyorsa** → GDS semantic search (embedding) kullan
+   - 📊 **Metadata gerekiyorsa** → Entity cypher query kullan
+   - Karışık sorular: Her iki yöntemi dene
    
-2. **İKİNCİ KARAR**: Cypher sonucuna BAK ve şunu sor:
-   - ✅ Soru metadata ile tam cevaplanıyor mu? → final_answer
-   - ❌ Çok fazla veri var mı? Daha spesifik arama gerekli mi? → refined cypher_query
-   - ❌ İçerik detaylarına ihtiyaç var mı? → cypher_query ile chunk'ları ara
-   - ❌ Belge metinlerini okumak gerekli mi? → cypher_query ile chunk'ları relationship takip ederek ara
-   - **⚠️ KRİTİK: Document.total_chunks=0 veya processed_chunk=0 görsen bile MUTLAKA chunk arama yap! Metadata güncel olmayabilir, chunk'lar var olabilir!**
+2. **HIZ OPTİMİZASYONU**: 
+   - ✅ Metadata başarısızsa 2 denemeden sonra semantic search'e geç
+   - ✅ Semantic search 0.5+ score threshold ile başla
    - **📋 CHUNK ANALİZİ**: Gelen chunk'larda eksik bilgi var mı?
-     * Tablo yarıda kesmişse → sonraki chunk'ları getir
+     * Tablo veya cümle yarıda kesmişse → sonraki chunk'ları getir
      * Cümle eksikse → position+1, position+2 chunk'larını getir  
-     * "P 12.02.2020" gibi başlangıç varsa → tam taksit tablosunu getir
-   - 5+ belge/poliçe bulunduğunda analiz gerekli ise:
-     * KULLANICIYA SOR: "X adet belge bulundu, hangisinin detayını analiz etmek istiyorsunuz?"
-     * VEYA KENDİ SEÇ: En güncel/önemli 2-3 tanesini analiz et  
-     * Karar senin - çok fazla içerik okumak uzun sürer!
+     * Tablo başlangıcı tespit edilirse → tam tablo içeriğini getir
 
-3. **CHUNK ARAMA**: İçerik gerekiyorsa:
-   - **cypher_query ile chunk arama**: Entity→document→chunk relationship'leri ile chunk'lar topla
-   - **Pozisyon-based arama**: Belirli pozisyonlardaki chunk'ları manuel olarak ara
-   - **MATCH (c:Chunk)-[:PART_OF]->(d:Document)**: Direct chunk araması
-   - Text içerik analizi için Cypher sonuçlarını kullan
+3. **HIZLI CHUNK ARAMA**: İçerik/detay gerekiyorsa:
+   - **SEM-ANTİK SEARCH ÖNCE**: generate_embeddings_for_cypher ile GDS cosine search
+   - **Entity filter SONRA**: Gerekiyorsa metadata ile filtrele
+   - **MATCH (c:Chunk)-[:PART_OF]->(d:Document)**: Direct GDS chunk araması (tercih edilen)
 
 ### � AVAILABLE TOOLS (OpenAI Function Calling):
 
@@ -1978,7 +1987,7 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
 - Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
 - text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
 - LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
-- KULLANIM: Tool çağır → Cypher'da "CALL db.index.vector.queryNodes('vector', 10, $embedding_vector)" kullan
+- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
 
 **🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
 - ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
@@ -1987,15 +1996,10 @@ Patterns: (Chunk)-[NEXT_CHUNK]->(Chunk); (Chunk)-[PART_OF]->(Document); (Custome
 - ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
 - ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
 
-**EMBEDDING METNI ÖRNEKLERİ:**
-- Kullanıcı: "d4 ün taksitleri neler" → Embedding: "taksit tutarları ödeme planı"
-- Kullanıcı: "hasar bedeli ne kadar" → Embedding: "hasar bedeli tazminat tutarı"
-- Kullanıcı: "prim ne kadar" → Embedding: "prim tutarı sigorta bedeli"
-
 ### �📝 ACTION FORMAT:
 ```
-Observation: [Mevcut durum ve önceki adım sonuçları]
-Thought: [Cypher sonucuna bakarak: Bu yeterli mi? İçerik detayına ihtiyaç var mı?]
+Observation: [Durum ve önceki sonuçlar]
+Thought: [İçerik/detay arıyorum mu yoksa metadata mi? Metadata 2 denemede başarısızsa semantic search gerekli]
 Action: [cypher_query | final_answer]
 Content: [Sorgu/arama metni/cevap]
 ```
@@ -2004,23 +2008,6 @@ Content: [Sorgu/arama metni/cevap]
 - ❌ `Content: |` (YAML pipe syntax kullanma)
 - ❌ `Content: >` (YAML fold syntax kullanma)
 - ❌ Çok satırlı content'te pipe karakteri kullanma
-- ✅ Doğru: `Content: CALL db.index.vector.queryNodes(...)`
-- ✅ Çok satırlı için sadece doğrudan yaz
-
-**TOOL CALL EXAMPLE**:
-```
-Observation: Ayça Dinçkök'ün 2 poliçesi bulundu, şimdi prim bilgilerini bulmak için ilgili chunk'ları araştıralım
-Thought: Cypher ile chunk araması yapacağım, önce "prim tutarı" için embedding oluşturayım
-Action: TOOL_CALL
-Content: generate_embeddings_for_cypher("prim tutarı")
-
-# Sonrasında Cypher - ZORUNLU apoc.text.clean VE CONTAINS kullanımı:
-Action: cypher_query
-Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD node, score 
-         MATCH (node)-[:PART_OF]->(d:Document) 
-         WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("Ayça_Dinçkök"))
-         RETURN node.text, score ORDER BY score DESC
-```
 
 ### 🎯 ACTION STRATEJİLERİ:
 
@@ -2028,53 +2015,87 @@ Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD 
 - Node sayıları, liste'ler, ID'ler, tipler için
 - Entity'leri bul ve ilişkilerini araştır
 - Chunk'ları topla: entity → document → chunk chain'i takip et
-- **Semantic Search Cypher**: `CALL db.index.vector.queryNodes('vector', limit, $embedding_vector)` kullan
 - **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür
-- **STRING ARAMA ZORUNLU KURALLARI:**
-  * ❌ `d.fileName = "xyz"` → Exact match YASAK
-  * ❌ `d.fileName CONTAINS "xyz"` → Temizlenmemiş arama YASAK
-  * ✅ `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("xyz"))` → ZORUNLU FORMAT
-  * ✅ Her string aramada mutlaka CONTAINS operatörü kullan
-  * ✅ Her string aramada mutlaka apoc.text.clean() fonksiyonu kullan
-  * ✅ Her string aramada mutlaka toLower() fonksiyonu kullan
+
+### 🔍 VECTOR ARAMA STRATEJİSİ (GDS COSİNE SİMİLARİTY!):
+
+**A) METADATA + GDS VECTOR ARAMA (Tercih Edilen):**
+```cypher
+// 1. Önce metadata filtrelerini uygula, sonra GDS cosine similarity ile ara
+WITH $embedding_vector AS queryVec
+MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge_adı"))
+AND c.embedding IS NOT NULL
+WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+**A2) MÜŞTERİ ADI + GDS VECTOR ARAMA (Customer adı filename'de):**
+```cypher
+// Müşteri adı filename'de geçiyorsa, dosya adında ara
+WITH $embedding_vector AS queryVec
+MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("müşteri_adı"))
+AND c.embedding IS NOT NULL
+WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+**B) SADECE GDS VECTOR ARAMA (Metadata yok ise):**
+```cypher
+// Soruda hiç metadata yok ise direk tüm chunk'larda GDS ile ara
+WITH $embedding_vector AS queryVec
+MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+WHERE c.embedding IS NOT NULL
+WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+ORDER BY score DESC
+LIMIT 15
+```
+
+**KARAR VERİCİ KURAL:**
+- ✅ Soru belge adı, müşteri adı, poliçe tipi içeriyorsa → Önce filtrele, sonra GDS vector ara
+- ✅ **MÜŞTERİ ADI ARAMA**: Customer node'da bulunamazsa filename'de müşteri adını ara (A2 stratejisi)
+- ✅ **FILENAME SEARCH**: Document.fileName içinde müşteri adı, poliçe numarası, tür bilgisi aranabilir
+- ✅ Soru sadece içerik/kavram arıyorsa ("taksit tablosu", "hasar limiti") → Direk GDS vector ara
+- ✅ GDS AVANTAJI: WHERE filtresi problemini çözüyor, daha iyi sonuçlar veriyor
+- ⚠️ YANLIŞ: db.index.vector.queryNodes kullanma → GDS cosine similarity tercih et
 
 ⚠️ **CHUNK ANALİZ ZORUNLU KURALI:**
 - **TÜM CHUNK'LARI DETAYLI ANALİZ ET**: Birden fazla chunk geldiğinde her birini tek tek oku
-- **İÇERİK BÜTÜNLÜĞÜ**: Tablolar, listeler, sayısal veriler birden fazla chunk'a yayılabilir
+- **İÇERİK BÜTÜNLÜĞÜ**: Tablolar, listeler, sayısal veriler ve devam eden içerik birden fazla chunk'a yayılabilir
 - **DEVAM KONTROL**: Bir chunk'ta kesik/eksik bilgi varsa, sonraki position'lardaki chunk'ları da kontrol et
 - **ZORUNLU**: final_answer vermeden önce TÜM chunk'ları analiz et ve tüm bulguları dahil et
 - **TABLO ANALİZİ**: Taksit tabloları, ödeme planları gibi yapısal veriler birden fazla chunk'ta dağıtılmış olabilir - HEPSİNİ BİRLEŞTİR!
 - **KEŞFEDİLEN CHUNK İÇERİKLERİ bölümündeki tüm text'leri mutlaka analiz et - bunlar sana verilen en önemli veri!**
 
-**🔤 TEXT ARAMA ZORUNLU KURALLARI:**
-- ❌ `d.fileName CONTAINS "d4"` → Büyük/küçük harf duyarlı
-- ✅ `apoc.text.clean(d.fileName) CONTAINS apoc.text.clean("d4")` → Temizlenmiş text arama (ZORUNLU)
-- ✅ `toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("d4"))` → Case-insensitive temizlenmiş arama
-- ✅ `c.fullName =~ "(?i).*ayça.*"` → Regex ile case-insensitive
-- ✅ **TÜM STRİNG EŞLEŞTİRMELERDE apoc.text.clean() VE toLower() KULLAN**
-- ⚠️ **MUTLAKA CONTAINS KULLAN, = OPERATÖRÜ YASAK**
-
-- **AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
-  sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
+**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
+sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
 - Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
 - **ÖRNEK AKILLI QUERY**:
   ```cypher
-  // İlk arama - ZORUNLU FORMAT
-  CALL db.index.vector.queryNodes('vector', 5, $embedding_vector) YIELD node, score
-  MATCH (node)-[:PART_OF]->(d:Document)
-  WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge"))
-  RETURN node.text, node.chunkId, node.page_number, node.position, score
-  
-  // Entity arama - ZORUNLU FORMAT  
+  // 1. ÖNCE METADATA - Entity'leri bul (MASTER RULE ile)
   MATCH (c:Customer)
-  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))
+  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // STRING field
+  RETURN c.fullName, c.name
   
-  // Eğer 1. chunk'ta eksik bilgi varsa, sonraki chunk'ları da getir
-  MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-  WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge")) AND c.position IN [12, 13, 14]  // position'ları manuel belirt
-  RETURN c.text, c.chunkId, c.page_number, c.position
-  ```
-
+  // 2. YEAR FİELDLARI - INTEGER TİP KONTROLÜ
+  MATCH (py:PolicyYear)
+  WHERE py.year = 2020  // INTEGER field - NO apoc.text.clean!
+  RETURN py.year
+  
+  // 3. MIXed QUERY - MASTER RULE kombinasyonu
+  MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)-[:HAS_YEAR]->(py:PolicyYear)
+  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // STRING
+  AND py.year = 2020  // INTEGER
+  RETURN p, py
 **final_answer**: 
 - Metadata yeterli ise: cypher_query sonuçlarını organize et
 - İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
@@ -2087,31 +2108,23 @@ Content: CALL db.index.vector.queryNodes('vector', 10, $embedding_vector) YIELD 
   * Sayısal veriler, tarihler, tutarlar gibi ilişkili bilgileri birlikte değerlendir
   * Eksik bilgi bırakma - tüm bulguları dahil et
 
-### ‼️ ZORUNLU KURALLAR:
+### ‼️ ZORUNLU KURALLAR SUMMARY:
 - Her soru için İLK ADIM cypher_query olmalı
+- **FIELD TİP KONTROLÜ**: MASTER RULE'leri kullan (yukarıya bak)
+- **MÜŞTERİ ADI ARAMA CHAIN**: Customer node → filename search → semantic search (3 adımlı strateji)
+- **FILENAME SEARCH**: Müşteri adı Customer node'da bulunamazsa Document.fileName'de ara
 - Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
-- **İÇERİK SORUSU ANALİZİ**: Kullanıcı "taksit", "ödeme planı", "prim", "hasar" gibi içerik soruyorsa MUTLAKA chunk arama YAP!
-- **total_chunks=0 GÖRSEN BİLE**: Bu sadece metadata, gerçek chunk'lar var olabilir - MUTLAKA ara!
-- final_answer'da doğal konuşma tarzında cevap ver (liste formatı YASAK)  
+- **AKILLI İÇERİK KARAR**: Kullanıcı sorusu belge içeriği, detaylı bilgi, sayısal veri gerektiriyor mu? KENDİN ANALİZ ET!
+- final_answer'da doğal konuşma tarzında cevap ver
 - Belge analizi: cypher_query (entity bul) → cypher_query (chunk topla) → final_answer
 - Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle
-- **TEXT ARAMA ZORUNLU FORMATı:**
-  * `toLower(apoc.text.clean(property)) CONTAINS toLower(apoc.text.clean("arama_terimi"))`
-  * MUTLAKA CONTAINS operatörü kullan (= operatörü YASAK)
-  * MUTLAKA apoc.text.clean() fonksiyonu kullan  
-  * MUTLAKA toLower() fonksiyonu kullan
 
-### 🎯 SEMANTIC SEARCH BAŞARISIZLIK PROTOKOLİ:
-**EĞER İLK SEMANTIC ARAMA YANLIŞ SONUÇ VERDİYSE:**
-1. **ALTERNATİF EMBEDDING**: Farklı anahtar kelimelerle yeni embedding oluştur
-   - "taksit" → "ödeme planı tablosu", "taksit vadesi", "prim taksitleri"
-   - "prim" → "sigorta bedeli", "prim tutarı", "ödeme miktarı"
-2. **SİSTEMATİK BELGE TARAMA**: 
-   - Position 1-15 chunk'larını manuel ara (belgeler genelde başta tablo içerir)
-   - Sayısal veri içeren chunk'ları ara (pattern: "TL", "₺", tarih formatları)
-3. **GENIŞ POZISYON ARAMI**: 
-   - İlk arama position 20+ verdiyse → Position 1-20 arası da kontrol et
-   - Tablolar ve listeler genelde belge başında yer alır"""
+### 🎯 GDS SORGU REFERANSLARI:
+- **Metadata + GDS Vector**: Yukarıdaki A) örneğini kullan
+- **Sadece GDS Vector**: Yukarıdaki B) örneğini kullan
+- **GDS ZORUNLU**: db.index.vector.queryNodes artık kullanma, sadece gds.similarity.cosine kullan
+- **THRESHOLD**: score >= 0.5 (strict), score >= 0.3 (loose) olarak ayarla
+"""
 
         return system_prompt
 
