@@ -79,24 +79,28 @@ def generate_reference_links(chunkdetails, sources):
         if fileName:
             # Document referansı
             if fileName not in document_refs:
-                # S3'ten presigned URL oluştur
-                doc_s3_key = None
+                # S3 yerine direkt BASE_URL kullan
                 doc_url = None
                 
-                if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                    # Document'in S3 key'ini tahmin et (upload sırasında kullanılan format)
-                    from pathlib import Path
-                    doc_name = Path(fileName).stem
-                    doc_s3_key = f"documents/{doc_name}/{fileName}"
-                    
-                    # Presigned URL oluştur
-                    from src.document_sources.s3_upload_utils import generate_s3_presigned_url
-                    doc_url = generate_s3_presigned_url(
-                        s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
-                    )
+                # S3 URL generation'ını devre dışı bırak - direkt BASE_URL fallback kullan
+                # if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                #     # Document'in S3 key'ini tahmin et (upload sırasında kullanılan format)
+                #     from pathlib import Path
+                #     doc_name = Path(fileName).stem
+                #     doc_s3_key = f"documents/{doc_name}/{fileName}"
+                #     
+                #     # Presigned URL oluştur
+                #     from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+                #     doc_url = generate_s3_presigned_url(
+                #         s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+                #     )
+                
+                # URL encode the filename for proper handling of Turkish characters and spaces
+                import urllib.parse
+                encoded_fileName = urllib.parse.quote(fileName, safe='', encoding='utf-8')
                 
                 document_refs[fileName] = {
-                    'doc_link': doc_url or f"#document-{fileName}",  # Fallback
+                    'doc_link': doc_url or f"{os.getenv('BASE_URL', 'http://localhost:8000')}/files/{encoded_fileName}",  # BASE_URL fallback
                     'pages': set()
                 }
             
@@ -104,41 +108,53 @@ def generate_reference_links(chunkdetails, sources):
             if page_link and page_number:
                 document_refs[fileName]['pages'].add(page_number)
                 
-                # S3'ten page image presigned URL oluştur
+                # S3 yerine direkt BASE_URL kullan
                 page_url = None
-                if s3_bucket and aws_access_key_id and aws_secret_access_key and page_link:
-                    from pathlib import Path
-                    doc_name = Path(fileName).stem
-                    page_s3_key = f"documents/{doc_name}/{page_link}"
-                    
-                    from src.document_sources.s3_upload_utils import generate_s3_presigned_url
-                    page_url = generate_s3_presigned_url(
-                        s3_bucket, page_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
-                    )
+                
+                # S3 URL generation'ını devre dışı bırak - direkt BASE_URL fallback kullan
+                # if s3_bucket and aws_access_key_id and aws_secret_access_key and page_link:
+                #     from pathlib import Path
+                #     doc_name = Path(fileName).stem
+                #     page_s3_key = f"documents/{doc_name}/{page_link}"
+                #     
+                #     from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+                #     page_url = generate_s3_presigned_url(
+                #         s3_bucket, page_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+                #     )
+                
+                # URL encode the page_link for proper handling of Turkish characters and spaces
+                import urllib.parse
+                encoded_page_link = urllib.parse.quote(page_link, safe='', encoding='utf-8')
                 
                 page_refs[page_link] = {
                     'page_number': page_number,
                     'fileName': fileName,
-                    'page_link': page_url or f"#page-{page_link}"  # Fallback
+                    'page_link': page_url or f"{os.getenv('BASE_URL', 'http://localhost:8000')}/images/{encoded_page_link}"  # BASE_URL fallback
                 }
     
     # Kaynaklardan eksik belgeleri ekle
     for source in sources:
         if source not in document_refs:
-            # S3'ten presigned URL oluştur
+            # S3 yerine direkt BASE_URL kullan
             doc_url = None
-            if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                from pathlib import Path
-                doc_name = Path(source).stem
-                doc_s3_key = f"documents/{doc_name}/{source}"
-                
-                from src.document_sources.s3_upload_utils import generate_s3_presigned_url
-                doc_url = generate_s3_presigned_url(
-                    s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
-                )
+            
+            # S3 URL generation'ını devre dışı bırak - direkt BASE_URL fallback kullan
+            # if s3_bucket and aws_access_key_id and aws_secret_access_key:
+            #     from pathlib import Path
+            #     doc_name = Path(source).stem
+            #     doc_s3_key = f"documents/{doc_name}/{source}"
+            #     
+            #     from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+            #     doc_url = generate_s3_presigned_url(
+            #         s3_bucket, doc_s3_key, aws_access_key_id, aws_secret_access_key, expiration=3600
+            #     )
+            
+            # URL encode the source filename for proper handling of Turkish characters and spaces
+            import urllib.parse
+            encoded_source = urllib.parse.quote(source, safe='', encoding='utf-8')
             
             document_refs[source] = {
-                'doc_link': doc_url or f"#document-{source}",
+                'doc_link': doc_url or f"{os.getenv('BASE_URL', 'http://localhost:8000')}/files/{encoded_source}",  # BASE_URL fallback
                 'pages': set()
             }
     
