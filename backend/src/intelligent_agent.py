@@ -233,8 +233,11 @@ GÖREV:
                                 file_name = link_result[0].get('file_name') or chunk.document_name
                                 
                                 if page_link:
-                                    # page_link'i direkt kullan
-                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({page_link})"
+                                    # page_link'i BASE_URL ile birleştir
+                                    import urllib.parse
+                                    encoded_page_link = urllib.parse.quote(page_link, safe='', encoding='utf-8')
+                                    image_link = f"{BASE_URL}/images/{encoded_page_link}"
+                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({image_link})"
                                     if page_ref not in references:
                                         references.append(page_ref)
                                         unique_chunks[chunk_id] = True
