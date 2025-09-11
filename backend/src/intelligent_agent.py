@@ -1931,6 +1931,12 @@ Patterns: Graph Db patterns bulunamadı uyarısı ver
 **METADATA SORULARI için entity araması** (count, liste, ID, tip, genel bilgi)
 **MÜŞTERİ ADI ARAMA: Customer node → filename search → semantic search chain**
 
+**🏠 D4/D5/D6 KONUT POLİÇESİ ARAMA KURALI:**
+- ❌ **YANLIŞ**: PolicyType.typeName'de "d4" veya "konut" arama
+- ✅ **DOĞRU**: Policy.name veya Document.fileName'de "d4" arama
+- **SEBEP**: D4, D5, D6 apartment numaraları Policy adında ve Document fileName'de bulunur
+- **ÖRNEK**: "Ayça Dinçkök Galata Residance D4 Konut_2020" → Policy.name'de "d4" ara
+
 ### ⚡ OPTİMİZE EDİLMİŞ KARAR VERİCİ:
 1. **AKILLI İLK ADIM** - Soru tipini algıla:
    - 📋 **İçerik/Detay aranıyorsa** → GDS semantic search (embedding) kullan
@@ -2085,6 +2091,13 @@ LIMIT 10
 - **TABLO ANALİZİ**: Taksit tabloları, ödeme planları gibi yapısal veriler birden fazla chunk'ta dağıtılmış olabilir - HEPSİNİ BİRLEŞTİR!
 - **KEŞFEDİLEN CHUNK İÇERİKLERİ bölümündeki tüm text'leri mutlaka analiz et - bunlar sana verilen en önemli veri!**
 
+🔥 **TARİH-TUTAR LİSTELERİ İÇİN ÖZEL KURAL:**
+- **TAKSİT TABLOLARI**: "P 12.02.2020 149.38", "1 12.03.2020 89.00" formatında veriler gördüğünde bunlar BAŞLANGIÇ ve TAKSİTLERDİR!
+- **P = PEŞİNAT**: "P" harfi peşinat anlamındadır, sonrası sayısal taksitlerdir
+- **DEVAMI VAR KURALI**: Bir chunk'ta taksit dizisi görünce (1,2,3...) mutlaka sonraki chunk'larda devamını ara
+- **TABLODA KESİK**: "1, 2, 3" gibi ardışık sayılar görürsen, muhtemelen "4, 5, 6" devamı başka chunk'tadır
+- **YANLIŞ DİYEMEZSİN**: Taksit formatında veri gördüğünde "belgede yok" demek yasaktır!
+
 **AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
 sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
 - Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
@@ -2105,6 +2118,14 @@ sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
   WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // STRING
   AND py.year = 2020  // INTEGER
   RETURN p, py
+  
+  // 4. D4 KONUT POLİÇESİ ARAMA - DOĞRU YÖNTEMİ
+  MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)-[:HAS_YEAR]->(py:PolicyYear)
+  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // Müşteri adı
+  AND py.year = 2020  // Yıl
+  AND toLower(apoc.text.clean(p.name)) CONTAINS toLower(apoc.text.clean("d4"))  // D4 apartment
+  RETURN p.name, p.policyNumber, p.source_file
+  ```
 **final_answer**: 
 - Metadata yeterli ise: cypher_query sonuçlarını organize et
 - İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
@@ -2115,6 +2136,11 @@ sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
   * "chunk", "metadata", "semantic search" gibi sistem terimlerini KESİNLİKLE kullanma
   * Kullanıcı için anlamlı, direkt cevap ver
   * Bilgi yoksa: "Bu bilgi mevcut değil" veya "Belgede bulunmuyor" de, teknik detay verme
+- **🔥 TAKSİT LİSTESİ İÇİN ÖZEL ANALİZ KURALI:**
+  * CHUNK İÇERİKLERİNDE TAKSİT FORMATI ARAŞTIR: "P tarih tutar", "1 tarih tutar", "2 tarih tutar" formatları
+  * HER CHUNK'I DİKKATLE OKU: Birden fazla chunk'ta taksit dizisi dağılmış olabilir
+  * TAKSİT DİZİSİ TESPIT EDİNCE: Peşinat (P) + taksit sayılarını (1,2,3,4,5...) tam listele
+  * YANLIŞ SONUÇ VERİLMESİ YASAK: Taksit verisi varken "belgede yok" demen kesinlikle yasaktır!
 - **⚠️ ZORUNLU ANALİZ KURALI:**
   * TÜM chunk'ları detaylı oku ve analiz et
   * Tablolar, listeler ve yapılandırılmış veriler birden fazla chunk'a yayılabilir
