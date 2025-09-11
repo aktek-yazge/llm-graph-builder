@@ -159,11 +159,11 @@ def generate_reference_links(chunkdetails, sources):
             }
     
     # Format referans linklerini
-    reference_text = "\n\n---\n**Faydalanılan Kaynaklar:**\n"
+    reference_text = ""
     
     # Document links
     if document_refs:
-        reference_text += "\n**📄 Belgeler:**\n"
+        reference_text += "\n\n**📄 Belgeler:**\n"
         for fileName, info in document_refs.items():
             if info['doc_link'] and not info['doc_link'].startswith('#'):
                 reference_text += f"- [{fileName}]({info['doc_link']})"

@@ -22,7 +22,7 @@ import neo4j.time
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
 
-from src.llm import get_llm, get_reasoning_response_text, get_full_reasoning_response, is_reasoning_model
+from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
@@ -90,6 +90,39 @@ class AgentState:
     discovered_relationships: List[Dict[str, Any]] = field(default_factory=list)
     query_attempts: List[str] = field(default_factory=list)
     successful_findings: List['SuccessfulFinding'] = field(default_factory=list)  # Başarılı bulgular
+    # YENİ: Bulunan document filenames - policy source_file'larından
+    discovered_document_filenames: List[str] = field(default_factory=list)
+    # YENİ: Başarısız entity query deneme sayacı
+    failed_entity_query_count: int = 0
+    max_entity_query_attempts: int = 3
+
+class ResourceManager:
+    """LLM'in bulduğu chunk kaynaklarını yöneten basit sistem"""
+    
+    def __init__(self):
+        self.page_resources = []      # Sayfa görselleri için (chunk'lar)
+        
+    def add_page_resource(self, page_link: str):
+        """Sayfa görseli kaynağı ekle"""
+        if not any(r['page_link'] == page_link for r in self.page_resources):
+            self.page_resources.append({
+                'page_link': page_link,
+                'type': 'page'
+            })
+            return f"✅ Page resource eklendi: {page_link}"
+        return f"⚠️ Page resource zaten mevcut: {page_link}"
+    
+    def get_all_resources(self):
+        """Tüm kaynakları döndür"""
+        return {
+            'pages': self.page_resources,
+            'total_count': len(self.page_resources)
+        }
+    
+    def clear_resources(self):
+        """Kaynakları temizle"""
+        self.page_resources = []
+
 
 class IntelligentAgent:
     """
@@ -114,6 +147,9 @@ class IntelligentAgent:
         
         # Session tracking
         self.current_session_id = "unknown"  # Mevcut session ID
+        
+        # Resource Manager - YENİ!
+        self.resource_manager = ResourceManager()
         
         # Text splitter'ı başlat
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -189,164 +225,70 @@ GÖREV:
             logger.error(f"LLM yorumlama hatası: {e}")
             return raw_answer  # Fallback: raw answer'ı döndür
     
-    def format_final_answer_with_references(self, clean_answer: str, state: 'AgentState') -> str:
+    def format_final_answer_with_references_simple(self, clean_answer: str) -> str:
         """
-        Temiz cevabı alır, bağlamsal olarak uygun referans tipini seçer ve ekler
+        YENİ VE BASİT: Resource Manager'dan kaynakları alıp cevabın sonuna ekler
         """
         try:
-            logger.info("📝 Final answer'a referans bilgileri ekleniyor...")
+            logger.info("📝 Basit referans sistemi ile final answer formatlanıyor...")
             
             # Ana cevabı başlat
             formatted_answer = clean_answer.strip()
             
-            # LLM ile referans tipini belirle
-            reference_type = self._determine_reference_type(clean_answer, state.original_question)
-            logger.info(f"🎯 Belirlenen referans tipi: {reference_type}")
+            # Resource Manager'dan kaynakları al
+            resources = self.resource_manager.get_all_resources()
             
-            # Referans bilgileri ekle
+            if resources['total_count'] == 0:
+                logger.info("📝 Hiç kaynak bulunamadı, sadece cevap döndürülüyor")
+                return formatted_answer
+            
+            # Referans listesi oluştur
             references = []
-            referenced_docs = set()
             
-            # 1. Discovered chunks'dan referanslar (eğer varsa)
-            if state.discovered_chunks and reference_type == "pages":
-                unique_chunks = {}
-                # Sadece yüksek relevance score'lu chunk'ları al (0.85 üzeri)
-                relevant_chunks = [chunk for chunk in state.discovered_chunks if chunk.relevance_score >= 0.85]
-                # Eğer hiç yüksek score'lu chunk yoksa, en yüksek 5 tanesini al
-                if not relevant_chunks:
-                    relevant_chunks = sorted(state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True)[:5]
+            # NOT: Document Resources kaldırıldı - LLM zaten hangi kaynaktan faydalandıysa
+            # onu page_link ile page_resource olarak ekleyecek
+            
+            # Page Resources (Sayfa görselleri)
+            for page_resource in resources['pages']:
+                page_link = page_resource['page_link']
                 
-                # Chunk'lar için page_link bilgisini Neo4j'den al
-                for chunk in relevant_chunks[:10]:  # En relevan 10 chunk'tan max
-                    chunk_id = chunk.chunk_id
-                    if chunk_id not in unique_chunks:
-                        # Neo4j'den page_link bilgisini al
-                        try:
-                            page_link_query = """
-                            MATCH (c:Chunk {chunkId: $chunk_id})
-                            RETURN c.page_link as page_link, c.page_number as page_number, c.fileName as file_name
-                            """
-                            link_result = self.graph.query(page_link_query, {"chunk_id": chunk_id})
-                            if link_result and len(link_result) > 0:
-                                page_link = link_result[0].get('page_link')
-                                page_number = link_result[0].get('page_number') or chunk.page_number
-                                file_name = link_result[0].get('file_name') or chunk.document_name
-                                
-                                if page_link:
-                                    # page_link'i BASE_URL ile birleştir
-                                    import urllib.parse
-                                    encoded_page_link = urllib.parse.quote(page_link, safe='', encoding='utf-8')
-                                    image_link = f"{BASE_URL}/images/{encoded_page_link}"
-                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({image_link})"
-                                    if page_ref not in references:
-                                        references.append(page_ref)
-                                        unique_chunks[chunk_id] = True
-                                        referenced_docs.add(f"{file_name}_page_{page_number}")
-                        except Exception as e:
-                            logger.warning(f"Page link alınamadı chunk {chunk_id} için: {e}")
-                            # Fallback: eski yöntem
-                            doc_name = chunk.document_name
-                            page_num = chunk.page_number
-                            image_name = f"{doc_name.replace('.pdf', '')}_page_{page_num:03d}.png"
-                            import urllib.parse
-                            encoded_image_name = urllib.parse.quote(image_name, safe='', encoding='utf-8')
-                            image_link = f"{BASE_URL}/images/{encoded_image_name}"
-                            references.append(f"- [Sayfa {page_num} - {doc_name}]({image_link})")
+                try:
+                    # page_link'i direkt kullan - zaten tam image linki olacak
+                    if page_link:
+                        import urllib.parse
+                        encoded_page_link = urllib.parse.quote(page_link, safe='', encoding='utf-8')
+                        image_link = f"{BASE_URL}/images/{encoded_page_link}"
+                        
+                        # Sayfa bilgilerini parse et (dosya adından sayfa numarasını çıkar)
+                        page_info = "Sayfa Görseli"
+                        if "_page_" in page_link:
+                            try:
+                                page_num = page_link.split("_page_")[1].split(".")[0]
+                                page_info = f"Sayfa {page_num}"
+                            except:
+                                page_info = "Sayfa Görseli"
+                        
+                        # Markdown image thumbnail formatı (resim olarak gösterir)
+                        page_ref = f"- ![{page_info}]({image_link})"
+                        # Alternatif: Hem thumbnail hem link istiyorsanız:
+                        # page_ref = f"- ![{page_info}]({image_link}) - [Büyük Görüntüle]({image_link})"
+                        
+                        if page_ref not in references:
+                            references.append(page_ref)
+                except Exception as e:
+                    logger.error(f"Page resource hatası ({page_link}): {e}")
             
-            # 2. Successful findings'den belge referansları (cypher_query sonuçlarından)
-            if state.successful_findings:
-                logger.info(f"🔍 DEBUG - Successful findings'den referans ekleniyor: {len(state.successful_findings)} finding")
-                for finding in state.successful_findings:
-                    logger.info(f"🔍 DEBUG - Finding: action_type={finding.action_type}, raw_data={bool(finding.raw_data)}")
-                    if finding.action_type == 'cypher_query' and finding.raw_data:
-                        # Cypher sonuçlarından Customer ve Policy bilgilerini çıkar
-                        logger.info(f"🔍 DEBUG - Raw data: {finding.raw_data}")
-                        for row in finding.raw_data:
-                            logger.info(f"🔍 DEBUG - Row: {row}")
-                            if isinstance(row, dict):
-                                # Customer ismi varsa ona bağlı belgeleri bul
-                                customer_name = None
-                                if 'customer' in row:
-                                    customer_name = row['customer']
-                                elif 'fullName' in row:
-                                    customer_name = row['fullName']
-                                elif 'customerName' in row:
-                                    customer_name = row['customerName']
-                                
-                                logger.info(f"🔍 DEBUG - Customer name found: {customer_name}")
-                                if customer_name:
-                                    if reference_type == "documents":
-                                        # PDF belgeleri döndür
-                                        doc_query = """
-                                        MATCH (c:Customer {fullName: $customer_name})-[:HAS_DOC]->(d:Document)
-                                        RETURN DISTINCT d.fileName as file_name
-                                        ORDER BY d.fileName
-                                        """
-                                        try:
-                                            doc_results = self.graph.query(doc_query, {"customer_name": customer_name})
-                                            logger.info(f"🔍 DEBUG - Document query results: {doc_results}")
-                                            for doc_row in doc_results:
-                                                file_name = doc_row.get('file_name')
-                                                if file_name and file_name.endswith('.pdf'):
-                                                    # URL encode the filename for proper handling of Turkish characters
-                                                    import urllib.parse
-                                                    encoded_filename = urllib.parse.quote(file_name, safe='', encoding='utf-8')
-                                                    pdf_link = f"{BASE_URL}/files/{encoded_filename}"
-                                                    doc_ref = f"- [{file_name}]({pdf_link})"
-                                                    if doc_ref not in references:
-                                                        references.append(doc_ref)
-                                                        referenced_docs.add(file_name)
-                                        except Exception as e:
-                                            logger.error(f"Document arama hatası: {e}")
-                                    
-                                    elif reference_type == "pages":
-                                        # Page image'ları döndür
-                                        chunk_query = """
-                                        MATCH (c:Customer {fullName: $customer_name})-[:HAS_DOC]->(d:Document)-[:FIRST_CHUNK]->(ch:Chunk)
-                                        OPTIONAL MATCH (ch)-[:NEXT_CHUNK*]->(ch2:Chunk)
-                                        WITH collect(ch) + collect(ch2) as all_chunks
-                                        UNWIND all_chunks as chunk
-                                        WITH chunk
-                                        WHERE chunk.page_link IS NOT NULL
-                                        RETURN DISTINCT chunk.page_link as page_link, chunk.page_number as page_number, chunk.fileName as file_name
-                                        ORDER BY chunk.page_number
-                                        LIMIT 10
-                                        """
-                                        try:
-                                            chunk_results = self.graph.query(chunk_query, {"customer_name": customer_name})
-                                            logger.info(f"🔍 DEBUG - Chunk query results: {chunk_results}")
-                                            for chunk_row in chunk_results:
-                                                page_link = chunk_row.get('page_link')
-                                                page_number = chunk_row.get('page_number')
-                                                file_name = chunk_row.get('file_name')
-                                                
-                                                if page_link:
-                                                    # Page link'ten image name'i çıkar (path'in son kısmı)
-                                                    import os
-                                                    import urllib.parse
-                                                    image_name = os.path.basename(page_link)
-                                                    
-                                                    # URL encode the image name for proper handling of Turkish characters
-                                                    encoded_image_name = urllib.parse.quote(image_name, safe='', encoding='utf-8')
-                                                    image_link = f"{BASE_URL}/images/{encoded_image_name}"
-                                                    page_ref = f"- [Sayfa {page_number} - {file_name}]({image_link})"
-                                                    if page_ref not in references:
-                                                        references.append(page_ref)
-                                                        referenced_docs.add(f"{file_name}_page_{page_number}")
-                                        except Exception as e:
-                                            logger.error(f"Chunk arama hatası: {e}")
-            
-            # Referansları cevaba ekle - sadece belgeler varsa
+            # Referansları cevaba ekle
             if references:
                 formatted_answer += "\n\n**📋 Kaynaklar:**\n" + "\n".join(references)
-                logger.info(f"📝 Referans ekleme tamamlandı: {len(references)} referans")
+                logger.info(f"📝 Basit referans ekleme tamamlandı: {len(references)} referans")
             else:
-                logger.info("📝 Referans ekleme tamamlandı: 0 referans")
+                logger.info("📝 Basit referans ekleme tamamlandı: 0 referans")
             
             return formatted_answer
             
         except Exception as e:
-            logger.error(f"Referans ekleme hatası: {e}")
+            logger.error(f"Basit referans ekleme hatası: {e}")
             return clean_answer  # Fallback: sadece temiz cevabı döndür
     
     def _determine_reference_type(self, answer: str, question: str) -> str:
@@ -509,24 +451,6 @@ Sadece "documents" veya "pages" olarak yanıtla."""
         except Exception as e:
             logger.error(f"❌ Cypher embedding oluşturma hatası: {e}")
             return False, str(e)
-
-    def get_available_documents(self) -> List[str]:
-        """Veritabanında mevcut belgelerin listesini al"""
-        try:
-            query = """
-            MATCH (d:Document)
-            RETURN DISTINCT d.fileName as document_name
-            ORDER BY d.fileName
-            """
-            result = self.graph.query(query)
-            
-            documents = [row['document_name'] for row in result if row['document_name']]
-            logger.info(f"Veritabanında {len(documents)} belge bulundu")
-            return documents
-            
-        except Exception as e:
-            logger.error(f"Belge listesi alma hatası: {e}")
-            return []
     
     def log_detailed_token_report(self):
         """Detaylı token kullanım raporunu logla"""
@@ -962,11 +886,37 @@ Sonuç sayısı: {len(result)}
     
     def update_context_memory(self, state: 'AgentState'):
         """Başarılı bulgulardan context prompt oluştur - AgentState ile uyumlu"""
-        if not state.successful_findings:
+        if not state.successful_findings and not state.discovered_document_filenames and state.failed_entity_query_count == 0:
             self.context_memory = ""
             return
         
         context_prompt = "## DAHA ÖNCE BULUNAN BAŞARILI BİLGİLER:\n\n"
+        
+        # Başarısız entity query denemelerini ekle
+        if state.failed_entity_query_count > 0:
+            context_prompt += f"**⚠️ ENTITY QUERY DENEMELERİ:**\n"
+            context_prompt += f"- Başarısız deneme sayısı: {state.failed_entity_query_count}/{state.max_entity_query_attempts}\n"
+            
+            if state.failed_entity_query_count < state.max_entity_query_attempts:
+                remaining = state.max_entity_query_attempts - state.failed_entity_query_count
+                context_prompt += f"- Kalan deneme hakkı: {remaining}\n"
+                context_prompt += f"- **STRATEJİ**: Filtreleri sadeleştir, daha basit WHERE koşulları kullan\n"
+                context_prompt += f"- **ÖNERİ**: Müşteri adının bir kısmını, yılı daha gevşek aramayı dene\n\n"
+            else:
+                context_prompt += f"- **SONUÇ**: Entity query limiti aşıldı, vector search'e geç!\n"
+                context_prompt += f"- **ZORUNLU**: generate_embeddings_for_cypher + GDS similarity kullan\n\n"
+        
+        # Bulunan document filename'lerini ekle
+        if state.discovered_document_filenames:
+            context_prompt += "**🔍 KEŞFEDİLEN DOCUMENT FILENAME'LERİ:**\n"
+            for i, filename in enumerate(state.discovered_document_filenames, 1):
+                context_prompt += f"  {i}. \"{filename}\"\n"
+            
+            context_prompt += f"\n**⚠️ SONRAKİ CHUNK SORGUSUNDA BU FILENAME'LERİ KULLAN:**\n"
+            context_prompt += f"```cypher\n"
+            context_prompt += f"WHERE d.fileName IN {state.discovered_document_filenames}\n"
+            context_prompt += f"```\n"
+            context_prompt += f"**TEKRAR filename contains araması yapma!**\n\n"
         
         for finding in state.successful_findings[-5:]:  # Son 5 başarılı bulguyu al
             context_prompt += f"**Adım {finding.iteration} - {finding.action_type.upper()}:**\n"
@@ -993,86 +943,30 @@ Sonuç sayısı: {len(result)}
             
             context_prompt += "---\n"
         
-        context_prompt += "\n**BU BİLGİLERİ DİKKATE ALARAK SONRAKI ADIMI BELİRLE!**\n\n"
+        context_prompt += "\n**🚀 BU BİLGİLERİ KULLANARAK SONRAKI ADIMI BELİRLE - FILENAME'LERİ TEKRAR ARAMA!**\n\n"
         self.context_memory = context_prompt
     
     
-    def calculate_text_relevance(self, chunk_info: ChunkInfo, question: str) -> ChunkInfo:
-        """Chunk text'ini böl ve soru ile ilişkililik hesapla - Neo4j chunk embedding kullan"""
-        try:
-            if not chunk_info.text:
-                return chunk_info
-                
-            # Chunk'ın Neo4j'deki embedding'ini al (chunkId field kullan)
-            chunk_embedding_query = """
-            MATCH (c:Chunk {chunkId: $chunk_id})
-            RETURN c.embedding as embedding
-            """
-            
-            result = self.graph.query(chunk_embedding_query, {'chunk_id': chunk_info.chunk_id})
-            if not result or not result[0].get('embedding'):
-                logger.warning(f"Chunk {chunk_info.chunk_id} için embedding bulunamadı")
-                chunk_info.relevance_score = 0.0
-                return chunk_info
-            
-            chunk_embedding = result[0]['embedding']
-            
-            # Text'i böl
-            split_texts = self.text_splitter.split_text(chunk_info.text)
-            
-            # Kısa metinleri filtrele
-            valid_splits = [(i, text) for i, text in enumerate(split_texts) if len(text.strip()) >= 20]
-            
-            if not valid_splits:
-                chunk_info.relevance_score = 0.0
-                return chunk_info
-            
-            # Soru için embedding oluştur
-            question_embedding = self.embedding_model.embed_query(normalize_unicode_text(question))
-            
-            # Chunk'ın mevcut embedding'i ile soru embedding'ini karşılaştır
-            chunk_similarity = cosine_similarity([question_embedding], [chunk_embedding])[0][0]
-            
-            # Split'ler için ayrı ayrı embedding oluştur ve en iyisini bul
-            if len(valid_splits) > 1:
-                split_embeddings = self.embedding_model.embed_documents([
-                    normalize_unicode_text(text) for _, text in valid_splits
-                ])
-                scores = []
-                for split_embedding in split_embeddings:
-                    similarity = cosine_similarity(
-                        [question_embedding], 
-                        [split_embedding]
-                    )[0][0]
-                    scores.append(float(similarity))
-            else:
-                # Tek split varsa direkt hesapla
-                _, split_text = valid_splits[0]
-                split_embedding = self.embedding_model.embed_query(normalize_unicode_text(split_text))
-                scores = [cosine_similarity([question_embedding], [split_embedding])[0][0]]
-            
-            # En yüksek 3 score'u al
-            scored_splits = [(valid_splits[i][1], scores[i]) for i in range(len(scores))]
-            scored_splits.sort(key=lambda x: x[1], reverse=True)
-            
-            # Threshold üzerindeki ilk 3'ü al
-            chunk_info.split_texts = [text for text, score in scored_splits[:3] if score > 0.1]
-            chunk_info.split_scores = [score for text, score in scored_splits[:3] if score > 0.1]
-            
-            # Chunk embedding similarity ile split similarity'lerini birleştir
-            max_split_score = max(scores) if scores else 0.0
-            chunk_info.relevance_score = max(chunk_similarity, max_split_score)
-            
-            logger.debug(f"Chunk {chunk_info.chunk_id} relevance: {chunk_info.relevance_score:.3f} (chunk: {chunk_similarity:.3f}, max_split: {max_split_score:.3f})")
-            return chunk_info
-            
-        except Exception as e:
-            logger.error(f"Text relevance hesaplama hatası: {e}")
-            chunk_info.relevance_score = 0.0
-            return chunk_info
-    
     def parse_agent_response(self, response: str) -> Tuple[str, str, str]:
         """Agent cevabını parse et - yıldızlı formatları da destekle"""
+        
+        # Tool call sonrası response'da JSON blokları varsa temizle
+        import re
+        # JSON formatındaki tool_uses bloklarını temizle
+        tool_uses_pattern = r'\{\s*"tool_uses"\s*:\s*\[.*?\]\s*\}'
+        response = re.sub(tool_uses_pattern, '', response, flags=re.DOTALL)
+        
+        # Başka tool call pattern'leri de temizle
+        tool_array_pattern = r'\[\s*\{\s*"recipient_name"\s*:\s*"functions\.[^"]+"\s*,.*?\}\s*\]'
+        response = re.sub(tool_array_pattern, '', response, flags=re.DOTALL)
+        
+        # Tek tool call objelerini temizle  
+        single_tool_pattern = r'\{\s*"recipient_name"\s*:\s*"functions\.[^"]+"\s*,.*?\}'
+        response = re.sub(single_tool_pattern, '', response, flags=re.DOTALL)
+        
+        # Fazla boşlukları ve newline'ları temizle
+        response = re.sub(r'\n\s*\n\s*\n+', '\n\n', response).strip()
+        
         # Observation, Thought, Action'ı ayır
         observation = ""
         thought = ""
@@ -1139,6 +1033,14 @@ Sonuç sayısı: {len(result)}
             # Başında newline varsa kaldır
             action_content = action_content.lstrip('\n').strip()
         
+        # ReAct formatı bulunamadıysa fallback: Düz text'i final_answer olarak kabul et
+        if not action and not action_content and response.strip():
+            # JSON temizlenmiş response'da eğer ReAct formatı yoksa, direk final_answer kabul et
+            logger.info("🔍 ReAct formatı bulunamadı, response'u final_answer olarak parse ediliyor")
+            action = "final_answer"
+            action_content = response.strip()
+            thought = "Tool call sonrası direkt final answer alındı"
+        
         return observation.strip(), thought.strip(), (action.strip(), action_content.strip())
     
     def get_available_tools(self) -> List[Dict[str, Any]]:
@@ -1148,16 +1050,33 @@ Sonuç sayısı: {len(result)}
                 "type": "function", 
                 "function": {
                     "name": "generate_embeddings_for_cypher",
-                    "description": "Cypher sorgusunda kullanmak üzere text'ten embedding oluşturur. LLM bu embedding'leri Cypher query'sinde $embedding_vector değişkeni olarak kullanır.",
+                    "description": "Cypher sorgusunda kullanmak üzere SADECE İÇERİK KELİMELERİNDEN embedding oluşturur. METADATA (müşteri adı, yıl, poliçe türü) ekleme! Örnek: 'taksit tablosu ödeme planı' ✅, 'ayça hanım 2020 taksit' ❌",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "text": {
                                 "type": "string",
-                                "description": "Embedding oluşturulacak text (metadata temizlenmiş anahtar kelimeler)"
+                                "description": "SADECE aranacak içerik kavramları - müşteri adı/yıl/tip EKLEMEYÜN! Örnek: 'taksit tutarları ödeme planı', 'prim bilgileri'"
                             }
                         },
                         "required": ["text"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_page_resource",
+                    "description": "ZORUNLU: Faydalanılan chunk'ların sayfa görsellerini resource listesine ekler. Final answer'da manuel sayfa referansı ekleme, sadece bu tool'u kullan!",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page_link": {
+                                "type": "string",
+                                "description": "Sayfa görseli linki - Cypher sonucundan gelen page_link değeri"
+                            }
+                        },
+                        "required": ["page_link"]
                     }
                 }
             }
@@ -1250,6 +1169,27 @@ Sonuç sayısı: {len(result)}
                             "name": function_name,
                             "content": f"Error: {result}"
                         }
+                
+                elif function_name == "add_page_resource":
+                    page_link = function_args.get("page_link")
+                    
+                    if not page_link:
+                        tool_result = {
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": "Error: page_link parametresi gerekli"
+                        }
+                    else:
+                        result_msg = self.resource_manager.add_page_resource(page_link)
+                        logger.info(f"📄 Page resource: {result_msg}")
+                        
+                        tool_result = {
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": result_msg
+                        }
                     
                 else:
                     tool_result = {
@@ -1302,7 +1242,7 @@ Sonuç sayısı: {len(result)}
             if 'gpt' in model_name or 'openai' in model_name:
                 return True
         
-        # Model property'sini kontrol et
+        # Model property'sini kontrol etß
         if hasattr(self.llm, 'model'):
             model = str(self.llm.model).lower()
             if 'gpt' in model or 'openai' in model:
@@ -1320,6 +1260,10 @@ Sonuç sayısı: {len(result)}
         self.context_memory = ""
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self.detailed_token_usage = []  # Detaylı token tracking'i temizle
+        
+        # YENİ: Resource Manager'ı temizle
+        self.resource_manager.clear_resources()
+        logger.info("🧹 Resource Manager temizlendi")
         
         logger.info(f"Soru çözülüyor: {user_question}")
         if session_id:
@@ -1454,17 +1398,8 @@ Sonuç sayısı: {len(result)}
                         # Tool sonuçları ile tekrar LLM'e sor
                         response = self.llm.invoke(messages)
                         
-                        # Reasoning model kontrolü
-                        if is_reasoning_model(self.llm):
-                            agent_response = get_reasoning_response_text(response)
-                            # Reasoning bilgileri varsa logla
-                            full_response = get_full_reasoning_response(response)
-                            if full_response["has_reasoning"]:
-                                logger.info("🧠 Reasoning model düşünce süreci:")
-                                for reasoning_text in full_response["reasoning"]:
-                                    logger.info(f"   {reasoning_text}")
-                        else:
-                            agent_response = response.content
+                        # Response content'i al
+                        agent_response = response.content
                         
                         # Tool call'lar tamamlandı observation'ı
                         embedding_count = len(getattr(self, '_cypher_embeddings', {}))
@@ -1472,32 +1407,14 @@ Sonuç sayısı: {len(result)}
                         
                         logger.info("✅ Tool call'lar işlendi ve final response alındı")
                     else:
-                        # Reasoning model kontrolü
-                        if is_reasoning_model(self.llm):
-                            agent_response = get_reasoning_response_text(response)
-                            # Reasoning bilgileri varsa logla
-                            full_response = get_full_reasoning_response(response)
-                            if full_response["has_reasoning"]:
-                                logger.info("🧠 Reasoning model düşünce süreci:")
-                                for reasoning_text in full_response["reasoning"]:
-                                    logger.info(f"   {reasoning_text}")
-                        else:
-                            agent_response = response.content
+                        # Response content'i al
+                        agent_response = response.content
                 else:
                     # Non-OpenAI modeller için standart invoke
                     response = self.llm.invoke(messages)
                     
-                    # Reasoning model kontrolü (Non-OpenAI reasoning modeller için)
-                    if is_reasoning_model(self.llm):
-                        agent_response = get_reasoning_response_text(response)
-                        # Reasoning bilgileri varsa logla
-                        full_response = get_full_reasoning_response(response)
-                        if full_response["has_reasoning"]:
-                            logger.info("🧠 Reasoning model düşünce süreci:")
-                            for reasoning_text in full_response["reasoning"]:
-                                logger.info(f"   {reasoning_text}")
-                    else:
-                        agent_response = response.content
+                    # Response content'i al
+                    agent_response = response.content
                 
                 # Response'u parse et - action type'ını almak için önce parse
                 observation, thought, (action, action_content) = self.parse_agent_response(agent_response)
@@ -1559,9 +1476,9 @@ Sonuç sayısı: {len(result)}
                         # Ham veriyi LLM'e aktar
                         final_answer = self.interpret_final_answer_with_llm(raw_final_answer, user_question, state.discovered_chunks)
                     else:
-                        logger.info("� Temiz cevap + referans modu - Gereksiz LLM çağrısı yok")
-                        # Sadece temiz cevabı kullan ve referansları ekle
-                        final_answer = self.format_final_answer_with_references(clean_answer, state)
+                        logger.info("✨ YENİ BASİT REFERANS SİSTEMİ - Resource Manager kullanılıyor")
+                        # Yeni basit sistem: Resource Manager'dan kaynakları al ve ekle
+                        final_answer = self.format_final_answer_with_references_simple(clean_answer)
                         
                     current_observation = f"Final answer verildi: {final_answer[:200]}..."
                     logger.info(f"Agent final answer verdi: {final_answer[:200]}...")
@@ -1570,6 +1487,31 @@ Sonuç sayısı: {len(result)}
                 elif action == "cypher_query":
                     success, result = self.execute_cypher_query(action_content)
                     if success and result:
+                        # Cypher sonuçlarından document filename'lerini çıkar
+                        document_filenames_found = []
+                        for row in result:
+                            if isinstance(row, dict):
+                                # Policy source_file alanını kontrol et
+                                if 'p.source_file' in row and row['p.source_file']:
+                                    filename = row['p.source_file']
+                                    if filename not in state.discovered_document_filenames and filename not in document_filenames_found:
+                                        document_filenames_found.append(filename)
+                                        state.discovered_document_filenames.append(filename)
+                                
+                                # Document fileName alanını kontrol et
+                                if 'd.fileName' in row and row['d.fileName']:
+                                    filename = row['d.fileName']
+                                    if filename not in state.discovered_document_filenames and filename not in document_filenames_found:
+                                        document_filenames_found.append(filename)
+                                        state.discovered_document_filenames.append(filename)
+                                        
+                                # fileName field'ını kontrol et
+                                if 'fileName' in row and row['fileName']:
+                                    filename = row['fileName']
+                                    if filename not in state.discovered_document_filenames and filename not in document_filenames_found:
+                                        document_filenames_found.append(filename)
+                                        state.discovered_document_filenames.append(filename)
+                        
                         # Cypher sonuçlarını basit şekilde işle - otomatik chunk arama yapmadan
                         data_summary = []
                         for row in result[:5]:  # İlk 5 sonucu özetle
@@ -1583,7 +1525,12 @@ Sonuç sayısı: {len(result)}
                             if row_summary:
                                 data_summary.append(", ".join(row_summary))
                         
-                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}. Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
+                        # Observation'a document filename bilgisini ekle
+                        filename_info = ""
+                        if document_filenames_found:
+                            filename_info = f" Document filenames keşfedildi: {document_filenames_found}. Sonraki chunk sorgusunda bu filename'leri kullan!"
+                        
+                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
                         
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
@@ -1716,7 +1663,25 @@ Sonuç sayısı: {len(result)}
                             current_observation += f" ({chunks_found} chunk discovered_chunks'a eklendi)"
                         
                     else:
-                        current_observation = f"Cypher sorgusu başarısız: {result}. Farklı bir sorgu dene."
+                        # Cypher query başarısız - failover stratejisi
+                        state.failed_entity_query_count += 1
+                        
+                        # Eğer vector search'e geçmeden önce daha fazla entity query denemesi yapalım
+                        if state.failed_entity_query_count <= state.max_entity_query_attempts:
+                            logger.info(f"⚠️ Entity query başarısız ({state.failed_entity_query_count}/{state.max_entity_query_attempts}). Farklı filtrelerle tekrar dene.")
+                            
+                            # LLM'e filtreleri sadeleştirme önerisi ver
+                            filter_suggestions = {
+                                1: "Daha basit filtreler kullan (sadece müşteri adı veya sadece yıl)",
+                                2: "CONTAINS filtresini gevşet (daha az karakter, case insensitive)",
+                                3: "WHERE koşullarını azalt, sadece en temel filtreler kullan"
+                            }
+                            
+                            suggestion = filter_suggestions.get(state.failed_entity_query_count, "Çok basit bir sorgu dene")
+                            current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Strateji: {suggestion}. Farklı bir cypher_query ile tekrar dene."
+                        else:
+                            logger.info(f"❌ Entity query {state.max_entity_query_attempts} kez başarısız. Vector search'e geç.")
+                            current_observation = f"Entity sorguları {state.max_entity_query_attempts} kez başarısız oldu. Artık vector search kullanarak chunk araması yap (generate_embeddings_for_cypher + GDS similarity)."
                         
                 else:
                     current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
@@ -1955,7 +1920,8 @@ Patterns: Graph Db patterns bulunamadı uyarısı ver
 
 🔤 **STRING MASTER RULE**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
 
-{schema_text}## 🧠 DECISION FRAMEWORK:
+{schema_text}
+## 🧠 DECISION FRAMEWORK:
 
 ### 🎯 FIELD TİP KURALLARI:
 - **Integer**: `field = value` | **String**: MASTER RULE | **Boolean**: `field = true/false`
@@ -1971,18 +1937,26 @@ Patterns: Graph Db patterns bulunamadı uyarısı ver
    - 📊 **Metadata gerekiyorsa** → Entity cypher query kullan
    - Karışık sorular: Her iki yöntemi dene
    
-2. **HIZ OPTİMİZASYONU**: 
-   - ✅ Metadata başarısızsa 2 denemeden sonra semantic search'e geç
-   - ✅ Semantic search 0.5+ score threshold ile başla
+2. **ENTITY QUERY FAILOVER STRATEJİSİ**: 
+   - ✅ İlk entity query başarısızsa 3 KERE daha dene
+   - ✅ Her denemede filtreleri sadeleştir:
+     * 1. deneme: Daha basit WHERE koşulları (poliçe tipin fileName de arar)
+     * 2. deneme: CONTAINS'i gevşet (daha az karakter, case insensitive)  
+     * 3. deneme: Minimum filtre (en temel sorgu, mutlaka yıl varsa içermeli)
+   - ❌ 3 deneme başarısızsa vector search'e GEÇ ZORUNLU!
+   
+3. **HIZ OPTİMİZASYONU**: 
+   - ✅ Context memory'de "ENTITY QUERY DENEMELERİ" varsa durumu kontrol et
+   - ✅ Başarısız deneme limitini aştıysan vector search kullan
    - **📋 CHUNK ANALİZİ**: Gelen chunk'larda eksik bilgi var mı?
      * Tablo veya cümle yarıda kesmişse → sonraki chunk'ları getir
      * Cümle eksikse → position+1, position+2 chunk'larını getir  
      * Tablo başlangıcı tespit edilirse → tam tablo içeriğini getir
 
-3. **HIZLI CHUNK ARAMA**: İçerik/detay gerekiyorsa:
-   - **SEM-ANTİK SEARCH ÖNCE**: generate_embeddings_for_cypher ile GDS cosine search
-   - **Entity filter SONRA**: Gerekiyorsa metadata ile filtrele
-   - **MATCH (c:Chunk)-[:PART_OF]->(d:Document)**: Direct GDS chunk araması (tercih edilen)
+4. **VECTOR SEARCH'E GEÇİŞ KURALI**:
+   - **ZORUNLU**: Entity query 3 kez başarısızsa generate_embeddings_for_cypher kullan
+   - **STRATEJ**: Sadece içerik terimleri ile GDS cosine similarity yap
+   - **AVANTAJ**: WHERE filtresi olmadan daha geniş arama yapabilirsin
 
 ### � AVAILABLE TOOLS (OpenAI Function Calling):
 
@@ -1993,11 +1967,16 @@ Patterns: Graph Db patterns bulunamadı uyarısı ver
 - KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
 
 **🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
+- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
+- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
+- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
+- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
 - ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
 - ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
 - ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
 - ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
 - ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
+- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
 
 ### �📝 ACTION FORMAT:
 ```
@@ -2015,10 +1994,21 @@ Content: [Sorgu/arama metni/cevap]
 ### 🎯 ACTION STRATEJİLERİ:
 
 **cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
-- Node sayıları, liste'ler, ID'ler, tipler için
-- Entity'leri bul ve ilişkilerini araştır
-- Chunk'ları topla: entity → document → chunk chain'i takip et
-- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür
+- **1. İTERASYON**: Entity'leri bul (Customer, Policy) - p.source_file'ı mutlaka RETURN et!
+- **2. İTERASYON**: Keşfedilen filename'leri kullan - WHERE d.fileName IN [liste] formatında!
+- **KRİTİK**: Filename CONTAINS araması yapma, direkt IN listesi kullan!
+- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür  
+- **ZORUNLU**: Cypher sonucunda chunk bulunca, faydalandığın her chunk için add_page_resource(page_link) çağır!
+
+**🔍 CONTEXT MEMORY KULLANIMI:**
+- **"KEŞFEDİLEN DOCUMENT FILENAME'LERİ" bölümü varsa**: Bu listedeki dosya adlarını kullan
+- **TEKRAR ARAMA YAPMA**: toLower(apoc.text.clean(d.fileName)) CONTAINS kullanma!
+- **DOĞRU FORMAT**: WHERE d.fileName IN ["dosya1.pdf", "dosya2.pdf"]
+
+**final_answer**: Son cevabı ver
+- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
+- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
+- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
 
 ### 🔍 VECTOR ARAMA STRATEJİSİ (GDS COSİNE SİMİLARİTY!):
 
@@ -2031,7 +2021,7 @@ WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("bel
 AND c.embedding IS NOT NULL
 WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
 ORDER BY score DESC
 LIMIT 10
 ```
@@ -2045,7 +2035,7 @@ WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("mü
 AND c.embedding IS NOT NULL
 WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
 ORDER BY score DESC
 LIMIT 10
 ```
@@ -2058,18 +2048,34 @@ MATCH (c:Chunk)-[:PART_OF]->(d:Document)
 WHERE c.embedding IS NOT NULL
 WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, d.fileName, score
+RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
 ORDER BY score DESC
 LIMIT 15
 ```
 
+**C) KEŞFEDİLEN FILENAME'LER + GDS VECTOR (ÖNCE KUE !!!!):**
+```cypher
+// Context memory'de filename'ler varsa BU STRATEJİYİ KULLAN!
+WITH $embedding_vector AS queryVec
+MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+WHERE d.fileName IN ["dosya1.pdf", "dosya2.pdf", "dosya3.pdf"]  // Context memory'den al
+AND c.embedding IS NOT NULL
+WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
+ORDER BY score DESC
+LIMIT 10
+```
+
 **KARAR VERİCİ KURAL:**
-- ✅ Soru belge adı, müşteri adı, poliçe tipi içeriyorsa → Önce filtrele, sonra GDS vector ara
-- ✅ **MÜŞTERİ ADI ARAMA**: Customer node'da bulunamazsa filename'de müşteri adını ara (A2 stratejisi)
+- 🏆 **BİRİNCİ ÖNCELİK**: Context memory'de "KEŞFEDİLEN DOCUMENT FILENAME'LERİ" varsa → C) stratejisini kullan
+- ✅ Soru belge adı, müşteri adı, poliçe tipi içeriyorsa → Önce filtrele, sonra GDS vector ara (A stratejisi)
+- ✅ **MÜŞTERİ ADI ARAMA**: Customer node'da bulunamazsa filename'de müşteri adını ara (A2 stratejisi)  
 - ✅ **FILENAME SEARCH**: Document.fileName içinde müşteri adı, poliçe numarası, tür bilgisi aranabilir
-- ✅ Soru sadece içerik/kavram arıyorsa ("taksit tablosu", "hasar limiti") → Direk GDS vector ara
+- ✅ Soru sadece içerik/kavram arıyorsa ("taksit tablosu", "hasar limiti") → Direk GDS vector ara (B stratejisi)
 - ✅ GDS AVANTAJI: WHERE filtresi problemini çözüyor, daha iyi sonuçlar veriyor
 - ⚠️ YANLIŞ: db.index.vector.queryNodes kullanma → GDS cosine similarity tercih et
+- ❌ **TEKRARLI ARAMA YAPMA**: Filename'ler zaten keşfedildiyse CONTAINS kullanma!
 
 ⚠️ **CHUNK ANALİZ ZORUNLU KURALI:**
 - **TÜM CHUNK'LARI DETAYLI ANALİZ ET**: Birden fazla chunk geldiğinde her birini tek tek oku
@@ -2104,30 +2110,68 @@ sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
 - İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
 - RAW DATA modunda: Bulunan verileri organize et (yorumsuz)
 - LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
-- CEVAP FORMATI: Normal, doğal konuşma tarzında yanıt ver (liste formatı değil)
+- **🎯 KULLANICI DOSTU CEVAP FORMATI:**
+  * Doğal, konuşma tarzında yanıt ver (teknik jargon kullanma)
+  * "chunk", "metadata", "semantic search" gibi sistem terimlerini KESİNLİKLE kullanma
+  * Kullanıcı için anlamlı, direkt cevap ver
+  * Bilgi yoksa: "Bu bilgi mevcut değil" veya "Belgede bulunmuyor" de, teknik detay verme
 - **⚠️ ZORUNLU ANALİZ KURALI:**
   * TÜM chunk'ları detaylı oku ve analiz et
   * Tablolar, listeler ve yapılandırılmış veriler birden fazla chunk'a yayılabilir
   * Sayısal veriler, tarihler, tutarlar gibi ilişkili bilgileri birlikte değerlendir
   * Eksik bilgi bırakma - tüm bulguları dahil et
+- **❌ YASAKLI KELİMELER final_answer'da:**
+  * "chunk", "metadata", "semantic search", "system", "database"
+  * "poliçede açıkça ifade edilmiştir", "chunk'lar arasında", "doğrudan tablo formatında"
+  * Teknik sistem açıklamaları ve veri kaynağı detayları
 
 ### ‼️ ZORUNLU KURALLAR SUMMARY:
-- Her soru için İLK ADIM cypher_query olmalı
+- **İLK İTERASYON**: Entity query ile başla (Customer/Policy ara)
+- **ENTITY QUERY BAŞARISIZ**: 3 KERE daha dene, her seferinde filtreleri sadeleştir
+- **3. BAŞARISIZ DENEME SONRASI**: Vector search'e GEÇ (generate_embeddings_for_cypher)
+- **CONTEXT MEMORY KONTROL**: "ENTITY QUERY DENEMELERİ" bölümünü kontrol et
+- **FILENAME BULUNDUYSA**: Context memory'deki filename listesini kullan - WHERE d.fileName IN [liste]
+- **FILENAME TEKRARı YASAK**: toLower(apoc.text.clean()) CONTAINS kullanma, direkt IN listesi kullan!
 - **FIELD TİP KONTROLÜ**: MASTER RULE'leri kullan (yukarıya bak)
-- **MÜŞTERİ ADI ARAMA CHAIN**: Customer node → filename search → semantic search (3 adımlı strateji)
-- **FILENAME SEARCH**: Müşteri adı Customer node'da bulunamazsa Document.fileName'de ara
 - Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
 - **AKILLI İÇERİK KARAR**: Kullanıcı sorusu belge içeriği, detaylı bilgi, sayısal veri gerektiriyor mu? KENDİN ANALİZ ET!
 - final_answer'da doğal konuşma tarzında cevap ver
-- Belge analizi: cypher_query (entity bul) → cypher_query (chunk topla) → final_answer
-- Schema ve cypher sonuçlarını kullanarak optimal stratejiyi KENDİN belirle
+- **OPTİMAL FLOW**: entity query (3 kez retry) → filename bulunamazsa vector search → chunk ara → final_answer
 
 ### 🎯 GDS SORGU REFERANSLARI:
+- **🏆 KEŞFEDİLEN FILENAME'LER + GDS Vector**: Yukarıdaki C) örneğini kullan (ÖNCE KUE!)
 - **Metadata + GDS Vector**: Yukarıdaki A) örneğini kullan
 - **Sadece GDS Vector**: Yukarıdaki B) örneğini kullan
 - **GDS ZORUNLU**: db.index.vector.queryNodes artık kullanma, sadece gds.similarity.cosine kullan
 - **THRESHOLD**: score >= 0.5 (strict), score >= 0.3 (loose) olarak ayarla
-"""
+- **ÖNEMLİ**: RETURN statement'ında mutlaka c.page_link ekle! Resource management için gerekli!
+- **TEKRAR FILENAME ARAMA YASAK**: Context memory'de filename listesi varsa WHERE d.fileName IN [liste] kullan!
+
+## 🔧 RESOURCE MANAGEMENT TOOLS:
+**KRİTİK KURAL**: Sayfa referanslarını ASLA manuel olarak final answer'a ekleme! Mutlaka tool kullan!
+
+**add_page_resource(page_link)**:
+- Cypher sonucunda chunk bilgisi bulduğunda VE o chunk'tan soruya cevap için bilgi aldığında kullan
+- Cypher'dan dönen c.page_link değerini direkt kullan
+- Örnek: "Ayça_Dinçkök_Galata_Residance_D4_Konut_Poliçesi_page_006.png"
+
+**ZORUNLU KULLANIM STRATEJİSİ:**
+- Cypher query'de MUTLAKA c.page_link field'ını RETURN et  
+- Chunk içeriğini oku ve analiz et
+- Bu chunk'tan soruya cevap için bilgi alıyor muyun? → EVET ise: MUTLAKA add_page_resource(c.page_link) ÇAĞIR
+- Final answer'da sayfa linklerini KENDİN ekleme! Sistem otomatik ekleyecek!
+- Her gerçekten faydalandığın sayfa için ayrı add_page_resource çağır
+
+**YAPMA:**
+❌ "Faydalanılan sayfa görselleri:" gibi manuel ekleme YAPMA!
+❌ Final answer'ın sonuna sayfa linklerini kendin ekleme!
+✅ Sadece add_page_resource tool'unu kullan, sistem geri kalanını halleder!
+
+**ÖRNEK SENARYO:**
+1. Cypher'da 5 chunk bulundu
+2. Bunlardan 3'ü soruya alakalı bilgi içeriyor 
+3. Her biri için MUTLAKA add_page_resource(page_link) çağır
+4. Final answer'da sayfa referanslarından bahsetme - sistem ekleyecek!"""
 
         return system_prompt
 
