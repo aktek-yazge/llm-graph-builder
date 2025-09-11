@@ -242,8 +242,34 @@ GÖREV:
                 logger.info("📝 Hiç kaynak bulunamadı, sadece cevap döndürülüyor")
                 return formatted_answer
             
-            # Referans listesi oluştur
-            references = []
+            # Referans listelerini ayrı tut
+            pdf_references = []
+            image_references = []
+            
+            # Document Resources (PDF Dosyaları)
+            document_files = set()
+            for page_resource in resources['pages']:
+                # Sayfa kaynaklarından dosya adlarını çıkar
+                page_link = page_resource.get('page_link', '')
+                if page_link and '_page_' in page_link:
+                    # "filename_page_001.png" formatından "filename.pdf" çıkar
+                    file_base = page_link.split('_page_')[0]
+                    if file_base:
+                        # PDF uzantısı ekle
+                        pdf_filename = f"{file_base}.pdf"
+                        document_files.add(pdf_filename)
+            
+            # PDF dosya linklerini ekle
+            for pdf_filename in sorted(document_files):
+                try:
+                    import urllib.parse
+                    encoded_filename = urllib.parse.quote(pdf_filename, safe='', encoding='utf-8')
+                    pdf_link = f"{BASE_URL}/files/{encoded_filename}"
+                    doc_ref = f"📄 [{pdf_filename}]({pdf_link})"
+                    if doc_ref not in pdf_references:
+                        pdf_references.append(doc_ref)
+                except Exception as e:
+                    logger.error(f"Document resource hatası ({pdf_filename}): {e}")
             
             # NOT: Document Resources kaldırıldı - LLM zaten hangi kaynaktan faydalandıysa
             # onu page_link ile page_resource olarak ekleyecek
@@ -269,19 +295,33 @@ GÖREV:
                                 page_info = "Sayfa Görseli"
                         
                         # Markdown image thumbnail formatı (resim olarak gösterir)
-                        page_ref = f"- ![{page_info}]({image_link})"
+                        page_ref = f"![{page_info}]({image_link})"
                         # Alternatif: Hem thumbnail hem link istiyorsanız:
-                        # page_ref = f"- ![{page_info}]({image_link}) - [Büyük Görüntüle]({image_link})"
+                        # page_ref = f"![{page_info}]({image_link}) - [Büyük Görüntüle]({image_link})"
                         
-                        if page_ref not in references:
-                            references.append(page_ref)
+                        if page_ref not in image_references:
+                            image_references.append(page_ref)
                 except Exception as e:
                     logger.error(f"Page resource hatası ({page_link}): {e}")
             
-            # Referansları cevaba ekle
-            if references:
-                formatted_answer += "\n\n**📋 Kaynaklar:**\n" + "\n".join(references)
-                logger.info(f"📝 Basit referans ekleme tamamlandı: {len(references)} referans")
+            # Referansları cevaba ekle - önce PDF'ler, sonra image'ler
+            if pdf_references or image_references:
+                formatted_answer += "\n\n**📋 Kaynaklar:**\n"
+                
+                # PDF belgeler - her biri ayrı liste elemanı
+                for pdf_ref in pdf_references:
+                    formatted_answer += f"- {pdf_ref}\n"
+                
+                # Image'ler - ilk image liste elemanı, diğerleri girinti ile
+                if image_references:
+                    for i, img_ref in enumerate(image_references):
+                        if i == 0:
+                            formatted_answer += f"- {img_ref}\n"
+                        else:
+                            formatted_answer += f"  {img_ref}\n"
+                
+                total_refs = len(pdf_references) + len(image_references)
+                logger.info(f"📝 Basit referans ekleme tamamlandı: {total_refs} referans ({len(pdf_references)} PDF + {len(image_references)} image)")
             else:
                 logger.info("📝 Basit referans ekleme tamamlandı: 0 referans")
             
@@ -2179,12 +2219,15 @@ sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
 **add_page_resource(page_link)**:
 - Cypher sonucunda chunk bilgisi bulduğunda VE o chunk'tan soruya cevap için bilgi aldığında kullan
 - Cypher'dan dönen c.page_link değerini direkt kullan
+- **page_images listesi bulduğunda**: Liste içindeki HER page image için add_page_resource çağır
 - Örnek: "Ayça_Dinçkök_Galata_Residance_D4_Konut_Poliçesi_page_006.png"
 
 **ZORUNLU KULLANIM STRATEJİSİ:**
 - Cypher query'de MUTLAKA c.page_link field'ını RETURN et  
+- **Document query'de**: d.page_images field'ını RETURN et ve her image için add_page_resource çağır
 - Chunk içeriğini oku ve analiz et
 - Bu chunk'tan soruya cevap için bilgi alıyor muyun? → EVET ise: MUTLAKA add_page_resource(c.page_link) ÇAĞIR
+- **Page_images listesi aldığında**: İçindeki her page image adı için add_page_resource çağır
 - Final answer'da sayfa linklerini KENDİN ekleme! Sistem otomatik ekleyecek!
 - Her gerçekten faydalandığın sayfa için ayrı add_page_resource çağır
 
@@ -2192,6 +2235,12 @@ sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
 ❌ "Faydalanılan sayfa görselleri:" gibi manuel ekleme YAPMA!
 ❌ Final answer'ın sonuna sayfa linklerini kendin ekleme!
 ✅ Sadece add_page_resource tool'unu kullan, sistem geri kalanını halleder!
+
+**PAGE_IMAGES KULLANIMI:**
+- Document query'de d.page_images RETURN ettiğinde: Liste içindeki HER page image için add_page_resource çağır
+- Örnek: ['file_page_001.png', 'file_page_002.png'] → Her biri için ayrı add_page_resource çağır
+- Kullanıcı "poliçeyi ver", "belgeyi göster" dediğinde: page_images listesini kullan
+- Sayfa görsellerini manuel olarak final answer'a ekleme, tool ile ekle!
 
 **ÖRNEK SENARYO:**
 1. Cypher'da 5 chunk bulundu
