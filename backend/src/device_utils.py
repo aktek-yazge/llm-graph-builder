@@ -6,6 +6,8 @@ Bu modül Apple Silicon Mac'lerde Metal GPU acceleration'ı etkinleştirir
 import torch
 import logging
 import os
+import psutil
+import platform
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,21 @@ def print_device_info():
     import sys
     print(f"Python Version: {sys.version}")
     print(f"Platform: {sys.platform}")
+    
+    # System information
+    print(f"System: {platform.system()} {platform.release()}")
+    print(f"Machine: {platform.machine()}")
+    print(f"Processor: {platform.processor()}")
+    
+    # CPU Information
+    print(f"CPU Cores (Physical): {psutil.cpu_count(logical=False)}")
+    print(f"CPU Cores (Logical): {psutil.cpu_count(logical=True)}")
+    
+    # Memory Information
+    memory = psutil.virtual_memory()
+    print(f"Total Memory: {memory.total / (1024**3):.2f} GB")
+    print(f"Available Memory: {memory.available / (1024**3):.2f} GB")
+    print(f"Memory Usage: {memory.percent:.1f}%")
     
     # MPS (Metal) support
     if hasattr(torch.backends, 'mps'):

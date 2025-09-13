@@ -2,6 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
@@ -431,14 +432,15 @@ class UTF8JSONResponse:
         else:
             await self.app(scope, receive, send)
 
-app = FastAPI()
-
-# Device information ve Apple Silicon optimizasyonu
-@app.on_event("startup")
-async def startup_event():
-    """FastAPI startup - device bilgilerini göster"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     optimize_for_apple_silicon()
     print_device_info()
+    yield
+    # Shutdown - here you can add cleanup code if needed
+
+app = FastAPI(lifespan=lifespan)
 
 # Add HTTP logging middleware for OpenTelemetry integration
 app.add_middleware(HTTPLoggingMiddleware)
