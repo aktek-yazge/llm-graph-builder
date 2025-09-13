@@ -7,6 +7,11 @@ services:
       - '6334:6334'
     volumes:
       - qdrant_storage:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+          cpus: '4'
     networks:
       - llm-graph-builder_net
 
@@ -33,8 +38,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3g
-          cpus: '2'
+          memory: 16g
+          cpus: '4'
     volumes:
       - neo4j_data:/data
       - neo4j_plugins:/plugins
