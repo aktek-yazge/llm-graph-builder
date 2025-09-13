@@ -121,18 +121,18 @@ MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
 MARKDOWN_CACHE_DIR = os.path.join(os.path.dirname(__file__), "markdown_cache")
 
 def sanitize_filename(filename):
-   """
-   Sanitize the user-provided filename to prevent directory traversal and remove unsafe characters.
-   Also normalizes UTF-8 encoding for consistency.
-   """
-   # Remove path separators and collapse redundant separators
-   filename = os.path.basename(filename)
-   filename = os.path.normpath(filename)
-   
-   # Normalize UTF-8 encoding for consistency
-   filename = normalize_file_name(filename)
-   
-   return filename
+    """
+    Sanitize the user-provided filename to prevent directory traversal and remove unsafe characters.
+    Also normalizes UTF-8 encoding for consistency.
+    """
+    # Remove path separators and collapse redundant separators
+    filename = os.path.basename(filename)
+    filename = os.path.normpath(filename)
+    
+    # Normalize UTF-8 encoding for consistency
+    filename = normalize_file_name(filename)
+    
+    return filename
 
 def create_markdown_cache_key(filename, file_size):
     """
@@ -182,16 +182,16 @@ def save_markdown_to_cache(filename, file_size, markdown_content):
         return None
 
 def validate_file_path(directory, filename):
-   """
-   Construct the full file path and ensure it is within the specified directory.
-   """
-   file_path = os.path.join(directory, filename)
-   abs_directory = os.path.abspath(directory)
-   abs_file_path = os.path.abspath(file_path)
-   # Ensure the file path starts with the intended directory path
-   if not abs_file_path.startswith(abs_directory):
-       raise ValueError("Invalid file path")
-   return abs_file_path
+    """
+    Construct the full file path and ensure it is within the specified directory.
+    """
+    file_path = os.path.join(directory, filename)
+    abs_directory = os.path.abspath(directory)
+    abs_file_path = os.path.abspath(file_path)
+    # Ensure the file path starts with the intended directory path
+    if not abs_file_path.startswith(abs_directory):
+        raise ValueError("Invalid file path")
+    return abs_file_path
 
 def healthy_condition():
     output = {"healthy": True}
@@ -1110,7 +1110,8 @@ async def extract_qa_based_knowledge_graph(
         
         # Neo4j'ye kaydet (opsiyonel - mevcut extract endpoint mantığını kullanarak)
         if uri and userName and password:
-            graph_db = graphDBdataAccess(uri, userName, password, database)
+            graph = create_graph_database_connection(uri, userName, password, database)
+            graph_db = graphDBdataAccess(graph)
             # GraphDocument'ları Neo4j'ye kaydet
             # Bu kısmı mevcut save işlemiyle entegre edebiliriz
         
@@ -2414,73 +2415,73 @@ async def calculate_additional_metrics(question: str = Form(),
                                         model: str = Form(),
                                         mode: str = Form(),
 ):
-   try:
-       context_list = [str(item).strip() for item in json.loads(context)] if context else []
-       answer_list = [str(item).strip() for item in json.loads(answer)] if answer else []
-       mode_list = [str(item).strip() for item in json.loads(mode)] if mode else []
-       result = await get_additional_metrics(question, context_list,answer_list, reference, model)
-       if result is None or "error" in result:
-           return create_api_response(
-               'Failed',
-               message='Failed to calculate evaluation metrics.',
-               error=result.get("error", "Ragas evaluation returned null")
-           )
-       data = {mode: {metric: result[i][metric] for metric in result[i]} for i, mode in enumerate(mode_list)}
-       return create_api_response('Success', data=data)
-   except Exception as e:
-       logging.exception(f"Error while calculating evaluation metrics: {e}")
-       return create_api_response(
-           'Failed',
-           message="Error while calculating evaluation metrics",
-           error=str(e)
-       )
-   finally:
-       gc.collect()
+    try:
+        context_list = [str(item).strip() for item in json.loads(context)] if context else []
+        answer_list = [str(item).strip() for item in json.loads(answer)] if answer else []
+        mode_list = [str(item).strip() for item in json.loads(mode)] if mode else []
+        result = await get_additional_metrics(question, context_list,answer_list, reference, model)
+        if result is None or "error" in result:
+            return create_api_response(
+                'Failed',
+                message='Failed to calculate evaluation metrics.',
+                error=result.get("error", "Ragas evaluation returned null")
+            )
+        data = {mode: {metric: result[i][metric] for metric in result[i]} for i, mode in enumerate(mode_list)}
+        return create_api_response('Success', data=data)
+    except Exception as e:
+        logging.exception(f"Error while calculating evaluation metrics: {e}")
+        return create_api_response(
+            'Failed',
+            message="Error while calculating evaluation metrics",
+            error=str(e)
+        )
+    finally:
+        gc.collect()
 
 @app.post("/fetch_chunktext")
 async def fetch_chunktext(
-   uri: str = Form(None),
-   database: str = Form(None),
-   userName: str = Form(None),
-   password: str = Form(None),
-   document_name: str = Form(),
-   page_no: int = Form(1),
-   email=Form(None)
+    uri: str = Form(None),
+    database: str = Form(None),
+    userName: str = Form(None),
+    password: str = Form(None),
+    document_name: str = Form(),
+    page_no: int = Form(1),
+    email=Form(None)
 ):
-   try:
-       start = time.time()
-       result = await asyncio.to_thread(
-           get_chunktext_results,
-           uri=uri,
-           username=userName,
-           password=password,
-           database=database,
-           document_name=document_name,
-           page_no=page_no
-       )
-       end = time.time()
-       elapsed_time = end - start
-       json_obj = {
-           'api_name': 'fetch_chunktext',
-           'db_url': uri,
-           'userName': userName,
-           'database': database,
-           'document_name': document_name,
-           'page_no': page_no,
-           'logging_time': formatted_time(datetime.now(timezone.utc)),
-           'elapsed_api_time': f'{elapsed_time:.2f}',
-           'email': email
-       }
-       logger.log_struct(json_obj, "INFO")
-       return create_api_response('Success', data=result, message=f"Total elapsed API time {elapsed_time:.2f}")
-   except Exception as e:
-       job_status = "Failed"
-       message = "Unable to get chunk text response"
-       error_message = str(e)
-       logging.exception(f'Exception in fetch_chunktext: {error_message}')
-       return create_api_response(job_status, message=message, error=error_message)
-   finally:
-       gc.collect()
+    try:
+        start = time.time()
+        result = await asyncio.to_thread(
+            get_chunktext_results,
+            uri=uri,
+            username=userName,
+            password=password,
+            database=database,
+            document_name=document_name,
+            page_no=page_no
+        )
+        end = time.time()
+        elapsed_time = end - start
+        json_obj = {
+            'api_name': 'fetch_chunktext',
+            'db_url': uri,
+            'userName': userName,
+            'database': database,
+            'document_name': document_name,
+            'page_no': page_no,
+            'logging_time': formatted_time(datetime.now(timezone.utc)),
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        return create_api_response('Success', data=result, message=f"Total elapsed API time {elapsed_time:.2f}")
+    except Exception as e:
+        job_status = "Failed"
+        message = "Unable to get chunk text response"
+        error_message = str(e)
+        logging.exception(f'Exception in fetch_chunktext: {error_message}')
+        return create_api_response(job_status, message=message, error=error_message)
+    finally:
+        gc.collect()
 
 
 @app.post("/backend_connection_configuration")
