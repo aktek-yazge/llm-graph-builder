@@ -6,17 +6,6 @@
 echo "=== LLM Graph Builder Backend Server Starter ==="
 echo "Timestamp: $(date)"
 
-# Conda environment'ı etkinleştir
-echo "Activating conda environment: graph-builder"
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate graph-builder
-
-# Environment kontrolü
-if [[ "$CONDA_DEFAULT_ENV" != "graph-builder" ]]; then
-    echo "ERROR: Failed to activate graph-builder environment"
-    echo "Current environment: $CONDA_DEFAULT_ENV"
-    exit 1
-fi
 
 echo "✅ Conda environment activated: $CONDA_DEFAULT_ENV"
 
