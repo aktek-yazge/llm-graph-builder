@@ -31,6 +31,13 @@ services:
     depends_on:
       - neo4j
       - qdrant
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+          cpus: '8'
+        reservations:
+          memory: 8g
     networks:
       - llm-graph-builder_net
 
@@ -41,5 +48,5 @@ volumes:
 # Ana compose'un network'ünü kullan
 networks:
   llm-graph-builder_net:
-    external: true
+    external: false
 

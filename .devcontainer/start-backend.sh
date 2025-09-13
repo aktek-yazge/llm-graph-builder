@@ -9,12 +9,6 @@ echo "🐍 Python version: $(python --version)"
 echo "🔗 API URL: http://localhost:8000"
 echo ""
 
-# Environment variables'ı load et
-if [ -f ".env" ]; then
-    echo "📄 .env dosyası yükleniyor..."
-    export $(cat .env | grep -v '^#' | xargs)
-fi
-
 # Score.py ana dosyasına göre başlat
 echo "🎯 Backend başlatılıyor (Ctrl+C ile durdur)..."
 if [ -f "score.py" ]; then
