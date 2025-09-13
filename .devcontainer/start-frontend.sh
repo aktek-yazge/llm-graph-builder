@@ -9,11 +9,6 @@ echo "📦 Node version: $(node --version)"
 echo "🔗 Dev Server URL: http://localhost:5173"
 echo ""
 
-# Environment variables'ı load et
-if [ -f ".env" ]; then
-    echo "📄 .env dosyası yükleniyor..."
-    export $(cat .env | grep -v '^#' | xargs)
-fi
 
 # Package.json varlığını kontrol et
 if [ -f "package.json" ]; then
