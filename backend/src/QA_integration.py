@@ -616,372 +616,372 @@ def process_documents(docs, question, messages, llm, model,chat_mode_settings):
     
     return content, result, total_tokens, formatted_docs
 
-def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None, session_id: str = None):
+# def retrieve_documents(doc_retriever, messages, intelligent_agent: IntelligentAgent = None, session_id: str = None):
 
-    start_time = time.time()
-    agent_token_usage = None  # Agent token kullanımını saklamak için
-    agent_result = None  # Agent sonuçlarını saklamak için
+#     start_time = time.time()
+#     agent_token_usage = None  # Agent token kullanımını saklamak için
+#     agent_result = None  # Agent sonuçlarını saklamak için
     
-    # Import HumanMessage at function level to avoid scope issues
-    from langchain_core.messages import HumanMessage
+#     # Import HumanMessage at function level to avoid scope issues
+#     from langchain_core.messages import HumanMessage
     
-    try:
-        # Son mesajı (kullanıcı sorusu) al
-        user_question = messages[-1].content if messages else ""
-        print(f"========== DOCUMENT RETRIEVAL BAŞLADI ==========")
-        print(f"Original User Question: {user_question}")
-        print(f"Message Count: {len(messages)}")
-        print("==============================================")
-        # Debug: Log tüm mesajları ve sadece HumanMessage'ları (transform için kullanılacak)
-        # ÖNEMLI: Mesaj dizisinde eksik HumanMessage'lar olabilir. Frontend'den gelen mesaj history'si
-        # tam değilse, session history'den önceki kullanıcı mesajlarını almanın yollarını araştırmalıyız.
+#     try:
+#         # Son mesajı (kullanıcı sorusu) al
+#         user_question = messages[-1].content if messages else ""
+#         print(f"========== DOCUMENT RETRIEVAL BAŞLADI ==========")
+#         print(f"Original User Question: {user_question}")
+#         print(f"Message Count: {len(messages)}")
+#         print("==============================================")
+#         # Debug: Log tüm mesajları ve sadece HumanMessage'ları (transform için kullanılacak)
+#         # ÖNEMLI: Mesaj dizisinde eksik HumanMessage'lar olabilir. Frontend'den gelen mesaj history'si
+#         # tam değilse, session history'den önceki kullanıcı mesajlarını almanın yollarını araştırmalıyız.
         
-        # Use a robust extractor: messages may be HumanMessage, dict, or objects with .content/.role
-        from types import SimpleNamespace
-        human_messages = []
-        for m in messages:
-            try:
-                if isinstance(m, HumanMessage):
-                    human_messages.append(m)
-                    continue
-                # object with content and optional role
-                content = getattr(m, 'content', None)
-                role = getattr(m, 'role', None) or getattr(m, 'type', None)
-                if content and (role is None or str(role).lower() in ('user', 'human')):
-                    human_messages.append(m)
-                    continue
-                # dict-like message
-                if isinstance(m, dict):
-                    content = m.get('content') or m.get('text') or m.get('message')
-                    role = m.get('role') or m.get('type') or m.get('sender')
-                    if content and (role is None or str(role).lower() in ('user', 'human')):
-                        human_messages.append(SimpleNamespace(content=content))
-                        continue
-            except Exception:
-                # ignore unparsable message types
-                continue
+#         # Use a robust extractor: messages may be HumanMessage, dict, or objects with .content/.role
+#         from types import SimpleNamespace
+#         human_messages = []
+#         for m in messages:
+#             try:
+#                 if isinstance(m, HumanMessage):
+#                     human_messages.append(m)
+#                     continue
+#                 # object with content and optional role
+#                 content = getattr(m, 'content', None)
+#                 role = getattr(m, 'role', None) or getattr(m, 'type', None)
+#                 if content and (role is None or str(role).lower() in ('user', 'human')):
+#                     human_messages.append(m)
+#                     continue
+#                 # dict-like message
+#                 if isinstance(m, dict):
+#                     content = m.get('content') or m.get('text') or m.get('message')
+#                     role = m.get('role') or m.get('type') or m.get('sender')
+#                     if content and (role is None or str(role).lower() in ('user', 'human')):
+#                         human_messages.append(SimpleNamespace(content=content))
+#                         continue
+#             except Exception:
+#                 # ignore unparsable message types
+#                 continue
         
-        logging.info(f"DEBUG: Full messages count: {len(messages)}")
-        for i, msg in enumerate(messages):
-            logging.info(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
+#         logging.info(f"DEBUG: Full messages count: {len(messages)}")
+#         for i, msg in enumerate(messages):
+#             logging.info(f"DEBUG: Message {i+1} ({type(msg).__name__}): {str(msg.content)[:300]}")
 
-        logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
-        for i, msg in enumerate(human_messages):
-            logging.info(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
+#         logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
+#         for i, msg in enumerate(human_messages):
+#             logging.info(f"DEBUG: Human message {i+1}: {str(msg.content)[:300]}")
             
-        # UYARI: Eğer human_messages sadece 1 mesaj içeriyorsa (son soru), önceki context kayıp!
-        if len(human_messages) <= 1:
-            logging.warning(f"WARNING: Only {len(human_messages)} human message(s) found in history!")
-            logging.warning("This means previous user questions are missing from the message history.")
-            logging.warning("Context transformation may be incomplete. Check frontend message passing.")
+#         # UYARI: Eğer human_messages sadece 1 mesaj içeriyorsa (son soru), önceki context kayıp!
+#         if len(human_messages) <= 1:
+#             logging.warning(f"WARNING: Only {len(human_messages)} human message(s) found in history!")
+#             logging.warning("This means previous user questions are missing from the message history.")
+#             logging.warning("Context transformation may be incomplete. Check frontend message passing.")
         
-        handler = CustomCallback()
+#         handler = CustomCallback()
 
-        # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
-        if intelligent_agent:
-            # Intelligent Agent'tan sonuç al
-            user_question = messages[-1].content if messages else ""
+#         # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
+#         if intelligent_agent:
+#             # Intelligent Agent'tan sonuç al
+#             user_question = messages[-1].content if messages else ""
             
-            # Eğer message history varsa (birden fazla mesaj), QUESTION_TRANSFORM uygula
-            transformed_question = user_question  # Default: original soru
+#             # Eğer message history varsa (birden fazla mesaj), QUESTION_TRANSFORM uygula
+#             transformed_question = user_question  # Default: original soru
             
-            # Let the LLM decide whether to transform the question. Use the last N human messages as context.
-            transformed_question = user_question  # default
-            try:
-                from src.shared.constants import QUESTION_TRANSFORM_TEMPLATE
-                from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-                from langchain_core.output_parsers import StrOutputParser
-                from src.llm import get_llm
+#             # Let the LLM decide whether to transform the question. Use the last N human messages as context.
+#             transformed_question = user_question  # default
+#             try:
+#                 from src.shared.constants import QUESTION_TRANSFORM_TEMPLATE
+#                 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+#                 from langchain_core.output_parsers import StrOutputParser
+#                 from src.llm import get_llm
 
-                # Debug: Tüm mesajları tiplerle birlikte logla
-                logging.info(f"DEBUG: Total messages in history: {len(messages)}")
-                for i, msg in enumerate(messages):
-                    msg_type = type(msg).__name__
-                    logging.info(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
+#                 # Debug: Tüm mesajları tiplerle birlikte logla
+#                 logging.info(f"DEBUG: Total messages in history: {len(messages)}")
+#                 for i, msg in enumerate(messages):
+#                     msg_type = type(msg).__name__
+#                     logging.info(f"DEBUG: Message {i+1} ({msg_type}): {str(msg.content)[:100]}...")
 
-                # SADECE kullanıcı mesajlarını filtrele (HumanMessage)
-                # Re-run robust extractor in case message shapes differ here
-                from types import SimpleNamespace
-                human_messages = []
-                for m in messages:
-                    try:
-                        if isinstance(m, HumanMessage):
-                            human_messages.append(m)
-                            continue
-                        content = getattr(m, 'content', None)
-                        role = getattr(m, 'role', None) or getattr(m, 'type', None)
-                        if content and (role is None or str(role).lower() in ('user', 'human')):
-                            human_messages.append(m)
-                            continue
-                        if isinstance(m, dict):
-                            content = m.get('content') or m.get('text') or m.get('message')
-                            role = m.get('role') or m.get('type') or m.get('sender')
-                            if content and (role is None or str(role).lower() in ('user', 'human')):
-                                human_messages.append(SimpleNamespace(content=content))
-                                continue
-                    except Exception:
-                        continue
-                logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
+#                 # SADECE kullanıcı mesajlarını filtrele (HumanMessage)
+#                 # Re-run robust extractor in case message shapes differ here
+#                 from types import SimpleNamespace
+#                 human_messages = []
+#                 for m in messages:
+#                     try:
+#                         if isinstance(m, HumanMessage):
+#                             human_messages.append(m)
+#                             continue
+#                         content = getattr(m, 'content', None)
+#                         role = getattr(m, 'role', None) or getattr(m, 'type', None)
+#                         if content and (role is None or str(role).lower() in ('user', 'human')):
+#                             human_messages.append(m)
+#                             continue
+#                         if isinstance(m, dict):
+#                             content = m.get('content') or m.get('text') or m.get('message')
+#                             role = m.get('role') or m.get('type') or m.get('sender')
+#                             if content and (role is None or str(role).lower() in ('user', 'human')):
+#                                 human_messages.append(SimpleNamespace(content=content))
+#                                 continue
+#                     except Exception:
+#                         continue
+#                 logging.info(f"DEBUG: Human messages count: {len(human_messages)}")
 
-                # En son N kullanıcı mesajını al (transformation için) - daha fazla bağlam için 10 kullan
-                transform_window = 10
-                last_human_messages = human_messages[-transform_window:] if len(human_messages) >= transform_window else human_messages
+#                 # En son N kullanıcı mesajını al (transformation için) - daha fazla bağlam için 10 kullan
+#                 transform_window = 10
+#                 last_human_messages = human_messages[-transform_window:] if len(human_messages) >= transform_window else human_messages
 
-                logging.info(f"DEBUG: Using {len(last_human_messages)} messages for transform (window={transform_window}):")
-                for i, msg in enumerate(last_human_messages):
-                    logging.info(f"DEBUG: Transform input {i+1}: {msg.content}")
+#                 logging.info(f"DEBUG: Using {len(last_human_messages)} messages for transform (window={transform_window}):")
+#                 for i, msg in enumerate(last_human_messages):
+#                     logging.info(f"DEBUG: Transform input {i+1}: {msg.content}")
 
-                # LLM ve transform prompt hazırla
-                llm, _ = get_llm("openai_gpt_4.1")  # Model parametresi ekle
-                query_transform_prompt = ChatPromptTemplate.from_messages([
-                    ("system", QUESTION_TRANSFORM_TEMPLATE),
-                    MessagesPlaceholder(variable_name="messages")
-                ])
-                output_parser = StrOutputParser()
-                transform_chain = query_transform_prompt | llm | output_parser
+#                 # LLM ve transform prompt hazırla
+#                 llm, _ = get_llm("openai_gpt_4.1")  # Model parametresi ekle
+#                 query_transform_prompt = ChatPromptTemplate.from_messages([
+#                     ("system", QUESTION_TRANSFORM_TEMPLATE),
+#                     MessagesPlaceholder(variable_name="messages")
+#                 ])
+#                 output_parser = StrOutputParser()
+#                 transform_chain = query_transform_prompt | llm | output_parser
 
-                # Transform'a gönderilecek mesajları format et ve logla
-                messages_for_llm = []
-                for i, msg in enumerate(last_human_messages):
-                    formatted_msg = f"Mesaj {i+1}: {msg.content}"
-                    messages_for_llm.append(formatted_msg)
-                    logging.info(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
+#                 # Transform'a gönderilecek mesajları format et ve logla
+#                 messages_for_llm = []
+#                 for i, msg in enumerate(last_human_messages):
+#                     formatted_msg = f"Mesaj {i+1}: {msg.content}"
+#                     messages_for_llm.append(formatted_msg)
+#                     logging.info(f"DEBUG: LLM'e gönderilecek mesaj {i+1}: {msg.content}")
 
-                # Final prompt'u manuel olarak oluştur ve logla (sadece debug amaçlı)
-                combined_messages = "\n".join(messages_for_llm)
-                final_prompt = f"{QUESTION_TRANSFORM_TEMPLATE}\n\nMesajlar:\n{combined_messages}"
-                logging.info(f"DEBUG: Final combined prompt that will be sent to LLM:")
-                logging.info(f"DEBUG: {final_prompt}")
+#                 # Final prompt'u manuel olarak oluştur ve logla (sadece debug amaçlı)
+#                 combined_messages = "\n".join(messages_for_llm)
+#                 final_prompt = f"{QUESTION_TRANSFORM_TEMPLATE}\n\nMesajlar:\n{combined_messages}"
+#                 logging.info(f"DEBUG: Final combined prompt that will be sent to LLM:")
+#                 logging.info(f"DEBUG: {final_prompt}")
 
-                # Transform işlemini yap - LLM'e bırakıyoruz; model gereksizse orijinali dönmelidir
-                transformed_question = transform_chain.invoke({"messages": last_human_messages})
-                transformed_question = transformed_question.strip()
+#                 # Transform işlemini yap - LLM'e bırakıyoruz; model gereksizse orijinali dönmelidir
+#                 transformed_question = transform_chain.invoke({"messages": last_human_messages})
+#                 transformed_question = transformed_question.strip()
 
-                logging.info(f"IntelligentAgent TRANSFORM: Original: {user_question}")
-                logging.info(f"IntelligentAgent TRANSFORM: Transformed: {transformed_question}")
-                logging.info(f"IntelligentAgent TRANSFORM: Human message count: {len(last_human_messages)}")
+#                 logging.info(f"IntelligentAgent TRANSFORM: Original: {user_question}")
+#                 logging.info(f"IntelligentAgent TRANSFORM: Transformed: {transformed_question}")
+#                 logging.info(f"IntelligentAgent TRANSFORM: Human message count: {len(last_human_messages)}")
 
-            except Exception as e:
-                logging.error(f"IntelligentAgent transform failed: {e}")
-                transformed_question = user_question
+#             except Exception as e:
+#                 logging.error(f"IntelligentAgent transform failed: {e}")
+#                 transformed_question = user_question
             
-            # Transform edilmiş soruyu IntelligentAgent'a gönder
-            intelligent_result = intelligent_agent.solve_question(transformed_question, session_id)
+#             # Transform edilmiş soruyu IntelligentAgent'a gönder
+#             intelligent_result = intelligent_agent.solve_question(transformed_question, session_id)
 
-            # Intelligent Agent response parsing
-            if intelligent_result and intelligent_result.get('final_answer'):
-                logging.info(f"IntelligentAgent response received")
+#             # Intelligent Agent response parsing
+#             if intelligent_result and intelligent_result.get('final_answer'):
+#                 logging.info(f"IntelligentAgent response received")
                 
-                # IntelligentAgent'in final answer'ını kullan
-                final_answer = intelligent_result.get('final_answer', '')
+#                 # IntelligentAgent'in final answer'ını kullan
+#                 final_answer = intelligent_result.get('final_answer', '')
                 
-                # Simple wrapper for expected document shape
-                class SimpleDoc:
-                    def __init__(self, page_content, metadata, state=None):
-                        self.page_content = page_content
-                        self.metadata = metadata
-                        self.state = state or {}
+#                 # Simple wrapper for expected document shape
+#                 class SimpleDoc:
+#                     def __init__(self, page_content, metadata, state=None):
+#                         self.page_content = page_content
+#                         self.metadata = metadata
+#                         self.state = state or {}
 
-                docs = []
-                chunk_details = intelligent_result.get('chunk_details', [])
+#                 docs = []
+#                 chunk_details = intelligent_result.get('chunk_details', [])
                 
-                # Final answer varsa, chunks olsun olmasın doküman oluştur
-                if final_answer:
-                    # Eğer chunks varsa, her chunk için ayrı doküman oluştur
-                    if chunk_details:
-                        for i, chunk in enumerate(chunk_details):
-                            doc_name = chunk.get('document', f'unknown_doc_{i}')
-                            page_number = chunk.get('page', i)
-                            relevance = chunk.get('relevance', 0.0)
-                            preview = chunk.get('preview', '')
-                            chunk_id = chunk.get('id', f"{doc_name}::{page_number}")
+#                 # Final answer varsa, chunks olsun olmasın doküman oluştur
+#                 if final_answer:
+#                     # Eğer chunks varsa, her chunk için ayrı doküman oluştur
+#                     if chunk_details:
+#                         for i, chunk in enumerate(chunk_details):
+#                             doc_name = chunk.get('document', f'unknown_doc_{i}')
+#                             page_number = chunk.get('page', i)
+#                             relevance = chunk.get('relevance', 0.0)
+#                             preview = chunk.get('preview', '')
+#                             chunk_id = chunk.get('id', f"{doc_name}::{page_number}")
                             
-                            # Her chunk için ayrı metadata
-                            chunk_metadata = {
-                                'source': doc_name,
-                                'chunkdetails': [{
-                                    'id': chunk_id,
-                                    'score': relevance
-                                }],
-                                'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
-                                'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
-                                'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
-                                'chunk_index': i,
-                                'page_number': page_number,
-                                'original_chunk_data': chunk  # Ham chunk verisini de sakla
-                            }
+#                             # Her chunk için ayrı metadata
+#                             chunk_metadata = {
+#                                 'source': doc_name,
+#                                 'chunkdetails': [{
+#                                     'id': chunk_id,
+#                                     'score': relevance
+#                                 }],
+#                                 'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
+#                                 'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
+#                                 'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
+#                                 'chunk_index': i,
+#                                 'page_number': page_number,
+#                                 'original_chunk_data': chunk  # Ham chunk verisini de sakla
+#                             }
                             
-                            state = {'query_similarity_score': relevance}
-                            # Preview varsa onu kullan, yoksa final_answer'ın bir kısmını kullan
-                            content = preview if preview else final_answer
-                            docs.append(SimpleDoc(page_content=content, metadata=chunk_metadata, state=state))
-                    else:
-                        # Chunks yoksa tek bir final answer dokümanı oluştur
-                        # Ama yine de intelligent_result'tan gelen gerçek verileri kullan
-                        metadata = {
-                            'source': f"IntelligentAgent_Query_{intelligent_result.get('iterations', 0)}",
-                            'chunkdetails': [{
-                                'id': f"intelligent_agent::final_answer::{intelligent_result.get('iterations', 0)}",
-                                'score': 0.95
-                            }],
-                            'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
-                            'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
-                            'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
-                            'total_chunks_found': len(chunk_details),
-                            'chunk_sources': [f"IntelligentAgent_Direct_Answer_Iteration_{intelligent_result.get('iterations', 0)}"],
-                            'final_answer_mode': True,
-                            'token_usage': intelligent_result.get('token_usage', {}),
-                            'transform_used': transformed_question != user_question
-                        }
+#                             state = {'query_similarity_score': relevance}
+#                             # Preview varsa onu kullan, yoksa final_answer'ın bir kısmını kullan
+#                             content = preview if preview else final_answer
+#                             docs.append(SimpleDoc(page_content=content, metadata=chunk_metadata, state=state))
+#                     else:
+#                         # Chunks yoksa tek bir final answer dokümanı oluştur
+#                         # Ama yine de intelligent_result'tan gelen gerçek verileri kullan
+#                         metadata = {
+#                             'source': f"IntelligentAgent_Query_{intelligent_result.get('iterations', 0)}",
+#                             'chunkdetails': [{
+#                                 'id': f"intelligent_agent::final_answer::{intelligent_result.get('iterations', 0)}",
+#                                 'score': 0.95
+#                             }],
+#                             'intelligent_agent_iterations': intelligent_result.get('iterations', 0),
+#                             'intelligent_agent_chunks': intelligent_result.get('discovered_chunks', 0),
+#                             'intelligent_agent_entities': intelligent_result.get('discovered_entities', 0),
+#                             'total_chunks_found': len(chunk_details),
+#                             'chunk_sources': [f"IntelligentAgent_Direct_Answer_Iteration_{intelligent_result.get('iterations', 0)}"],
+#                             'final_answer_mode': True,
+#                             'token_usage': intelligent_result.get('token_usage', {}),
+#                             'transform_used': transformed_question != user_question
+#                         }
                         
-                        state = {'query_similarity_score': 0.95}
-                        docs.append(SimpleDoc(page_content=final_answer, metadata=metadata, state=state))
+#                         state = {'query_similarity_score': 0.95}
+#                         docs.append(SimpleDoc(page_content=final_answer, metadata=metadata, state=state))
 
-                final_question = transformed_question
-                logging.info(f"IntelligentAgent returned {len(docs)} documents")
+#                 final_question = transformed_question
+#                 logging.info(f"IntelligentAgent returned {len(docs)} documents")
                 
-                # Intelligent agent'in sonucunu agent_result'a ata
-                agent_result = {
-                    'mode': 'intelligent_agent',
-                    'final_answer': final_answer,
-                    'iterations': intelligent_result.get('iterations', 0),
-                    'chunks': intelligent_result.get('discovered_chunks', 0),
-                    'entities': intelligent_result.get('discovered_entities', 0),
-                    'token_usage': intelligent_result.get('token_usage', {}),
-                    'meta': {
-                        'chunk_details': chunk_details
-                    }
-                }
+#                 # Intelligent agent'in sonucunu agent_result'a ata
+#                 agent_result = {
+#                     'mode': 'intelligent_agent',
+#                     'final_answer': final_answer,
+#                     'iterations': intelligent_result.get('iterations', 0),
+#                     'chunks': intelligent_result.get('discovered_chunks', 0),
+#                     'entities': intelligent_result.get('discovered_entities', 0),
+#                     'token_usage': intelligent_result.get('token_usage', {}),
+#                     'meta': {
+#                         'chunk_details': chunk_details
+#                     }
+#                 }
                 
-            else:
-                # Fallback - boş sonuç
-                logging.info(f"IntelligentAgent - no final answer")
+#             else:
+#                 # Fallback - boş sonuç
+#                 logging.info(f"IntelligentAgent - no final answer")
                 
-                # Simple wrapper for expected document shape
-                class SimpleDoc:
-                    def __init__(self, page_content, metadata, state=None):
-                        self.page_content = page_content
-                        self.metadata = metadata
-                        self.state = state or {}
+#                 # Simple wrapper for expected document shape
+#                 class SimpleDoc:
+#                     def __init__(self, page_content, metadata, state=None):
+#                         self.page_content = page_content
+#                         self.metadata = metadata
+#                         self.state = state or {}
                 
-                # Fallback için boş sonuç
-                docs = []
-                final_question = transformed_question
-                agent_result = {
-                    'mode': 'intelligent_agent_no_result',
-                    'final_answer': 'No result from Intelligent Agent',
-                    'iterations': 0,
-                    'chunks': 0,
-                    'entities': 0,
-                    'token_usage': {},
-                    'meta': {}
-                }
+#                 # Fallback için boş sonuç
+#                 docs = []
+#                 final_question = transformed_question
+#                 agent_result = {
+#                     'mode': 'intelligent_agent_no_result',
+#                     'final_answer': 'No result from Intelligent Agent',
+#                     'iterations': 0,
+#                     'chunks': 0,
+#                     'entities': 0,
+#                     'token_usage': {},
+#                     'meta': {}
+#                 }
                 
-        # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
-        elif intelligent_agent:
-            # Agent'tan sonuç al
-            user_question = messages[-1].content if messages else ""
-            agent_result = intelligent_agent.solve_question(user_question, session_id)
+#         # Eğer bir IntelligentAgent verilmişse, onu kullanarak dokümanları oluştur
+#         elif intelligent_agent:
+#             # Agent'tan sonuç al
+#             user_question = messages[-1].content if messages else ""
+#             agent_result = intelligent_agent.solve_question(user_question, session_id)
 
-            # Agent token bilgilerini çıkar
-            agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
-            if agent_token_usage:
-                logging.info(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
+#             # Agent token bilgilerini çıkar
+#             agent_token_usage = agent_result.get('token_usage') if isinstance(agent_result, dict) else None
+#             if agent_token_usage:
+#                 logging.info(f"IntelligentAgent Token Usage - Input: {agent_token_usage.get('input_tokens', 0)}, Output: {agent_token_usage.get('output_tokens', 0)}, Total: {agent_token_usage.get('total_tokens', 0)}")
 
-            # Log agent result summary for debugging (avoid full dump to prevent huge outputs)
-            try:
-                keys = list(agent_result.keys()) if isinstance(agent_result, dict) else []
-                logging.info(f"IntelligentAgent result keys: {keys}")
+#             # Log agent result summary for debugging (avoid full dump to prevent huge outputs)
+#             try:
+#                 keys = list(agent_result.keys()) if isinstance(agent_result, dict) else []
+#                 logging.info(f"IntelligentAgent result keys: {keys}")
 
-                chunk_count = len(agent_result.get('chunk_details', [])) if isinstance(agent_result, dict) else 0
-                logging.info(f"Agent chunk_details count: {chunk_count}")
+#                 chunk_count = len(agent_result.get('chunk_details', [])) if isinstance(agent_result, dict) else 0
+#                 logging.info(f"Agent chunk_details count: {chunk_count}")
 
-                llm_prompt = agent_result.get('llm_prompt_structure') if isinstance(agent_result, dict) else None
-                if llm_prompt:
-                    logging.debug("Agent llm_prompt_structure (truncated): %s", llm_prompt[:1000])
+#                 llm_prompt = agent_result.get('llm_prompt_structure') if isinstance(agent_result, dict) else None
+#                 if llm_prompt:
+#                     logging.debug("Agent llm_prompt_structure (truncated): %s", llm_prompt[:1000])
 
-                context_mem = agent_result.get('context_memory') if isinstance(agent_result, dict) else None
-                if context_mem:
-                    logging.debug("Agent context_memory (truncated): %s", context_mem[:500])
+#                 context_mem = agent_result.get('context_memory') if isinstance(agent_result, dict) else None
+#                 if context_mem:
+#                     logging.debug("Agent context_memory (truncated): %s", context_mem[:500])
 
-            except Exception as e:
-                logging.exception(f"Error while logging agent_result: {e}")
+#             except Exception as e:
+#                 logging.exception(f"Error while logging agent_result: {e}")
 
-            # Simple wrapper for expected document shape
-            class SimpleDoc:
-                def __init__(self, page_content, metadata, state=None):
-                    self.page_content = page_content
-                    self.metadata = metadata
-                    self.state = state or {}
+#             # Simple wrapper for expected document shape
+#             class SimpleDoc:
+#                 def __init__(self, page_content, metadata, state=None):
+#                     self.page_content = page_content
+#                     self.metadata = metadata
+#                     self.state = state or {}
 
-            docs = []
-            transformed_question = None
+#             docs = []
+#             transformed_question = None
 
-            # agent_result contains 'chunk_details' and 'llm_prompt_structure' etc.
-            for c in agent_result.get('chunk_details', []):
-                doc_name = c.get('document', 'local')
-                page = c.get('page')
-                score = c.get('relevance', 0)
-                preview = c.get('preview', '')
+#             # agent_result contains 'chunk_details' and 'llm_prompt_structure' etc.
+#             for c in agent_result.get('chunk_details', []):
+#                 doc_name = c.get('document', 'local')
+#                 page = c.get('page')
+#                 score = c.get('relevance', 0)
+#                 preview = c.get('preview', '')
 
-                chunk_id = f"{doc_name}::{page}"
-                metadata = {
-                    'source': doc_name,
-                    'chunkdetails': [{
-                        'id': chunk_id,
-                        'score': score
-                    }],
-                    # Agent tarafından üretilen prompt/context bilgilerini ekle
-                    'agent_prompt': agent_result.get('llm_prompt_structure', ''),
-                    'agent_context': agent_result.get('context_memory', '')
-                }
+#                 chunk_id = f"{doc_name}::{page}"
+#                 metadata = {
+#                     'source': doc_name,
+#                     'chunkdetails': [{
+#                         'id': chunk_id,
+#                         'score': score
+#                     }],
+#                     # Agent tarafından üretilen prompt/context bilgilerini ekle
+#                     'agent_prompt': agent_result.get('llm_prompt_structure', ''),
+#                     'agent_context': agent_result.get('context_memory', '')
+#                 }
 
-                state = {'query_similarity_score': score}
-                docs.append(SimpleDoc(page_content=preview, metadata=metadata, state=state))
+#                 state = {'query_similarity_score': score}
+#                 docs.append(SimpleDoc(page_content=preview, metadata=metadata, state=state))
 
-            # Eğer agent hiçbir chunk dönmediyse, fallback ile retriever çağrısı yap
-            if not docs:
-                docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
-                final_question = handler.transformed_question
-            else:
-                final_question = user_question
-        else:
-            docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
-            final_question = handler.transformed_question
+#             # Eğer agent hiçbir chunk dönmediyse, fallback ile retriever çağrısı yap
+#             if not docs:
+#                 docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
+#                 final_question = handler.transformed_question
+#             else:
+#                 final_question = user_question
+#         else:
+#             docs = doc_retriever.invoke({"messages": messages},{"callbacks":[handler]})
+#             final_question = handler.transformed_question
         
-        print(f"========== DOCUMENT RETRIEVAL SONUÇLARI ==========")
-        # Transform edilen soruyu sadece loglara yaz, print'e çıkarma
-        if final_question:
-            logging.info(f"Transformed question : {final_question}")
-        else:
-            logging.info(f"Original question used (no transformation): {user_question}")
+#         print(f"========== DOCUMENT RETRIEVAL SONUÇLARI ==========")
+#         # Transform edilen soruyu sadece loglara yaz, print'e çıkarma
+#         if final_question:
+#             logging.info(f"Transformed question : {final_question}")
+#         else:
+#             logging.info(f"Original question used (no transformation): {user_question}")
             
-        print(f"Retrieved Documents Count: {len(docs) if docs else 0}")
+#         print(f"Retrieved Documents Count: {len(docs) if docs else 0}")
         
-        if docs:
-            print("========== RETRIEVED DOCUMENTS DETAILS ==========")
-            for i, doc in enumerate(docs[:3]):  # İlk 3 dokümanı göster
-                print(f"Document {i+1}:")
-                print(f"  Content: {doc.page_content[:150]}...")
-                print(f"  Metadata: {doc.metadata}")
-                print("-" * 50)
+#         if docs:
+#             print("========== RETRIEVED DOCUMENTS DETAILS ==========")
+#             for i, doc in enumerate(docs[:3]):  # İlk 3 dokümanı göster
+#                 print(f"Document {i+1}:")
+#                 print(f"  Content: {doc.page_content[:150]}...")
+#                 print(f"  Metadata: {doc.metadata}")
+#                 print("-" * 50)
         
-        print("==============================================")
+#         print("==============================================")
         
-        doc_retrieval_time = time.time() - start_time
-        logging.info(f"Documents retrieved in {doc_retrieval_time:.2f} seconds")
+#         doc_retrieval_time = time.time() - start_time
+#         logging.info(f"Documents retrieved in {doc_retrieval_time:.2f} seconds")
         
-    except Exception as e:
-        error_message = f"Error retrieving documents: {str(e)}"
-        print(f"========== DOCUMENT RETRIEVAL ERROR ==========")
-        print(f"Error: {error_message}")
-        print("============================================")
-        logging.error(error_message)
-        docs = None
-        final_question = None
+#     except Exception as e:
+#         error_message = f"Error retrieving documents: {str(e)}"
+#         print(f"========== DOCUMENT RETRIEVAL ERROR ==========")
+#         print(f"Error: {error_message}")
+#         print("============================================")
+#         logging.error(error_message)
+#         docs = None
+#         final_question = None
 
     
-    return docs, final_question, agent_token_usage, agent_result
+#     return docs, final_question, agent_token_usage, agent_result
 
 def create_document_retriever_chain(llm, retriever):
     try:
@@ -1172,26 +1172,26 @@ def get_neo4j_retriever(graph, document_names, chat_mode_settings, score_thresho
         raise Exception(f"An error occurred while retrieving the Neo4jVector index or creating the retriever. Please drop and create a new vector index '{index_name}': {e}") from e 
 
 
-def setup_chat(model, graph, document_names, chat_mode_settings):
-    start_time = time.time()
-    try:
-        if model == "diffbot":
-            model = os.getenv('DEFAULT_DIFFBOT_CHAT_MODEL')
+# def setup_chat(model, graph, document_names, chat_mode_settings):
+#     start_time = time.time()
+#     try:
+#         if model == "diffbot":
+#             model = os.getenv('DEFAULT_DIFFBOT_CHAT_MODEL')
         
-        llm, model_name = get_llm(model=model)
-        logging.info(f"Model called in chat: {model} (version: {model_name})")
+#         llm, model_name = get_llm(model=model)
+#         logging.info(f"Model called in chat: {model} (version: {model_name})")
 
-        retriever = get_neo4j_retriever(graph=graph, chat_mode_settings=chat_mode_settings, document_names=document_names, llm=llm)
-        doc_retriever = create_document_retriever_chain(llm, retriever)
+#         retriever = get_neo4j_retriever(graph=graph, chat_mode_settings=chat_mode_settings, document_names=document_names, llm=llm)
+#         doc_retriever = create_document_retriever_chain(llm, retriever)
         
-        chat_setup_time = time.time() - start_time
-        logging.info(f"Chat setup completed in {chat_setup_time:.2f} seconds")
+#         chat_setup_time = time.time() - start_time
+#         logging.info(f"Chat setup completed in {chat_setup_time:.2f} seconds")
         
-    except Exception as e:
-        logging.error(f"Error during chat setup: {e}", exc_info=True)
-        raise
+#     except Exception as e:
+#         logging.error(f"Error during chat setup: {e}", exc_info=True)
+#         raise
     
-    return llm, doc_retriever, model_name
+#     return llm, doc_retriever, model_name
 
 def process_chat_response(messages, history, question, model, graph, document_names, chat_mode_settings, intelligent_agent=None, session_id=None):
     agent_token_usage = None  # Agent token kullanımını saklamak için
@@ -2908,7 +2908,10 @@ async def process_chat_response_stream(messages, history, question, model, graph
         }
         
         # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
+        
+        # Her durumda llm'i tanımla (summarization için gerekli)
         llm, model_version = get_llm(model=model)
+        
         
         # Direkt document retrieval'a geç
         yield {
@@ -2935,7 +2938,7 @@ async def process_chat_response_stream(messages, history, question, model, graph
         intelligent_agent = None
         try:
             # Temiz cevap + referans modu - gereksiz LLM yorumlama yok
-            intelligent_agent = IntelligentAgent(graph, enable_llm_interpretation=False)
+            intelligent_agent = IntelligentAgent(graph, model_name=model, enable_llm_interpretation=False)
         except Exception:
             intelligent_agent = None
 
