@@ -1,0 +1,45 @@
+# Development environment compose
+# Ana docker-compose.yml'e development ayarları ekler
+# DevContainer için tek container - hem Python hem Node.js
+
+services:
+  # Full-stack development container
+  devcontainer:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    ports:
+      - '8000:8000' # Backend API
+      - '5173:5173' # Frontend Vite
+    volumes:
+      - ../:/workspace:cached # Full workspace mount
+      - backend_pip_cache:/root/.cache/pip # Python cache
+      - frontend_node_modules:/workspace/frontend/node_modules # Node.js cache
+      - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
+    env_file:
+      - ./backend/.env # Backend env (relative to workspace root)
+      - ./frontend/.env # Frontend env (relative to workspace root)
+    environment:
+      - PYTHONPATH=/workspace/backend
+      - UVICORN_RELOAD=true
+      - LOG_LEVEL=debug
+      - VITE_BACKEND_API_URL=http://localhost:8000
+      - VITE_ENV=DEV
+      - VITE_HOST=0.0.0.0
+    working_dir: /workspace
+    command: ['tail', '-f', '/dev/null'] # Manuel başlatma
+    depends_on:
+      - neo4j
+      - qdrant
+    networks:
+      - llm-graph-builder_net
+
+volumes:
+  frontend_node_modules:
+  backend_pip_cache:
+
+# Ana compose'un network'ünü kullan
+networks:
+  llm-graph-builder_net:
+    external: true
+
