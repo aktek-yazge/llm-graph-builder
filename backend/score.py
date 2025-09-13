@@ -31,6 +31,7 @@ import re
 from urllib.parse import unquote
 from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
+from src.device_utils import get_optimal_device, print_device_info, optimize_for_apple_silicon
 from datetime import datetime, timezone
 import time
 import gc
@@ -431,6 +432,13 @@ class UTF8JSONResponse:
             await self.app(scope, receive, send)
 
 app = FastAPI()
+
+# Device information ve Apple Silicon optimizasyonu
+@app.on_event("startup")
+async def startup_event():
+    """FastAPI startup - device bilgilerini göster"""
+    optimize_for_apple_silicon()
+    print_device_info()
 
 # Add HTTP logging middleware for OpenTelemetry integration
 app.add_middleware(HTTPLoggingMiddleware)
@@ -1523,7 +1531,7 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         # Try to instantiate IntelligentAgent and pass them to QA_RAG (fallback to None on failure)
         intelligent_agent = None
         try:
-            intelligent_agent = IntelligentAgent(graph)
+            intelligent_agent = IntelligentAgent(graph, model_name=model)
         except Exception:
             intelligent_agent = None
 
@@ -1634,7 +1642,7 @@ async def chat_bot_stream(
             # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
             intelligent_agent = None
             try:
-                intelligent_agent = IntelligentAgent(graph)
+                intelligent_agent = IntelligentAgent(graph, model_name=model)
             except Exception:
                 intelligent_agent = None
 

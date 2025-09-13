@@ -11,14 +11,15 @@ import re
 import os
 import sys
 import time
+import asyncio
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from langchain.schema import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage
 from langchain_neo4j import Neo4jGraph
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 import neo4j.time
-
+from mem0 import Memory
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
 
@@ -37,10 +38,37 @@ load_dotenv()
 # Base URL for reference links
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
-load_dotenv()
+# Mem0 configuration for query strategy memory - Qdrant vector store kullanarak
+mem0_config = {
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "model": "text-embedding-3-large",
+            "embedding_dims": 1536  # text-embedding-3-large için standart boyut
+        },
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "host": "qdrant",
+            "port": 6333,
+            "collection_name": "strategy_memories",
+            "embedding_model_dims": 1536
+        },
+    },
+}
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Mem0 instance - güvenli initialization
+try:
+    mem0 = Memory.from_config(config_dict=mem0_config)
+    logger.info("✅ Mem0 başarıyla initialize edildi")
+except Exception as e:
+    logger.warning(f"⚠️ Mem0 initialization hatası: {e}")
+    mem0 = None
 
 def serialize_neo4j_data(obj):
     """Neo4j özel tiplerini JSON serializable hale getir"""
@@ -151,13 +179,13 @@ class IntelligentAgent:
         # Resource Manager - YENİ!
         self.resource_manager = ResourceManager()
         
-        # Text splitter'ı başlat
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=300,
-            chunk_overlap=50,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
-        )
+        # Mem0 Memory Manager - YENİ!
+        self.memory = mem0 if mem0 is not None else None
+        self.query_strategies = []  # Bu session'da denenen stratejiler
+        
+        # Thread Pool Executor for background memory operations
+        self._memory_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
     
     def interpret_final_answer_with_llm(self, raw_answer: str, user_question: str, chunks: List[ChunkInfo], cypher_results: Any = None) -> str:
         """LLM ile final answer'ı yorumla ve zenginleştir"""
@@ -1290,6 +1318,230 @@ Sonuç sayısı: {len(result)}
                 
         return False
 
+    async def search_query_memory_async(self, question: str) -> str:
+        """Mem0'dan benzer sorular ve başarılı stratejileri asenkron ara"""
+        try:
+            if self.memory is None:
+                return ""  # Mem0 mevcut değilse boş string döndür
+                
+            # Mem0 işlemini thread pool'da çalıştır
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._search_memory_sync, question)
+                result = await loop.run_in_executor(None, lambda: future.result())
+                return result
+                
+        except Exception as e:
+            logger.warning(f"Mem0 async arama hatası: {e}")
+            return ""
+    
+    def _search_memory_sync(self, question: str) -> str:
+        """Mem0 arama işleminin senkron versiyonu"""
+        try:
+            # Direkt soruyu kullan, kategorize etme
+            search_results = self.memory.search(
+                f"Benzer soru: {question} - hangi stratejiler başarılı oldu?",
+                user_id="query_strategies"
+            )
+            
+            if not search_results or "results" not in search_results:
+                return ""
+            
+            # En yüksek skorlu anıları topla
+            relevant_memories = []
+            for result in search_results["results"][:3]:  # Top 3
+                if result.get("score", 0) > 0.7:  # Yüksek benzerlik
+                    relevant_memories.append(result["memory"])
+            
+            if relevant_memories:
+                memory_context = "\n".join([f"- {memory}" for memory in relevant_memories])
+                return f"""
+## 🧠 ÖNCEKİ DENEYİMLER (Mem0):
+{memory_context}
+
+Bu deneyimleri dikkate alarak strateji belirle."""
+            
+            return ""
+            
+        except Exception as e:
+            logger.warning(f"Mem0 senkron arama hatası: {e}")
+            return ""
+
+    def search_query_memory(self, question: str) -> str:
+        """Mem0'dan benzer sorular ve başarılı stratejileri ara (senkron wrapper)"""
+        try:
+            if self.memory is None:
+                return ""  # Mem0 mevcut değilse boş string döndür
+                
+            # Direkt soruyu kullan, kategorize etme
+            search_results = self.memory.search(
+                f"Benzer soru: {question} - hangi stratejiler başarılı oldu?",
+                user_id="strategy_memory"
+            )
+            
+            if not search_results or "results" not in search_results:
+                return ""
+            
+            # En yüksek skorlu anıları topla
+            relevant_memories = []
+            for result in search_results["results"][:3]:  # Top 3
+                if result.get("score", 0) > 0.7:  # Yüksek benzerlik
+                    relevant_memories.append(result["memory"])
+            
+            if relevant_memories:
+                memory_context = "\n".join([f"- {memory}" for memory in relevant_memories])
+                return f"""
+## 🧠 ÖNCEKİ DENEYİMLER (Mem0):
+{memory_context}
+
+Bu deneyimleri dikkate alarak strateji belirle."""
+            
+            return ""
+            
+        except Exception as e:
+            logger.warning(f"Mem0 arama hatası: {e}")
+            return ""
+    
+    async def store_query_strategy_async(self, question: str, strategies: List[Dict], final_success: bool):
+        """Denenen stratejileri ve sonuçları Mem0'a asenkron kaydet"""
+        try:
+            if self.memory is None:
+                return  # Mem0 mevcut değilse fonksiyonu atla
+                
+            # Mem0 işlemini thread pool'da çalıştır
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._store_strategy_sync, question, strategies, final_success)
+                await loop.run_in_executor(None, lambda: future.result())
+                
+        except Exception as e:
+            logger.warning(f"Mem0 async kaydetme hatası: {e}")
+    
+    def _store_strategy_sync(self, question: str, strategies: List[Dict], final_success: bool):
+        """Mem0 kaydetme işleminin senkron versiyonu - SADECE STRATEJİ BİLGİLERİ"""
+        try:
+            # Başarılı ve başarısız stratejileri ayır
+            successful_strategies = [s for s in strategies if s.get("success", False)]
+            failed_strategies = [s for s in strategies if not s.get("success", False)]
+            
+            # Memory mesajları oluştur - SADECE STRATEJİ BİLGİLERİ, KULLANICI SORULARI YOK
+            messages = []
+            
+            # Soru tipini kategorize et (kişi adı, tarih vs metadata'yı kaldır)
+            question_type = self._categorize_question_type(question)
+            
+            # Başarısız denemeler
+            if failed_strategies:
+                failed_list = [f"{s.get('strategy', 'unknown')}: {s.get('reason', 'belirsiz')}" for s in failed_strategies]
+                messages.append({
+                    "role": "system",
+                    "content": f"Soru tipi: '{question_type}' - Başarısız stratejiler: {', '.join(failed_list)}"
+                })
+            
+            # Başarılı strateji
+            if successful_strategies and final_success:
+                successful_strategy = successful_strategies[-1]  # Son başarılı
+                strategy_detail = f"{successful_strategy.get('strategy', 'unknown')}"
+                if successful_strategy.get('details'):
+                    strategy_detail += f" - {successful_strategy['details']}"
+                
+                messages.append({
+                    "role": "system", 
+                    "content": f"Soru tipi: '{question_type}' - BAŞARILI strateji: {strategy_detail}. Bu strateji çalıştı."
+                })
+            
+            # Mem0'a kaydet
+            if messages:
+                self.memory.add(messages, user_id="strategy_memory")
+                logger.info(f"Mem0'a kaydedilen strateji: {len(messages)} mesaj")
+            
+        except Exception as e:
+            logger.warning(f"Mem0 senkron kaydetme hatası: {e}")
+
+    def _categorize_question_type(self, question: str) -> str:
+        """Soruyu kategorize et, kişi adlarını ve spesifik detayları kaldır"""
+        question_lower = question.lower()
+        
+        # Soru tiplerini belirle
+        if any(word in question_lower for word in ["taksit", "ödeme", "prim"]):
+            return "taksit_ödeme_sorgusu"
+        elif any(word in question_lower for word in ["poliçe", "sigorta"]):
+            return "poliçe_bilgi_sorgusu"
+        elif any(word in question_lower for word in ["listele", "list", "göster"]):
+            return "listeleme_sorgusu"
+        elif any(word in question_lower for word in ["ara", "bul", "search"]):
+            return "arama_sorgusu"
+        else:
+            return "genel_sorgu"
+
+    def store_query_strategy(self, question: str, strategies: List[Dict], final_success: bool):
+        """Denenen stratejileri ve sonuçları Mem0'a kaydet (senkron wrapper)"""
+        try:
+            if self.memory is None:
+                return  # Mem0 mevcut değilse fonksiyonu atla
+                
+            # Başarılı ve başarısız stratejileri ayır
+            successful_strategies = [s for s in strategies if s.get("success", False)]
+            failed_strategies = [s for s in strategies if not s.get("success", False)]
+            
+            # Memory mesajları oluştur
+            messages = []
+            
+            # Soru tipini kategorize et (kişi adı, tarih vs metadata'yı kaldır)
+            question_type = self._categorize_question_type(question)
+            
+            # Başarısız denemeler
+            if failed_strategies:
+                failed_list = [f"{s.get('strategy', 'unknown')}: {s.get('reason', 'belirsiz')}" for s in failed_strategies]
+                messages.append({
+                    "role": "system",
+                    "content": f"Soru tipi: '{question_type}' - Başarısız stratejiler: {', '.join(failed_list)}"
+                })
+            
+            # Başarılı strateji
+            if successful_strategies and final_success:
+                successful_strategy = successful_strategies[-1]  # Son başarılı
+                strategy_detail = f"{successful_strategy.get('strategy', 'unknown')}"
+                if successful_strategy.get('details'):
+                    strategy_detail += f" - {successful_strategy['details']}"
+                
+                messages.append({
+                    "role": "system", 
+                    "content": f"Soru tipi: '{question_type}' - BAŞARILI strateji: {strategy_detail}. Bu strateji çalıştı."
+                })
+            
+            # Mem0'a kaydet
+            if messages:
+                self.memory.add(messages, user_id="strategy_memory")
+                logger.info(f"Mem0'a kaydedilen strateji: {len(messages)} mesaj")
+            
+        except Exception as e:
+            logger.warning(f"Mem0 kaydetme hatası: {e}")
+    
+    def track_strategy_attempt(self, strategy: str, success: bool, reason: str = "", details: str = ""):
+        """Strateji denemesini takip et"""
+        self.query_strategies.append({
+            "strategy": strategy,
+            "success": success,
+            "reason": reason,
+            "details": details,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    def _classify_cypher_strategy(self, cypher_query: str) -> str:
+        """Cypher sorgusunu genel strateji tipine göre sınıflandır"""
+        query_lower = cypher_query.lower()
+        
+        # Basit genel kategoriler
+        if "embedding" in query_lower or "gds.similarity" in query_lower:
+            return "vector_search"
+        elif "chunk" in query_lower:
+            return "chunk_search"
+        elif "customer" in query_lower or "policy" in query_lower:
+            return "entity_search"
+        else:
+            return "general_query"
+
     def solve_question(self, user_question: str, session_id: str = None) -> Dict[str, Any]:
         """Ana problem çözme fonksiyonu - ReAct pattern ile Chunk-based arama"""
         
@@ -1300,10 +1552,20 @@ Sonuç sayısı: {len(result)}
         self.context_memory = ""
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self.detailed_token_usage = []  # Detaylı token tracking'i temizle
+        self.query_strategies = []  # Strateji takibini temizle
         
         # YENİ: Resource Manager'ı temizle
         self.resource_manager.clear_resources()
         logger.info("🧹 Resource Manager temizlendi")
+        
+        # 🧠 MEM0: Önceki deneyimleri ara (background thread'de)
+        memory_context_future = None
+        try:
+            # Shared thread pool executor ile background'da memory aramayı başlat
+            memory_context_future = self._memory_executor.submit(self.search_query_memory, user_question)
+            logger.info("🧠 Mem0 aramasi background thread'de başlatıldı")
+        except Exception as e:
+            logger.warning(f"🧠 Mem0 background thread oluşturulamadı: {e}")
         
         logger.info(f"Soru çözülüyor: {user_question}")
         if session_id:
@@ -1377,6 +1639,18 @@ Sonuç sayısı: {len(result)}
         while state.iteration_count < self.max_iterations and not final_answer:
             state.iteration_count += 1
             logger.info(f"İterasyon {state.iteration_count}")
+            
+            # 🧠 MEM0: Background memory aramayı kontrol et (non-blocking)
+            if memory_context_future and state.iteration_count == 1:
+                try:
+                    # Memory sonucunu kontrol et (timeout olmadan, sadece hazırsa al)
+                    if memory_context_future.done():
+                        memory_context = memory_context_future.result()
+                        if memory_context and memory_context not in self.context_memory:
+                            self.context_memory += memory_context + "\n"
+                            logger.info("🧠 Mem0'dan önceki deneyimler ilk iterasyonda eklendi")
+                except Exception as e:
+                    logger.warning(f"🧠 Memory check hatası: {e}")
             
             # LLM'e gönderilecek mesaj - mevcut state bilgileriyle zenginleştir
             context_info = ""
@@ -1572,6 +1846,15 @@ Sonuç sayısı: {len(result)}
                         
                         current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
                         
+                        # 🧠 MEM0: Başarılı stratejiyi takip et
+                        strategy_type = self._classify_cypher_strategy(action_content)
+                        self.track_strategy_attempt(
+                            strategy=f"cypher_query_{strategy_type}",
+                            success=True,
+                            details=f"Başarılı sorgu: {action_content[:100]}...",
+                            reason=f"{len(result)} sonuç bulundu"
+                        )
+                        
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(f"Cypher Query: {action_content}", result, "structured_data")
                         self.add_successful_finding(
@@ -1719,6 +2002,15 @@ Sonuç sayısı: {len(result)}
                             
                             suggestion = filter_suggestions.get(state.failed_entity_query_count, "Çok basit bir sorgu dene")
                             current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Strateji: {suggestion}. Farklı bir cypher_query ile tekrar dene."
+                            
+                            # 🧠 MEM0: Başarısız stratejiyi takip et
+                            strategy_type = self._classify_cypher_strategy(action_content)
+                            self.track_strategy_attempt(
+                                strategy=f"cypher_query_{strategy_type}",
+                                success=False,
+                                details=f"Başarısız sorgu: {action_content[:100]}...",
+                                reason=str(result)[:200]
+                            )
                         else:
                             logger.info(f"❌ Entity query {state.max_entity_query_attempts} kez başarısız. Vector search'e geç.")
                             current_observation = f"Entity sorguları {state.max_entity_query_attempts} kez başarısız oldu. Artık vector search kullanarak chunk araması yap (generate_embeddings_for_cypher + GDS similarity)."
@@ -1747,6 +2039,36 @@ Sonuç sayısı: {len(result)}
        # Final answer varsa döndür, yoksa chunk ve entity verilerini döndür
         if final_answer:
             logger.info(f"Agent final answer verdi 1: {final_answer}")
+            
+            # 🧠 MEM0: Önceki memory aramayı tamamla (eğer varsa)
+            try:
+                if memory_context_future:
+                    # Background thread'den memory sonucunu al (timeout ile)
+                    memory_context = memory_context_future.result(timeout=2.0)  # 2 saniye timeout
+                    if memory_context and memory_context not in self.context_memory:
+                        logger.info("🧠 Mem0'dan önceki deneyimler geç bulundu ama kullanılamadı (zaten işlem bitti)")
+            except concurrent.futures.TimeoutError:
+                logger.warning("🧠 Mem0 arama timeout oldu")
+            except Exception as e:
+                logger.warning(f"🧠 Mem0 arama hatası: {e}")
+            
+            # 🧠 MEM0: Başarılı stratejiyi kaydet (background thread'de)
+            has_success = any(s.get("success", False) for s in self.query_strategies)
+            try:
+                # Shared executor ile background'da strategy kaydet
+                store_future = self._memory_executor.submit(
+                    self.store_query_strategy, user_question, self.query_strategies, has_success
+                )
+                logger.info("🧠 Mem0'a strateji kaydı background'da başlatıldı")
+                
+            except Exception as e:
+                logger.warning(f"🧠 Mem0 background kaydetme hatası: {e}")
+                # Fallback: non-blocking sync store
+                try:
+                    self.store_query_strategy(user_question, self.query_strategies, has_success)
+                except:
+                    pass  # Mem0 kaydı başarısız olsa da ana işlem devam etsin
+            
             return {
                 "final_answer": final_answer,
                 "iterations": state.iteration_count,
@@ -1920,333 +2242,132 @@ Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap 
         return self.system_prompt_cache
     
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
-        """Token-optimized system prompt - domain-agnostic decision making"""
+        """Schema-based ReAct Agent - General Purpose Graph Database Query Assistant"""
         
-        # Schema'yı dinamik olarak Neo4j'den çek - token tasarrufu için compact format
+        # Schema'yı dinamik olarak Neo4j'den çek
         try:
-            # Mevcut graph connection'ı kullan
             from src.schema_extractor import Neo4jSchemaExtractor
             extractor = Neo4jSchemaExtractor()
-            extractor.graph = self.graph  # Mevcut graph'ı kullan
-            
-            # Compact schema + field type kuralları
+            extractor.graph = self.graph
             compact_schema = get_compact_schema(self.graph)
             
-            schema_text = f"""## 🗄️ Neo4j Schema Yapısı:
+            schema_text = f"""� NEO4J GRAPH DATABASE SCHEMA:
 {compact_schema}
 
-## 📊 DOMAIN ARCHITECTURE:
-- **Document**: Policy'lerin metadata'larını içeren ana kaynak belgeler
-- **Chunk**: Document'lerin parçalara bölünmüş text içerikleri (semantic search için)
-- **Policy/Customer/PolicyType**: Yapılandırılmış business entity'leri
-"""
+🎯 DOMAIN CONTEXT:
+Bu graph database, belge tabanlı bir bilgi sistemidir:
+- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
+- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri
+- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
+- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
+            
         except Exception as e:
             logger.warning(f"Schema çekme hatası: {e}")
-            # Fallback: Sabit schema kullan
-            schema_text = """## 🗄️ Neo4j Schema Yapısı:
-Nodes: Graph Db Nodes bulunamadı uyarısı ver
-Rels: Graph Db Rels bulunamadı uyarısı ver
-Patterns: Graph Db patterns bulunamadı uyarısı ver
+            schema_text = """� NEO4J GRAPH DATABASE SCHEMA:
+⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"""
 
-⚠️ DOMAIN: Document→Chunk (text içerik), Policy/Customer (yapısal data)
-"""
+        system_prompt = f"""# GRAPH DATABASE QUERY AGENT
 
-        system_prompt = f"""Sen bir graph veritabanı analiz uzmanısın. Kullanıcı sorularını analiz ederek en uygun arama stratejisini KENDI KARAR VER.
-
-⚠️ **MASTER CYPHER KURALLARI:**
-1. **FIELD TİP KONTROLÜ**: Schema'dan field tipini kontrol et
-2. **INTEGER**: `field = value` | **STRING**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
-3. **CONTAINS sadece STRING'de, = sadece INTEGER'da kullan**
-
-🔤 **STRING MASTER RULE**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
+Sen verilen Neo4j graph database şemasını kullanan bir ReAct (Reasoning + Acting) ajansın. 
+Kullanıcı sorularını analiz ederek en uygun graph database sorgularını oluşturur ve sonuçları yorumlarsın.
 
 {schema_text}
-## 🧠 DECISION FRAMEWORK:
 
-### 🎯 FIELD TİP KURALLARI:
-- **Integer**: `field = value` | **String**: MASTER RULE | **Boolean**: `field = true/false`
+## 🔧 TEMEL KURALLAR:
 
-### 🔍 AKILLI ARAMA STRATEJİSİ:
-**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
-**METADATA SORULARI için entity araması** (count, liste, ID, tip, genel bilgi)
-**MÜŞTERİ ADI ARAMA: Customer node → filename search → semantic search chain**
+### 📝 CYPHER QUERY KURALLARI:
+1. **Field Type Matching**: Schema'dan field tipini kontrol et
+   - **String fields**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean("value"))`
+   - **Integer fields**: `field = value` 
+   - **Boolean fields**: `field = true/false`
 
-**🏠 D4/D5/D6 KONUT POLİÇESİ ARAMA KURALI:**
-- ❌ **YANLIŞ**: PolicyType.typeName'de "d4" veya "konut" arama
-- ✅ **DOĞRU**: Policy.name veya Document.fileName'de "d4" arama
-- **SEBEP**: D4, D5, D6 apartment numaraları Policy adında ve Document fileName'de bulunur
-- **ÖRNEK**: "Ayça Dinçkök Galata Residance D4 Konut_2020" → Policy.name'de "d4" ara
+2. **Node/Relationship Kullanımı**: Sadece schema'da tanımlı node'ları ve relationship'leri kullan
 
-### ⚡ OPTİMİZE EDİLMİŞ KARAR VERİCİ:
-1. **AKILLI İLK ADIM** - Soru tipini algıla:
-   - 📋 **İçerik/Detay aranıyorsa** → GDS semantic search (embedding) kullan
-   - 📊 **Metadata gerekiyorsa** → Entity cypher query kullan
-   - Karışık sorular: Her iki yöntemi dene
-   
-2. **ENTITY QUERY FAILOVER STRATEJİSİ**: 
-   - ✅ İlk entity query başarısızsa 3 KERE daha dene
-   - ✅ Her denemede filtreleri sadeleştir:
-     * 1. deneme: Daha basit WHERE koşulları (poliçe tipin fileName de arar)
-     * 2. deneme: CONTAINS'i gevşet (daha az karakter, case insensitive)  
-     * 3. deneme: Minimum filtre (en temel sorgu, mutlaka yıl varsa içermeli)
-   - ❌ 3 deneme başarısızsa vector search'e GEÇ ZORUNLU!
-   
-3. **HIZ OPTİMİZASYONU**: 
-   - ✅ Context memory'de "ENTITY QUERY DENEMELERİ" varsa durumu kontrol et
-   - ✅ Başarısız deneme limitini aştıysan vector search kullan
-   - **📋 CHUNK ANALİZİ**: Gelen chunk'larda eksik bilgi var mı?
-     * Tablo veya cümle yarıda kesmişse → sonraki chunk'ları getir
-     * Cümle eksikse → position+1, position+2 chunk'larını getir  
-     * Tablo başlangıcı tespit edilirse → tam tablo içeriğini getir
+3. **Return Clause**: Sorguya uygun alanları döndür (id, name, properties vs.)
 
-4. **VECTOR SEARCH'E GEÇİŞ KURALI**:
-   - **ZORUNLU**: Entity query 3 kez başarısızsa generate_embeddings_for_cypher kullan
-   - **STRATEJ**: Sadece içerik terimleri ile GDS cosine similarity yap
-   - **AVANTAJ**: WHERE filtresi olmadan daha geniş arama yapabilirsin
+### 🔍 MÜŞTERİ ADI ARAMA STRATEJİSİ:
 
-### � AVAILABLE TOOLS (OpenAI Function Calling):
+**KURAL**: Kullanıcı kısmi ad belirtirse (örn: "Ayça hanım", "Mehmet bey"), ÖNCE KEŞİF YAP:
 
-**generate_embeddings_for_cypher(text)**: 
-- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
-- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
-- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
-- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
+1. **Keşif Sorgusu**: Kısmi adla eşleşen tüm müşterileri bul
+   ```cypher
+   MATCH (c:Customer) 
+   WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("Ayça"))
+   RETURN c.fullName, c.id
+   ```
 
-**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
-- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
-- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
-- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
-- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
-- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
-- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
-- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
-- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
-- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
-- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
+2. **Çoklu Sonuç Durumu**: Birden fazla eşleşme varsa, kullanıcıya seçenek sun
+   ```
+   "Ayça" ismiyle eşleşen müşteriler:
+   - Ayça Dinçkök
+   - Ayça Yılmaz
+   Hangi müşteri hakkında bilgi istiyorsunuz?
+   ```
 
-### �📝 ACTION FORMAT:
-```
-Observation: [Durum ve önceki sonuçlar]
-Thought: [İçerik/detay arıyorum mu yoksa metadata mi? Metadata 2 denemede başarısızsa semantic search gerekli]
-Action: [cypher_query | final_answer]
-Content: [Sorgu/arama metni/cevap]
-```
+3. **Tek Sonuç Durumu**: Tek eşleşme varsa, doğrudan o müşteriyle devam et
 
-**⚠️ YASAKLI FORMATLAR:**
-- ❌ `Content: |` (YAML pipe syntax kullanma)
-- ❌ `Content: >` (YAML fold syntax kullanma)
-- ❌ Çok satırlı content'te pipe karakteri kullanma
+**UYGULAMA**:
+- İlk sorgu her zaman keşif amaçlı olsun
+- Tam eşleşme gerektiren durumlarda bile esnek arama kullan
+- Müşteri adını normalize etmek için `apoc.text.clean` kullan
 
-### 🎯 ACTION STRATEJİLERİ:
+### 🎯 ARAMA STRATEJİSİ:
 
-**cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
-- **1. İTERASYON**: Entity'leri bul (Customer, Policy) - p.source_file'ı mutlaka RETURN et!
-- **2. İTERASYON**: Keşfedilen filename'leri kullan - WHERE d.fileName IN [liste] formatında!
-- **KRİTİK**: Filename CONTAINS araması yapma, direkt IN listesi kullan!
-- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür  
-- **ZORUNLU**: Cypher sonucunda chunk bulunca, faydalandığın her chunk için add_page_resource(page_link) çağır!
+**METADATA ARAMALARI**: Entity'ler ve yapılandırılmış veriler için
+- Node properties üzerinden filtreleme
+- Count, list, ID, type gibi sorular
 
-**🔍 CONTEXT MEMORY KULLANIMI:**
-- **"KEŞFEDİLEN DOCUMENT FILENAME'LERİ" bölümü varsa**: Bu listedeki dosya adlarını kullan
-- **TEKRAR ARAMA YAPMA**: toLower(apoc.text.clean(d.fileName)) CONTAINS kullanma!
-- **DOĞRU FORMAT**: WHERE d.fileName IN ["dosya1.pdf", "dosya2.pdf"]
+**CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
+- Chunk nodes üzerinden text içeriği arama
+- Embedding-based similarity search
 
-**final_answer**: Son cevabı ver
-- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
-- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
-- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
+**HİBRİT ARAMALARI**: Hem metadata hem content gereken durumlarda
+- Önce entity filtresi, sonra content arama
+- Filename discovery → content search chain
 
-### 🔍 VECTOR ARAMA STRATEJİSİ (GDS COSİNE SİMİLARİTY!):
+### 🛠️ AVAILABLE TOOLS:
 
-**A) METADATA + GDS VECTOR ARAMA (Tercih Edilen):**
-```cypher
-// 1. Önce metadata filtrelerini uygula, sonra GDS cosine similarity ile ara
-WITH $embedding_vector AS queryVec
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("belge_adı"))
-AND c.embedding IS NOT NULL
-WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-**A2) MÜŞTERİ ADI + GDS VECTOR ARAMA (Customer adı filename'de):**
-```cypher
-// Müşteri adı filename'de geçiyorsa, dosya adında ara
-WITH $embedding_vector AS queryVec
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-WHERE toLower(apoc.text.clean(d.fileName)) CONTAINS toLower(apoc.text.clean("müşteri_adı"))
-AND c.embedding IS NOT NULL
-WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-**B) SADECE GDS VECTOR ARAMA (Metadata yok ise):**
-```cypher
-// Soruda hiç metadata yok ise direk tüm chunk'larda GDS ile ara
-WITH $embedding_vector AS queryVec
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-WHERE c.embedding IS NOT NULL
-WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
-ORDER BY score DESC
-LIMIT 15
-```
-
-**C) KEŞFEDİLEN FILENAME'LER + GDS VECTOR (ÖNCE KUE !!!!):**
-```cypher
-// Context memory'de filename'ler varsa BU STRATEJİYİ KULLAN!
-WITH $embedding_vector AS queryVec
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-WHERE d.fileName IN ["dosya1.pdf", "dosya2.pdf", "dosya3.pdf"]  // Context memory'den al
-AND c.embedding IS NOT NULL
-WITH c, d, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, c.chunkId, c.page_number, c.position, c.page_link, d.fileName, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-**KARAR VERİCİ KURAL:**
-- 🏆 **BİRİNCİ ÖNCELİK**: Context memory'de "KEŞFEDİLEN DOCUMENT FILENAME'LERİ" varsa → C) stratejisini kullan
-- ✅ Soru belge adı, müşteri adı, poliçe tipi içeriyorsa → Önce filtrele, sonra GDS vector ara (A stratejisi)
-- ✅ **MÜŞTERİ ADI ARAMA**: Customer node'da bulunamazsa filename'de müşteri adını ara (A2 stratejisi)  
-- ✅ **FILENAME SEARCH**: Document.fileName içinde müşteri adı, poliçe numarası, tür bilgisi aranabilir
-- ✅ Soru sadece içerik/kavram arıyorsa ("taksit tablosu", "hasar limiti") → Direk GDS vector ara (B stratejisi)
-- ✅ GDS AVANTAJI: WHERE filtresi problemini çözüyor, daha iyi sonuçlar veriyor
-- ⚠️ YANLIŞ: db.index.vector.queryNodes kullanma → GDS cosine similarity tercih et
-- ❌ **TEKRARLI ARAMA YAPMA**: Filename'ler zaten keşfedildiyse CONTAINS kullanma!
-
-⚠️ **CHUNK ANALİZ ZORUNLU KURALI:**
-- **TÜM CHUNK'LARI DETAYLI ANALİZ ET**: Birden fazla chunk geldiğinde her birini tek tek oku
-- **İÇERİK BÜTÜNLÜĞÜ**: Tablolar, listeler, sayısal veriler ve devam eden içerik birden fazla chunk'a yayılabilir
-- **DEVAM KONTROL**: Bir chunk'ta kesik/eksik bilgi varsa, sonraki position'lardaki chunk'ları da kontrol et
-- **ZORUNLU**: final_answer vermeden önce TÜM chunk'ları analiz et ve tüm bulguları dahil et
-- **TABLO ANALİZİ**: Taksit tabloları, ödeme planları gibi yapısal veriler birden fazla chunk'ta dağıtılmış olabilir - HEPSİNİ BİRLEŞTİR!
-- **KEŞFEDİLEN CHUNK İÇERİKLERİ bölümündeki tüm text'leri mutlaka analiz et - bunlar sana verilen en önemli veri!**
-
-🔥 **TARİH-TUTAR LİSTELERİ İÇİN ÖZEL KURAL:**
-- **TAKSİT TABLOLARI**: "P 12.02.2020 149.38", "1 12.03.2020 89.00" formatında veriler gördüğünde bunlar BAŞLANGIÇ ve TAKSİTLERDİR!
-- **P = PEŞİNAT**: "P" harfi peşinat anlamındadır, sonrası sayısal taksitlerdir
-- **DEVAMI VAR KURALI**: Bir chunk'ta taksit dizisi görünce (1,2,3...) mutlaka sonraki chunk'larda devamını ara
-- **TABLODA KESİK**: "1, 2, 3" gibi ardışık sayılar görürsen, muhtemelen "4, 5, 6" devamı başka chunk'tadır
-- **YANLIŞ DİYEMEZSİN**: Taksit formatında veri gördüğünde "belgede yok" demek yasaktır!
-
-**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
-sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
-- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
-- **ÖRNEK AKILLI QUERY**:
-  ```cypher
-  // 1. ÖNCE METADATA - Entity'leri bul (MASTER RULE ile)
-  MATCH (c:Customer)
-  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // STRING field
-  RETURN c.fullName, c.name
-  
-  // 2. YEAR FİELDLARI - INTEGER TİP KONTROLÜ
-  MATCH (py:PolicyYear)
-  WHERE py.year = 2020  // INTEGER field - NO apoc.text.clean!
-  RETURN py.year
-  
-  // 3. MIXed QUERY - MASTER RULE kombinasyonu
-  MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)-[:HAS_YEAR]->(py:PolicyYear)
-  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // STRING
-  AND py.year = 2020  // INTEGER
-  RETURN p, py
-  
-  // 4. D4 KONUT POLİÇESİ ARAMA - DOĞRU YÖNTEMİ
-  MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)-[:HAS_YEAR]->(py:PolicyYear)
-  WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean("ayça"))  // Müşteri adı
-  AND py.year = 2020  // Yıl
-  AND toLower(apoc.text.clean(p.name)) CONTAINS toLower(apoc.text.clean("d4"))  // D4 apartment
-  RETURN p.name, p.policyNumber, p.source_file
-  ```
-**final_answer**: 
-- Metadata yeterli ise: cypher_query sonuçlarını organize et
-- İçerik toplandı ise: chunk text'lerini ve metadata'yı birleştir
-- RAW DATA modunda: Bulunan verileri organize et (yorumsuz)
-- LLM INTERPRETATION modunda: Sistem otomatik olarak LLM ile yorumlayacak
-- **🎯 KULLANICI DOSTU CEVAP FORMATI:**
-  * Doğal, konuşma tarzında yanıt ver (teknik jargon kullanma)
-  * "chunk", "metadata", "semantic search" gibi sistem terimlerini KESİNLİKLE kullanma
-  * Kullanıcı için anlamlı, direkt cevap ver
-  * Bilgi yoksa: "Bu bilgi mevcut değil" veya "Belgede bulunmuyor" de, teknik detay verme
-- **🔥 TAKSİT LİSTESİ İÇİN ÖZEL ANALİZ KURALI:**
-  * CHUNK İÇERİKLERİNDE TAKSİT FORMATI ARAŞTIR: "P tarih tutar", "1 tarih tutar", "2 tarih tutar" formatları
-  * HER CHUNK'I DİKKATLE OKU: Birden fazla chunk'ta taksit dizisi dağılmış olabilir
-  * TAKSİT DİZİSİ TESPIT EDİNCE: Peşinat (P) + taksit sayılarını (1,2,3,4,5...) tam listele
-  * YANLIŞ SONUÇ VERİLMESİ YASAK: Taksit verisi varken "belgede yok" demen kesinlikle yasaktır!
-- **⚠️ ZORUNLU ANALİZ KURALI:**
-  * TÜM chunk'ları detaylı oku ve analiz et
-  * Tablolar, listeler ve yapılandırılmış veriler birden fazla chunk'a yayılabilir
-  * Sayısal veriler, tarihler, tutarlar gibi ilişkili bilgileri birlikte değerlendir
-  * Eksik bilgi bırakma - tüm bulguları dahil et
-- **❌ YASAKLI KELİMELER final_answer'da:**
-  * "chunk", "metadata", "semantic search", "system", "database"
-  * "poliçede açıkça ifade edilmiştir", "chunk'lar arasında", "doğrudan tablo formatında"
-  * Teknik sistem açıklamaları ve veri kaynağı detayları
-
-### ‼️ ZORUNLU KURALLAR SUMMARY:
-- **İLK İTERASYON**: Entity query ile başla (Customer/Policy ara)
-- **ENTITY QUERY BAŞARISIZ**: 3 KERE daha dene, her seferinde filtreleri sadeleştir
-- **3. BAŞARISIZ DENEME SONRASI**: Vector search'e GEÇ (generate_embeddings_for_cypher)
-- **CONTEXT MEMORY KONTROL**: "ENTITY QUERY DENEMELERİ" bölümünü kontrol et
-- **FILENAME BULUNDUYSA**: Context memory'deki filename listesini kullan - WHERE d.fileName IN [liste]
-- **FILENAME TEKRARı YASAK**: toLower(apoc.text.clean()) CONTAINS kullanma, direkt IN listesi kullan!
-- **FIELD TİP KONTROLÜ**: MASTER RULE'leri kullan (yukarıya bak)
-- Cypher sonucuna bakarak daha fazla chunk'a ihtiyaç olup olmadığını KENDİN karar ver
-- **AKILLI İÇERİK KARAR**: Kullanıcı sorusu belge içeriği, detaylı bilgi, sayısal veri gerektiriyor mu? KENDİN ANALİZ ET!
-- final_answer'da doğal konuşma tarzında cevap ver
-- **OPTİMAL FLOW**: entity query (3 kez retry) → filename bulunamazsa vector search → chunk ara → final_answer
-
-### 🎯 GDS SORGU REFERANSLARI:
-- **🏆 KEŞFEDİLEN FILENAME'LER + GDS Vector**: Yukarıdaki C) örneğini kullan (ÖNCE KUE!)
-- **Metadata + GDS Vector**: Yukarıdaki A) örneğini kullan
-- **Sadece GDS Vector**: Yukarıdaki B) örneğini kullan
-- **GDS ZORUNLU**: db.index.vector.queryNodes artık kullanma, sadece gds.similarity.cosine kullan
-- **THRESHOLD**: score >= 0.5 (strict), score >= 0.3 (loose) olarak ayarla
-- **ÖNEMLİ**: RETURN statement'ında mutlaka c.page_link ekle! Resource management için gerekli!
-- **TEKRAR FILENAME ARAMA YASAK**: Context memory'de filename listesi varsa WHERE d.fileName IN [liste] kullan!
-
-## 🔧 RESOURCE MANAGEMENT TOOLS:
-**KRİTİK KURAL**: Sayfa referanslarını ASLA manuel olarak final answer'a ekleme! Mutlaka tool kullan!
+**generate_embeddings_for_cypher(text)**:
+- Content-based aramalar için embedding oluşturur
+- `text`: Aranacak kavram/içerik terimleri (metadata değil!)
+- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
+- `gds.similarity.cosine(chunk.embedding, $embedding_vector)` ile similarity
 
 **add_page_resource(page_link)**:
-- Cypher sonucunda chunk bilgisi bulduğunda VE o chunk'tan soruya cevap için bilgi aldığında kullan
-- Cypher'dan dönen c.page_link değerini direkt kullan
-- **page_images listesi bulduğunda**: Liste içindeki HER page image için add_page_resource çağır
-- Örnek: "Ayça_Dinçkök_Galata_Residance_D4_Konut_Poliçesi_page_006.png"
+- Chunk'lardan faydalanılan sayfaları kaynak olarak ekler
+- Her kullanılan chunk için mutlaka çağır
 
-**ZORUNLU KULLANIM STRATEJİSİ:**
-- Cypher query'de MUTLAKA c.page_link field'ını RETURN et  
-- **Document query'de**: d.page_images field'ını RETURN et ve her image için add_page_resource çağır
-- Chunk içeriğini oku ve analiz et
-- Bu chunk'tan soruya cevap için bilgi alıyor muyun? → EVET ise: MUTLAKA add_page_resource(c.page_link) ÇAĞIR
-- **Page_images listesi aldığında**: İçindeki her page image adı için add_page_resource çağır
-- Final answer'da sayfa linklerini KENDİN ekleme! Sistem otomatik ekleyecek!
-- Her gerçekten faydalandığın sayfa için ayrı add_page_resource çağır
+## 📋 REACT FORMAT:
 
-**YAPMA:**
-❌ "Faydalanılan sayfa görselleri:" gibi manuel ekleme YAPMA!
-❌ Final answer'ın sonuna sayfa linklerini kendin ekleme!
-✅ Sadece add_page_resource tool'unu kullan, sistem geri kalanını halleder!
+Her iterasyonda şu formatı kullan:
 
-**PAGE_IMAGES KULLANIMI:**
-- Document query'de d.page_images RETURN ettiğinde: Liste içindeki HER page image için add_page_resource çağır
-- Örnek: ['file_page_001.png', 'file_page_002.png'] → Her biri için ayrı add_page_resource çağır
-- Kullanıcı "poliçeyi ver", "belgeyi göster" dediğinde: page_images listesini kullan
-- Sayfa görsellerini manuel olarak final answer'a ekleme, tool ile ekle!
+```
+Observation: [Şu anki durum, önceki bulgular, kullanıcının sorusu]
+Thought: [Sorunu nasıl çözebilirim? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
+Action: [cypher_query | generate_embeddings_for_cypher | add_page_resource | final_answer]
+Content: [Cypher sorgusu | embedding text | page_link | final cevap]
+```
 
-**ÖRNEK SENARYO:**
-1. Cypher'da 5 chunk bulundu
-2. Bunlardan 3'ü soruya alakalı bilgi içeriyor 
-3. Her biri için MUTLAKA add_page_resource(page_link) çağır
-4. Final answer'da sayfa referanslarından bahsetme - sistem ekleyecek!"""
+## 🎯 ITERATION BAŞLANGICI:
+
+Her iterasyon başında şunları değerlendir:
+1. **Kullanıcı Sorusu**: Ne tür bilgi aranıyor?
+2. **Önceki Bulgular**: Hangi veriler elde edildi?
+3. **Schema Mapping**: Soruya hangi node/relationship'ler cevap verebilir?
+4. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
+5. **Raw DB Results**: Son 5 database sonucunu örnek olarak değerlendir
+
+## ⚠️ ÖNEMLİ NOTLAR:
+
+- Schema'da olmayan node/property kullanma
+- Field tiplerini karıştırma (string'e =, integer'a CONTAINS)
+- Chunk'lardan faydalanıyorsan mutlaka add_page_resource çağır
+- Embedding'lerde metadata kullanma, sadece content terimleri
+- Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
+
+Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
+
+        return system_prompt
 
         return system_prompt
 
