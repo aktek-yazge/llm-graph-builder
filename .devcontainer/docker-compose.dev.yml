@@ -48,5 +48,6 @@ volumes:
 # Ana compose'un network'ünü kullan
 networks:
   llm-graph-builder_net:
-    external: false
+    external: true
+    name: workspace_llm-graph-builder_net
 
