@@ -269,7 +269,13 @@ GÖREV:
             ]
 
             response = self.llm.invoke(messages)
-            interpreted_answer = response.content.strip()
+
+            # Response content'i al - GPT-5-mini için list kontrolü
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                interpreted_answer = " ".join(str(item) for item in raw_content).strip()
+            else:
+                interpreted_answer = raw_content.strip()
 
             # Token kullanımını logla
             self.log_token_usage(
@@ -899,7 +905,7 @@ SYSTEM PROMPT ÖZET:
             logger.info(f"   - Toplam satır: {len(user_lines)}")
             logger.info(f"   - Toplam karakter: {len(user_prompt)}")
             logger.info(f"   - Conversation history: {conv_history_count} mesaj")
-            # logger.info(f"   - Son mesajlar: {last_messages}")
+            logger.info(f"   - Son mesajlar: {last_messages}")
 
             file_content += f"""
 USER PROMPT ÖZET:
@@ -1098,7 +1104,12 @@ Sonuç sayısı: {len(result)}
                 ]
             )
 
-            return response.content.strip()
+            # Response content'i al - GPT-5-mini için list kontrolü
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                return " ".join(str(item) for item in raw_content).strip()
+            else:
+                return raw_content.strip()
 
         except Exception as e:
             logger.error(f"Özet oluşturma hatası: {e}")
@@ -1885,8 +1896,17 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                     f"Conversation history alındı: {len(conversation_context.messages)} mesaj"
                 )
 
-                # Son 40 mesajı al
-                recent_messages = conversation_context.messages[-40:]  # Son 40 mesaj
+                # Son mesajı hariç tut (henüz işlenen soruyu dahil etme)
+                all_messages = (
+                    conversation_context.messages[:-1]
+                    if conversation_context.messages
+                    else []
+                )
+
+                # Son 40 mesajı al (son mesaj hariç)
+                recent_messages = (
+                    all_messages[-40:] if len(all_messages) > 40 else all_messages
+                )
 
                 # İlk mesajın Human olduğundan emin ol
                 if (
@@ -1925,7 +1945,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
 """
                     logger.info(
-                        f"Conversation context oluşturuldu: {len(previous_messages)} mesaj (son 40'tan kesilen)"
+                        f"Conversation context oluşturuldu: {len(previous_messages)} mesaj (son mesaj hariç, son 40'tan kesilen)"
                     )
                 else:
                     conversation_context = ""
@@ -2067,8 +2087,12 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         # Tool sonuçları ile tekrar LLM'e sor
                         response = self.llm.invoke(messages)
 
-                        # Response content'i al
-                        agent_response = response.content
+                        # Response content'i al - GPT-5-mini için list kontrolü
+                        raw_content = response.content
+                        if isinstance(raw_content, list):
+                            agent_response = " ".join(str(item) for item in raw_content)
+                        else:
+                            agent_response = raw_content
 
                         # Tool call'lar tamamlandı observation'ı
                         embedding_count = len(getattr(self, "_cypher_embeddings", {}))
@@ -2076,14 +2100,22 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         logger.info("✅ Tool call'lar işlendi ve final response alındı")
                     else:
-                        # Response content'i al
-                        agent_response = response.content
+                        # Response content'i al - GPT-5-mini için list kontrolü
+                        raw_content = response.content
+                        if isinstance(raw_content, list):
+                            agent_response = " ".join(str(item) for item in raw_content)
+                        else:
+                            agent_response = raw_content
                 else:
                     # Non-OpenAI modeller için standart invoke
                     response = self.llm.invoke(messages)
 
-                    # Response content'i al
-                    agent_response = response.content
+                    # Response content'i al - GPT-5-mini için list kontrolü
+                    raw_content = response.content
+                    if isinstance(raw_content, list):
+                        agent_response = " ".join(str(item) for item in raw_content)
+                    else:
+                        agent_response = raw_content
                 # print("agent_response", agent_response)
                 # Response'u parse et - action type'ını almak için önce parse
                 observation, thought, (action, action_content) = (
@@ -2657,115 +2689,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 for f in state.successful_findings
             ],
             "context_memory": self.context_memory,
-            "llm_prompt_structure": self.create_llm_prompt_structure(
-                state, user_question
-            ),
         }
-
-    def create_llm_prompt_structure(self, state: AgentState, user_question: str) -> str:
-        """Agent'ın bulduğu bilgileri LLM prompt yapısı olarak oluştur"""
-        print("create_llm_prompt_structure çağrıldı")
-        prompt_structure = f"""# INTELLIGENT AGENT KNOWLEDGE EXTRACTION REPORT
-
-## 🔍 USER QUESTION
-{user_question}
-
-## 📊 SEARCH RESULTS SUMMARY
-- **Total Iterations**: {state.iteration_count}
-- **Chunks Discovered**: {len(state.discovered_chunks)}
-- **Entities Found**: {len(state.discovered_entities)}
-- **Token Usage**: Input: {self.token_usage['input_tokens']}, Output: {self.token_usage['output_tokens']}
-
-## 🎯 SUCCESSFUL FINDINGS PER ITERATION
-"""
-        for i, finding in enumerate(state.successful_findings, 1):
-            prompt_structure += f"""
-### Iteration {finding.iteration} - {finding.action_type.upper()}
-- **Action**: {finding.action_type}
-- **Finding**: {finding.summary}
-- **Relevance Score**: {finding.relevance_score:.3f}
-"""
-
-        # En yüksek relevance'a sahip chunk'ları listele
-        top_chunks = sorted(
-            state.discovered_chunks, key=lambda x: x.relevance_score, reverse=True
-        )[:10]
-
-        prompt_structure += """
-## 📄 TOP RELEVANT CHUNKS
-
-"""
-        for i, chunk in enumerate(top_chunks, 1):
-            prompt_structure += f"""
-### Chunk {i} (Relevance: {chunk.relevance_score:.3f})
-- **Document**: {chunk.document_name}
-- **Page**: {chunk.page_number}
-- **Text Preview**: {chunk.text[:200]}...
-
-"""
-
-        # Entity bilgilerini ekle
-        if state.discovered_entities:
-            prompt_structure += """
-## 🏷️ DISCOVERED ENTITIES
-
-"""
-            for i, entity in enumerate(state.discovered_entities[:20], 1):
-                prompt_structure += f"""
-### Entity {i}
-{entity}
-
-"""
-
-        # Context memory ekle
-        prompt_structure += f"""
-## 🧠 CONTEXT MEMORY
-{self.context_memory}
-
-## 📋 FINAL KNOWLEDGE BASE
-"""
-
-        # En iyi chunk'ların tam text'lerini ekle
-        for i, chunk in enumerate(top_chunks[:5], 1):
-            prompt_structure += f"""
-### Knowledge Piece {i} (Score: {chunk.relevance_score:.3f})
-**Source**: {chunk.document_name}, Page {chunk.page_number}
-**Content**: {chunk.text}
-
----
-"""
-
-        prompt_structure += """
-## 🤖 LLM PROMPT TEMPLATE
-
-Yukarıdaki bilgileri kullanarak aşağıdaki prompt template'i doldurabilirsiniz:
-
-```
-Sistem: Sen expert bir bilgi analisti olarak görev yapıyorsun.
-
-Kullanıcı Sorusu: {user_question}
-
-Mevcut Bilgi Kaynakları:
-{chunk_information}
-
-Entity Bilgileri:
-{entity_information}
-
-Lütfen bu bilgileri analiz ederek kullanıcının sorusuna kapsamlı bir cevap ver.
-```
-
-## 📈 SEARCH STRATEGY ANALYSIS
-"""
-
-        # Kullanılan stratejileri analiz et
-        strategies_used = set([f.action_type for f in state.successful_findings])
-        prompt_structure += f"""
-**Strategies Used**: {', '.join(strategies_used)}
-**Most Effective Strategy**: {max(state.successful_findings, key=lambda x: x.relevance_score).action_type if state.successful_findings else 'None'}
-**Best Relevance Score**: {max([f.relevance_score for f in state.successful_findings]) if state.successful_findings else 0:.3f}
-"""
-        print("prompt_structure", prompt_structure)
-        return prompt_structure
 
     def get_system_prompt(self) -> str:
         """System prompt'u cache'den al veya oluştur - token-optimized"""
