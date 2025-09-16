@@ -1257,8 +1257,8 @@ Sonuç sayısı: {len(result)}
         context_prompt += "\n**🚀 BU BİLGİLERİ KULLANARAK SONRAKI ADIMI BELİRLE - FILENAME'LERİ TEKRAR ARAMA!**\n\n"
         self.context_memory = context_prompt
 
-    def parse_agent_response(self, response: str) -> Tuple[str, str, str]:
-        """Agent cevabını parse et - yıldızlı formatları da destekle"""
+    def parse_agent_response(self, response: str) -> Tuple[str, Tuple[str, str]]:
+        """Agent cevabını parse et - yıldızlı formatları da destekle (observation kaldırıldı)"""
 
         # Tool call sonrası response'da JSON blokları varsa temizle
         import re
@@ -1280,8 +1280,7 @@ Sonuç sayısı: {len(result)}
         # Fazla boşlukları ve newline'ları temizle
         response = re.sub(r"\n\s*\n\s*\n+", "\n\n", response).strip()
 
-        # Observation, Thought, Action'ı ayır
-        observation = ""
+        # Thought, Action'ı ayır (observation kaldırıldı)
         thought = ""
         action = ""
         action_content = ""
@@ -1291,14 +1290,10 @@ Sonuç sayısı: {len(result)}
 
         for line in lines:
             line = line.strip()
-            # Yıldızlı formatları da destekle
+            # Yıldızlı formatları da destekle (observation satırları atlanacak)
             if line.startswith("Observation:") or line.startswith("**Observation:**"):
-                current_section = "observation"
-                observation = (
-                    line.replace("**Observation:**", "")
-                    .replace("Observation:", "")
-                    .strip()
-                )
+                current_section = "skip_observation"  # Observation'ları atla
+                continue
             elif line.startswith("Thought:") or line.startswith("**Thought:**"):
                 current_section = "thought"
                 thought = (
@@ -1321,8 +1316,8 @@ Sonuç sayısı: {len(result)}
                 current_section = "content"  # Content section'a geç
             elif current_section and line and not line.startswith("```"):
                 # Kod blokları hariç
-                if current_section == "observation":
-                    observation += " " + line
+                if current_section == "skip_observation":
+                    continue  # Observation satırlarını atla
                 elif current_section == "thought":
                     thought += " " + line
                 elif current_section == "action":
@@ -1371,7 +1366,6 @@ Sonuç sayısı: {len(result)}
             thought = "Tool call sonrası direkt final answer alındı"
 
         return (
-            observation.strip(),
             thought.strip(),
             (action.strip(), action_content.strip()),
         )
@@ -1976,7 +1970,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         conversation_history = []
         final_answer = None
 
-        # İlk observation
+        # İlk durum bilgisi
         current_observation = f"Kullanıcı sorusu: '{user_question}'"
 
         while state.iteration_count < self.max_iterations and not final_answer:
@@ -2121,7 +2115,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         else:
                             agent_response = raw_content
 
-                        # Tool call'lar tamamlandı observation'ı
+                        # Tool call'lar tamamlandı durumu
                         embedding_count = len(getattr(self, "_cypher_embeddings", {}))
                         current_observation = f"Tool calls tamamlandı: {len(response.tool_calls)} tool çağrısı, {embedding_count} embedding oluşturuldu. Cypher'da $embedding_vector kullanabilirsin."
 
@@ -2145,7 +2139,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         agent_response = raw_content
                 # print("agent_response", agent_response)
                 # Response'u parse et - action type'ını almak için önce parse
-                observation, thought, (action, action_content) = (
+                thought, (action, action_content) = (
                     self.parse_agent_response(agent_response)
                 )
 
@@ -2309,7 +2303,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             if row_summary:
                                 data_summary.append(", ".join(row_summary))
 
-                        # Observation'a document filename bilgisini ekle
+                        # Document filename bilgisini duruma ekle
                         filename_info = ""
                         if document_filenames_found:
                             filename_info = f" Document filenames keşfedildi: {document_filenames_found}. Sonraki chunk sorgusunda bu filename'leri kullan!"
@@ -2896,8 +2890,7 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 Her iterasyonda şu formatı kullan:
 
 ```
-Observation: [Şu anki durum, önceki bulgular, kullanıcının sorusu - YENİ SORU ÖNCEKİ BAĞLAMLA İLGİLİ OLABİLİR!]
-Thought: [Observation'daki spesifik detayları koru - hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
+Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
 Action: [cypher_query | generate_embeddings_for_cypher | add_page_resource | final_answer]
 Content: [Cypher sorgusu | embedding text | page_link | final cevap]
 ```
