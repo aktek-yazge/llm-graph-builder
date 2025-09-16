@@ -2854,7 +2854,11 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
                     yield chunk
             else:
                 chat_mode_settings = get_chat_mode_settings(mode=mode)
-                document_names = list(map(str.strip, json.loads(document_names)))
+                # document_names None kontrolü ekle
+                if document_names:
+                    document_names = list(map(str.strip, json.loads(document_names)))
+                else:
+                    document_names = []
                 
                 if document_names and not chat_mode_settings["document_filter"]:
                     yield {

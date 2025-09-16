@@ -915,8 +915,8 @@ USER PROMPT ÖZET:
 
 """
 
-            # Context memory kontrol
-            if "DAHA ÖNCE BULUNAN BAŞARILI BİLGİLER" in user_prompt:
+            # Context memory kontrol (başarılı bulgular)
+            if "ÖNCEKİ BAŞARILI BULGULAR" in user_prompt:
                 logger.info(f"   - ✅ Context memory bulundu")
                 file_content += "- ✅ Context memory bulundu\n"
             else:
@@ -931,8 +931,12 @@ USER PROMPT ÖZET:
                 logger.info(f"   - ℹ️ Conversation history yok")
                 file_content += "- ℹ️ Conversation history yok\n"
 
-            # Mevcut durum bilgisi kontrol
-            if "Mevcut Durum:" in user_prompt:
+            # Mevcut durum bilgisi kontrol (başarılı bulgular veya chunk'lar)
+            if (
+                ("Mevcut Durum:" in user_prompt)
+                or ("ÖNCEKİ BAŞARILI BULGULAR" in user_prompt)
+                or ("BAŞARISIZ SORGULAR" in user_prompt)
+            ):
                 logger.info(f"   - ✅ Mevcut durum bilgisi bulundu")
                 file_content += "- ✅ Mevcut durum bilgisi bulundu\n"
             else:
@@ -2002,20 +2006,41 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
             # Successful findings'i ekle
             if state.successful_findings:
+                logger.info(
+                    f"🔍 Successful findings mevcut: {len(state.successful_findings)} adet"
+                )
                 context_info += f"\n\n**ÖNCEKİ BAŞARILI BULGULAR:**\n"
                 for finding in state.successful_findings:
-                    context_info += (
-                        f"- İterasyon {finding.iteration}: {finding.summary}\n"
+                    logger.info(
+                        f"🔍 Adding finding: İterasyon {finding.iteration} ({finding.action_type})"
                     )
+                    context_info += f"- İterasyon {finding.iteration} ({finding.action_type}): {finding.summary}\n"
+                    # Eğer cypher_query ise, ham sonuçları da göster
+                    if finding.action_type == "cypher_query" and finding.raw_data:
+                        sample_results = finding.raw_data[:3]  # İlk 3 sonucu göster
+                        context_info += f"  📊 Sonuç Örnekleri: {sample_results}\n"
+                        context_info += (
+                            f"  ⚠️ Bu sorgu zaten başarılı! Aynı sorguyu tekrarlama.\n"
+                        )
+
+                # Başarılı bulgular varsa mevcut durum bilgisini de ekle
+                context_info += f"\n\n**Mevcut Durum:**\n- {len(state.successful_findings)} başarılı bulgu toplandı\n- İterasyon: {state.iteration_count}/{self.max_iterations}\n"
+            else:
+                logger.info(f"🔍 Successful findings boş!")
 
             # Başarısız sorguları ekle
             if state.failed_queries:
+                logger.info(
+                    f"🔍 Failed queries mevcut: {len(state.failed_queries)} adet"
+                )
                 context_info += f"\n\n**BAŞARISIZ SORGULAR (TEKRARLAMA!):**\n"
                 for failed in state.failed_queries[
                     -5:
                 ]:  # Son 5 başarısız sorguyu göster
                     context_info += f"- İterasyon {failed['iteration']}: {failed['query'][:100]}... -> HATA: {failed['error'][:100]}...\n"
                 context_info += "⚠️ Bu sorguları tekrarlama! Farklı yaklaşım dene.\n"
+            else:
+                logger.info(f"🔍 Failed queries boş!")
 
             if state.discovered_chunks:
                 context_info += f"\n\nMevcut Durum:\n- {len(state.discovered_chunks)} chunk keşfedildi\n- En yüksek relevance: {max([c.relevance_score for c in state.discovered_chunks]):.3f}\n- Toplanan dokümolar: {list(set([c.document_name for c in state.discovered_chunks]))}"
@@ -2036,16 +2061,18 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 context_info += chunk_contents
 
             # Context memory, conversation context ve mevcut durum bilgilerini birleştir
-            prompt = f"{conversation_context}{self.context_memory}{current_observation}{context_info}\n\nBu duruma göre next action'ını belirle:"
+            # Final answer yönlendirmesi
+            if state.successful_findings:
+                final_answer_hint = "\n\n🎯 **ÖNEMLI:** Yukarıdaki başarılı bulgular soruyu cevaplamak için yeterli olabilir! Aynı sorguları tekrarlama, bunun yerine final_answer ver!"
+            else:
+                final_answer_hint = ""
+
+            prompt = f"{conversation_context}{self.context_memory}{current_observation}{context_info}{final_answer_hint}\n\nBu duruma göre next action'ını belirle:"
 
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=prompt),
             ]
-
-            # Conversation history ekle
-            for entry in conversation_history[-4:]:  # Son 4 adımı tut
-                messages.append(HumanMessage(content=entry))
 
             # LLM prompt'unu logla - tam mesajlar ile birlikte
             self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
@@ -2133,10 +2160,6 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 # DEBUG: LLM response'unu logla
                 logger.info(f"🔍 DEBUG - Raw LLM Response:\n{agent_response}")
 
-                conversation_history.append(
-                    f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content}\nSonuç: {current_observation if 'current_observation' in locals() else 'Henüz sonuç yok'}"
-                )
-
                 # Action'ı uygula
                 if action == "final_answer":
                     # Final answer - temiz cevabı direkt kullan, sadece referansları ekle
@@ -2218,6 +2241,11 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         f"Final answer verildi: {final_answer[:200]}..."
                     )
                     logger.info(f"Agent final answer verdi: {final_answer[:200]}...")
+
+                    # Conversation history'ye ekle
+                    conversation_history.append(
+                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                    )
                     break
 
                 elif action == "cypher_query":
@@ -2494,6 +2522,11 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 f" ({chunks_found} chunk discovered_chunks'a eklendi)"
                             )
 
+                        # Conversation history'ye ekle - Başarılı cypher query
+                        conversation_history.append(
+                            f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                        )
+
                     else:
                         # Cypher query başarısız - failover stratejisi
                         state.failed_entity_query_count += 1
@@ -2540,6 +2573,11 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 details=f"Başarısız sorgu: {action_content[:100]}...",
                                 reason=str(result)[:200],
                             )
+
+                            # Conversation history'ye ekle - Başarısız cypher query (retry)
+                            conversation_history.append(
+                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                            )
                         else:
                             # Son başarısız denemeden sonra da state'e ekle
                             self.add_failed_query(
@@ -2555,8 +2593,18 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             )
                             current_observation = f"Entity sorguları {state.max_entity_query_attempts} kez başarısız oldu. Artık vector search kullanarak chunk araması yap (generate_embeddings_for_cypher + GDS similarity)."
 
+                            # Conversation history'ye ekle - Başarısız cypher query (final)
+                            conversation_history.append(
+                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                            )
+
                 else:
                     current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
+
+                    # Conversation history'ye ekle - Bilinmeyen action
+                    conversation_history.append(
+                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100] if action_content else 'N/A'}...\nSonuç: {current_observation}"
+                    )
 
                 # Chunk limit kontrolü
                 if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -2565,6 +2613,11 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             except Exception as e:
                 logger.error(f"İterasyon {state.iteration_count} hatası: {e}")
                 current_observation = f"Hata oluştu: {e}. Farklı bir yaklaşım dene."
+
+                # Conversation history'ye ekle - Exception
+                conversation_history.append(
+                    f"İterasyon {state.iteration_count}:\nHATA: {str(e)[:100]}...\nSonuç: {current_observation}"
+                )
 
             # Chunk limit kontrolü (sadece uyarı ver, LLM karar versin)
             if len(state.discovered_chunks) >= state.max_chunks_limit:
@@ -2844,7 +2897,7 @@ Her iterasyonda şu formatı kullan:
 
 ```
 Observation: [Şu anki durum, önceki bulgular, kullanıcının sorusu - YENİ SORU ÖNCEKİ BAĞLAMLA İLGİLİ OLABİLİR!]
-Thought: [ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
+Thought: [Observation'daki spesifik detayları koru - hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
 Action: [cypher_query | generate_embeddings_for_cypher | add_page_resource | final_answer]
 Content: [Cypher sorgusu | embedding text | page_link | final cevap]
 ```
@@ -2864,6 +2917,8 @@ Her iterasyon başında şunları değerlendir:
 - **KRİTİK: PARAMETER INHERITANCE!** Eksik parametreleri önceki sorulardan semantic olarak inherit et!
 - **KRİTİK: CONTEXT CONTINUITY kontrol et!** Yeni sorular önceki konuşmayla ilgili olabilir - özellikle belirsiz kelimeler!
 - **KRİTİK: STRING NORMALİZASYONU KULLAN!** Tüm string karşılaştırmalarında `toLower(apoc.text.clean(field))` zorunlu!
+- **KRİTİK: TEKRAR SORGU YAPMA!** ÖNCEKİ BAŞARILI BULGULAR bölümünde aynı/benzer sorgu varsa DIREK final_answer ver!
+- **KRİTİK: YETERLİ VERİ KONTROLÜ!** Başarılı cypher sonuçları alındıktan sonra gereksiz embedding/arama yapma!
 - Schema'da olmayan node/property kullanma
 - Field tiplerini karıştırma (string'e =, integer'a CONTAINS)
 - Chunk'lardan faydalanıyorsan mutlaka add_page_resource çağır
