@@ -176,6 +176,7 @@ class IntelligentAgent:
     ):
         self.graph = graph
         self.llm, _ = get_llm(model_name)
+        self.master_llm, _ = get_llm("openai_gpt_4.1")
         self.embedding_model, _ = load_embedding_model("openai")
         self.max_iterations = 10  # Derinlemesine araştırma için
         # self.max_iterations = 5
@@ -1074,39 +1075,42 @@ PARSED ACTION CONTENT:
             logger.error(f"LLM response logging hatası: {e}")
 
     def summarize_finding(
-        self, action_description: str, result, finding_type: str
+        self, action_description: str, result, finding_type: str, user_question: str
     ) -> str:
-        """Bulguları LLM ile özetle - token tasarrufu için"""
+        """Bulguları LLM ile özetle ve kullanıcı sorusuna göre yeterliliğini değerlendir"""
         try:
             if finding_type == "structured_data":
                 if isinstance(result, list) and len(result) > 0:
                     # İlk birkaç sonucu özetle
-                    sample_data = result[:3] if len(result) > 3 else result
-                    sample_text = str(sample_data)[:500]  # İlk 500 karakter
+                    sample_data = result[:5] if len(result) > 5 else result
+                    sample_text = str(sample_data)
 
-                    summary_prompt = f"""
-Bu structured data sonuçlarını kısa ve öz şekilde özetle (max 150 kelime):
+                    summary_prompt = f"""Soru: {user_question}
+İşlem: {action_description} 
+ilk 5 Sonuç: {sample_text}
 
-Action: {action_description}
-Sonuç sayısı: {len(result)}
-Örnek data: {sample_text}
-
-Önemli bulgular ve anahtar bilgiler nedir?
-"""
+Tek cümle ile özetle: Bu veri soruyu cevaplayabilir mi? Final Answer vermek için yeterli mi? Eksik ne var?"""
                 else:
-                    return f"Structured data: {len(result) if result else 0} kayıt"
+                    return f"Sonuç yok - '{user_question}' için veri bulunamadı"
             else:
-                return f"{finding_type}: {str(result)[:200]}..."
+                summary_prompt = f"""Soru: {user_question}
+Bulgu: {str(result)}
 
-            # LLM ile özetle
-            response = self.llm.invoke(
+Tek cümle ile: Bu bulgu soruyu cevaplayabilir mi? Ya doğru yolda olduğunu söyleyip daha fazla arama yapması gerektiğini söyleyebilirsin."""
+
+            print("summary_prompt:", summary_prompt)
+            # LLM ile özetle ve değerlendir
+            response = self.master_llm.invoke(
                 [
                     SystemMessage(
-                        content="Sen başarılı bulgları özetleyen bir asistansın. Kısa, net ve anahtar bilgileri vurgulayan özetler yap."
+                        content="Sen bulunan başarılı bulguların soruyu cevaplayıp cevaplamadığına karar veren bir uzmansın. Kısa ve net özet yap. Sadece 1-2 cümle ile bulgularda eksik olan bilgiyi belirt."
                     ),
                     HumanMessage(content=summary_prompt),
                 ]
             )
+
+            # Token kullanımını logla
+            self.log_token_usage(response, -1, "summarize_finding")
 
             # Response content'i al - GPT-5-mini için list kontrolü
             raw_content = response.content
@@ -1120,11 +1124,103 @@ Sonuç sayısı: {len(result)}
             # Fallback: basit özet
             if finding_type == "structured_data":
                 return (
-                    f"Structured data: {len(result) if result else 0} kayıt. Örnek: {str(result[:1])[:100]}..."
+                    f"{len(result) if result else 0} kayıt bulundu. Örnek: {str(result[:1])}..."
                     if result
-                    else "Sonuç yok"
+                    else f"Sonuç yok - '{user_question}' için veri bulunamadı"
                 )
-            return f"{finding_type}: {str(result)[:100]}..."
+            return f"{finding_type}: {str(result)}..."
+
+    def analyze_empty_result(
+        self, user_question: str, cypher_query: str, query_type: str = "entity"
+    ) -> str:
+        """Boş sonuç dönen sorguları analiz edip alternatif strateji önerir"""
+        try:
+            # Schema bilgisini al
+            try:
+                compact_schema = get_compact_schema(self.graph)
+                schema_info = f"\nNeo4j Schema:\n{compact_schema}\n"
+            except Exception as e:
+                logger.warning(f"Schema bilgisi alınamadı: {e}")
+                schema_info = "\nSchema bilgisi mevcut değil.\n"
+
+            analysis_prompt = f"""Neo4j veritabanında boş sorgu analizi:
+
+{schema_info}
+KULLANICI SORUSU: {user_question}
+BAŞARISIZ SORGU: {cypher_query}
+SONUÇ: 0 kayıt
+
+GÖREV: Bu sorgu neden boş döndü? Schema ve property'lere dayalı akıllı çözüm öner.
+
+ÖZELLİKLER:
+1. **Field Type Matching**: Schema'dan field tipini kontrol et
+   - **String fields**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
+   - **Integer fields**: `field = value` 
+   - **Boolean fields**: `field = true/false`
+2. **Relationship Analizi**: Hangi path'lerin daha etkili olacağını belirle
+3. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
+   - `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
+   - ÖRN: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
+   - Asla doğrudan `p.type = 'str'` kullanma!
+
+ÇÖZÜM FORMAT:
+- Problem: [Tek cümle analiz]
+- Strateji: [Spesifik çözüm önerisi]
+- Örnek: [Güncellenmiş sorgu önerisi]"""
+
+            # LLM ile analiz et
+            response = self.master_llm.invoke(
+                [
+                    SystemMessage(
+                        content="Sen Neo4j ve Türkçe text processing uzmanısın. Schema'ya dayalı akıllı sorgu optimizasyonları ve text normalizasyon stratejileri önerirsin."
+                    ),
+                    HumanMessage(content=analysis_prompt),
+                ]
+            )
+
+            # Token kullanımını logla
+            self.log_token_usage(response, -1, "analyze_empty_result")
+
+            # Response content'i al
+            raw_content = response.content
+            print("analyze_empty_result response:", raw_content)
+            if isinstance(raw_content, list):
+                return " ".join(str(item) for item in raw_content).strip()
+            else:
+                return raw_content.strip()
+
+        except Exception as e:
+            logger.error(f"Boş sonuç analizi hatası: {e}")
+            # Fallback: basit analiz
+            return f"Sorgu '{cypher_query}...' boş sonuç verdi. İsim normalizasyonu ve CONTAINS filtreleri dene."
+
+    def _is_meaningful_result(self, result: List[Dict], user_question: str) -> bool:
+        """Sonucun kullanıcı sorusu için anlamlı olup olmadığını kontrol eder - domain agnostic"""
+        if not result or len(result) == 0:
+            return False
+        
+        # Tek satır sonuç için özel kontrol (COUNT, SUM vb. aggregate sorguları)
+        if len(result) == 1:
+            first_row = result[0]
+            
+            # Tüm değerlerin sayısal ve 0 olup olmadığını kontrol et
+            numeric_zero_values = []
+            non_zero_values = []
+            
+            for key, value in first_row.items():
+                if isinstance(value, (int, float)):
+                    if value == 0:
+                        numeric_zero_values.append(key)
+                    else:
+                        non_zero_values.append((key, value))
+                elif value and str(value).strip():  # Non-empty string/object
+                    non_zero_values.append((key, value))
+            
+            # Eğer tüm sayısal değerler 0 ise ve hiç anlamlı değer yoksa
+            if numeric_zero_values and not non_zero_values:
+                return False  # Anlamsız sonuç - analyze_empty_result'a git
+        
+        return True  # Anlamlı sonuç
 
     def add_successful_finding(
         self,
@@ -1172,7 +1268,7 @@ Sonuç sayısı: {len(result)}
         state.failed_queries.append(failed_query)
 
         logger.info(
-            f"Başarısız sorgu eklendi - İterasyon {iteration}: {query_type} -> {error_message[:100]}..."
+            f"Başarısız sorgu eklendi - İterasyon {iteration}: {query_type} -> {error_message}..."
         )
 
     def update_context_memory(self, state: "AgentState"):
@@ -2232,19 +2328,42 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         )
 
                     current_observation = (
-                        f"Final answer verildi: {final_answer[:200]}..."
+                        f"Final answer verildi: {final_answer}..."
                     )
                     logger.info(f"Agent final answer verdi: {final_answer[:200]}...")
 
                     # Conversation history'ye ekle
                     conversation_history.append(
-                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content}...\nSonuç: {current_observation}"
                     )
                     break
 
                 elif action == "cypher_query":
                     success, result = self.execute_cypher_query(action_content)
                     if success and result:
+                        # Sonuç anlamlı mı kontrol et (domain-agnostic)
+                        if not self._is_meaningful_result(result, user_question):
+                            logger.info(f"❌ Cypher sonucu anlamsız (aggregate=0), analyze_empty_result'a yönlendiriliyor")
+                            
+                            # Boş sonuç analizi yap
+                            analysis = self.analyze_empty_result(
+                                user_question, action_content, "cypher"
+                            )
+                            
+                            # Context memory'e başarısız sorgu olarak ekle
+                            # self.add_failed_query(
+                            #     state, state.iteration_count, action_content, 
+                            #     f"Anlamsız sonuç (aggregate=0): {result}", "cypher"
+                            # )
+                            
+                            current_observation = f"Anlamsız sonuç: {result}. Analiz: {analysis}"
+                            
+                            # Conversation history'ye ekle
+                            conversation_history.append(
+                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                            )
+                            continue  # Bir sonraki iterasyona geç
+                        
                         # Cypher sonuçlarından document filename'lerini çıkar
                         document_filenames_found = []
                         for row in result:
@@ -2321,7 +2440,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(
-                            f"Cypher Query: {action_content}", result, "structured_data"
+                            f"Cypher Query: {action_content}", result, "structured_data", user_question
                         )
                         self.add_successful_finding(
                             state,  # state parametresi eklendi
@@ -2521,9 +2640,50 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                         )
 
+                    elif success and not result:
+                        # Başarılı sorgu ama boş sonuç - analiz et ve öneride bulun
+                        logger.info(f"✅ Cypher sorgusu başarılı ama boş sonuç: {action_content}")
+                        
+                        # LLM ile boş sonucu analiz et
+                        analysis = self.analyze_empty_result(
+                            user_question, action_content, "entity"
+                        )
+                        
+                        current_observation = f"Sorgu başarılı ama 0 kayıt bulundu. Analiz: {analysis} Farklı filtreler veya vector search dene."
+                        
+                        # Bu başarısız bulguyu context memory'ye ekle
+                        summary = f"Boş sonuç: {analysis}"
+                        self.add_successful_finding(
+                            state,
+                            state.iteration_count,
+                            "empty_query_analysis",
+                            summary,
+                            0.1,  # Düşük relevance - boş sonuç
+                            [],  # Boş result
+                        )
+                        
+                        # Failed query olarak da kaydet
+                        self.add_failed_query(
+                            state,
+                            state.iteration_count,
+                            action_content,
+                            "Sorgu başarılı ama 0 kayıt döndü",
+                            "empty_cypher",
+                        )
+                        
+                        # Conversation history'ye ekle - Boş sonuç cypher query
+                        conversation_history.append(
+                            f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                        )
+
                     else:
-                        # Cypher query başarısız - failover stratejisi
+                        # Cypher query başarısız - failover stratejisi ve analiz
                         state.failed_entity_query_count += 1
+
+                        # LLM ile başarısız sorguyu analiz et
+                        analysis = self.analyze_empty_result(
+                            user_question, action_content, "cypher_error"
+                        )
 
                         # Eğer vector search'e geçmeden önce daha fazla entity query denemesi yapalım
                         if (
@@ -2531,19 +2691,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             <= state.max_entity_query_attempts
                         ):
                             logger.info(
-                                f"⚠️ Entity query başarısız ({state.failed_entity_query_count}/{state.max_entity_query_attempts}). Farklı filtrelerle tekrar dene."
-                            )
-
-                            # LLM'e filtreleri sadeleştirme önerisi ver
-                            filter_suggestions = {
-                                1: "Daha basit filtreler kullan (sadece müşteri adı veya sadece yıl)",
-                                2: "CONTAINS filtresini gevşet (daha az karakter, case insensitive)",
-                                3: "WHERE koşullarını azalt, sadece en temel filtreler kullan",
-                            }
-
-                            suggestion = filter_suggestions.get(
-                                state.failed_entity_query_count,
-                                "Çok basit bir sorgu dene",
+                                f"⚠️ Entity query başarısız ({state.failed_entity_query_count}/{state.max_entity_query_attempts}). LLM analizi: {analysis[:100]}..."
                             )
 
                             # Başarısız sorguyu state'e ekle
@@ -2555,7 +2703,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 "cypher",
                             )
 
-                            current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Strateji: {suggestion}. Farklı bir cypher_query ile tekrar dene."
+                            current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Analiz: {analysis} Farklı bir cypher_query ile tekrar dene."
 
                             # 🧠 MEM0: Başarısız stratejiyi takip et
                             strategy_type = self._classify_cypher_strategy(
@@ -2766,7 +2914,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             extractor.graph = self.graph
             compact_schema = get_compact_schema(self.graph)
 
-            schema_text = f"""� NEO4J GRAPH DATABASE SCHEMA:
+            schema_text = f"""NEO4J GRAPH DATABASE SCHEMA:
 {compact_schema}
 
 🎯 DOMAIN CONTEXT:
@@ -2778,7 +2926,7 @@ Bu graph database, belge tabanlı bir bilgi sistemidir:
 
         except Exception as e:
             logger.warning(f"Schema çekme hatası: {e}")
-            schema_text = """� NEO4J GRAPH DATABASE SCHEMA:
+            schema_text = """NEO4J GRAPH DATABASE SCHEMA:
 ⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"""
 
         system_prompt = f"""# GRAPH DATABASE QUERY AGENT
@@ -2793,8 +2941,8 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 ### 📝 CYPHER QUERY KURALLARI:
 1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
    - `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
-   - ÖRN: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('konut'))`
-   - Asla doğrudan `p.type = 'konut'` kullanma!
+   - ÖRN: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
+   - Asla doğrudan `p.type = 'str'` kullanma!
 
 2. **Field Type Matching**: Schema'dan field tipini kontrol et
    - **String fields**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
@@ -2813,7 +2961,7 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
    ```cypher
    MATCH (c:Customer) 
    WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean('Ayça'))
-   RETURN c.fullName, c.id
+   RETURN c.fullName
    ```
 
 2. **Çoklu Sonuç Durumu**: Birden fazla eşleşme varsa, kullanıcıya seçenek sun
@@ -2835,7 +2983,6 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 **METADATA ARAMALARI**: Entity'ler ve yapılandırılmış veriler için
 - Node properties üzerinden filtreleme
-- Count, list, ID, type gibi sorular
 
 **CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
 - Chunk nodes üzerinden text içeriği arama
