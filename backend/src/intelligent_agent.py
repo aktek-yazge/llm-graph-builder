@@ -1208,7 +1208,7 @@ LLM'İN KARARI: {action}
 
   ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
 1. ÖNCE Entity arama (Customer, PolicyType, vb.)
-2. SONRA Document node filefName arama (metadata) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+2. SONRA Document node filefName arama (metadata) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
 3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
 4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
 
@@ -1304,7 +1304,7 @@ KEŞİFTEN ÇIKAN SONUÇLAR: {sample_text}
 
 ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
 1. ÖNCE Entity arama (Customer, PolicyType, vb.)
-2. SONRA Document node arama (metadata) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+2. SONRA Document node arama (metadata) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
 3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
 
 ÇIKTI: 1 cümle ile LLM'e net yönlendirme - APOC ve CONTAINS kullanımını dahil et."""
@@ -1367,7 +1367,7 @@ BOŞ SONUÇ VERDİ: {cypher_query}
 
 ARAMA STRATEJİSİ:
 1. Entity aramadan başla (Customer, PolicyType vb...)
-2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
 3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
 4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
 
@@ -3171,7 +3171,7 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 **PROGRESSIVE SEARCH STRATEGY**: Boş sonuç alırsan bu sırayı takip et:
 
 1. **ÖNCE Entity Arama**: Yapılandırılmış node'larda ara (Customer, PolicyType, vb.)
-2. **SONRA Document node fileName Arama**: Dosya metadata'sında ara (Document.fileName) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+2. **SONRA Document node fileName Arama**: Dosya metadata'sında ara (Document.fileName) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
 3. **SONRA Semantic/Content Arama**: generate_embeddings_for_cypher ile chunk'larda ara - **ZORUNLU: Boş sonuç sonrası MUTLAKA semantic arama dene!**  
 
 
