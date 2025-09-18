@@ -1,21 +1,23 @@
-import { useEffect, useState, useCallback, useReducer } from 'react';
+import { SpotlightProvider } from '@neo4j-ndl/react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import { useLocation } from 'react-router';
-import { MessageContextWrapper, useMessageContext } from '../../context/UserMessages';
+import { v4 as uuidv4 } from 'uuid';
+import ThemeWrapper from '../../context/ThemeWrapper';
 import UserCredentialsWrapper, { useCredentials } from '../../context/UserCredentials';
-import { FileContextProvider } from '../../context/UsersFiles';
-import Chatbot from './Chatbot';
-import ConnectionModal from '../Popups/ConnectionModal/ConnectionModal';
-import Header from '../Layout/Header';
+import { MessageContextWrapper, useMessageContext } from '../../context/UserMessages';
+import { FileContextProvider, useFileContext } from '../../context/UsersFiles';
 import { clearChatAPI } from '../../services/QnaAPI';
 import { ChatProps, connectionState, Messages, UserCredentials } from '../../types';
 import { getIsLoading } from '../../utils/Utils';
-import ThemeWrapper from '../../context/ThemeWrapper';
-import { SpotlightProvider } from '@neo4j-ndl/react';
+import Header from '../Layout/Header';
+import ConnectionModal from '../Popups/ConnectionModal/ConnectionModal';
+import Chatbot from './Chatbot';
 
 const ChatContent: React.FC<ChatProps> = ({ chatMessages }) => {
   const { clearHistoryData, messages, setMessages, setClearHistoryData, setIsDeleteChatLoading, isDeleteChatLoading } =
     useMessageContext();
   const { setUserCredentials, setConnectionStatus, connectionStatus, setShowDisconnectButton } = useCredentials();
+  const { model } = useFileContext(); // Model bilgisini almak için
   const [showBackButton, setShowBackButton] = useReducer((state) => !state, false);
   const [openConnection, setOpenConnection] = useState<connectionState>({
     openPopUp: false,
@@ -85,9 +87,18 @@ const ChatContent: React.FC<ChatProps> = ({ chatMessages }) => {
       setIsDeleteChatLoading(true);
       // const credentials = JSON.parse(localStorage.getItem('neo4j.connection') || '{}') as UserCredentials;
       const sessionId = sessionStorage.getItem('session_id') || '';
-      const response = await clearChatAPI(sessionId);
+
+      // ✅ Yeni session ID'yi önceden oluştur
+      const newSessionId = uuidv4();
+
+      const response = await clearChatAPI(sessionId, model, newSessionId);
       setIsDeleteChatLoading(false);
-      if (response.data.status !== 'Success') {
+      if (response.data.status === 'Success') {
+        // ✅ Yeni session ID'yi sessionStorage'a kaydet
+        sessionStorage.setItem('session_id', newSessionId);
+        console.log(`🆕 New UUID session ID created after clear chat: ${newSessionId}`);
+        console.log(`🤖 New IntelligentAgent created for session: ${newSessionId}, model: ${model}`);
+      } else {
         setClearHistoryData(false);
       }
     } catch (error) {

@@ -29,10 +29,16 @@ export const chatBotAPI = async (
   }
 };
 
-export const clearChatAPI = async (session_id: string) => {
+export const clearChatAPI = async (session_id: string, model?: string, new_session_id?: string) => {
   try {
     const formData = new FormData();
     formData.append('session_id', session_id);
+    if (model) {
+      formData.append('model', model);
+    }
+    if (new_session_id) {
+      formData.append('new_session_id', new_session_id);
+    }
     const response = await api.post(`/clear_chat_bot`, formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
@@ -40,7 +46,7 @@ export const clearChatAPI = async (session_id: string) => {
     });
     return response;
   } catch (error) {
-    console.log('Error Posting the Question:', error);
+    console.log('Error clearing chat:', error);
     throw error;
   }
 };

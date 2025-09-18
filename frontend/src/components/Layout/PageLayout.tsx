@@ -1,30 +1,29 @@
+import { useAuth0 } from '@auth0/auth0-react';
+import { Spotlight, SpotlightTour, useMediaQuery, useSpotlightContext } from '@neo4j-ndl/react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { v4 as uuidv4 } from 'uuid';
-import SideNav from './SideNav';
-import DrawerDropzone from './DrawerDropzone';
-import DrawerChatbot from './DrawerChatbot';
-import Content from '../Content';
-import { clearChatAPI } from '../../services/QnaAPI';
-import { useCredentials } from '../../context/UserCredentials';
-import { connectionState, OptionType } from '../../types';
-import { useMessageContext } from '../../context/UserMessages';
-import { useMediaQuery, Spotlight, SpotlightTour, useSpotlightContext } from '@neo4j-ndl/react';
-import { useFileContext } from '../../context/UsersFiles';
+import { createDefaultFormData } from '../../API/Index';
 import SchemaFromTextDialog from '../../components/Popups/GraphEnhancementDialog/EnitityExtraction/SchemaFromTextDialog';
+import { useCredentials } from '../../context/UserCredentials';
+import { useMessageContext } from '../../context/UserMessages';
+import { useFileContext } from '../../context/UsersFiles';
 import useSpeechSynthesis from '../../hooks/useSpeech';
-import FallBackDialog from '../UI/FallBackDialog';
 import { envConnectionAPI } from '../../services/ConnectAPI';
 import { healthStatus } from '../../services/HealthStatus';
-import { useAuth0 } from '@auth0/auth0-react';
+import { clearChatAPI } from '../../services/QnaAPI';
+import { connectionState, OptionType } from '../../types';
+import { APP_SOURCES, SKIP_AUTH } from '../../utils/Constants';
 import { showErrorToast } from '../../utils/Toasts';
-import { APP_SOURCES } from '../../utils/Constants';
-import { createDefaultFormData } from '../../API/Index';
+import { deduplicateByFullPattern, deduplicateNodeByValue } from '../../utils/Utils';
+import Content from '../Content';
+import DataImporterSchemaDialog from '../Popups/GraphEnhancementDialog/EnitityExtraction/DataImporter';
 import LoadDBSchemaDialog from '../Popups/GraphEnhancementDialog/EnitityExtraction/LoadExistingSchema';
 import PredefinedSchemaDialog from '../Popups/GraphEnhancementDialog/EnitityExtraction/PredefinedSchemaDialog';
-import { SKIP_AUTH } from '../../utils/Constants';
-import { useNavigate } from 'react-router';
-import { deduplicateByFullPattern, deduplicateNodeByValue } from '../../utils/Utils';
-import DataImporterSchemaDialog from '../Popups/GraphEnhancementDialog/EnitityExtraction/DataImporter';
+import FallBackDialog from '../UI/FallBackDialog';
+import DrawerChatbot from './DrawerChatbot';
+import DrawerDropzone from './DrawerDropzone';
+import SideNav from './SideNav';
 
 const GCSModal = lazy(() => import('../DataSources/GCS/GCSModal'));
 const S3Modal = lazy(() => import('../DataSources/AWS/S3Modal'));
@@ -202,6 +201,7 @@ const PageLayout: React.FC = () => {
     setSourceOptions,
     setTargetOptions,
     setTypeOptions,
+    model, // Model bilgisini almak için
   } = useFileContext();
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth0();
@@ -334,19 +334,22 @@ const PageLayout: React.FC = () => {
       setClearHistoryData(true);
       setIsDeleteChatLoading(true);
       cancel();
-      
+
       // Mevcut session ID'yi al
       const currentSessionId = sessionStorage.getItem('session_id') ?? '';
-      const response = await clearChatAPI(currentSessionId);
-      
+
+      // ✅ Yeni session ID'yi önceden oluştur
+      const newSessionId = uuidv4();
+
+      const response = await clearChatAPI(currentSessionId, model, newSessionId);
+
       setIsDeleteChatLoading(false);
       if (response.data.status === 'Success') {
-        // ⚠️ FIX: Clear chat'ten sonra yeni UUID session ID yarat
-        sessionStorage.removeItem('session_id');
-        const newSessionId = uuidv4();
+        // ✅ Yeni session ID'yi sessionStorage'a kaydet
         sessionStorage.setItem('session_id', newSessionId);
         console.log(`🆕 New UUID session ID created after clear chat: ${newSessionId}`);
-        
+        console.log(`🤖 New IntelligentAgent created for session: ${newSessionId}, model: ${model}`);
+
         const date = new Date();
         setMessages([
           {

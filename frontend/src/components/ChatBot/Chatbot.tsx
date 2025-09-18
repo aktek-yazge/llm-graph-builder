@@ -1,19 +1,28 @@
-import React, { FC, lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
-  Widget,
-  Typography,
   Avatar,
-  TextInput,
+  Box,
+  Flex,
   IconButton,
   Modal,
-  useCopyToClipboard,
-  Flex,
-  Box,
-  TextLink,
   SpotlightTarget,
+  TextInput,
+  TextLink,
+  Typography,
+  useCopyToClipboard,
+  Widget,
 } from '@neo4j-ndl/react';
 import { ArrowDownTrayIconOutline, XMarkIconOutline } from '@neo4j-ndl/react/icons';
+import clsx from 'clsx';
+import React, { FC, lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw';
+import remarkGfm from 'remark-gfm';
+import { v4 as uuidv4 } from 'uuid';
 import ChatBotAvatar from '../../assets/images/chatbot-ai.png';
+import { useFileContext } from '../../context/UsersFiles';
+import useSpeechSynthesis from '../../hooks/useSpeech';
+import { chatStreamAPI, ChatStreamMessage } from '../../services/ChatStreamAPI';
+import { chatBotAPI } from '../../services/QnaAPI';
 import {
   ChatbotProps,
   Chunk,
@@ -23,37 +32,35 @@ import {
   ExtendedNode,
   ExtendedRelationship,
   Messages,
-  ResponseMode,
   metricstate,
   multimodelmetric,
   nodeDetailsProps,
+  ResponseMode,
 } from '../../types';
-import { chatBotAPI } from '../../services/QnaAPI';
-import { chatStreamAPI, ChatStreamMessage } from '../../services/ChatStreamAPI';
-import { v4 as uuidv4 } from 'uuid';
-import { useFileContext } from '../../context/UsersFiles';
-import clsx from 'clsx';
-import ReactMarkdown from 'react-markdown';
 import { buttonCaptions, chatModeLables } from '../../utils/Constants';
-import useSpeechSynthesis from '../../hooks/useSpeech';
+import Loader from '../../utils/Loader';
+import { downloadClickHandler, getDateTime } from '../../utils/Utils';
 import ButtonWithToolTip from '../UI/ButtonWithToolTip';
 import FallBackDialog from '../UI/FallBackDialog';
-import { downloadClickHandler, getDateTime } from '../../utils/Utils';
 import ChatModesSwitch from './ChatModesSwitch';
 import CommonActions from './CommonChatActions';
-import Loader from '../../utils/Loader';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
 const InfoModal = lazy(() => import('./ChatInfoModal'));
 
-// Session ID'yi initialize et
+// Session ID'yi initialize et - veritabanında mevcut session varsa yeni ID oluştur
 const initializeSessionId = () => {
   if (typeof window !== 'undefined') {
-    if (!sessionStorage.getItem('session_id')) {
-      const id = uuidv4();
-      sessionStorage.setItem('session_id', id);
+    let sessionId = sessionStorage.getItem('session_id');
+
+    // Eğer session ID yoksa veya çok eskiyse yeni oluştur
+    if (!sessionId) {
+      sessionId = uuidv4();
+      sessionStorage.setItem('session_id', sessionId);
+      console.log(`🆕 New session ID created: ${sessionId}`);
+    } else {
+      console.log(`♻️ Existing session ID used: ${sessionId}`);
     }
-    return sessionStorage.getItem('session_id') ?? '';
+
+    return sessionId;
   }
   return '';
 };
@@ -68,10 +75,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     isChatOnly,
     isDeleteChatLoading,
   } = props;
-  
+
   // ⚠️ FIX: Session ID'yi state olarak yönet (clear chat'ten sonra güncellenmesi için)
   const [sessionId, setSessionId] = useState<string>(() => initializeSessionId());
-  
+
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState<boolean>(isLoading);
   const { model, chatModes, selectedRows, filesData } = useFileContext();
@@ -133,10 +140,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
         console.log(`🔄 Session ID updated from storage: ${newSessionId}`);
       }
     };
-    
+
     // Storage change event'ini dinle
     window.addEventListener('storage', handleStorageChange);
-    
+
     // Interval ile de kontrol et (aynı tab içindeki değişiklikler için)
     const interval = setInterval(() => {
       const currentSessionId = sessionStorage.getItem('session_id') ?? '';
@@ -145,7 +152,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
         console.log(`🔄 Session ID updated via interval: ${currentSessionId}`);
       }
     }, 1000);
-    
+
     return () => {
       window.removeEventListener('storage', handleStorageChange);
       clearInterval(interval);
