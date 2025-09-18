@@ -19,7 +19,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage
 from langchain_neo4j import Neo4jGraph
 import neo4j.time
-from mem0 import Memory
+# from mem0 import Memory  # Mem0 özelliği devre dışı bırakıldı
 
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
@@ -63,14 +63,15 @@ mem0_config = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mem0 instance - güvenli initialization
-try:
-    mem0 = Memory.from_config(config_dict=mem0_config)
-    logger.info("✅ Mem0 başarıyla initialize edildi")
-except Exception as e:
-    logger.warning(f"⚠️ Mem0 initialization hatası: {e}")
-    logger.info("ℹ️ Mem0 devre dışı - agent normal çalışmaya devam edecek")
-    mem0 = None
+# Mem0 instance - güvenli initialization (DEVRE DIŞI)
+# try:
+#     mem0 = Memory.from_config(config_dict=mem0_config)
+#     logger.info("✅ Mem0 başarıyla initialize edildi")
+# except Exception as e:
+#     logger.warning(f"⚠️ Mem0 initialization hatası: {e}")
+#     logger.info("ℹ️ Mem0 devre dışı - agent normal çalışmaya devam edecek")
+#     mem0 = None
+mem0 = None  # Mem0 özelliği tamamen devre dışı bırakıldı
 
 
 def serialize_neo4j_data(obj):
@@ -197,12 +198,13 @@ class IntelligentAgent:
         # Resource Manager - YENİ!
         self.resource_manager = ResourceManager()
 
-        # Mem0 Memory Manager - YENİ!
-        self.memory = mem0 if mem0 is not None else None
+        # Mem0 Memory Manager - DEVRE DIŞI!
+        # self.memory = mem0 if mem0 is not None else None
+        self.memory = None  # Mem0 özelliği devre dışı bırakıldı
         self.query_strategies = []  # Bu session'da denenen stratejiler
 
-        # Thread Pool Executor for background memory operations
-        self._memory_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # Thread Pool Executor for background memory operations (mem0 devre dışı olduğu için isteğe bağlı)
+        # self._memory_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def interpret_final_answer_with_llm(
         self,
@@ -284,6 +286,42 @@ GÖREV:
             )  # -1 iteration: extra step
 
             logger.info(f"LLM yorumlama tamamlandı: {len(interpreted_answer)} karakter")
+
+            # Resource Manager'dan page resource'ları ekle
+            if self.resource_manager:
+                resources = self.resource_manager.get_all_resources()
+                if resources["total_count"] > 0:
+                    logger.info(f"📝 LLM yorumlamasına {resources['total_count']} page resource ekleniyor")
+
+                    # Page resource'ları ekle
+                    page_refs = []
+                    for page_resource in resources["pages"]:
+                        page_link = page_resource["page_link"]
+                        try:
+                            import urllib.parse
+                            encoded_page_link = urllib.parse.quote(
+                                page_link, safe="", encoding="utf-8"
+                            )
+                            image_link = f"{BASE_URL}/images/{encoded_page_link}"
+
+                            # Sayfa bilgilerini parse et
+                            page_info = "Sayfa Görseli"
+                            if "_page_" in page_link:
+                                try:
+                                    page_num = page_link.split("_page_")[1].split(".")[0]
+                                    page_info = f"Sayfa {page_num}"
+                                except:
+                                    page_info = "Sayfa Görseli"
+
+                            page_refs.append(f"![{page_info}]({image_link})")
+                        except Exception as e:
+                            logger.error(f"Page resource ekleme hatası ({page_link}): {e}")
+
+                    if page_refs:
+                        interpreted_answer += "\n\n**📋 Sayfa Görselleri:**\n"
+                        for page_ref in page_refs:
+                            interpreted_answer += f"- {page_ref}\n"
+
             return interpreted_answer
 
         except Exception as e:
@@ -302,6 +340,7 @@ GÖREV:
 
             # Resource Manager'dan kaynakları al
             resources = self.resource_manager.get_all_resources()
+            logger.info(f"📝 Resource Manager'dan alınan kaynaklar: {resources}")
 
             if resources["total_count"] == 0:
                 logger.info("📝 Hiç kaynak bulunamadı, sadece cevap döndürülüyor")
@@ -1075,104 +1114,274 @@ PARSED ACTION CONTENT:
             logger.error(f"LLM response logging hatası: {e}")
 
     def summarize_finding(
-        self, action_description: str, result, finding_type: str, user_question: str
+        self, action_description: str, result, user_question: str, thought: str = "", action: str = ""
     ) -> str:
-        """Bulguları LLM ile özetle ve kullanıcı sorusuna göre yeterliliğini değerlendir"""
+        """İki aşamalı bulgu analizi: Önce basit kontrol, sonra detaylı analiz"""
         try:
-            if finding_type == "structured_data":
-                if isinstance(result, list) and len(result) > 0:
-                    # İlk birkaç sonucu özetle
-                    sample_data = result[:5] if len(result) > 5 else result
-                    sample_text = str(sample_data)
+            # AŞAMA 1: Basit "Soru karşılandı mı?" kontrolü + Keşif tespiti
+            if isinstance(result, list) and len(result) > 0:
+                sample_data = result[:3] if len(result) > 3 else result
+                sample_text = str(sample_data)
+                
+                # Basit kontrol promptu - KEŞİF seçeneği eklendi
+                simple_check_prompt = f"""KULLANICI SORUSU: {user_question}
 
-                    summary_prompt = f"""Soru: {user_question}
-İşlem: {action_description} 
-ilk 5 Sonuç: {sample_text}
+LLM'İN DÜŞÜNCESI: {thought}
 
-Tek cümle ile özetle: Bu veri soruyu cevaplayabilir mi? Final Answer vermek için yeterli mi? Eksik ne var?"""
-                else:
-                    return f"Sonuç yok - '{user_question}' için veri bulunamadı"
+BULUNAN SONUÇLAR: {sample_text}
+
+Bu sonuçlar ve LLM'in düşüncesi değerlendirilerek yanıtla:
+- "EVET" = Sonuçlar kullanıcının sorusunu tam olarak cevaplayabilir
+- "HAYIR" = Sonuçlar yetersiz, daha detaylı analiz gerekiyor  
+- "KEŞİF" = LLM keşif/araştırma yapıyor, yönlendirme gerekiyor
+
+Sadece "EVET", "HAYIR" veya "KEŞİF" ile yanıtla."""
+
+                # Basit kontrol yap
+                simple_response = self.master_llm.invoke([
+                    SystemMessage(content="Sen verilen sonuçların kullanıcı sorusunu karşılayıp karşılamadığını ve LLM'in keşif yapıp yapmadığını kontrol eden bir analistisin. Sadece EVET, HAYIR veya KEŞİF yanıtı verirsin."),
+                    HumanMessage(content=simple_check_prompt)
+                ])
+                
+                # Token logla (basit kontrol)
+                self.log_token_usage(simple_response, -1, "summarize_finding_simple_check")
+                
+                # Response'u normalize et
+                simple_answer = simple_response.content.strip().upper()
+                if isinstance(simple_answer, list):
+                    simple_answer = " ".join(str(item) for item in simple_answer).strip().upper()
+                
+                # Eğer EVET ise, basit özet döndür
+                if "EVET" in simple_answer:
+                    return f"✅ Kullanıcı sorusu karşılandı: {len(result)} sonuç bulundu ve istenen bilgileri içeriyor."
+                
+                # Eğer KEŞİF ise, hiçbir değerlendirme yapma - üst LLM kendi kararını vermeye devam etsin
+                elif "KEŞİF" in simple_answer:
+                    logger.info(f"🔍 Keşif durumu tespit edildi - Hiçbir değerlendirme yapılmayacak, üst LLM karar vermeye devam edecek...")
+                    return ""  # Boş string döndür, hiçbir değerlendirme yapma
+                
+                # HAYIR ise AŞAMA 2'ye geç
+                logger.info(f"📊 Basit kontrol: HAYIR - Detaylı analiz yapılıyor...")
+                
             else:
-                summary_prompt = f"""Soru: {user_question}
-Bulgu: {str(result)}
+                return f"❌ Sonuç yok - '{user_question}' için veri bulunamadı"
 
-Tek cümle ile: Bu bulgu soruyu cevaplayabilir mi? Ya doğru yolda olduğunu söyleyip daha fazla arama yapması gerektiğini söyleyebilirsin."""
+            # AŞAMA 2: Detaylı analiz (sadece basit kontrol HAYIR derse)
+            # Neo4j şema bilgisini al
+            try:
+                compact_schema = get_compact_schema(self.graph)
+                schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
+{compact_schema}
 
-            print("summary_prompt:", summary_prompt)
-            # LLM ile özetle ve değerlendir
-            response = self.master_llm.invoke(
-                [
-                    SystemMessage(
-                        content="Sen bulunan başarılı bulguların soruyu cevaplayıp cevaplamadığına karar veren bir uzmansın. Kısa ve net özet yap. Sadece 1-2 cümle ile bulgularda eksik olan bilgiyi belirt."
-                    ),
-                    HumanMessage(content=summary_prompt),
-                ]
-            )
+🎯 DOMAIN CONTEXT:
+Bu graph database, belge tabanlı bir bilgi sistemidir:
+- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
+- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri  
+- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
+- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
+            except Exception as e:
+                logger.warning(f"Schema bilgisi alınamadı: {e}")
+                schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
 
-            # Token kullanımını logla
-            self.log_token_usage(response, -1, "summarize_finding")
+            # Structured data için detaylı analiz
+            sample_data = result[:5] if len(result) > 5 else result
+            sample_text = str(sample_data)
 
-            # Response content'i al - GPT-5-mini için list kontrolü
-            raw_content = response.content
+            detailed_prompt = f"""⚠️ DETAYLI ANALİZ GEREKİYOR - Basit kontrol yetersiz kaldı
+
+{schema_info}
+
+KULLANICI SORUSU: {user_question}
+
+LLM'İN DÜŞÜNCESI: {thought}
+LLM'İN KARARI: {action}
+İŞLEM DETAYI: {action_description} 
+İLK 5 SONUÇ: {sample_text}
+
+🎯 DETAYLI GÖREV: Neo4j şemasını dikkate alarak kapsamlı analiz yap:
+1. LLM doğru stratejiyi mi seçti? Schema'ya uygun mu?
+2. Bu veri soruyu NEDEN tam karşılamıyor? Eksik ne?
+3. Final Answer vermek için ne gerekiyor?
+4. LLM'in bir sonraki adımı ne olmalı? Schema'ya göre hangi node/relationship'lere bakmalı?
+5. Vector araması yapılmışsa gelen sonuçlarda istenen bilgi kesik, eksik ise takip eden 2-3 chunka position üzerinden bakması için yönlendirme yap.
+6. Entity query yerine vector search yapması gerekiyor mu? Şema'ya göre değerlendir.
+
+  ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
+1. ÖNCE Entity arama (Customer, PolicyType, vb.)
+2. SONRA Document node filefName arama (metadata) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
+4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
+
+ TÜRKÇE METİN ARAMA ÖNERİLERİ (eksikse belirt):
+- Exact match yerine CONTAINS kullanması gerekiyorsa söyle
+- APOC text clean ile normalizasyon: apoc.text.clean(text)
+- Türkçe karakter duyarsız arama: toLower() + apoc.text.clean()
+- Örnek: WHERE apoc.text.clean(toLower(c.name)) CONTAINS apoc.text.clean(toLower("aranacak"))
+
+📊 SCHEMA PROPERTY ÖNERİLERİ (yanlışsa düzelt):
+- CONTAINS ile esnek arama öner
+- Doğru property isimlerini kontrol et
+
+ÇIKTI: 1-2 cümle ile LLM'e net yönlendirme ve eksiklikleri belirt - APOC kullanımını dahil et."""
+
+            logger.info(f"📊 Detaylı analiz prompt uzunluğu: {len(detailed_prompt)} karakter")
+            
+            # Detaylı analiz yap
+            detailed_response = self.master_llm.invoke([
+                SystemMessage(
+                    content="Sen Neo4j şema uzmanı, APOC uzmanı ve LLM performans analistisin. Türkçe text processing, APOC text fonksiyonları ve karakter normalizasyonu konularında uzmansın. Yetersiz bulunan sonuçları derinlemesine analiz edip LLM'e en optimum stratejiyi önerirsin. Şema bilgisini kullanarak graph veritabanı yapısına göre en iyi yolu belirlersin."
+                ),
+                HumanMessage(content=detailed_prompt)
+            ])
+
+            # Token logla (detaylı analiz)
+            self.log_token_usage(detailed_response, -1, "summarize_finding_detailed_analysis")
+
+            # Response content'i al
+            raw_content = detailed_response.content
             if isinstance(raw_content, list):
-                return " ".join(str(item) for item in raw_content).strip()
+                detailed_result = " ".join(str(item) for item in raw_content).strip()
             else:
-                return raw_content.strip()
+                detailed_result = raw_content.strip()
+
+            return f"⚠️ {detailed_result}"
 
         except Exception as e:
             logger.error(f"Özet oluşturma hatası: {e}")
             # Fallback: basit özet
-            if finding_type == "structured_data":
-                return (
-                    f"{len(result) if result else 0} kayıt bulundu. Örnek: {str(result[:1])}..."
-                    if result
-                    else f"Sonuç yok - '{user_question}' için veri bulunamadı"
-                )
-            return f"{finding_type}: {str(result)}..."
+            return (
+                f"{len(result) if result else 0} kayıt bulundu. Örnek: {str(result[:1])}..."
+                if result
+                else f"❌ Sonuç yok - '{user_question}' için veri bulunamadı"
+            )
+
+    def _handle_exploration_guidance(self, user_question: str, result, thought: str, action: str) -> str:
+        """Keşif durumunda LLM'e yönlendirme ver"""
+        try:
+            # Neo4j şema bilgisini al
+            try:
+                compact_schema = get_compact_schema(self.graph)
+                schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
+{compact_schema}
+
+🎯 DOMAIN CONTEXT:
+Bu graph database, belge tabanlı bir bilgi sistemidir:
+- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
+- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri  
+- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
+- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
+            except Exception as e:
+                logger.warning(f"Schema bilgisi alınamadı: {e}")
+                schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
+
+            sample_data = result[:3] if len(result) > 3 else result
+            sample_text = str(sample_data)
+
+            exploration_prompt = f"""🔍 KEŞİF DURUMU - LLM Yönlendirmesi
+
+{schema_info}
+
+KULLANICI SORUSU: {user_question}
+
+LLM'İN KEŞİF DÜŞÜNCESI: {thought}
+LLM'İN KARARI: {action}
+KEŞİFTEN ÇIKAN SONUÇLAR: {sample_text}
+
+🎯 GÖREV: LLM keşif yapıyor. Bu keşif sonuçlarına göre LLM'e basit yönlendirme ver:
+
+📋 KEŞİF YÖNLENDİRME KURALLARI:
+1. Eğer keşif başarılıysa: "Bu verilerle soruyu cevaplayabilirsin, final answer ver"
+2. Eğer keşif eksikse: "Şu spesifik bilgileri ara: [neleri araması gerektiğini söyle]"
+3. Schema'ya göre hangi node/relationship'lere bakması gerektiğini belirt
+4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
+
+  METİN ARAMA ÖNERİLERİ:
+- İsim aramalarında CONTAINS kullan (exact match yerine)
+- APOC text clean fonksiyonlarını öner: apoc.text.clean(text)
+- Türkçe karakterler için normalizasyon öner
+- Büyük/küçük harf duyarsız arama için toLower() kullan
+- Örnek: WHERE apoc.text.clean(toLower(c.name)) CONTAINS apoc.text.clean(toLower("string"))
+
+ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
+1. ÖNCE Entity arama (Customer, PolicyType, vb.)
+2. SONRA Document node arama (metadata) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
+
+ÇIKTI: 1 cümle ile LLM'e net yönlendirme - APOC ve CONTAINS kullanımını dahil et."""
+
+            # Keşif yönlendirmesi yap
+            exploration_response = self.master_llm.invoke([
+                SystemMessage(
+                    content="Sen LLM'in keşif sürecine yönlendirme veren bir Neo4j ve APOC uzmanısın. Türkçe metin arama, karakter normalizasyonu ve APOC text fonksiyonları konularında uzmansın. LLM'e hangi adımları atması gerektiğini basit ve net şekilde söylersin. CONTAINS ve APOC text clean kullanımını önerirsin."
+                ),
+                HumanMessage(content=exploration_prompt)
+            ])
+
+            # Token logla (keşif yönlendirmesi)
+            self.log_token_usage(exploration_response, -1, "summarize_finding_exploration_guidance")
+
+            # Response content'i al
+            raw_content = exploration_response.content
+            if isinstance(raw_content, list):
+                guidance_result = " ".join(str(item) for item in raw_content).strip()
+            else:
+                guidance_result = raw_content.strip()
+
+            return f"🔍 Keşif devam ediyor: {guidance_result}"
+
+        except Exception as e:
+            logger.error(f"Keşif yönlendirmesi hatası: {e}")
+            return f"🔍 Keşif devam ediyor: {len(result)} sonuç bulundu. '{user_question}' için daha spesifik bilgiler ara."
 
     def analyze_empty_result(
-        self, user_question: str, cypher_query: str, query_type: str = "entity"
+        self, user_question: str, cypher_query: str, query_type: str = "entity", thought: str = "", action: str = ""
     ) -> str:
         """Boş sonuç dönen sorguları analiz edip alternatif strateji önerir"""
         try:
             # Schema bilgisini al
             try:
                 compact_schema = get_compact_schema(self.graph)
-                schema_info = f"\nNeo4j Schema:\n{compact_schema}\n"
+                schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
+{compact_schema}
+
+🎯 DOMAIN CONTEXT:
+Bu graph database, belge tabanlı bir bilgi sistemidir:
+- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
+- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri
+- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
+- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
             except Exception as e:
                 logger.warning(f"Schema bilgisi alınamadı: {e}")
-                schema_info = "\nSchema bilgisi mevcut değil.\n"
+                schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
 
             analysis_prompt = f"""Neo4j veritabanında boş sorgu analizi:
 
 {schema_info}
+
 KULLANICI SORUSU: {user_question}
-BAŞARISIZ SORGU: {cypher_query}
-SONUÇ: 0 kayıt
+LLM'İN DÜŞÜNCESI: {thought}
+LLM'İN KARARI: {action}
+BOŞ SONUÇ VERDİ: {cypher_query}
 
-GÖREV: Bu sorgu neden boş döndü? Schema ve property'lere dayalı akıllı çözüm öner.
+🎯 GÖREV: Bu sorgu neden boş döndü? SADECE TEK CÜMLE ile neden ve çözümü söyle. 
 
-ÖZELLİKLER:
-1. **Field Type Matching**: Schema'dan field tipini kontrol et
-   - **String fields**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
-   - **Integer fields**: `field = value` 
-   - **Boolean fields**: `field = true/false`
-2. **Relationship Analizi**: Hangi path'lerin daha etkili olacağını belirle
-3. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
-   - `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
-   - ÖRN: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
-   - Asla doğrudan `p.type = 'str'` kullanma!
+ARAMA STRATEJİSİ:
+1. Entity aramadan başla (Customer, PolicyType vb...)
+2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
+4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
 
-ÇÖZÜM FORMAT:
-- Problem: [Tek cümle analiz]
-- Strateji: [Spesifik çözüm önerisi]
-- Örnek: [Güncellenmiş sorgu önerisi]"""
+Öneriler: CONTAINS kullan, apoc.text.clean() öner.
+
+
+
+SADECE TEK CÜMLE ile cevap ver."""
 
             # LLM ile analiz et
             response = self.master_llm.invoke(
                 [
                     SystemMessage(
-                        content="Sen Neo4j ve Türkçe text processing uzmanısın. Schema'ya dayalı akıllı sorgu optimizasyonları ve text normalizasyon stratejileri önerirsin."
+                        content="Sen kısa ve net cevap veren Neo4j uzmanısın. Boş sorgu nedenini ve çözümünü SADECE TEK CÜMLE ile açıklarsın. Uzun açıklama yapma!"
                     ),
                     HumanMessage(content=analysis_prompt),
                 ]
@@ -1473,7 +1682,7 @@ GÖREV: Bu sorgu neden boş döndü? Schema ve property'lere dayalı akıllı ç
                 "type": "function",
                 "function": {
                     "name": "generate_embeddings_for_cypher",
-                    "description": "Cypher sorgusunda kullanmak üzere SADECE İÇERİK KELİMELERİNDEN embedding oluşturur. METADATA (müşteri adı, yıl, poliçe türü) ekleme! Örnek: 'taksit tablosu ödeme planı' ✅, 'ayça hanım 2020 taksit' ❌",
+                    "description": "Cypher sorgusunda kullanmak üzere SADECE İÇERİK KELİMELERİNDEN embedding oluşturur. METADATA (müşteri adı, yıl, poliçe türü) ekleme! Örnek: 'taksit tablosu ödeme planı' ✅, 'ayça hanım 2020 taksit' ❌. KRİTİK: Bu tool çağrısı SONRASINDA MUTLAKA bir sonraki iterasyonda cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1961,16 +2170,17 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         self.resource_manager.clear_resources()
         logger.info("🧹 Resource Manager temizlendi")
 
-        # 🧠 MEM0: Önceki deneyimleri ara (background thread'de)
+        # 🧠 MEM0: Önceki deneyimleri ara (background thread'de) - DEVRE DIŞI
         memory_context_future = None
-        try:
-            # Shared thread pool executor ile background'da memory aramayı başlat
-            memory_context_future = self._memory_executor.submit(
-                self.search_query_memory, user_question
-            )
-            logger.info("🧠 Mem0 aramasi background thread'de başlatıldı")
-        except Exception as e:
-            logger.warning(f"🧠 Mem0 background thread oluşturulamadı: {e}")
+        # try:
+        #     # Shared thread pool executor ile background'da memory aramayı başlat
+        #     memory_context_future = self._memory_executor.submit(
+        #         self.search_query_memory, user_question
+        #     )
+        #     logger.info("🧠 Mem0 aramasi background thread'de başlatıldı")
+        # except Exception as e:
+        #     logger.warning(f"🧠 Mem0 background thread oluşturulamadı: {e}")
+        logger.info("🧠 Mem0 özelliği devre dışı bırakıldı")
 
         logger.info(f"Soru çözülüyor: {user_question}")
         if session_id:
@@ -2057,8 +2267,6 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         # Embedding storage için
         self._current_embeddings = {}
 
-        # Cypher embedding storage
-        self._cypher_embeddings = {}
 
         # Schema-based system prompt'u al (cache'den veya oluştur)
         system_prompt = self.get_system_prompt()
@@ -2073,19 +2281,19 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             state.iteration_count += 1
             logger.info(f"İterasyon {state.iteration_count}")
 
-            # 🧠 MEM0: Background memory aramayı kontrol et (non-blocking)
-            if memory_context_future and state.iteration_count == 1:
-                try:
-                    # Memory sonucunu kontrol et (timeout olmadan, sadece hazırsa al)
-                    if memory_context_future.done():
-                        memory_context = memory_context_future.result()
-                        if memory_context and memory_context not in self.context_memory:
-                            self.context_memory += memory_context + "\n"
-                            logger.info(
-                                "🧠 Mem0'dan önceki deneyimler ilk iterasyonda eklendi"
-                            )
-                except Exception as e:
-                    logger.warning(f"🧠 Memory check hatası: {e}")
+            # 🧠 MEM0: Background memory aramayı kontrol et (non-blocking) - DEVRE DIŞI
+            # if memory_context_future and state.iteration_count == 1:
+            #     try:
+            #         # Memory sonucunu kontrol et (timeout olmadan, sadece hazırsa al)
+            #         if memory_context_future.done():
+            #             memory_context = memory_context_future.result()
+            #             if memory_context and memory_context not in self.context_memory:
+            #                 self.context_memory += memory_context + "\n"
+            #                 logger.info(
+            #                     "🧠 Mem0'dan önceki deneyimler ilk iterasyonda eklendi"
+            #                 )
+            #     except Exception as e:
+            #         logger.warning(f"🧠 Memory check hatası: {e}")
 
             # LLM'e gönderilecek mesaj - mevcut state bilgileriyle zenginleştir
             context_info = ""
@@ -2165,7 +2373,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             ]
 
             # LLM prompt'unu logla - tam mesajlar ile birlikte
-            self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
+            # self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
 
             try:
                 # OpenAI model kontrolü ve tool calling desteği
@@ -2217,6 +2425,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         logger.info("✅ Tool call'lar işlendi ve final response alındı")
                     else:
+                        logger.info("⚠️ Tool call bulunamadı, text parsing ile devam ediliyor")
                         # Response content'i al - GPT-5-mini için list kontrolü
                         raw_content = response.content
                         if isinstance(raw_content, list):
@@ -2347,7 +2556,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             
                             # Boş sonuç analizi yap
                             analysis = self.analyze_empty_result(
-                                user_question, action_content, "cypher"
+                                user_question, action_content, "cypher", thought, action
                             )
                             
                             # Context memory'e başarısız sorgu olarak ekle
@@ -2429,18 +2638,22 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
 
-                        # 🧠 MEM0: Başarılı stratejiyi takip et
-                        strategy_type = self._classify_cypher_strategy(action_content)
-                        self.track_strategy_attempt(
-                            strategy=f"cypher_query_{strategy_type}",
-                            success=True,
-                            details=f"Başarılı sorgu: {action_content[:100]}...",
-                            reason=f"{len(result)} sonuç bulundu",
-                        )
+                        # 🧠 MEM0: Başarılı stratejiyi takip et - DEVRE DIŞI
+                        # strategy_type = self._classify_cypher_strategy(action_content)
+                        # self.track_strategy_attempt(
+                        #     strategy=f"cypher_query_{strategy_type}",
+                        #     success=True,
+                        #     details=f"Başarılı sorgu: {action_content[:100]}...",
+                        #     reason=f"{len(result)} sonuç bulundu",
+                        # )
 
                         # Başarılı cypher sorgu bulgusunu kaydet
                         summary = self.summarize_finding(
-                            f"Cypher Query: {action_content}", result, "structured_data", user_question
+                            f"Cypher Query: {action_content}", 
+                            result, 
+                            user_question,
+                            thought,  # LLM'in düşüncesi ayrı parametre
+                            action    # LLM'in kararı ayrı parametre
                         )
                         self.add_successful_finding(
                             state,  # state parametresi eklendi
@@ -2646,29 +2859,18 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         
                         # LLM ile boş sonucu analiz et
                         analysis = self.analyze_empty_result(
-                            user_question, action_content, "entity"
+                            user_question, action_content, "entity", thought, action
                         )
                         
                         current_observation = f"Sorgu başarılı ama 0 kayıt bulundu. Analiz: {analysis} Farklı filtreler veya vector search dene."
                         
                         # Bu başarısız bulguyu context memory'ye ekle
-                        summary = f"Boş sonuç: {analysis}"
-                        self.add_successful_finding(
-                            state,
-                            state.iteration_count,
-                            "empty_query_analysis",
-                            summary,
-                            0.1,  # Düşük relevance - boş sonuç
-                            [],  # Boş result
-                        )
-                        
-                        # Failed query olarak da kaydet
                         self.add_failed_query(
                             state,
                             state.iteration_count,
                             action_content,
-                            "Sorgu başarılı ama 0 kayıt döndü",
-                            "empty_cypher",
+                            f"Boş sonuç analizi: {analysis}",
+                            "cypher"
                         )
                         
                         # Conversation history'ye ekle - Boş sonuç cypher query
@@ -2682,7 +2884,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         # LLM ile başarısız sorguyu analiz et
                         analysis = self.analyze_empty_result(
-                            user_question, action_content, "cypher_error"
+                            user_question, action_content, "cypher_error", thought, action
                         )
 
                         # Eğer vector search'e geçmeden önce daha fazla entity query denemesi yapalım
@@ -2705,16 +2907,16 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                             current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Analiz: {analysis} Farklı bir cypher_query ile tekrar dene."
 
-                            # 🧠 MEM0: Başarısız stratejiyi takip et
-                            strategy_type = self._classify_cypher_strategy(
-                                action_content
-                            )
-                            self.track_strategy_attempt(
-                                strategy=f"cypher_query_{strategy_type}",
-                                success=False,
-                                details=f"Başarısız sorgu: {action_content[:100]}...",
-                                reason=str(result)[:200],
-                            )
+                            # 🧠 MEM0: Başarısız stratejiyi takip et - DEVRE DIŞI
+                            # strategy_type = self._classify_cypher_strategy(
+                            #     action_content
+                            # )
+                            # self.track_strategy_attempt(
+                            #     strategy=f"cypher_query_{strategy_type}",
+                            #     success=False,
+                            #     details=f"Başarısız sorgu: {action_content[:100]}...",
+                            #     reason=str(result)[:200],
+                            # )
 
                             # Conversation history'ye ekle - Başarısız cypher query (retry)
                             conversation_history.append(
@@ -2781,43 +2983,43 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         if final_answer:
             logger.info(f"Agent final answer verdi 1: {final_answer}")
 
-            # 🧠 MEM0: Önceki memory aramayı tamamla (eğer varsa)
-            try:
-                if memory_context_future:
-                    # Background thread'den memory sonucunu al (timeout ile)
-                    memory_context = memory_context_future.result(
-                        timeout=2.0
-                    )  # 2 saniye timeout
-                    if memory_context and memory_context not in self.context_memory:
-                        logger.info(
-                            "🧠 Mem0'dan önceki deneyimler geç bulundu ama kullanılamadı (zaten işlem bitti)"
-                        )
-            except concurrent.futures.TimeoutError:
-                logger.warning("🧠 Mem0 arama timeout oldu")
-            except Exception as e:
-                logger.warning(f"🧠 Mem0 arama hatası: {e}")
+            # 🧠 MEM0: Önceki memory aramayı tamamla (eğer varsa) - DEVRE DIŞI
+            # try:
+            #     if memory_context_future:
+            #         # Background thread'den memory sonucunu al (timeout ile)
+            #         memory_context = memory_context_future.result(
+            #             timeout=2.0
+            #         )  # 2 saniye timeout
+            #         if memory_context and memory_context not in self.context_memory:
+            #             logger.info(
+            #                 "🧠 Mem0'dan önceki deneyimler geç bulundu ama kullanılamadı (zaten işlem bitti)"
+            #             )
+            # except concurrent.futures.TimeoutError:
+            #     logger.warning("🧠 Mem0 arama timeout oldu")
+            # except Exception as e:
+            #     logger.warning(f"🧠 Mem0 arama hatası: {e}")
 
-            # 🧠 MEM0: Başarılı stratejiyi kaydet (background thread'de)
-            has_success = any(s.get("success", False) for s in self.query_strategies)
-            try:
-                # Shared executor ile background'da strategy kaydet
-                store_future = self._memory_executor.submit(
-                    self.store_query_strategy,
-                    user_question,
-                    self.query_strategies,
-                    has_success,
-                )
-                logger.info("🧠 Mem0'a strateji kaydı background'da başlatıldı")
+            # 🧠 MEM0: Başarılı stratejiyi kaydet (background thread'de) - DEVRE DIŞI
+            # has_success = any(s.get("success", False) for s in self.query_strategies)
+            # try:
+            #     # Shared executor ile background'da strategy kaydet
+            #     store_future = self._memory_executor.submit(
+            #         self.store_query_strategy,
+            #         user_question,
+            #         self.query_strategies,
+            #         has_success,
+            #     )
+            #     logger.info("🧠 Mem0'a strateji kaydı background'da başlatıldı")
 
-            except Exception as e:
-                logger.warning(f"🧠 Mem0 background kaydetme hatası: {e}")
-                # Fallback: non-blocking sync store
-                try:
-                    self.store_query_strategy(
-                        user_question, self.query_strategies, has_success
-                    )
-                except:
-                    pass  # Mem0 kaydı başarısız olsa da ana işlem devam etsin
+            # except Exception as e:
+            #     logger.warning(f"🧠 Mem0 background kaydetme hatası: {e}")
+            #     # Fallback: non-blocking sync store
+            #     try:
+            #         self.store_query_strategy(
+            #             user_question, self.query_strategies, has_success
+            #         )
+            #     except:
+            #         pass  # Mem0 kaydı başarısız olsa da ana işlem devam etsin
 
             return {
                 "final_answer": final_answer,
@@ -2918,11 +3120,12 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 {compact_schema}
 
 🎯 DOMAIN CONTEXT:
-Bu graph database, belge tabanlı bir bilgi sistemidir:
-- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
-- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri
-- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
-- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
+Bu graph database, genel amaçlı bir veri sistemidir. Schema dinamik olarak sistem tarafından sağlanır:
+- **Nodes**: Schema'da tanımlı tüm varlık türleri (node labels)
+- **Properties**: Her node türünün sahip olduğu özellikler (property keys)
+- **Relationships**: Varlıklar arasındaki bağlantılar (relationship types)
+
+**KRİTİK**: Sorguları yazarken MUTLAKA schema'da tanımlı node türlerini, property'leri ve relationship'leri kullan!"""
 
         except Exception as e:
             logger.warning(f"Schema çekme hatası: {e}")
@@ -2938,51 +3141,132 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 ## 🔧 TEMEL KURALLAR:
 
-### 📝 CYPHER QUERY KURALLARI:
+### � SCHEMA KULLANIM KURALLARI (KRİTİK):
+1. **SCHEMA FIRST**: Her sorgu öncesi yukarıdaki schema bölümünü incele
+2. **NODE TYPES**: Sadece schema'da listelenen node label'larını kullan
+3. **PROPERTIES**: Sadece schema'da tanımlı property key'lerini kullan
+4. **RELATIONSHIPS**: Sadece schema'da gösterilen relationship type'larını kullan
+5. **NO ASSUMPTIONS**: Schema'da yoksa kullanma - hardcoded domain bilgisi yasak!
+
+### �📝 CYPHER QUERY KURALLARI:
 1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
-   - `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
-   - ÖRN: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
+   - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(coalesce(toString(field), ''))) CONTAINS toLower(apoc.text.clean('value'))`
+   - **ÖRN**: `toLower(apoc.text.clean(coalesce(toString(p.type), ''))) CONTAINS toLower(apoc.text.clean('str'))`
+   - **KRİTİK**: `coalesce(toString(field), '')` kullanarak null değer hatalarını önle!
    - Asla doğrudan `p.type = 'str'` kullanma!
 
 2. **Field Type Matching**: Schema'dan field tipini kontrol et
-   - **String fields**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
+   - **String fields**: `toLower(apoc.text.clean(coalesce(toString(field), ''))) CONTAINS toLower(apoc.text.clean('value'))`
    - **Integer fields**: `field = value` 
    - **Boolean fields**: `field = true/false`
 
 3. **Node/Relationship Kullanımı**: Sadece schema'da tanımlı node'ları ve relationship'leri kullan
 
-4. **Return Clause**: Sorguya uygun alanları döndür (id, name, properties vs.)
+4. **Embedding Field Hariç Tutma**: Schema'da `embedding_vector` tipindeki field'larda CONTAINS araması yapma - bunlar vector search için kullanılır
 
-### 🔍 MÜŞTERİ ADI ARAMA STRATEJİSİ:
+5. **Return Clause**: Sorguya uygun alanları döndür (id, name, properties vs.)
 
-**KURAL**: Kullanıcı kısmi ad belirtirse (örn: "Ayça hanım", "Mehmet bey"), ÖNCE KEŞİF YAP:
+### 🔍 ARAMA STRATEJİSİ:
 
-1. **Keşif Sorgusu**: Kısmi adla eşleşen tüm müşterileri bul
-   ```cypher
-   MATCH (c:Customer) 
-   WHERE toLower(apoc.text.clean(c.fullName)) CONTAINS toLower(apoc.text.clean('Ayça'))
-   RETURN c.fullName
+**PROGRESSIVE SEARCH STRATEGY**: Boş sonuç alırsan bu sırayı takip et:
+
+1. **ÖNCE Entity Arama**: Yapılandırılmış node'larda ara (Customer, PolicyType, vb.)
+2. **SONRA Document node fileName Arama**: Dosya metadata'sında ara (Document.fileName) - **ZORUNLU: Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
+3. **SONRA Semantic/Content Arama**: generate_embeddings_for_cypher ile chunk'larda ara - **ZORUNLU: Boş sonuç sonrası MUTLAKA semantic arama dene!**  
+
+
+**KURAL**: ÖNCE KEŞİF YAP - HER ZAMAN KEŞİF İLE BAŞLA!
+
+#### 🎯 KEŞİF SORGUSU YAKLAŞIMI (Schema-Driven, Domain Agnostic):
+
+**ZORUNLU**: Keşif sorgularında schema'dan öğrenilen node türlerini ve property'lerini dinamik olarak kullan!
+
+**1. SCHEMA-BASED NODE KEŞFİ:**
+```cypher
+// ADIM 1: Schema'daki tüm node türlerinde ilgili property'lerde ara
+// NOT: Customer, Policy gibi node isimlerini kullanma - schema'dan al!
+MATCH (n:SchemaNodeType)  // <-- SchemaNodeType'ı gerçek node türü ile değiştir
+WHERE toLower(apoc.text.clean(n.schema_property)) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+RETURN n.schema_property, id(n), labels(n) as node_type, properties(n)
+LIMIT 5
+
+// ÖRNEK UYGULAMA: Eğer schema'da [Person] node'u ve [fullName] property'si varsa:
+MATCH (n:Person)
+WHERE toLower(apoc.text.clean(n.fullName)) CONTAINS toLower(apoc.text.clean('kullanici_adi'))
+RETURN n.fullName, id(n), labels(n) as node_type
+LIMIT 5
+```
+
+**2. SCHEMA-BASED PROPERTY KEŞFİ:**
+```cypher
+// ADIM 2: Schema'da bulunan property'leri dinamik olarak kontrol et
+// Embedding fieldlarını hariç tutarak arama yap
+MATCH (n)
+WHERE any(prop IN keys(n) WHERE 
+    prop <> 'embedding' AND NOT prop CONTAINS 'vector' AND
+    toLower(apoc.text.clean(coalesce(toString(n[prop]), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi')))
+RETURN labels(n) as node_type, keys(n) as properties, 
+       [prop IN keys(n) WHERE 
+         prop <> 'embedding' AND NOT prop CONTAINS 'vector' AND
+         toLower(apoc.text.clean(coalesce(toString(n[prop]), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi')) 
+       | {{property: prop, value: n[prop]}}] as matches
+LIMIT 5
+```
+
+**3. SCHEMA-BASED RELATİONSHİP KEŞFİ:**
+```cypher
+// ADIM 3: Schema'da tanımlı relationship'leri kullanarak bağlantılı ara
+// Schema'dan öğrenilen relationship türlerini kullan
+MATCH (n)-[r:SchemaRelationType]->(m)  // <-- SchemaRelationType'ı gerçek relationship türü ile değiştir
+WHERE toLower(apoc.text.clean(coalesce(toString(n.schema_property), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+   OR toLower(apoc.text.clean(coalesce(toString(m.schema_property), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+RETURN labels(n) as source_type, type(r) as relation_type, labels(m) as target_type,
+       n.schema_property as source_value, m.schema_property as target_value
+LIMIT 5
+```
+
+#### 📋 KEŞİF SONRASI ANALİZ (Schema-Based):
+
+**ÇOKLU SONUÇ DURUMU**: Birden fazla eşleşme varsa, schema'daki node türlerini analiz et
+   ```
+   "kullanici_terimi" ile eşleşen yapılar:
+   - SchemaNodeType1'de: X sonuç
+   - SchemaNodeType2'de: Y sonuç
+   - SchemaNodeType3'te: Z sonuç
+   Hangi node türü ile devam etmek istiyorsun?
    ```
 
-2. **Çoklu Sonuç Durumu**: Birden fazla eşleşme varsa, kullanıcıya seçenek sun
+**TEK SONUÇ DURUMU**: Tek eşleşme varsa, o node türü ile devam et
    ```
-   "Ayça" ismiyle eşleşen müşteriler:
-   - Ayça Dinçkök
-   - Ayça Yılmaz
-   Hangi müşteri hakkında bilgi istiyorsunuz?
+   ✅ Tek "SchemaNodeType" node'u bulundu. Bu varlık ile devam ediyorum.
    ```
 
-3. **Tek Sonuç Durumu**: Tek eşleşme varsa, doğrudan o müşteriyle devam et
+**BOŞ SONUÇ DURUMU**: Hiç eşleşme yoksa, schema'daki alternatif property'leri dene
+   ```
+   ⚠️ İlk property'de eşleşme bulunamadı. Schema'daki alternatif property'lerde arıyorum:
+   - Farklı property isimlerinde ara
+   - Daha geniş node türlerinde ara
+   - Relationship üzerinden bağlantılı ara
+   ```
+
+#### 🔄 KEŞİF İTERASYON YAKLAŞIMI (Schema-Driven):
+
+**GENİŞ KEŞİF**: Schema'daki tüm node türlerinde ara (MATCH (n) WHERE schema_property...)
+**DAR KEŞİF**: Schema'dan spesifik node türünde ara (MATCH (n:SchemaNodeType) WHERE ...)
+**DERİN KEŞİF**: Schema'daki relationship'ler üzerinden ara (MATCH (n)-[r:SchemaRelType]->(m) WHERE ...)
+**YENİDEN ŞEKİLLENDİRME**: Başarısızsa schema'daki farklı property'lerde ara
 
 **UYGULAMA**:
-- İlk sorgu her zaman keşif amaçlı olsun
-- Tam eşleşme gerektiren durumlarda bile esnek arama kullan
-- Müşteri adını normalize etmek için `apoc.text.clean` kullan
+- İlk sorgu her zaman schema'daki tüm node türlerini keşfet
+- Schema'dan öğrenilen property isimlerini dinamik olarak kullan
+- Schema'da tanımlı relationship türlerini keşfet
+- Hardcoded domain terimleri kullanma - her şeyi schema'dan al!
 
 ### 🎯 ARAMA STRATEJİSİ:
 
 **METADATA ARAMALARI**: Entity'ler ve yapılandırılmış veriler için
 - Node properties üzerinden filtreleme
+- Eğer birden fazla kelimeden oluşan bir node arama başarısız olursa ayrı ayrı arama yap
 
 **CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
 - Chunk nodes üzerinden text içeriği arama
@@ -3000,10 +3284,75 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 - `text`: Aranacak kavram/içerik terimleri (metadata değil!)
 - Cypher'da `$embedding_vector` değişkeni olarak kullanılır
 - `gds.similarity.cosine(chunk.embedding, $embedding_vector)` ile similarity
+- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
+- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
+
+### 🔍 VECTOR ARAMA STRATEJİSİ (Schema-Driven, Domain Agnostic):
+
+**A) METADATA + VECTOR ARAMA (Schema-Based, Tercih Edilen):**
+```cypher
+// Schema'daki content node'ları ve container node'larını kullan
+WITH $embedding_vector AS queryVec
+MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
+WHERE toLower(apoc.text.clean(container_node.schema_identifier_property)) CONTAINS toLower(apoc.text.clean("aranan_terim"))
+  AND content_node.schema_embedding_property IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
+       content_node.schema_position_property, content_node.schema_reference_property, 
+       container_node.schema_identifier_property, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+**B) SADECE VECTOR ARAMA (Schema'dan Öğrenilen Structure):**
+```cypher
+// Schema'daki content ve container node pattern'ini kullan
+WITH $embedding_vector AS queryVec
+MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
+WHERE content_node.schema_embedding_property IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
+       content_node.schema_position_property, content_node.schema_reference_property, 
+       container_node.schema_identifier_property, score
+ORDER BY score DESC
+LIMIT 15
+```
+
+**C) FİLTRELİ VECTOR ARAMA (Schema-Based Context Memory):**
+```cypher
+// Context memory'de spesifik container'lar varsa schema pattern'ini kullan
+WITH $embedding_vector AS queryVec
+MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
+WHERE container_node.schema_identifier_property IN $context_identifiers  // Context memory'den al
+  AND content_node.schema_embedding_property IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
+       content_node.schema_position_property, content_node.schema_reference_property, 
+       container_node.schema_identifier_property, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+**NOT**: Yukarıdaki örneklerde:
+- `SchemaContentType`, `SchemaContainerType`: Schema'dan öğrenilen gerçek node türleri
+- `SchemaRelationType`: Schema'dan öğrenilen gerçek relationship türü
+- `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
+- LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
+
+#### 🛠️ GENEL ARAÇLAR:
+
+**generate_embeddings_for_cypher(text)**:
+- İçerik tabanlı aramalar için embedding oluşturur
+- `text`: Aranacak kavram/içerik terimleri
+- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
+- `gds.similarity.cosine(content_node.embedding_vector, $embedding_vector)` ile benzerlik
 
 **add_page_resource(page_link)**:
-- Chunk'lardan faydalanılan sayfaları kaynak olarak ekler
-- Her kullanılan chunk için mutlaka çağır
+- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
+- Her kullanılan içerik için mutlaka çağır
 
 ### 🔗 PARAMETER INHERITANCE:
 
@@ -3037,9 +3386,9 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 Her iterasyonda şu formatı kullan:
 
 ```
-Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant?]
-Action: [cypher_query | generate_embeddings_for_cypher | add_page_resource | final_answer]
-Content: [Cypher sorgusu | embedding text | page_link | final cevap]
+Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant? KRİTİK: Eğer önceki iterasyonda generate_embeddings_for_cypher çağrıldıysa, bu iterasyonda MUTLAKA cypher_query eylemi yap!]
+Action: [cypher_query | final_answer]
+Content: [Cypher sorgusu | final cevap]
 ```
 
 ## 🎯 ITERATION BAŞLANGICI:
@@ -3052,23 +3401,25 @@ Her iterasyon başında şunları değerlendir:
 5. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
 6. **Raw DB Results**: Son 5 database sonucunu örnek olarak değerlendir
 
-## ⚠️ ÖNEMLİ NOTLAR:
+## ⚠️ ÖNEMLİ NOTLAR (Schema-Driven, Domain Agnostic):
 
+- **KRİTİK: SCHEMA FIRST!** Her sorgu öncesi schema'yı incele ve sadece orada tanımlı node/property/relationship kullan!
+- **KRİTİK: NO HARDCODED DOMAIN KNOWLEDGE!** Customer, Policy, Document gibi hardcoded terimler yasak - schema'dan öğren!
 - **KRİTİK: PARAMETER INHERITANCE!** Eksik parametreleri önceki sorulardan semantic olarak inherit et!
 - **KRİTİK: CONTEXT CONTINUITY kontrol et!** Yeni sorular önceki konuşmayla ilgili olabilir - özellikle belirsiz kelimeler!
-- **KRİTİK: STRING NORMALİZASYONU KULLAN!** Tüm string karşılaştırmalarında `toLower(apoc.text.clean(field))` zorunlu!
+- **KRİTİK: STRING NORMALİZASYONU KULLAN!** Tüm string karşılaştırmalarında `toLower(apoc.text.clean(coalesce(toString(field), '')))` zorunlu!
 - **KRİTİK: TEKRAR SORGU YAPMA!** ÖNCEKİ BAŞARILI BULGULAR bölümünde aynı/benzer sorgu varsa DIREK final_answer ver!
-- **KRİTİK: YETERLİ VERİ KONTROLÜ!** Başarılı cypher sonuçları alındıktan sonra gereksiz embedding/arama yapma!
-- Schema'da olmayan node/property kullanma
-- Field tiplerini karıştırma (string'e =, integer'a CONTAINS)
-- Chunk'lardan faydalanıyorsan mutlaka add_page_resource çağır
+- **KRİTİK: SCHEMA-BASED FILENAME ARAMA!** Entity node'larında bulunmayan bilgiler için schema'daki container node'larının identifier property'sinde ara!
+- **KRİTİK: SEMANTIC ARAMA SONRASI CYPHER QUERY ZORUNLU!** generate_embeddings_for_cypher çağrısı yaptıktan sonra MUTLAKA bir sonraki iterasyonda cypher_query eylemi ile arama gerçekleştir!
+- **KRİTİK: TEKRARLI EMBEDDING YASAK!** generate_embeddings_for_cypher'dan sonra tekrar embedding oluşturma - doğrudan cypher_query'ye geç!
+- Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
+- Field tiplerini karıştırma (string'e =, integer/date'e CONTAINS)
+- İçerik node'larından faydalanıyorsan mutlaka add_page_resource çağır (schema'daki reference property'yi kullan)
 - Embedding'lerde metadata kullanma, sadece content terimleri
 - Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
 - Başarısız sorguları tekrarlama - context'teki BAŞARISIZ SORGULAR bölümünü kontrol et!
 
 Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
-
-        return system_prompt
 
         return system_prompt
 
