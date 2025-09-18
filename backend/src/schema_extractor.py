@@ -24,6 +24,10 @@ import sys
 from typing import Dict, List, Any
 from langchain_neo4j import Neo4jGraph
 import logging
+from dotenv import load_dotenv
+
+# .env dosyasını yükle
+load_dotenv()
 
 # Logger ayarla - sadece ERROR seviyesi
 logging.basicConfig(level=logging.ERROR)
@@ -80,7 +84,11 @@ class Neo4jSchemaExtractor:
                         if 'String' in str(prop_types):
                             type_str = 'string[]'
                         elif 'Float' in str(prop_types) or 'Double' in str(prop_types):
-                            type_str = 'float[]'
+                            # Embedding fieldlarını belirle
+                            if 'embedding' in prop_name.lower() or 'vector' in prop_name.lower():
+                                type_str = 'embedding_vector'
+                            else:
+                                type_str = 'float[]'
                         else:
                             type_str = 'array'
                     else:
