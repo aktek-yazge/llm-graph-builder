@@ -1200,12 +1200,21 @@ def process_chat_response(messages, history, question, model, graph, document_na
     try:
         # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         llm, model_name = get_llm(model=model)
-        # Eğer agent parametre olarak gelmemişse, oluştur
+        # 🚀 CACHED AGENT KULLAN - Eğer agent parametre olarak geçildiyse cache'den gelen agent'ı kullan
         if intelligent_agent is None:
             try:
                 intelligent_agent = IntelligentAgent(graph)
-            except Exception:
+                print(f"🆕 Yeni IntelligentAgent oluşturuldu (non-stream) - Session: {session_id}")
+            except Exception as e:
+                print(f"❌ IntelligentAgent oluşturma hatası (non-stream) - Session: {session_id}: {e}")
                 intelligent_agent = None
+        else:
+            print(f"🎯 Cached IntelligentAgent kullanılıyor (non-stream) - Session: {session_id}")
+            # Cache'den gelen agent'ın session ID'sini güncelle
+            try:
+                intelligent_agent.current_session_id = session_id
+            except Exception as e:
+                print(f"⚠️ Cached agent ayarları güncellenemedi: {e}")
         
         
         # Normal işlem: IntelligentAgent kullan
@@ -2939,12 +2948,23 @@ async def process_chat_response_stream(messages, history, question, model, graph
         }
         
         # Instantiate intelligent agent for streaming path as well
-        intelligent_agent = None
-        try:
-            # Temiz cevap + referans modu - gereksiz LLM yorumlama yok
-            intelligent_agent = IntelligentAgent(graph, model_name=model, enable_llm_interpretation=False)
-        except Exception:
-            intelligent_agent = None
+        # 🚀 CACHED AGENT KULLAN - Eğer parametre olarak geçildiyse cache'den gelen agent'ı kullan
+        if intelligent_agent is None:
+            try:
+                # Sadece agent geçilmemişse yeni oluştur
+                intelligent_agent = IntelligentAgent(graph, model_name=model, enable_llm_interpretation=False)
+                print(f"🆕 Yeni IntelligentAgent oluşturuldu (stream) - Session: {session_id}")
+            except Exception as e:
+                print(f"❌ IntelligentAgent oluşturma hatası (stream) - Session: {session_id}: {e}")
+                intelligent_agent = None
+        else:
+            print(f"🎯 Cached IntelligentAgent kullanılıyor (stream) - Session: {session_id}")
+            # Cache'den gelen agent'ın ayarlarını güncelle
+            try:
+                intelligent_agent.enable_llm_interpretation = False
+                intelligent_agent.current_session_id = session_id
+            except Exception as e:
+                print(f"⚠️ Cached agent ayarları güncellenemedi: {e}")
 
         # IntelligentAgent'ı direkt kullan - retriever'a gerek yok
         if intelligent_agent:

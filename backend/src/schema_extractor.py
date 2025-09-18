@@ -48,7 +48,7 @@ class Neo4jSchemaExtractor:
             raise
     
     def get_node_schemas(self) -> Dict[str, List[str]]:
-        """Tüm node label'ları ve property'lerini çek"""
+        """Tüm node label'ları ve property'lerini çek (Message ve Session hariç)"""
         query = """
         CALL db.schema.nodeTypeProperties()
         YIELD nodeType, nodeLabels, propertyName, propertyTypes, mandatory
@@ -63,6 +63,10 @@ class Neo4jSchemaExtractor:
             
             for row in result:
                 label = row['label']
+                # Message ve Session node'larını hariç tut
+                if label in ['Message', 'Session']:
+                    continue
+                    
                 properties = []
                 
                 for prop in row['properties']:
@@ -104,7 +108,7 @@ class Neo4jSchemaExtractor:
             return {}
     
     def get_relationship_schemas(self) -> List[Dict[str, Any]]:
-        """Tüm relationship type'larını ve property'lerini çek"""
+        """Tüm relationship type'larını ve property'lerini çek (Message ve Session hariç)"""
         query = """
         CALL db.schema.relTypeProperties()
         YIELD relType, propertyName, propertyTypes, mandatory
@@ -117,10 +121,19 @@ class Neo4jSchemaExtractor:
             result = self.graph.query(query)
             rel_schemas = []
             
+            # Message ve Session ile ilgili olabilecek relationship type'ları hariç tut
+            # Gerçek veritabanından tespit edilen: LAST_MESSAGE, NEXT (Message->Message)
+            excluded_rel_types = ['HAS_MESSAGE', 'BELONGS_TO_SESSION', 'NEXT_MESSAGE', 'SESSION_MESSAGE', 
+                                 'LAST_MESSAGE', 'NEXT']
+            
             for row in result:
                 rel_type = row['relType']
                 # Başındaki ':' ve backtick karakterlerini kaldır
                 rel_type = rel_type.strip(':`')
+                
+                # Message/Session ile ilgili relationship'leri hariç tut
+                if rel_type in excluded_rel_types:
+                    continue
                 
                 properties = []
                 
@@ -154,12 +167,18 @@ class Neo4jSchemaExtractor:
             return []
     
     def get_relationship_patterns(self) -> List[str]:
-        """Relationship pattern'lerini çek"""
+        """Relationship pattern'lerini çek (Message ve Session hariç)"""
         query = """
         MATCH (start)-[r]->(end)
+        WHERE labels(start)[0] IS NOT NULL 
+          AND labels(end)[0] IS NOT NULL 
+          AND labels(start)[0] <> 'Message' 
+          AND labels(start)[0] <> 'Session'
+          AND labels(end)[0] <> 'Message' 
+          AND labels(end)[0] <> 'Session'
         RETURN DISTINCT labels(start)[0] as startLabel, 
-               type(r) as relType,
-               labels(end)[0] as endLabel
+                        type(r) as relType,
+                        labels(end)[0] as endLabel
         ORDER BY startLabel, relType, endLabel
         """
         

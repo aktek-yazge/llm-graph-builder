@@ -187,6 +187,9 @@ class IntelligentAgent:
             enable_llm_interpretation  # LLM yorumlama açık/kapalı
         )
 
+        # Schema'yı initialize et
+        self._initialize_schema_cache()
+
         # Progress tracking ve context memory
         self.context_memory = ""  # Birikimli context prompt
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -205,6 +208,23 @@ class IntelligentAgent:
 
         # Thread Pool Executor for background memory operations (mem0 devre dışı olduğu için isteğe bağlı)
         # self._memory_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    def _initialize_schema_cache(self):
+        """Schema bilgisini başlangıçta bir kez al ve cache'le"""
+        try:
+            logger.info("📋 Neo4j schema bilgisi başlangıçta alınıyor...")
+            self.schema_cache = get_compact_schema(self.graph)
+            logger.info(f"✅ Schema cache'lendi: {len(self.schema_cache)} karakter")
+        except Exception as e:
+            logger.error(f"❌ Schema cache'leme hatası: {e}")
+            self.schema_cache = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
+
+    def get_cached_schema(self) -> str:
+        """Cache'lenmiş schema bilgisini döndür"""
+        if self.schema_cache is None or not self.schema_cache:
+            logger.warning("⚠️ Schema cache boş, yeniden alınıyor...")
+            self._initialize_schema_cache()
+        return self.schema_cache
 
     def interpret_final_answer_with_llm(
         self,
@@ -805,10 +825,11 @@ Sadece "documents" veya "pages" olarak yanıtla."""
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             session_info = getattr(self, "current_session_id", "unknown")
             log_file = f"llm_prompts_{session_info}_{timestamp}_iter_{iteration}.txt"
-            log_path = f"context_memory_logs/{log_file}"
+            log_dir = os.path.abspath("context_memory_logs")
+            log_path = os.path.join(log_dir, log_file)
 
             # Dizin yoksa oluştur
-            os.makedirs("context_memory_logs", exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True)
 
             logger.info(f"\n{'='*60}")
             logger.info(f"LLM PROMPT LOGGING - İterasyon {iteration}")
@@ -1068,11 +1089,12 @@ ANALYSIS SUMMARY:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             session_info = getattr(self, "current_session_id", "unknown")
             log_file = f"llm_response_{session_info}_{timestamp}_iter_{iteration}.txt"
-            log_path = f"context_memory_logs/{log_file}"
+            log_dir = os.path.abspath("context_memory_logs")
+            log_path = os.path.join(log_dir, log_file)
 
             # Dizin yoksa oluştur (sadece yazacaksak)
             if will_write:
-                os.makedirs("context_memory_logs", exist_ok=True)
+                os.makedirs(log_dir, exist_ok=True)
 
             # Response içeriğini hazırla
             file_content = f"""{'='*80}
@@ -1092,9 +1114,7 @@ RAW LLM RESPONSE:
 {response_content}
 
 {'='*80}
-PARSED ACTION CONTENT:
-{'='*80}
-{action_content}
+
 """
 
             # Dosyaya yaz (sadece will_write True ise)
@@ -1116,231 +1136,77 @@ PARSED ACTION CONTENT:
     def summarize_finding(
         self, action_description: str, result, user_question: str, thought: str = "", action: str = ""
     ) -> str:
-        """İki aşamalı bulgu analizi: Önce basit kontrol, sonra detaylı analiz"""
+        """Soru-cevap karşılaştırması: Sonuçlar arasından en uygun bulguyu seç ve yanıt olarak döndür"""
         try:
-            # AŞAMA 1: Basit "Soru karşılandı mı?" kontrolü + Keşif tespiti
+            # Sonuç kontrolü
             if isinstance(result, list) and len(result) > 0:
-                sample_data = result[:3] if len(result) > 3 else result
+                # İlk 5 sonucu analiz için al
+                sample_data = result[:5] if len(result) > 5 else result
                 sample_text = str(sample_data)
                 
-                # Basit kontrol promptu - KEŞİF seçeneği eklendi
-                simple_check_prompt = f"""KULLANICI SORUSU: {user_question}
+                # Master LLM'den en uygun bulguyu seçmesini iste
+                selection_prompt = f"""KULLANICI SORUSU: {user_question}
 
-LLM'İN DÜŞÜNCESI: {thought}
+YAPILAN İŞLEM: {action_description}
+CYPHER SORGUSU: {action}
 
-BULUNAN SONUÇLAR: {sample_text}
+BULUNAN SONUÇLAR ({len(result)} adet):
+{sample_text}
 
-Bu sonuçlar ve LLM'in düşüncesi değerlendirilerek yanıtla:
-- "EVET" = Sonuçlar kullanıcının sorusunu tam olarak cevaplayabilir
-- "HAYIR" = Sonuçlar yetersiz, daha detaylı analiz gerekiyor  
-- "KEŞİF" = LLM keşif/araştırma yapıyor, yönlendirme gerekiyor
+🎯 GÖREV: Bu sonuçlar arasından kullanıcı sorusuna EN UYGUN olanı seç ve tam yanıt olarak döndür.
 
-Sadece "EVET", "HAYIR" veya "KEŞİF" ile yanıtla."""
+KURALLAR:
+1. Eğer sonuçlar kullanıcı sorusunu cevaplayabiliyorsa → En uygun sonucu seç ve detaylı yanıt ver
+2. Eğer birden fazla seçenek varsa → Kullanıcı sorusuna en yakın/uygun olanı seç
+3. Eğer sonuçlar yetersizse → "Bu sonuçlar yetersiz, daha fazla bilgi gerekiyor" de
+4. Mümkünse bulduğun veriyi kullanarak kullanıcının sorusunu direkt yanıtla
+5. Aynı isimde birden fazla müşteri varsa → Final answer ile kullanıcıya bunlardan hangisini seçmesi gerektiğini tavsiye et
+6. BAŞARILI BULGU ise → Kullanılan Cypher sorgusu ve bulunan node/değerleri belirt ki sonraki iterasyonlarda kullanılabilsin
 
-                # Basit kontrol yap
-                simple_response = self.master_llm.invoke([
-                    SystemMessage(content="Sen verilen sonuçların kullanıcı sorusunu karşılayıp karşılamadığını ve LLM'in keşif yapıp yapmadığını kontrol eden bir analistisin. Sadece EVET, HAYIR veya KEŞİF yanıtı verirsin."),
-                    HumanMessage(content=simple_check_prompt)
+ÖRN: Birden fazla seçenek listeleniyorsa, kullanıcı sorusundaki kriterlere en uygun olanı seç.
+
+YANIT FORMATINI BELİRLE:
+- BAŞARILI ise: "✅ [Seçilen sonuç ve detaylar] | NODE/DEĞERLER: [bulunan node,type ve data ilişkisi]"
+- YETERSİZ ise: "⚠️ Bu sonuçlar yetersiz: [neden yetersiz] | NODE/DEĞERLER: [bulunan node,type ve data ilişkisi]"
+- KISMEN YETERLİ ise: "⚠️ Bu sonuçlar kısmen yeterli: [neden kısmen yeterli] | NODE/DEĞERLER: [bulunan node type ve data ilişkisi]"
+"""
+
+                # Master LLM'den en iyi yanıtı al
+                response = self.master_llm.invoke([
+                    SystemMessage(content="Sen sonuç analizi uzmanısın. Verilen sonuçlar arasından kullanıcı sorusuna en uygun olanı seçip detaylı yanıt olarak döndürürsün. Bulunan verileri kullanarak kullanıcının sorusunu mümkün olduğunca eksiksiz yanıtlarsın."),
+                    HumanMessage(content=selection_prompt)
                 ])
                 
-                # Token logla (basit kontrol)
-                self.log_token_usage(simple_response, -1, "summarize_finding_simple_check")
+                # Token logla
+                self.log_token_usage(response, -1, "summarize_finding_selection")
                 
                 # Response'u normalize et
-                simple_answer = simple_response.content.strip().upper()
-                if isinstance(simple_answer, list):
-                    simple_answer = " ".join(str(item) for item in simple_answer).strip().upper()
+                answer = response.content.strip()
+                if isinstance(answer, list):
+                    answer = " ".join(str(item) for item in answer).strip()
                 
-                # Eğer EVET ise, basit özet döndür
-                if "EVET" in simple_answer:
-                    return f"✅ Kullanıcı sorusu karşılandı: {len(result)} sonuç bulundu ve istenen bilgileri içeriyor."
-                
-                # Eğer KEŞİF ise, hiçbir değerlendirme yapma - üst LLM kendi kararını vermeye devam etsin
-                elif "KEŞİF" in simple_answer:
-                    logger.info(f"🔍 Keşif durumu tespit edildi - Hiçbir değerlendirme yapılmayacak, üst LLM karar vermeye devam edecek...")
-                    return ""  # Boş string döndür, hiçbir değerlendirme yapma
-                
-                # HAYIR ise AŞAMA 2'ye geç
-                logger.info(f"📊 Basit kontrol: HAYIR - Detaylı analiz yapılıyor...")
+                return answer
                 
             else:
                 return f"❌ Sonuç yok - '{user_question}' için veri bulunamadı"
 
-            # AŞAMA 2: Detaylı analiz (sadece basit kontrol HAYIR derse)
-            # Neo4j şema bilgisini al
-            try:
-                compact_schema = get_compact_schema(self.graph)
-                schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
-{compact_schema}
-
-🎯 DOMAIN CONTEXT:
-Bu graph database, belge tabanlı bir bilgi sistemidir:
-- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
-- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri  
-- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
-- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
-            except Exception as e:
-                logger.warning(f"Schema bilgisi alınamadı: {e}")
-                schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
-
-            # Structured data için detaylı analiz
-            sample_data = result[:5] if len(result) > 5 else result
-            sample_text = str(sample_data)
-
-            detailed_prompt = f"""⚠️ DETAYLI ANALİZ GEREKİYOR - Basit kontrol yetersiz kaldı
-
-{schema_info}
-
-KULLANICI SORUSU: {user_question}
-
-LLM'İN DÜŞÜNCESI: {thought}
-LLM'İN KARARI: {action}
-İŞLEM DETAYI: {action_description} 
-İLK 5 SONUÇ: {sample_text}
-
-🎯 DETAYLI GÖREV: Neo4j şemasını dikkate alarak kapsamlı analiz yap:
-1. LLM doğru stratejiyi mi seçti? Schema'ya uygun mu?
-2. Bu veri soruyu NEDEN tam karşılamıyor? Eksik ne?
-3. Final Answer vermek için ne gerekiyor?
-4. LLM'in bir sonraki adımı ne olmalı? Schema'ya göre hangi node/relationship'lere bakmalı?
-5. Vector araması yapılmışsa gelen sonuçlarda istenen bilgi kesik, eksik ise takip eden 2-3 chunka position üzerinden bakması için yönlendirme yap.
-6. Entity query yerine vector search yapması gerekiyor mu? Şema'ya göre değerlendir.
-
-  ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
-1. ÖNCE Entity arama (Customer, PolicyType, vb.)
-2. SONRA Document node filefName arama (metadata) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
-4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
-
- TÜRKÇE METİN ARAMA ÖNERİLERİ (eksikse belirt):
-- Exact match yerine CONTAINS kullanması gerekiyorsa söyle
-- APOC text clean ile normalizasyon: apoc.text.clean(text)
-- Türkçe karakter duyarsız arama: toLower() + apoc.text.clean()
-- Örnek: WHERE apoc.text.clean(toLower(c.name)) CONTAINS apoc.text.clean(toLower("aranacak"))
-
-📊 SCHEMA PROPERTY ÖNERİLERİ (yanlışsa düzelt):
-- CONTAINS ile esnek arama öner
-- Doğru property isimlerini kontrol et
-
-ÇIKTI: 1-2 cümle ile LLM'e net yönlendirme ve eksiklikleri belirt - APOC kullanımını dahil et."""
-
-            logger.info(f"📊 Detaylı analiz prompt uzunluğu: {len(detailed_prompt)} karakter")
-            
-            # Detaylı analiz yap
-            detailed_response = self.master_llm.invoke([
-                SystemMessage(
-                    content="Sen Neo4j şema uzmanı, APOC uzmanı ve LLM performans analistisin. Türkçe text processing, APOC text fonksiyonları ve karakter normalizasyonu konularında uzmansın. Yetersiz bulunan sonuçları derinlemesine analiz edip LLM'e en optimum stratejiyi önerirsin. Şema bilgisini kullanarak graph veritabanı yapısına göre en iyi yolu belirlersin."
-                ),
-                HumanMessage(content=detailed_prompt)
-            ])
-
-            # Token logla (detaylı analiz)
-            self.log_token_usage(detailed_response, -1, "summarize_finding_detailed_analysis")
-
-            # Response content'i al
-            raw_content = detailed_response.content
-            if isinstance(raw_content, list):
-                detailed_result = " ".join(str(item) for item in raw_content).strip()
-            else:
-                detailed_result = raw_content.strip()
-
-            return f"⚠️ {detailed_result}"
-
         except Exception as e:
-            logger.error(f"Özet oluşturma hatası: {e}")
+            logger.error(f"Sonuç seçimi hatası: {e}")
             # Fallback: basit özet
             return (
-                f"{len(result) if result else 0} kayıt bulundu. Örnek: {str(result[:1])}..."
+                f"✅ {len(result)} kayıt bulundu: {str(result[:1])}..."
                 if result
                 else f"❌ Sonuç yok - '{user_question}' için veri bulunamadı"
             )
 
-    def _handle_exploration_guidance(self, user_question: str, result, thought: str, action: str) -> str:
-        """Keşif durumunda LLM'e yönlendirme ver"""
-        try:
-            # Neo4j şema bilgisini al
-            try:
-                compact_schema = get_compact_schema(self.graph)
-                schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
-{compact_schema}
-
-🎯 DOMAIN CONTEXT:
-Bu graph database, belge tabanlı bir bilgi sistemidir:
-- **Document nodes**: Kaynak belgeler (PDF'ler ve diğer dosyalar)
-- **Chunk nodes**: Belgelerin semantic search için parçalanmış içerikleri  
-- **Entity nodes**: Belgelerden çıkarılmış yapılandırılmış varlıklar
-- **Relationship'ler**: Varlıklar arasındaki bağlantılar ve hiyerarşik ilişkiler"""
-            except Exception as e:
-                logger.warning(f"Schema bilgisi alınamadı: {e}")
-                schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
-
-            sample_data = result[:3] if len(result) > 3 else result
-            sample_text = str(sample_data)
-
-            exploration_prompt = f"""🔍 KEŞİF DURUMU - LLM Yönlendirmesi
-
-{schema_info}
-
-KULLANICI SORUSU: {user_question}
-
-LLM'İN KEŞİF DÜŞÜNCESI: {thought}
-LLM'İN KARARI: {action}
-KEŞİFTEN ÇIKAN SONUÇLAR: {sample_text}
-
-🎯 GÖREV: LLM keşif yapıyor. Bu keşif sonuçlarına göre LLM'e basit yönlendirme ver:
-
-📋 KEŞİF YÖNLENDİRME KURALLARI:
-1. Eğer keşif başarılıysa: "Bu verilerle soruyu cevaplayabilirsin, final answer ver"
-2. Eğer keşif eksikse: "Şu spesifik bilgileri ara: [neleri araması gerektiğini söyle]"
-3. Schema'ya göre hangi node/relationship'lere bakması gerektiğini belirt
-4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
-
-  METİN ARAMA ÖNERİLERİ:
-- İsim aramalarında CONTAINS kullan (exact match yerine)
-- APOC text clean fonksiyonlarını öner: apoc.text.clean(text)
-- Türkçe karakterler için normalizasyon öner
-- Büyük/küçük harf duyarsız arama için toLower() kullan
-- Örnek: WHERE apoc.text.clean(toLower(c.name)) CONTAINS apoc.text.clean(toLower("string"))
-
-ARAMA STRATEJİSİ (yanlış yerde arıyorsa yönlendir):
-1. ÖNCE Entity arama (Customer, PolicyType, vb.)
-2. SONRA Document node arama (metadata) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
-
-ÇIKTI: 1 cümle ile LLM'e net yönlendirme - APOC ve CONTAINS kullanımını dahil et."""
-
-            # Keşif yönlendirmesi yap
-            exploration_response = self.master_llm.invoke([
-                SystemMessage(
-                    content="Sen LLM'in keşif sürecine yönlendirme veren bir Neo4j ve APOC uzmanısın. Türkçe metin arama, karakter normalizasyonu ve APOC text fonksiyonları konularında uzmansın. LLM'e hangi adımları atması gerektiğini basit ve net şekilde söylersin. CONTAINS ve APOC text clean kullanımını önerirsin."
-                ),
-                HumanMessage(content=exploration_prompt)
-            ])
-
-            # Token logla (keşif yönlendirmesi)
-            self.log_token_usage(exploration_response, -1, "summarize_finding_exploration_guidance")
-
-            # Response content'i al
-            raw_content = exploration_response.content
-            if isinstance(raw_content, list):
-                guidance_result = " ".join(str(item) for item in raw_content).strip()
-            else:
-                guidance_result = raw_content.strip()
-
-            return f"🔍 Keşif devam ediyor: {guidance_result}"
-
-        except Exception as e:
-            logger.error(f"Keşif yönlendirmesi hatası: {e}")
-            return f"🔍 Keşif devam ediyor: {len(result)} sonuç bulundu. '{user_question}' için daha spesifik bilgiler ara."
-
     def analyze_empty_result(
         self, user_question: str, cypher_query: str, query_type: str = "entity", thought: str = "", action: str = ""
     ) -> str:
-        """Boş sonuç dönen sorguları analiz edip alternatif strateji önerir"""
+        """Boş sonuç dönen sorguları ve syntax hatalarını analiz edip alternatif strateji önerir"""
         try:
             # Schema bilgisini al
             try:
-                compact_schema = get_compact_schema(self.graph)
+                compact_schema = self.get_cached_schema()
                 schema_info = f"""NEO4J GRAPH DATABASE SCHEMA:
 {compact_schema}
 
@@ -1354,7 +1220,30 @@ Bu graph database, belge tabanlı bir bilgi sistemidir:
                 logger.warning(f"Schema bilgisi alınamadı: {e}")
                 schema_info = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
 
-            analysis_prompt = f"""Neo4j veritabanında boş sorgu analizi:
+            # Query type'a göre prompt oluştur
+            if query_type == "cypher_error":
+                analysis_prompt = f"""Neo4j veritabanında SYNTAX HATASI analizi:
+
+{schema_info}
+
+KULLANICI SORUSU: {user_question}
+LLM'İN DÜŞÜNCESI: {thought}
+LLM'İN KARARI: {action}
+
+{cypher_query}
+
+🎯 GÖREV: Bu Cypher sorgusu neden hata verdi? SYNTAX HATASINI tespit et ve SADECE TEK CÜMLE ile düzeltilmiş çözümü öner.
+
+SYNTAX HATASI ANALİZİ:
+1. Property isimleri schema'ya uygun mu? (örn: fileName vs filename)
+2. Node label'ları doğru mu? (örn: Document vs document)
+3. String normalizasyon fonksiyonları doğru mu? (apoc.text.clean, toString vs)
+4. APOC fonksiyonları varsa syntax'ı doğru mu?
+5. RETURN clause'da field isimleri var mı?
+
+SADECE TEK CÜMLE ile çözümü söyle."""
+            else:
+                analysis_prompt = f"""Neo4j veritabanında boş sorgu analizi:
 
 {schema_info}
 
@@ -1369,20 +1258,22 @@ ARAMA STRATEJİSİ:
 1. Entity aramadan başla (Customer, PolicyType vb...)
 2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
 3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
-4. **ZORUNLU: Semantic arama (generate_embeddings_for_cypher) yaptıktan sonra MUTLAKA bir cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!**
+4. **KRİTİK: Vector/Semantic arama gerekiyorsa LLM'e 'generate_embeddings_for_cypher TOOL'UNU ÇAĞIR' de! LLM tool calling yapmalı, sadece metin tavsiyesi verme!**
 
 Öneriler: CONTAINS kullan, apoc.text.clean() öner.
 
-
-
 SADECE TEK CÜMLE ile cevap ver."""
+
+            # SystemMessage'ı query type'a göre ayarla
+            if query_type == "cypher_error":
+                system_message = "Sen Cypher syntax uzmanısın. Cypher syntax hatalarını tespit edip kısa ve net çözüm önerirsin. Schema'ya uygun property/node isimlerini kontrol edersin. SADECE TEK CÜMLE ile çözümü açıklarsın."
+            else:
+                system_message = "Sen kısa ve net cevap veren Neo4j uzmanısın. Boş sorgu nedenini ve çözümünü SADECE TEK CÜMLE ile açıklarsın. Vector/semantic arama gerekiyorsa 'generate_embeddings_for_cypher TOOL'UNU ÇAĞIR' şeklinde tool calling öner. Uzun açıklama yapma!"
 
             # LLM ile analiz et
             response = self.master_llm.invoke(
                 [
-                    SystemMessage(
-                        content="Sen kısa ve net cevap veren Neo4j uzmanısın. Boş sorgu nedenini ve çözümünü SADECE TEK CÜMLE ile açıklarsın. Uzun açıklama yapma!"
-                    ),
+                    SystemMessage(content=system_message),
                     HumanMessage(content=analysis_prompt),
                 ]
             )
@@ -1508,7 +1399,7 @@ SADECE TEK CÜMLE ile cevap ver."""
                 context_prompt += (
                     f"- **SONUÇ**: Entity query limiti aşıldı, vector search'e geç!\n"
                 )
-                context_prompt += f"- **ZORUNLU**: generate_embeddings_for_cypher + GDS similarity kullan\n\n"
+                context_prompt += f"- **ZORUNLU**: generate_embeddings_for_cypher TOOL'UNU ÇAĞIR + GDS similarity kullan\n\n"
 
         # Bulunan document filename'lerini ekle
         if state.discovered_document_filenames:
@@ -1682,7 +1573,7 @@ SADECE TEK CÜMLE ile cevap ver."""
                 "type": "function",
                 "function": {
                     "name": "generate_embeddings_for_cypher",
-                    "description": "Cypher sorgusunda kullanmak üzere SADECE İÇERİK KELİMELERİNDEN embedding oluşturur. METADATA (müşteri adı, yıl, poliçe türü) ekleme! Örnek: 'taksit tablosu ödeme planı' ✅, 'ayça hanım 2020 taksit' ❌. KRİTİK: Bu tool çağrısı SONRASINDA MUTLAKA bir sonraki iterasyonda cypher_query eylemi ile arama gerçekleştir! Embedding oluşturduktan sonra doğrudan final_answer verme!",
+                    "description": "Cypher sorgusunda kullanmak üzere SADECE İÇERİK KELİMELERİNDEN embedding oluşturur. METADATA (müşteri adı, yıl, poliçe türü) ekleme! Örnek: 'taksit tablosu ödeme planı' ✅, 'ayça hanım 2020 taksit'",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -2138,20 +2029,6 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             }
         )
 
-    def _classify_cypher_strategy(self, cypher_query: str) -> str:
-        """Cypher sorgusunu genel strateji tipine göre sınıflandır"""
-        query_lower = cypher_query.lower()
-
-        # Basit genel kategoriler
-        if "embedding" in query_lower or "gds.similarity" in query_lower:
-            return "vector_search"
-        elif "chunk" in query_lower:
-            return "chunk_search"
-        elif "customer" in query_lower or "policy" in query_lower:
-            return "entity_search"
-        else:
-            return "general_query"
-
     def solve_question(
         self, user_question: str, session_id: str = None
     ) -> Dict[str, Any]:
@@ -2199,6 +2076,10 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 logger.info(
                     f"Conversation history alındı: {len(conversation_context.messages)} mesaj"
                 )
+                
+                # DEBUG: Mesajları detaylı logla
+                for i, msg in enumerate(conversation_context.messages):
+                    logger.info(f"DEBUG Mesaj {i}: type={type(msg)}, content_length={len(msg.content) if hasattr(msg, 'content') else 'N/A'}, role={getattr(msg, 'role', 'N/A')}")
 
                 # Son mesajı hariç tut (henüz işlenen soruyu dahil etme)
                 all_messages = (
@@ -2266,6 +2147,9 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
         # Embedding storage için
         self._current_embeddings = {}
+        
+        # Cypher embedding storage
+        self._cypher_embeddings = {}
 
 
         # Schema-based system prompt'u al (cache'den veya oluştur)
@@ -2450,7 +2334,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                 # LLM response'unu dosyaya kaydet
                 self.log_llm_response(
-                    agent_response, state.iteration_count, action, action_content, False
+                    agent_response, state.iteration_count, action, action_content, True
                 )  # will_write=False ile sadece debug log
 
                 # Token kullanımını action type ile logla
@@ -2882,9 +2766,10 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         # Cypher query başarısız - failover stratejisi ve analiz
                         state.failed_entity_query_count += 1
 
-                        # LLM ile başarısız sorguyu analiz et
+                        # LLM ile başarısız sorguyu analiz et - error message'ı da geç
+                        error_info = f"CYPHER SORGU: {action_content}\n\nHATA MESAJI: {result}"
                         analysis = self.analyze_empty_result(
-                            user_question, action_content, "cypher_error", thought, action
+                            user_question, error_info, "cypher_error", thought, action
                         )
 
                         # Eğer vector search'e geçmeden önce daha fazla entity query denemesi yapalım
@@ -3090,9 +2975,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
     def get_system_prompt(self) -> str:
         """System prompt'u cache'den al veya oluştur - token-optimized"""
-        # Cache'i temizle ki güncel prompt kullanılsın
-        self.system_prompt_cache = None
-
+        
         if self.system_prompt_cache:
             logger.info("📋 System prompt cache'den alınıyor")
             return self.system_prompt_cache
@@ -3108,13 +2991,13 @@ Bu deneyimleri dikkate alarak strateji belirle."""
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
         """Schema-based ReAct Agent - General Purpose Graph Database Query Assistant"""
 
-        # Schema'yı dinamik olarak Neo4j'den çek
+        # Schema'yı cache'den al
         try:
             from src.schema_extractor import Neo4jSchemaExtractor
 
             extractor = Neo4jSchemaExtractor()
             extractor.graph = self.graph
-            compact_schema = get_compact_schema(self.graph)
+            compact_schema = self.get_cached_schema()
 
             schema_text = f"""NEO4J GRAPH DATABASE SCHEMA:
 {compact_schema}
@@ -3172,8 +3055,6 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 1. **ÖNCE Entity Arama**: Yapılandırılmış node'larda ara (Customer, PolicyType, vb.)
 2. **SONRA Document node fileName Arama**: Dosya metadata'sında ara (Document.fileName) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-3. **SONRA Semantic/Content Arama**: generate_embeddings_for_cypher ile chunk'larda ara - **ZORUNLU: Boş sonuç sonrası MUTLAKA semantic arama dene!**  
-
 
 **KURAL**: ÖNCE KEŞİF YAP - HER ZAMAN KEŞİF İLE BAŞLA!
 
@@ -3342,17 +3223,32 @@ LIMIT 10
 - `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
 - LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
 
-#### 🛠️ GENEL ARAÇLAR:
+#### 🛠️ TOOL KULLANIM KURALLARI:
+
+**ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
+
+1. **Vector/Semantic Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
+   - Entity aramalarında 2-3 defa boş sonuç gelince
+   - "prim", "taksit", "ödeme" gibi CONTENT kavramları aranıyorsa  
+   - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
+   - Context memory'de "vector search kullan" yazdıysa
+
+2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR:**
+   - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
+   - Final answer'da sayfa referansları gösterilecekse
+   - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
 
 **generate_embeddings_for_cypher(text)**:
 - İçerik tabanlı aramalar için embedding oluşturur
-- `text`: Aranacak kavram/içerik terimleri
+- `text`: Aranacak kavram/içerik terimleri (SADECE content, metadata değil!)
 - Cypher'da `$embedding_vector` değişkeni olarak kullanılır
 - `gds.similarity.cosine(content_node.embedding_vector, $embedding_vector)` ile benzerlik
+- **KRİTİK**: Tool çağrısından sonra MUTLAKA bir sonraki iterasyonda cypher_query yap!
 
 **add_page_resource(page_link)**:
 - Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
 - Her kullanılan içerik için mutlaka çağır
+- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
 
 ### 🔗 PARAMETER INHERITANCE:
 
@@ -3391,6 +3287,14 @@ Action: [cypher_query | final_answer]
 Content: [Cypher sorgusu | final cevap]
 ```
 
+**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
+- **generate_embeddings_for_cypher**: Semantic arama için embedding oluştur  
+- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
+
+Tool çağırma örneği (JSON format):
+- generate_embeddings_for_cypher(text="prim miktarı ödeme tutarı")
+- add_page_resource(page_link="document_page_link.png")
+
 ## 🎯 ITERATION BAŞLANGICI:
 
 Her iterasyon başında şunları değerlendir:
@@ -3410,7 +3314,7 @@ Her iterasyon başında şunları değerlendir:
 - **KRİTİK: STRING NORMALİZASYONU KULLAN!** Tüm string karşılaştırmalarında `toLower(apoc.text.clean(coalesce(toString(field), '')))` zorunlu!
 - **KRİTİK: TEKRAR SORGU YAPMA!** ÖNCEKİ BAŞARILI BULGULAR bölümünde aynı/benzer sorgu varsa DIREK final_answer ver!
 - **KRİTİK: SCHEMA-BASED FILENAME ARAMA!** Entity node'larında bulunmayan bilgiler için schema'daki container node'larının identifier property'sinde ara!
-- **KRİTİK: SEMANTIC ARAMA SONRASI CYPHER QUERY ZORUNLU!** generate_embeddings_for_cypher çağrısı yaptıktan sonra MUTLAKA bir sonraki iterasyonda cypher_query eylemi ile arama gerçekleştir!
+- **KRİTİK: SEMANTIC ARAMA İÇİN TOOL ÇAĞIR!** Vector/semantic arama gerektiğinde generate_embeddings_for_cypher TOOL'UNU çağır, sonra cypher_query eylemi yap!
 - **KRİTİK: TEKRARLI EMBEDDING YASAK!** generate_embeddings_for_cypher'dan sonra tekrar embedding oluşturma - doğrudan cypher_query'ye geç!
 - Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
 - Field tiplerini karıştırma (string'e =, integer/date'e CONTAINS)

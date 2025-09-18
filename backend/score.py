@@ -25,7 +25,7 @@ from sse_starlette.sse import EventSourceResponse
 from src.communities import create_communities
 from src.neighbours import get_neighbour_nodes
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict
 from google.oauth2.credentials import Credentials
 import os
 import re
@@ -47,7 +47,6 @@ from starlette.requests import Request
 from dotenv import load_dotenv
 import tempfile
 from pathlib import Path
-from src.intelligent_agent import IntelligentAgent
 import time
 import json
 import logging
@@ -117,6 +116,113 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 
 logger = CustomLogger()
+
+# 🚀 SESSION-BASED INTELLIGENT AGENT CACHE
+# Agent'ları session ID'ye göre memory'de tut - performance optimization
+_agent_cache: Dict[str, IntelligentAgent] = {}
+_cache_access_times: Dict[str, float] = {}  # LRU tracking için access time'ları
+
+# 📊 CACHE CONFIGURATION PARAMETERS
+AGENT_CACHE_MAX_SIZE = int(os.environ.get("AGENT_CACHE_MAX_SIZE", "500"))  # Max session sayısı
+AGENT_CACHE_CLEANUP_COUNT = int(os.environ.get("AGENT_CACHE_CLEANUP_COUNT", "50"))  # Temizleme sırasında silinecek session sayısı
+
+def get_cached_agent(session_id: str, graph: Neo4jGraph, model_name: str) -> IntelligentAgent:
+    """
+    Session ID'ye göre cache'lenmiş agent'ı döndür veya yeni oluştur
+    LRU (Least Recently Used) cache mantığı ile memory management
+    """
+    import time
+    
+    try:
+        current_time = time.time()
+        
+        # Önce cache'te var mı diye kontrol et
+        if session_id in _agent_cache:
+            cached_agent = _agent_cache[session_id]
+            
+            # LRU için access time'ını güncelle
+            _cache_access_times[session_id] = current_time
+            
+            print(f"✅ Cached agent bulundu - Session: {session_id}")
+            
+            # Graph instance'ını güncelle (bağlantı değişmiş olabilir)
+            cached_agent.graph = graph
+            cached_agent.current_session_id = session_id
+            
+            return cached_agent
+        
+        # Cache'te yok, yeni agent oluştur
+        print(f"🆕 Yeni agent oluşturuluyor - Session: {session_id}")
+        new_agent = IntelligentAgent(graph, model_name=model_name)
+        new_agent.current_session_id = session_id
+        
+        # Cache'e ekle
+        _agent_cache[session_id] = new_agent
+        _cache_access_times[session_id] = current_time
+        
+        # LRU Cache boyutu kontrolü (global parametrelerle)
+        if len(_agent_cache) > AGENT_CACHE_MAX_SIZE:
+            # En az kullanılan session'ları bul (LRU mantığı)
+            sorted_sessions = sorted(
+                _cache_access_times.items(), 
+                key=lambda x: x[1]  # access time'a göre sırala
+            )
+            
+            # Konfigüre edilebilir sayıda session'ı sil
+            sessions_to_remove = sorted_sessions[:AGENT_CACHE_CLEANUP_COUNT]
+            removed_sessions = []
+            
+            for session_to_remove, last_access in sessions_to_remove:
+                if session_to_remove in _agent_cache:
+                    del _agent_cache[session_to_remove]
+                    del _cache_access_times[session_to_remove]
+                    removed_sessions.append(session_to_remove)
+            
+            print(f"🧹 LRU Cache temizlendi: {len(removed_sessions)} eski session silindi")
+            print(f"   Cache limit: {AGENT_CACHE_MAX_SIZE}, cleanup size: {AGENT_CACHE_CLEANUP_COUNT}")
+            print(f"   Silinen sessions: {removed_sessions[:5]}{'...' if len(removed_sessions) > 5 else ''}")
+        
+        print(f"✅ Agent cache'lendi - Session: {session_id} | Toplam cache: {len(_agent_cache)}")
+        return new_agent
+        
+    except Exception as e:
+        print(f"❌ Agent cache hatası - Session: {session_id} | Hata: {e}")
+        # Fallback: cache'siz yeni agent
+        return IntelligentAgent(graph, model_name=model_name)
+
+def get_cache_stats() -> Dict:
+    """
+    Agent cache istatistiklerini döndür
+    """
+    import time
+    current_time = time.time()
+    
+    stats = {
+        'total_sessions': len(_agent_cache),
+        'max_capacity': AGENT_CACHE_MAX_SIZE,
+        'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
+        'usage_percentage': round((len(_agent_cache) / AGENT_CACHE_MAX_SIZE) * 100, 1),
+        'sessions': []
+    }
+    
+    # Session'ları son erişim zamanına göre sırala
+    if _cache_access_times:
+        sorted_sessions = sorted(
+            _cache_access_times.items(), 
+            key=lambda x: x[1], 
+            reverse=True  # En yeni erişim en üstte
+        )
+        
+        for session_id, last_access in sorted_sessions:
+            minutes_ago = round((current_time - last_access) / 60, 1)
+            stats['sessions'].append({
+                'session_id': session_id,
+                'last_access_minutes_ago': minutes_ago,
+                'has_agent': session_id in _agent_cache
+            })
+    
+    return stats
+
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
 MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
 MARKDOWN_CACHE_DIR = os.path.join(os.path.dirname(__file__), "markdown_cache")
@@ -1534,8 +1640,11 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         # Try to instantiate IntelligentAgent and pass them to QA_RAG (fallback to None on failure)
         intelligent_agent = None
         try:
-            intelligent_agent = IntelligentAgent(graph, model_name=model)
-        except Exception:
+            # 🚀 SESSION-BASED CACHED AGENT - Performance optimization
+            intelligent_agent = get_cached_agent(session_id, graph, model)
+            print(f"🎯 Cached agent alındı - Session: {session_id}")
+        except Exception as e:
+            print(f"❌ Cached agent hatası - Session: {session_id} | Hata: {e}")
             intelligent_agent = None
 
         result = await asyncio.to_thread(
@@ -1567,6 +1676,72 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         return create_api_response(job_status, message=message, error=error_message,data=mode)
     finally:
         gc.collect()
+
+@app.post("/setup_chatbot")
+async def setup_chatbot(
+    uri: str = Form(None),
+    userName: str = Form(None),
+    password: str = Form(None),
+    database: str = Form(None),
+    session_id: str = Form(None),
+    model: str = Form(None),
+    email: str = Form(None)
+):
+    """
+    Belirli bir session ID için IntelligentAgent'ı önceden oluştur/cache'le
+    Bu endpoint chat başlamadan önce agent'ı hazır hale getirir
+    """
+    try:
+        start_time = time.time()
+        
+        # Parametreleri kontrol et
+        if not session_id:
+            return create_api_response('Failed', message="session_id parametresi gerekli")
+        
+        if not model:
+            return create_api_response('Failed', message="model parametresi gerekli")
+        
+        # Graph bağlantısını kur
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        # Agent'ı oluştur veya mevcut cache'den al
+        agent = get_cached_agent(session_id, graph, model)
+        
+        # Agent bilgilerini al
+        agent_info = {
+            'session_id': session_id,
+            'model': model,
+            'agent_created': True,
+            'cache_hit': session_id in _agent_cache and session_id in _cache_access_times,
+            'schema_initialized': hasattr(agent, '_schema_cache') and agent._schema_cache is not None,
+            'total_cached_sessions': len(_agent_cache),
+            'initialization_time': f"{time.time() - start_time:.3f}s"
+        }
+        
+        # Loglama
+        elapsed_time = time.time() - start_time
+        json_obj = {
+            'api_name': 'setup_chatbot',
+            'db_url': uri,
+            'userName': userName,
+            'database': database,
+            'session_id': session_id,
+            'model': model,
+            'cache_hit': agent_info['cache_hit'],
+            'total_cached_sessions': agent_info['total_cached_sessions'],
+            'logging_time': formatted_time(datetime.now(timezone.utc)),
+            'elapsed_api_time': f'{elapsed_time:.3f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        return create_api_response('Success', data=agent_info, 
+                                 message=f"Chatbot setup completed for session {session_id}")
+    
+    except Exception as e:
+        error_message = str(e)
+        logging.exception(f'Exception in setup_chatbot: {error_message}')
+        return create_api_response('Failed', message=f"Chatbot setup failed: {error_message}")
 
 @app.post("/chat_bot_stream")
 async def chat_bot_stream(
@@ -1645,8 +1820,11 @@ async def chat_bot_stream(
             # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
             intelligent_agent = None
             try:
-                intelligent_agent = IntelligentAgent(graph, model_name=model)
-            except Exception:
+                # 🚀 SESSION-BASED CACHED AGENT - Performance optimization
+                intelligent_agent = get_cached_agent(session_id, graph, model)
+                print(f"🎯 Cached agent alındı - Session: {session_id}")
+            except Exception as e:
+                print(f"❌ Cached agent hatası - Session: {session_id} | Hata: {e}")
                 intelligent_agent = None
 
             async for chunk in QA_RAG_stream(
@@ -1722,6 +1900,144 @@ async def chat_bot_stream(
             gc.collect()
     
     return EventSourceResponse(generate_real_streaming_response())
+
+@app.get("/agent_cache_sessions")
+async def get_agent_cache_sessions():
+    """
+    Cache'deki tüm session'ları listele
+    """
+    try:
+        import time
+        current_time = time.time()
+        
+        sessions_info = []
+        for session_id, agent in _agent_cache.items():
+            last_access = _cache_access_times.get(session_id, 0)
+            sessions_info.append({
+                'session_id': session_id,
+                'model': getattr(agent, 'model_name', 'unknown'),
+                'last_access': last_access,
+                'last_access_formatted': formatted_time(datetime.fromtimestamp(last_access, tz=timezone.utc)),
+                'seconds_since_access': int(current_time - last_access),
+                'schema_cached': hasattr(agent, '_schema_cache') and agent._schema_cache is not None
+            })
+        
+        # Son erişim zamanına göre sırala (en son kullanılan önce)
+        sessions_info.sort(key=lambda x: x['last_access'], reverse=True)
+        
+        summary = {
+            'total_sessions': len(sessions_info),
+            'cache_limit': AGENT_CACHE_MAX_SIZE,
+            'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
+            'sessions': sessions_info
+        }
+        
+        return create_api_response('Success', data=summary, message=f"Found {len(sessions_info)} cached sessions")
+    
+    except Exception as e:
+        logging.error(f"Agent cache sessions hatası: {e}")
+        return create_api_response('Failed', message=f"Error retrieving sessions: {str(e)}")
+
+@app.post("/clear_agent_cache")
+async def clear_agent_cache(
+    session_id: str = Form(None),  # Specific session to clear, or None for all
+    email: str = Form(None)
+):
+    """
+    Agent cache'i temizle - belirli session veya tüm cache
+    """
+    try:
+        if session_id:
+            # Belirli session'ı temizle
+            if session_id in _agent_cache:
+                del _agent_cache[session_id]
+                del _cache_access_times[session_id]
+                message = f"Session {session_id} cache'den temizlendi"
+                action = "single_session_cleared"
+            else:
+                message = f"Session {session_id} cache'de bulunamadı"
+                action = "session_not_found"
+        else:
+            # Tüm cache'i temizle
+            cleared_count = len(_agent_cache)
+            _agent_cache.clear()
+            _cache_access_times.clear()
+            message = f"Tüm agent cache temizlendi ({cleared_count} session)"
+            action = "all_cache_cleared"
+        
+        # Loglama
+        json_obj = {
+            'api_name': 'clear_agent_cache',
+            'action': action,
+            'session_id': session_id,
+            'remaining_sessions': len(_agent_cache),
+            'logging_time': formatted_time(datetime.now(timezone.utc)),
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        return create_api_response('Success', message=message, data={
+            'action': action,
+            'session_id': session_id,
+            'remaining_sessions': len(_agent_cache)
+        })
+    
+    except Exception as e:
+        logging.error(f"Agent cache clear hatası: {e}")
+        return create_api_response('Failed', message=f"Error clearing cache: {str(e)}")
+
+@app.get("/agent_cache_stats")
+async def get_agent_cache_stats():
+    """
+    Session-based agent cache istatistiklerini döndür
+    """
+    try:
+        stats = get_cache_stats()
+        return create_api_response('Success', data=stats, message="Agent cache statistics retrieved successfully")
+    except Exception as e:
+        logging.error(f"Agent cache stats hatası: {e}")
+        return create_api_response('Failed', message=f"Error retrieving cache stats: {str(e)}")
+
+@app.post("/agent_cache_config")
+async def update_agent_cache_config(
+    max_size: int = Form(None),
+    cleanup_count: int = Form(None)
+):
+    """
+    Agent cache konfigürasyonunu güncelle
+    """
+    global AGENT_CACHE_MAX_SIZE, AGENT_CACHE_CLEANUP_COUNT
+    
+    try:
+        updated_params = {}
+        
+        if max_size is not None:
+            if max_size > 0 and max_size <= 10000:  # Reasonable limits
+                AGENT_CACHE_MAX_SIZE = max_size
+                updated_params['max_size'] = max_size
+            else:
+                return create_api_response('Failed', message="max_size must be between 1 and 10000")
+        
+        if cleanup_count is not None:
+            if cleanup_count > 0 and cleanup_count <= 1000:  # Reasonable limits
+                AGENT_CACHE_CLEANUP_COUNT = cleanup_count
+                updated_params['cleanup_count'] = cleanup_count
+            else:
+                return create_api_response('Failed', message="cleanup_count must be between 1 and 1000")
+        
+        # Current config döndür
+        current_config = {
+            'max_size': AGENT_CACHE_MAX_SIZE,
+            'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
+            'current_sessions': len(_agent_cache),
+            'updated_params': updated_params
+        }
+        
+        return create_api_response('Success', data=current_config, message="Cache configuration updated successfully")
+        
+    except Exception as e:
+        logging.error(f"Cache config update hatası: {e}")
+        return create_api_response('Failed', message=f"Error updating cache config: {str(e)}")
 
 # @app.post("/chat_bot_stream_legacy")
 # async def chat_bot_stream_legacy(
@@ -1927,14 +2243,81 @@ async def graph_query(
     
 
 @app.post("/clear_chat_bot")
-async def clear_chat_bot(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), session_id=Form(None),email=Form(None)):
+async def clear_chat_bot(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), session_id=Form(None), model=Form(None), new_session_id=Form(None),email=Form(None)):
     try:
         start = time.time()
-        graph = create_graph_database_connection(uri, userName, password, database)
-        result = await asyncio.to_thread(clear_chat_history,graph=graph,session_id=session_id)
+        
+        # 🧹 SESSION-BASED AGENT CACHE TEMİZLİK ÖNCE YAP
+        # Chat history temizlendiğinde ilgili agent'ı da cache'den kaldır
+        agent_cache_result = "no_cache_entry"
+        if session_id and session_id in _agent_cache:
+            del _agent_cache[session_id]
+            if session_id in _cache_access_times:
+                del _cache_access_times[session_id]
+            agent_cache_result = "cache_cleared"
+            print(f"🧹 Agent cache temizlendi - Session: {session_id}")
+        elif session_id:
+            agent_cache_result = "cache_not_found"
+            print(f"🔍 Agent cache'de bulunamadı - Session: {session_id}")
+        
+        # ⚠️ NEO4J BAĞLANTI KONTROLÜ
+        result = None
+        db_clear_result = "db_connection_failed"
+        new_agent_result = "no_model_provided"
+        
+        try:
+            # Neo4j bağlantısını dene
+            graph = create_graph_database_connection(uri, userName, password, database)
+            result = await asyncio.to_thread(clear_chat_history,graph=graph,session_id=session_id)
+            db_clear_result = "db_cleared"
+            print(f"✅ Neo4j'den chat history temizlendi - Session: {session_id}")
+            
+            # 🆕 CLEAR CHAT'TEN SONRA YENİ SESSION ID İLE AGENT OLUŞTUR (eğer new_session_id gönderildiyse)
+            if model and new_session_id and db_clear_result == "db_cleared":
+                try:
+                    # Yeni session ID ile agent oluştur
+                    new_session_agent = get_cached_agent(new_session_id, graph, model)
+                    new_agent_result = f"agent_created_for_new_session: {new_session_id}"
+                    print(f"🆕 Clear chat sonrası yeni session için agent oluşturuldu - New Session: {new_session_id}, Model: {model}")
+                except Exception as agent_error:
+                    new_agent_result = f"new_session_agent_creation_failed: {str(agent_error)}"
+                    print(f"❌ Yeni session için agent oluşturma hatası - New Session: {new_session_id}: {agent_error}")
+        
+        except Exception as db_error:
+            # Neo4j bağlantı hatası durumunda sadece cache temizle
+            db_clear_result = f"db_connection_failed: {str(db_error)[:100]}"
+            print(f"⚠️ Neo4j bağlantı hatası, sadece cache temizlendi - Session: {session_id}: {db_error}")
+            # Fallback result oluştur
+            result = {
+                "session_id": session_id, 
+                "message": "Chat cache cleared (database connection failed)", 
+                "user": "chatbot"
+            }
+        
+        # Sonuca cache temizleme ve yeni agent bilgilerini ekle
+        if isinstance(result, dict):
+            result['agent_cache_status'] = agent_cache_result
+            result['db_clear_status'] = db_clear_result
+            result['new_agent_status'] = new_agent_result
+            result['remaining_cached_sessions'] = len(_agent_cache)
+        
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'clear_chat_bot', 'db_url':uri, 'userName':userName, 'database':database, 'session_id':session_id, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            'api_name':'clear_chat_bot', 
+            'db_url':uri, 
+            'userName':userName, 
+            'database':database, 
+            'session_id':session_id, 
+            'model': model,
+            'agent_cache_status': agent_cache_result,
+            'db_clear_status': db_clear_result,
+            'new_agent_status': new_agent_result,
+            'remaining_cached_sessions': len(_agent_cache),
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time':f'{elapsed_time:.2f}',
+            'email':email
+        }
         logger.log_struct(json_obj, "INFO")
         return create_api_response('Success',data=result)
     except Exception as e:
@@ -2636,52 +3019,6 @@ async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), 
         logging.info(message)
         logging.exception(f'Exception:{error_message}')
         return create_api_response("Failed", message=message, error=error_message)
-    finally:
-        gc.collect()
-
-@app.post("/intelligent_search")
-async def intelligent_search_endpoint(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), question=Form(None), model=Form("openai_gpt_4o")):
-    """
-    ReAct pattern kullanan intelligent agent ile akıllı arama
-    """
-    try:
-        if not question:
-            return create_api_response('Failed', message="question parameter is required")
-            
-        start_time = time.time()
-        
-        # Neo4j bağlantısı oluştur
-        graph = create_graph_database_connection(uri, userName, password, database)
-        
-        # Intelligent agent'ı oluştur
-        agent = IntelligentAgent(graph, model_name=model)
-        
-        # Soruyu çöz
-        result = agent.solve_question(question)
-        
-        elapsed_time = time.time() - start_time
-        
-        # Logging
-        json_obj = {
-            'api_name': 'intelligent_search', 
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database, 
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'question': question,
-            'model': model,
-            'iterations': result.get('iterations', 0)
-        }
-        logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success', data=result, message=f"Intelligent search completed in {elapsed_time:.2f} seconds")
-        
-    except Exception as e:
-        message = f"Unable to complete intelligent search for question: {question}"
-        error_message = str(e)
-        logging.exception(f'Exception in intelligent_search: {error_message}')
-        return create_api_response('Failed', message=message, error=error_message)
     finally:
         gc.collect()
 
