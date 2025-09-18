@@ -7,19 +7,27 @@ echo "🚀 Full-Stack DevContainer kurulum başlıyor..."
 echo "🐍 Python environment hazırlanıyor..."
 cd /workspace/backend
 
-# Cache kontrolü - sadece requirements değiştiyse yükle
+# Cache kontrolü - hash ve paket varlığını kontrol et
 REQUIREMENTS_HASH=$(sha256sum requirements.txt 2>/dev/null | cut -d' ' -f1 || echo "")
 CACHE_FILE="/root/.cache/pip/requirements_hash"
+INSTALLED_PACKAGES=$(pip list --format=freeze | wc -l)
 
-if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$REQUIREMENTS_HASH" ]; then
-    echo "✅ Python paketleri cache'den kullanılıyor (değişiklik yok)"
+# Cache geçerli mi kontrol et: hash eşleşmeli + en az 50 paket yüklü olmalı
+if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$REQUIREMENTS_HASH" ] && [ "$INSTALLED_PACKAGES" -gt "50" ]; then
+    echo "✅ Python paketleri cache'den kullanılıyor ($INSTALLED_PACKAGES paket mevcut)"
 else
-    echo "📦 Python paketleri yükleniyor..."
+    if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$REQUIREMENTS_HASH" ]; then
+        echo "⚠️  Hash eşleşiyor ama paketler eksik ($INSTALLED_PACKAGES/~250). Yeniden yükleniyor..."
+    else
+        echo "📦 Requirements değişti veya cache yok. Python paketleri yükleniyor..."
+    fi
+    
     pip install --upgrade pip
     if [ -f "requirements.txt" ]; then
         pip install -r requirements.txt
         echo "$REQUIREMENTS_HASH" > "$CACHE_FILE"
-        echo "✅ Python paketleri yüklendi ve cache'lendi"
+        FINAL_COUNT=$(pip list --format=freeze | wc -l)
+        echo "✅ Python paketleri yüklendi ve cache'lendi ($FINAL_COUNT paket)"
     else
         echo "⚠️  requirements.txt bulunamadı"
     fi
@@ -29,18 +37,31 @@ fi
 echo "📦 Node.js environment hazırlanıyor..."
 cd /workspace/frontend
 
-# Cache kontrolü - sadece package.json değiştiyse yükle
+# Cache kontrolü - hash ve node_modules varlığını kontrol et
 PACKAGE_HASH=$(sha256sum package.json 2>/dev/null | cut -d' ' -f1 || echo "")
 NODE_CACHE_FILE="/workspace/frontend/node_modules/.package_hash"
 
-if [ -f "$NODE_CACHE_FILE" ] && [ "$(cat $NODE_CACHE_FILE)" = "$PACKAGE_HASH" ]; then
-    echo "✅ Node.js paketleri cache'den kullanılıyor (değişiklik yok)"
+# node_modules var mı ve paket sayısı yeterli mi kontrol et
+if [ -d "node_modules" ]; then
+    NODE_MODULE_COUNT=$(find node_modules -maxdepth 1 -type d | wc -l)
 else
-    echo "📦 Node.js paketleri yükleniyor..."
+    NODE_MODULE_COUNT=0
+fi
+
+if [ -f "$NODE_CACHE_FILE" ] && [ "$(cat $NODE_CACHE_FILE)" = "$PACKAGE_HASH" ] && [ "$NODE_MODULE_COUNT" -gt "100" ]; then
+    echo "✅ Node.js paketleri cache'den kullanılıyor ($NODE_MODULE_COUNT modül mevcut)"
+else
+    if [ -f "$NODE_CACHE_FILE" ] && [ "$(cat $NODE_CACHE_FILE)" = "$PACKAGE_HASH" ]; then
+        echo "⚠️  Hash eşleşiyor ama node_modules eksik ($NODE_MODULE_COUNT/~800). Yeniden yükleniyor..."
+    else
+        echo "📦 Package.json değişti veya cache yok. Node.js paketleri yükleniyor..."
+    fi
+    
     if [ -f "package.json" ]; then
         yarn install
         echo "$PACKAGE_HASH" > "$NODE_CACHE_FILE"
-        echo "✅ Node.js paketleri yüklendi ve cache'lendi"
+        FINAL_NODE_COUNT=$(find node_modules -maxdepth 1 -type d | wc -l)
+        echo "✅ Node.js paketleri yüklendi ve cache'lendi ($FINAL_NODE_COUNT modül)"
     else
         echo "⚠️  package.json bulunamadı"
     fi

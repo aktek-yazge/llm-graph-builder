@@ -16,9 +16,6 @@ services:
       - backend_pip_cache:/root/.cache/pip # Python cache
       - frontend_node_modules:/workspace/frontend/node_modules # Node.js cache
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
-    env_file:
-      - ./backend/.env # Backend env (relative to workspace root)
-      - ./frontend/.env # Frontend env (relative to workspace root)
     environment:
       - PYTHONPATH=/workspace/backend
       - UVICORN_RELOAD=true
