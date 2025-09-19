@@ -2923,7 +2923,14 @@ async def process_chat_response_stream(messages, history, question, model, graph
         # llm, doc_retriever, model_version = setup_chat(model, graph, document_names, chat_mode_settings)
         
         # Her durumda llm'i tanımla (summarization için gerekli)
-        llm, model_version = get_llm(model=model)
+        # NOT: Eğer intelligent_agent varsa onun model'ini kullan, yoksa yeni yükle
+        if intelligent_agent is not None:
+            llm = intelligent_agent.llm
+            model_version = model  # Model adını kullan
+            print(f"🎯 Cached agent'ın model'i kullanılıyor (stream) - Session: {session_id}")
+        else:
+            llm, model_version = get_llm(model=model)
+            print(f"🆕 Yeni model yükleniyor (stream) - Session: {session_id}")
         
         
         # Direkt document retrieval'a geç
