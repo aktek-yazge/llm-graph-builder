@@ -189,6 +189,9 @@ class IntelligentAgent:
 
         # Schema'yı initialize et
         self._initialize_schema_cache()
+        
+        # System prompt'u da başlangıçta oluştur (eager loading)
+        self._initialize_system_prompt_cache()
 
         # Progress tracking ve context memory
         self.context_memory = ""  # Birikimli context prompt
@@ -209,12 +212,24 @@ class IntelligentAgent:
         # Thread Pool Executor for background memory operations (mem0 devre dışı olduğu için isteğe bağlı)
         # self._memory_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
+    def _initialize_system_prompt_cache(self):
+        """System prompt'u başlangıçta bir kez oluştur ve cache'le"""
+        try:
+            logger.info("📋 System prompt başlangıçta oluşturuluyor (agent yaratılırken)...")
+            self.system_prompt_cache = self.create_enhanced_system_prompt({})
+            logger.info(f"✅ System prompt cache'lendi: {len(self.system_prompt_cache)} karakter")
+            logger.info("🎯 System prompt agent oluşturulurken hazırlandı - ilk mesajda cache'den alınacak!")
+        except Exception as e:
+            logger.error(f"❌ System prompt cache'leme hatası: {e}")
+            self.system_prompt_cache = "⚠️ System prompt oluşturulamadı - LLM bağlantısını kontrol edin"
+
     def _initialize_schema_cache(self):
         """Schema bilgisini başlangıçta bir kez al ve cache'le"""
         try:
-            logger.info("📋 Neo4j schema bilgisi başlangıçta alınıyor...")
+            logger.info("📋 Neo4j schema bilgisi başlangıçta alınıyor (agent yaratılırken)...")
             self.schema_cache = get_compact_schema(self.graph)
             logger.info(f"✅ Schema cache'lendi: {len(self.schema_cache)} karakter")
+            logger.info("🎯 Schema agent oluşturulurken hazırlandı - ilk mesajda cache'den alınacak!")
         except Exception as e:
             logger.error(f"❌ Schema cache'leme hatası: {e}")
             self.schema_cache = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
@@ -2974,18 +2989,17 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         }
 
     def get_system_prompt(self) -> str:
-        """System prompt'u cache'den al veya oluştur - token-optimized"""
+        """System prompt'u cache'den al - artık başlangıçta oluşturuluyor"""
         
         if self.system_prompt_cache:
-            logger.info("📋 System prompt cache'den alınıyor")
+            logger.info("📋 System prompt cache'den alınıyor (agent oluşturulurken hazırlandı)")
+            logger.info(f"📋 Cache'deki system prompt uzunluğu: {len(self.system_prompt_cache)} karakter")
             return self.system_prompt_cache
-
-        logger.info("📋 System prompt ilk kez oluşturuluyor (sabit şema ile)...")
-        # Artık schema çekmiyoruz, sabit prompt kullanıyoruz
+        
+        # Fallback: Eğer cache yoksa (normalde olmamalı), oluştur
+        logger.warning("⚠️ System prompt cache boş, fallback ile oluşturuluyor...")
         self.system_prompt_cache = self.create_enhanced_system_prompt({})
-        logger.info(
-            f"✅ System prompt oluşturuldu ve cache'lendi: {len(self.system_prompt_cache)} karakter"
-        )
+        logger.info(f"✅ System prompt fallback ile oluşturuldu: {len(self.system_prompt_cache)} karakter")
         return self.system_prompt_cache
 
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
