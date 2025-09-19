@@ -1087,19 +1087,17 @@ BULUNAN SONUÇLAR ({len(result)} adet):
 🎯 GÖREV: Bu sonuçlar arasından kullanıcı sorusuna EN UYGUN olanı seç ve tam yanıt olarak döndür.
 
 KURALLAR:
-1. Eğer sonuçlar kullanıcı sorusunu cevaplayabiliyorsa → En uygun sonucu seç ve detaylı yanıt ver
+1. Eğer sonuçlar kullanıcı sorusunu cevaplayabiliyorsa → En uygun sonucu seç
 2. Eğer birden fazla seçenek varsa → Kullanıcı sorusuna en yakın/uygun olanı seç
-3. Eğer sonuçlar yetersizse → "Bu sonuçlar yetersiz, daha fazla bilgi gerekiyor" de
-4. Mümkünse bulduğun veriyi kullanarak kullanıcının sorusunu direkt yanıtla
-5. Aynı isimde birden fazla müşteri varsa → Final answer ile kullanıcıya bunlardan hangisini seçmesi gerektiğini tavsiye et
-6. BAŞARILI BULGU ise → Kullanılan Cypher sorgusu ve bulunan node/değerleri belirt ki sonraki iterasyonlarda kullanılabilsin
+3. Aynı isimde birden fazla müşteri varsa → Final answer ile kullanıcıya bunlardan hangisini seçmesi gerektiğini tavsiye et
+4. BAŞARILI BULGU ise → Kullanılan Cypher sorgusu ve bulunan node/değerleri belirt ki sonraki iterasyonlarda kullanılabilsin
 
 ÖRN: Birden fazla seçenek listeleniyorsa, kullanıcı sorusundaki kriterlere en uygun olanı seç.
 
 YANIT FORMATINI BELİRLE:
-- BAŞARILI ise: "✅ [Seçilen sonuç ve detaylar] | NODE/DEĞERLER: [bulunan node,type ve data ilişkisi]"
-- YETERSİZ ise: "⚠️ Bu sonuçlar yetersiz: [neden yetersiz] | NODE/DEĞERLER: [bulunan node,type ve data ilişkisi]"
-- KISMEN YETERLİ ise: "⚠️ Bu sonuçlar kısmen yeterli: [neden kısmen yeterli] | NODE/DEĞERLER: [bulunan node type ve data ilişkisi]"
+- BAŞARILI ise: "✅ [Seçilen sonuç ve detaylar] | NODE/DEĞERLER: [bulunan soru ile ilişkili node,type ve data ilişkisi]"
+- YETERSİZ ise: "⚠️ Bu sonuçlar yetersiz: [neden yetersiz] | NODE/DEĞERLER: [bulunan soru ile ilişkili node,type ve data ilişkisi]"
+- KISMEN YETERLİ ise: "⚠️ Bu sonuçlar kısmen yeterli: [neden kısmen yeterli] | NODE/DEĞERLER: [bulunan soru ile ilişkili node type ve data ilişkisi]"
 """
 
                 # Master LLM'den en iyi yanıtı al
@@ -2188,7 +2186,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             ]
 
             # LLM prompt'unu logla - tam mesajlar ile birlikte
-            # self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
+            self.log_llm_prompt(system_prompt, prompt, state.iteration_count, messages)
 
             try:
                 # OpenAI model kontrolü ve tool calling desteği
@@ -2963,13 +2961,12 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 ### �📝 CYPHER QUERY KURALLARI:
 1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
-   - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(coalesce(toString(field), ''))) CONTAINS toLower(apoc.text.clean('value'))`
-   - **ÖRN**: `toLower(apoc.text.clean(coalesce(toString(p.type), ''))) CONTAINS toLower(apoc.text.clean('str'))`
-   - **KRİTİK**: `coalesce(toString(field), '')` kullanarak null değer hatalarını önle!
+   - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
+   - **ÖRN**: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
    - Asla doğrudan `p.type = 'str'` kullanma!
 
 2. **Field Type Matching**: Schema'dan field tipini kontrol et
-   - **String fields**: `toLower(apoc.text.clean(coalesce(toString(field), ''))) CONTAINS toLower(apoc.text.clean('value'))`
+   - **String fields**: `toLower(apoc.text.clean(field))) CONTAINS toLower(apoc.text.clean('value'))`
    - **Integer fields**: `field = value` 
    - **Boolean fields**: `field = true/false`
 
@@ -2981,31 +2978,20 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 ### 🔍 ARAMA STRATEJİSİ:
 
-**PROGRESSIVE SEARCH STRATEGY**: Boş sonuç alırsan bu sırayı takip et:
-
-1. **ÖNCE Entity Arama**: Yapılandırılmış node'larda ara (Customer, PolicyType, vb.)
-2. **SONRA Document node fileName Arama**: Dosya metadata'sında ara (Document.fileName) - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-
 **KURAL**: ÖNCE KEŞİF YAP - HER ZAMAN KEŞİF İLE BAŞLA!
 
-#### 🎯 KEŞİF SORGUSU YAKLAŞIMI (Schema-Driven, Domain Agnostic):
+#### 🎯 KEŞİF SORGUSU YAKLAŞIMI (Schema-Driven):
 
 **ZORUNLU**: Keşif sorgularında schema'dan öğrenilen node türlerini ve property'lerini dinamik olarak kullan!
 
 **1. SCHEMA-BASED NODE KEŞFİ:**
 ```cypher
 // ADIM 1: Schema'daki tüm node türlerinde ilgili property'lerde ara
-// NOT: Customer, Policy gibi node isimlerini kullanma - schema'dan al!
 MATCH (n:SchemaNodeType)  // <-- SchemaNodeType'ı gerçek node türü ile değiştir
 WHERE toLower(apoc.text.clean(n.schema_property)) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
 RETURN n.schema_property, id(n), labels(n) as node_type, properties(n)
 LIMIT 5
 
-// ÖRNEK UYGULAMA: Eğer schema'da [Person] node'u ve [fullName] property'si varsa:
-MATCH (n:Person)
-WHERE toLower(apoc.text.clean(n.fullName)) CONTAINS toLower(apoc.text.clean('kullanici_adi'))
-RETURN n.fullName, id(n), labels(n) as node_type
-LIMIT 5
 ```
 
 **2. SCHEMA-BASED PROPERTY KEŞFİ:**
@@ -3087,64 +3073,42 @@ LIMIT 5
 - Önce entity filtresi, sonra content arama
 - Filename discovery → content search chain
 
-### 🛠️ AVAILABLE TOOLS:
-
-**generate_embeddings_for_cypher(text)**:
-- Sadece Vector / Semantic arama karar verildiğinde çağırılır
-- Content-based aramalar için embedding oluşturur
-- `text`: Aranacak kavram/içerik terimleri (metadata değil!)
-- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
-- `gds.similarity.cosine(chunk.embedding, $embedding_vector)` ile similarity
-- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
-- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
 
 ### 🔍 VECTOR ARAMA STRATEJİSİ (Schema-Driven, Domain Agnostic):
 
-**A) METADATA + VECTOR ARAMA (Schema-Based, Tercih Edilen):**
+**A) METADATA + VECTOR ARAMA (Schema-Driven):**
 ```cypher
-// Schema'daki content node'ları ve container node'larını kullan
 WITH $embedding_vector AS queryVec
-MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
-WHERE toLower(apoc.text.clean(container_node.schema_identifier_property)) CONTAINS toLower(apoc.text.clean("aranan_terim"))
-  AND content_node.schema_embedding_property IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+MATCH (content_node)-[rel]->(container_node)
+WHERE toLower(apoc.text.clean(coalesce(toString(container_node.schema_property), ''))) CONTAINS toLower(apoc.text.clean("filter_term"))
+  AND content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
-       content_node.schema_position_property, content_node.schema_reference_property, 
-       container_node.schema_identifier_property, score
-ORDER BY score DESC
-LIMIT 10
+RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 10
 ```
 
-**B) SADECE VECTOR ARAMA (Schema'dan Öğrenilen Structure):**
+**B) SADECE VECTOR ARAMA (Schema-Driven):**
 ```cypher
-// Schema'daki content ve container node pattern'ini kullan
 WITH $embedding_vector AS queryVec
-MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
-WHERE content_node.schema_embedding_property IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+MATCH (content_node)-[rel]->(container_node)
+WHERE content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
-       content_node.schema_position_property, content_node.schema_reference_property, 
-       container_node.schema_identifier_property, score
-ORDER BY score DESC
-LIMIT 15
+RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 15
 ```
 
-**C) FİLTRELİ VECTOR ARAMA (Schema-Based Context Memory):**
+**C) FİLTRELİ VECTOR ARAMA (Schema-Driven + Context):**
 ```cypher
-// Context memory'de spesifik container'lar varsa schema pattern'ini kullan
 WITH $embedding_vector AS queryVec
-MATCH (content_node:SchemaContentType)-[schema_relation:SchemaRelationType]->(container_node:SchemaContainerType)
-WHERE container_node.schema_identifier_property IN $context_identifiers  // Context memory'den al
-  AND content_node.schema_embedding_property IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.schema_embedding_property, queryVec) AS score
+MATCH (content_node)-[rel]->(container_node)
+WHERE container_node.schema_property IN $context_list
+  AND content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.schema_content_property, content_node.id, content_node.schema_page_property,
-       content_node.schema_position_property, content_node.schema_reference_property, 
-       container_node.schema_identifier_property, score
-ORDER BY score DESC
-LIMIT 10
+RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 10
 ```
 
 **NOT**: Yukarıdaki örneklerde:
@@ -3155,30 +3119,36 @@ LIMIT 10
 
 #### 🛠️ TOOL KULLANIM KURALLARI:
 
+**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
+- **generate_embeddings_for_cypher**: Semantic/Vector/Chunk arama için embedding oluştur  
+- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
+
+**generate_embeddings_for_cypher(text)**:
+- Sadece Vector / Semantic arama karar verildiğinde çağırılır
+- Yapılacak vector araması için WITH $embedding_vector AS queryVec sorgularına embedding sağlar
+- Content-based aramalar için embedding oluşturur
+- `text`: Aranacak kavram/içerik terimleri (SADECE content, metadata değil!)
+- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
+- `gds.similarity.cosine(content_node.embedding_vector, $embedding_vector)` ile benzerlik
+
+**add_page_resource(page_link)**:
+- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
+- Her kullanılan içerik için mutlaka çağır
+- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
+
 **ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
 
-1. **Vector/Semantic Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
-   - Entity aramalarında 2-3 defa boş sonuç gelince
-   - "prim", "taksit", "ödeme" gibi CONTENT kavramları aranıyorsa  
+1. **Vector/Semantic/Chunk Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
    - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
-   - Context memory'de "vector search kullan" yazdıysa
 
 2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR:**
    - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
    - Final answer'da sayfa referansları gösterilecekse
    - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
 
-**generate_embeddings_for_cypher(text)**:
-- İçerik tabanlı aramalar için embedding oluşturur
-- `text`: Aranacak kavram/içerik terimleri (SADECE content, metadata değil!)
-- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
-- `gds.similarity.cosine(content_node.embedding_vector, $embedding_vector)` ile benzerlik
-- **KRİTİK**: Tool çağrısından sonra MUTLAKA bir sonraki iterasyonda cypher_query yap!
-
-**add_page_resource(page_link)**:
-- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
-- Her kullanılan içerik için mutlaka çağır
-- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
+Tool çağırma örneği (JSON format):
+- generate_embeddings_for_cypher(text="prim miktarı ödeme tutarı")
+- add_page_resource(page_link="document_page_link.png")
 
 ### 🔗 PARAMETER INHERITANCE:
 
@@ -3188,10 +3158,6 @@ LIMIT 10
 
 1. **ÖNCEKI SORU ANALİZİ (ZORUNLU):**
    - Conversation history'den son soruyu parse et
-   - Entity/Subject: Kim/ne hakkında?  
-   - Filters/Qualifiers: Hangi özellikteki?
-   - Operations: Ne yapılıyor?
-   - Constraints: Hangi kısıtlar?
 
 2. **YENİ SORU ANALİZİ (ZORUNLU):**
    - Hangi parametreler explicit olarak belirtilmiş?
@@ -3217,13 +3183,6 @@ Action: [cypher_query | final_answer]
 Content: [Cypher sorgusu | final cevap]
 ```
 
-**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
-- **generate_embeddings_for_cypher**: Semantic arama için embedding oluştur  
-- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
-
-Tool çağırma örneği (JSON format):
-- generate_embeddings_for_cypher(text="prim miktarı ödeme tutarı")
-- add_page_resource(page_link="document_page_link.png")
 
 ## 🎯 ITERATION BAŞLANGICI:
 
@@ -3233,25 +3192,15 @@ Her iterasyon başında şunları değerlendir:
 3. **Önceki Bulgular**: Hangi veriler elde edildi?
 4. **Schema Mapping**: Soruya hangi node/relationship'ler cevap verebilir?
 5. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
-6. **Raw DB Results**: Son 5 database sonucunu örnek olarak değerlendir
 
 ## ⚠️ ÖNEMLİ NOTLAR (Schema-Driven, Domain Agnostic):
 
 - **KRİTİK: SCHEMA FIRST!** Her sorgu öncesi schema'yı incele ve sadece orada tanımlı node/property/relationship kullan!
-- **KRİTİK: NO HARDCODED DOMAIN KNOWLEDGE!** Customer, Policy, Document gibi hardcoded terimler yasak - schema'dan öğren!
-- **KRİTİK: PARAMETER INHERITANCE!** Eksik parametreleri önceki sorulardan semantic olarak inherit et!
-- **KRİTİK: CONTEXT CONTINUITY kontrol et!** Yeni sorular önceki konuşmayla ilgili olabilir - özellikle belirsiz kelimeler!
-- **KRİTİK: STRING NORMALİZASYONU KULLAN!** Tüm string karşılaştırmalarında `toLower(apoc.text.clean(coalesce(toString(field), '')))` zorunlu!
-- **KRİTİK: TEKRAR SORGU YAPMA!** ÖNCEKİ BAŞARILI BULGULAR bölümünde aynı/benzer sorgu varsa DIREK final_answer ver!
-- **KRİTİK: SCHEMA-BASED FILENAME ARAMA!** Entity node'larında bulunmayan bilgiler için schema'daki container node'larının identifier property'sinde ara!
 - **KRİTİK: SEMANTIC ARAMA İÇİN TOOL ÇAĞIR!** Vector/semantic arama gerektiğinde generate_embeddings_for_cypher TOOL'UNU çağır, sonra cypher_query eylemi yap!
-- **KRİTİK: TEKRARLI EMBEDDING YASAK!** generate_embeddings_for_cypher'dan sonra tekrar embedding oluşturma - doğrudan cypher_query'ye geç!
 - Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
-- Field tiplerini karıştırma (string'e =, integer/date'e CONTAINS)
 - İçerik node'larından faydalanıyorsan mutlaka add_page_resource çağır (schema'daki reference property'yi kullan)
 - Embedding'lerde metadata kullanma, sadece content terimleri
 - Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
-- Başarısız sorguları tekrarlama - context'teki BAŞARISIZ SORGULAR bölümünü kontrol et!
 
 Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
 
