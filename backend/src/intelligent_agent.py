@@ -750,261 +750,80 @@ GÖREV:
         iteration: int,
         full_messages: list = None,
     ):
-        """LLM'e gönderilen prompt'u detaylı olarak logla ve dosyaya kaydet"""
+        """LLM'e gönderilen prompt'u RAW formatında hiç filtreleme yapmadan dosyaya kaydet"""
         try:
             # Dosya adı - session id ve timestamp ile
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             session_info = getattr(self, "current_session_id", "unknown")
-            log_file = f"llm_prompts_{session_info}_{timestamp}_iter_{iteration}.txt"
+            log_file = f"llm_prompts_RAW_{session_info}_{timestamp}_iter_{iteration}.txt"
             log_dir = os.path.abspath("context_memory_logs")
             log_path = os.path.join(log_dir, log_file)
 
             # Dizin yoksa oluştur
             os.makedirs(log_dir, exist_ok=True)
 
-            logger.info(f"\n{'='*60}")
-            logger.info(f"LLM PROMPT LOGGING - İterasyon {iteration}")
-            logger.info(f"{'='*60}")
+            # Sadece basit log - analiz yok
+            logger.info(f"📁 RAW LLM PROMPT LOGGING - İterasyon {iteration}")
+            logger.info(f"   System Prompt: {len(system_prompt):,} karakter")
+            logger.info(f"   User Prompt: {len(user_prompt):,} karakter")
+            if full_messages:
+                logger.info(f"   Full Messages: {len(full_messages)} mesaj")
 
-            # System prompt özeti
-            system_lines = system_prompt.split("\n")
-            schema_start = -1
-            schema_end = -1
-
-            # Yeni schema formatını ara
-            for i, line in enumerate(system_lines):
-                if (
-                    "Neo4j Schema Yapısı:" in line
-                    or "Neo4j Schema:" in line
-                    or "NEO4J GRAPH DATABASE SCHEMA:" in line
-                ):
-                    schema_start = i
-                elif schema_start > -1 and (
-                    line.startswith("## 📊 DOMAIN ARCHITECTURE:")
-                    or line.startswith("## 🧠 DECISION FRAMEWORK:")
-                    or line.startswith("🎯 DOMAIN CONTEXT:")
-                ):
-                    schema_end = i
-                    break
-
-            logger.info(f"📋 SYSTEM PROMPT ÖZET:")
-            logger.info(f"   - Toplam satır: {len(system_lines)}")
-            logger.info(f"   - Toplam karakter: {len(system_prompt)}")
-
-            # Dosyaya yazma için içerik hazırla
-            file_content = f"""{'='*80}
-LLM PROMPT LOGGING - İterasyon {iteration}
+            # RAW içerik - hiçbir filtre veya formatlama olmadan
+            file_content = f"""{'='*100}
+RAW LLM PROMPT LOGGING - İterasyon {iteration}
 Tarih: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 Session ID: {session_info}
-{'='*80}
-
-SYSTEM PROMPT ÖZET:
-- Toplam satır: {len(system_lines)}
-- Toplam karakter: {len(system_prompt)}
-"""
-
-            if schema_start > -1:
-                logger.info(
-                    f"   - ✅ Schema bilgisi başlangıç: Satır {schema_start + 1}"
-                )
-                file_content += (
-                    f"- ✅ Schema bilgisi başlangıç: Satır {schema_start + 1}\n"
-                )
-
-                if schema_end > -1:
-                    logger.info(f"   - Schema bilgisi bitiş: Satır {schema_end}")
-                    file_content += f"- Schema bilgisi bitiş: Satır {schema_end}\n"
-                    schema_content = "\n".join(system_lines[schema_start:schema_end])
-                    logger.info(
-                        f"   - Schema bilgisi uzunluk: {len(schema_content)} karakter"
-                    )
-                    file_content += (
-                        f"- Schema bilgisi uzunluk: {len(schema_content)} karakter\n"
-                    )
-
-                    # Yeni schema formatında Nodes ve Rels satırlarını ara
-                    nodes_line = None
-                    rels_line = None
-                    patterns_line = None
-
-                    for line in system_lines[schema_start:schema_end]:
-                        if line.startswith("Nodes:"):
-                            nodes_line = line
-                        elif line.startswith("Rels:"):
-                            rels_line = line
-                        elif line.startswith("Patterns:"):
-                            patterns_line = line
-
-                    if nodes_line:
-                        logger.info(
-                            f"   - ✅ Nodes satırı bulundu: {nodes_line[:100]}..."
-                        )
-                        file_content += (
-                            f"- ✅ Nodes satırı bulundu: {nodes_line[:100]}...\n"
-                        )
-                    if rels_line:
-                        logger.info(
-                            f"   - ✅ Rels satırı bulundu: {rels_line[:100]}..."
-                        )
-                        file_content += (
-                            f"- ✅ Rels satırı bulundu: {rels_line[:100]}...\n"
-                        )
-                    if patterns_line:
-                        logger.info(
-                            f"   - ✅ Patterns satırı bulundu: {patterns_line[:100]}..."
-                        )
-                        file_content += (
-                            f"- ✅ Patterns satırı bulundu: {patterns_line[:100]}...\n"
-                        )
-
-                    # Schema kompaktlığını kontrol et
-                    if nodes_line and rels_line and patterns_line:
-                        logger.info(f"   - ✅ Kompakt schema formatı: Token-optimized")
-                        file_content += "- ✅ Kompakt schema formatı: Token-optimized\n"
-                    else:
-                        logger.warning(f"   - ⚠️ Schema formatı eksik olabilir")
-                        file_content += "- ⚠️ Schema formatı eksik olabilir\n"
-            else:
-                logger.warning("   ⚠️ Schema bilgisi system prompt'ta bulunamadı!")
-                file_content += "- ⚠️ Schema bilgisi system prompt'ta bulunamadı!\n"
-
-            # User prompt özeti ve conversation history analizi
-            user_lines = user_prompt.split("\n")
-
-            # Conversation history analizi
-            conv_history_count = 0
-            last_messages = []
-            if "## 📝 ÖNCEKI KONUŞMA:" in user_prompt:
-                conv_lines = (
-                    user_prompt.split("## 📝 ÖNCEKI KONUŞMA:")[1]
-                    .split("Kullanıcı sorusu:")[0]
-                    .strip()
-                    .split("\n")
-                )
-                conv_lines = [
-                    line.strip()
-                    for line in conv_lines
-                    if line.strip() and line.strip() != ""
-                ]
-                conv_history_count = len(
-                    [line for line in conv_lines if line.startswith(("Human:", "AI:"))]
-                )
-                last_messages = (
-                    conv_lines[-11:] if len(conv_lines) >= 11 else conv_lines
-                )  # Son 11 satır
-
-            logger.info(f"📨 USER PROMPT ÖZET:")
-            logger.info(f"   - Toplam satır: {len(user_lines)}")
-            logger.info(f"   - Toplam karakter: {len(user_prompt)}")
-            logger.info(f"   - Conversation history: {conv_history_count} mesaj")
-            logger.info(f"   - Son mesajlar: {last_messages}")
-
-            file_content += f"""
-USER PROMPT ÖZET:
-- Toplam satır: {len(user_lines)}
-- Toplam karakter: {len(user_prompt)}
-- Conversation history: {conv_history_count} mesaj
+System Prompt Length: {len(system_prompt):,} karakter
+User Prompt Length: {len(user_prompt):,} karakter
+Full Messages Count: {len(full_messages) if full_messages else 0}
+{'='*100}
 
 """
 
-            # Context memory kontrol (başarılı bulgular)
-            if "ÖNCEKİ BAŞARILI BULGULAR" in user_prompt:
-                logger.info(f"   - ✅ Context memory bulundu")
-                file_content += "- ✅ Context memory bulundu\n"
-            else:
-                logger.info(f"   - ℹ️ Context memory yok (ilk iterasyon)")
-                file_content += "- ℹ️ Context memory yok (ilk iterasyon)\n"
-
-            # Conversation history kontrol
-            if "ÖNCEKI KONUŞMA:" in user_prompt:
-                logger.info(f"   - ✅ Conversation history bulundu")
-                file_content += "- ✅ Conversation history bulundu\n"
-            else:
-                logger.info(f"   - ℹ️ Conversation history yok")
-                file_content += "- ℹ️ Conversation history yok\n"
-
-            # Mevcut durum bilgisi kontrol (başarılı bulgular veya chunk'lar)
-            if (
-                ("Mevcut Durum:" in user_prompt)
-                or ("ÖNCEKİ BAŞARILI BULGULAR" in user_prompt)
-                or ("BAŞARISIZ SORGULAR" in user_prompt)
-            ):
-                logger.info(f"   - ✅ Mevcut durum bilgisi bulundu")
-                file_content += "- ✅ Mevcut durum bilgisi bulundu\n"
-            else:
-                logger.info(f"   - ℹ️ Mevcut durum bilgisi yok")
-                file_content += "- ℹ️ Mevcut durum bilgisi yok\n"
-
-            # Eğer full_messages varsa, LLM'e gönderilen tam mesaj listesini de ekle
+            # Eğer full_messages varsa, önce onları RAW olarak yaz
             if full_messages:
-                file_content += f"""
-{'='*80}
-FULL MESSAGES SENT TO LLM:
-{'='*80}
+                file_content += f"""{'='*100}
+RAW FULL MESSAGES SENT TO LLM (AS RECEIVED):
+{'='*100}
+
 """
                 for i, msg in enumerate(full_messages):
                     msg_type = type(msg).__name__
                     msg_content = msg.content if hasattr(msg, "content") else str(msg)
-                    file_content += f"""
-MESSAGE {i+1} ({msg_type}):
-{'-'*40}
+                    file_content += f"""[MESSAGE {i+1} - {msg_type}]
 {msg_content}
-{'-'*40}
-"""
-            else:
-                # Full messages yoksa, system ve user prompt'ları ayrı ayrı göster
-                # Çok uzun system prompt'ları kısalt
-                system_display = (
-                    system_prompt
-                    if len(system_prompt) < 5000
-                    else f"{system_prompt[:2500]}\n\n[... {len(system_prompt) - 5000:,} karakter daha ...]\n\n{system_prompt[-2500:]}"
-                )
 
-                file_content += f"""
-{'='*80}
-SYSTEM PROMPT (TAM İÇERİK):
-{'='*80}
-{system_display}
+{'='*50}
 
-{'='*80}
-USER PROMPT (TAM İÇERİK):
-{'='*80}
-{user_prompt}
 """
 
-            # Token ve analiz bilgisi ekle
-            total_chars = len(system_prompt) + len(user_prompt)
-            estimated_tokens = total_chars / 4  # Yaklaşık token hesabı
+            # System ve User Prompt'ları TAM RAW HALDE yaz - hiçbir kısaltma veya filtreleme olmadan
+#             file_content += f"""{'='*100}
+# RAW SYSTEM PROMPT (FULL CONTENT - NO FILTERING):
+# {'='*100}
+# {system_prompt}
 
-            file_content += f"""
-{'='*80}
-ANALYSIS SUMMARY:
-{'='*80}
-📊 METRICS:
-- Total Characters: {total_chars:,}
-- Estimated Tokens: {estimated_tokens:,.0f}
-- System/User Token Ratio: {len(system_prompt) / 4:,.0f} / {len(user_prompt) / 4:,.0f}
+# {'='*100}
+# RAW USER PROMPT (FULL CONTENT - NO FILTERING):
+# {'='*100}
+# {user_prompt}
 
-🔍 CONTENT ANALYSIS:
-- Messages in Full List: {len(full_messages) if full_messages else 0}
-- Has Context Memory: {'✅' if 'DAHA ÖNCE BULUNAN BAŞARILI BİLGİLER' in user_prompt else '❌'}
-- Has Conversation History: {'✅' if 'ÖNCEKI KONUŞMA:' in user_prompt else '❌'}
-- Has Current State: {'✅' if 'Mevcut Durum:' in user_prompt else '❌'}
-- Schema Format: {'✅ Kompakt' if 'Nodes:' in system_prompt and 'Rels:' in system_prompt else '⚠️ Eksik'}
-"""
+# {'='*100}
+# END OF RAW PROMPT LOGGING
+# {'='*100}
+# """
 
             # Dosyaya yaz
             try:
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(file_content)
-                logger.info(f"📁 LLM prompt dosyaya kaydedildi: {log_path}")
+                logger.info(f"📁 RAW LLM prompt dosyaya kaydedildi: {log_path}")
             except Exception as file_error:
-                logger.error(f"Dosya yazma hatası: {file_error}")
-
-            logger.info(f"{'='*60}\n")
+                logger.error(f"RAW prompt dosya yazma hatası: {file_error}")
 
         except Exception as e:
-            logger.error(f"LLM prompt logging hatası: {e}")
+            logger.error(f"RAW LLM prompt logging hatası: {e}")
 
     def log_llm_response(
         self,
@@ -1165,10 +984,8 @@ LLM'İN KARARI: {action}
 
 SYNTAX HATASI ANALİZİ:
 1. Property isimleri schema'ya uygun mu? (örn: fileName vs filename)
-2. Node label'ları doğru mu? (örn: Document vs document)
-3. String normalizasyon fonksiyonları doğru mu? (apoc.text.clean, toString vs)
+3. String normalizasyon fonksiyonları doğru mu? (apoc.text.clean vs)
 4. APOC fonksiyonları varsa syntax'ı doğru mu?
-5. RETURN clause'da field isimleri var mı?
 
 SADECE TEK CÜMLE ile çözümü söyle."""
             else:
@@ -1184,12 +1001,11 @@ BOŞ SONUÇ VERDİ: {cypher_query}
 🎯 GÖREV: Bu sorgu neden boş döndü? SADECE TEK CÜMLE ile neden ve çözümü söyle. 
 
 ARAMA STRATEJİSİ:
-1. Entity aramadan başla (Customer, PolicyType vb...)
+1. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
 2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-3. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
-4. **KRİTİK: Vector/Semantic arama gerekiyorsa LLM'e 'generate_embeddings_for_cypher TOOL'UNU ÇAĞIR' de! LLM tool calling yapmalı, sadece metin tavsiyesi verme!**
+3. **KRİTİK: Vector/Semantic arama gerekiyorsa vector embeddingleri bulması için LLM tool calling yapmasını öner**
 
-Öneriler: CONTAINS kullan, apoc.text.clean() öner.
+Öneriler: string alanlar için mutlaka CONTAINS - apoc.text.clean() öner.
 
 SADECE TEK CÜMLE ile cevap ver."""
 
@@ -1197,7 +1013,7 @@ SADECE TEK CÜMLE ile cevap ver."""
             if query_type == "cypher_error":
                 system_message = "Sen Cypher syntax uzmanısın. Cypher syntax hatalarını tespit edip kısa ve net çözüm önerirsin. Schema'ya uygun property/node isimlerini kontrol edersin. SADECE TEK CÜMLE ile çözümü açıklarsın."
             else:
-                system_message = "Sen kısa ve net cevap veren Neo4j uzmanısın. Boş sorgu nedenini ve çözümünü SADECE TEK CÜMLE ile açıklarsın. Vector/semantic arama gerekiyorsa 'generate_embeddings_for_cypher TOOL'UNU ÇAĞIR' şeklinde tool calling öner. Uzun açıklama yapma!"
+                system_message = "Sen kısa ve net cevap veren Neo4j uzmanısın. Boş sorgu nedenini ve çözümünü SADECE TEK CÜMLE ile açıklarsın. Uzun açıklama yapma!"
 
             # LLM ile analiz et
             response = self.master_llm.invoke(
@@ -1379,7 +1195,7 @@ SADECE TEK CÜMLE ile cevap ver."""
 
             context_prompt += "---\n"
 
-        context_prompt += "\n**🚀 BU BİLGİLERİ KULLANARAK SONRAKI ADIMI BELİRLE - FILENAME'LERİ TEKRAR ARAMA!**\n\n"
+        context_prompt += "\n**🚀 BU BİLGİLERİ KULLANARAK SONRAKI ADIMI BELİRLE**\n\n"
         self.context_memory = context_prompt
 
     def parse_agent_response(self, response: str) -> Tuple[str, Tuple[str, str]]:
@@ -2191,9 +2007,10 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             try:
                 # OpenAI model kontrolü ve tool calling desteği
                 if self.is_openai_model():
-                    # OpenAI tool calling desteği ekle
+                    # OpenAI tool calling desteği - model'i tool'larla bind et
                     tools = self.get_available_tools()
-                    response = self.llm.invoke(messages, tools=tools)
+                    model_with_tools = self.llm.bind_tools(tools)
+                    response = model_with_tools.invoke(messages)
 
                     # Tool call var mı kontrol et
                     if hasattr(response, "tool_calls") and response.tool_calls:
@@ -2222,8 +2039,8 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         # Çünkü tool sadece embedding oluşturuyor, sonuç Cypher'da kullanılıyor
 
                         # print("LLMCALL", messages)
-                        # Tool sonuçları ile tekrar LLM'e sor
-                        response = self.llm.invoke(messages)
+                        # Tool sonuçları ile tekrar LLM'e sor - bind edilmiş model'i kullan
+                        response = model_with_tools.invoke(messages)
 
                         # Response content'i al - GPT-5-mini için list kontrolü
                         raw_content = response.content
@@ -2262,9 +2079,9 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 )
 
                 # LLM response'unu dosyaya kaydet
-                self.log_llm_response(
-                    agent_response, state.iteration_count, action, action_content, True
-                )  # will_write=False ile sadece debug log
+                # self.log_llm_response(
+                #     agent_response, state.iteration_count, action, action_content, True
+                # )  # will_write=False ile sadece debug log
 
                 # Token kullanımını action type ile logla
                 self.log_token_usage(response, state.iteration_count, action)
@@ -2675,16 +2492,16 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             user_question, action_content, "entity", thought, action
                         )
                         
-                        current_observation = f"Sorgu başarılı ama 0 kayıt bulundu. Analiz: {analysis} Farklı filtreler veya vector search dene."
+                        current_observation = f"Sorgu başarılı ama 0 kayıt bulundu. Analiz: {analysis} "
                         
                         # Bu başarısız bulguyu context memory'ye ekle
-                        self.add_failed_query(
-                            state,
-                            state.iteration_count,
-                            action_content,
-                            f"Boş sonuç analizi: {analysis}",
-                            "cypher"
-                        )
+                        # self.add_failed_query(
+                        #     state,
+                        #     state.iteration_count,
+                        #     action_content,
+                        #     f"Boş sonuç analizi: {analysis}",
+                        #     "cypher"
+                        # )
                         
                         # Conversation history'ye ekle - Boş sonuç cypher query
                         conversation_history.append(
@@ -2711,13 +2528,13 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             )
 
                             # Başarısız sorguyu state'e ekle
-                            self.add_failed_query(
-                                state,
-                                state.iteration_count,
-                                action_content,
-                                str(result),
-                                "cypher",
-                            )
+                            # self.add_failed_query(
+                            #     state,
+                            #     state.iteration_count,
+                            #     action_content,
+                            #     str(result),
+                            #     "cypher",
+                            # )
 
                             current_observation = f"Cypher sorgusu başarısız: {result}. Deneme {state.failed_entity_query_count}/{state.max_entity_query_attempts}. Analiz: {analysis} Farklı bir cypher_query ile tekrar dene."
 
@@ -2738,13 +2555,13 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             )
                         else:
                             # Son başarısız denemeden sonra da state'e ekle
-                            self.add_failed_query(
-                                state,
-                                state.iteration_count,
-                                action_content,
-                                str(result),
-                                "cypher",
-                            )
+                            # self.add_failed_query(
+                            #     state,
+                            #     state.iteration_count,
+                            #     action_content,
+                            #     str(result),
+                            #     "cypher",
+                            # )
 
                             logger.info(
                                 f"❌ Entity query {state.max_entity_query_attempts} kez başarısız. Vector search'e geç."
@@ -3117,24 +2934,26 @@ ORDER BY score DESC LIMIT 10
 - `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
 - LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
 
-#### 🛠️ TOOL KULLANIM KURALLARI:
 
-**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
-- **generate_embeddings_for_cypher**: Semantic/Vector/Chunk arama için embedding oluştur  
-- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
 
-**generate_embeddings_for_cypher(text)**:
-- Sadece Vector / Semantic arama karar verildiğinde çağırılır
-- Yapılacak vector araması için WITH $embedding_vector AS queryVec sorgularına embedding sağlar
-- Content-based aramalar için embedding oluşturur
-- `text`: Aranacak kavram/içerik terimleri (SADECE content, metadata değil!)
-- Cypher'da `$embedding_vector` değişkeni olarak kullanılır
-- `gds.similarity.cosine(content_node.embedding_vector, $embedding_vector)` ile benzerlik
+### � AVAILABLE TOOLS (OpenAI Function Calling):
+
+**generate_embeddings_for_cypher(text)**: 
+- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
+- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
+- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
+- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
 
 **add_page_resource(page_link)**:
 - Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
 - Her kullanılan içerik için mutlaka çağır
 - `page_link` parametresi: Cypher sonucundan gelen page_link değeri
+
+#### 🛠️ TOOL KULLANIM KURALLARI:
+
+**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
+- **generate_embeddings_for_cypher**: Semantic/Vector/Chunk arama için embedding oluştur  
+- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
 
 **ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
 
@@ -3145,10 +2964,6 @@ ORDER BY score DESC LIMIT 10
    - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
    - Final answer'da sayfa referansları gösterilecekse
    - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
-
-Tool çağırma örneği (JSON format):
-- generate_embeddings_for_cypher(text="prim miktarı ödeme tutarı")
-- add_page_resource(page_link="document_page_link.png")
 
 ### 🔗 PARAMETER INHERITANCE:
 
@@ -3178,7 +2993,7 @@ Tool çağırma örneği (JSON format):
 Her iterasyonda şu formatı kullan:
 
 ```
-Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant? KRİTİK: Eğer önceki iterasyonda generate_embeddings_for_cypher çağrıldıysa, bu iterasyonda MUTLAKA cypher_query eylemi yap!]
+Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant? ]
 Action: [cypher_query | final_answer]
 Content: [Cypher sorgusu | final cevap]
 ```
