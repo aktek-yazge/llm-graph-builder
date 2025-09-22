@@ -911,11 +911,13 @@ KURALLAR:
 3. Aynı isimde birden fazla müşteri varsa → Final answer ile kullanıcıya bunlardan hangisini seçmesi gerektiğini tavsiye et
 4. BAŞARILI BULGU ise → Kullanılan Cypher sorgusu ve bulunan node/değerleri belirt ki sonraki iterasyonlarda kullanılabilsin
 
-ÖRN: Birden fazla seçenek listeleniyorsa, kullanıcı sorusundaki kriterlere en uygun olanı seç.
+***KRİTİK***
+Eğer elde edilen sonuçlar dan sorudaki içerik bilgisi elde edilememişse vector, semantic arama yapılması gerektiğini belirt.
+Metadata bilgileri ile bir sonuç elde edilmiş ama istenen detaylar yoksa (örn: müşteri adı var ama adres yok) → yetersiz olduğunu ve vector, semantic arama yapılması gerektiğini belirt.
 
 YANIT FORMATINI BELİRLE:
-- BAŞARILI ise: "✅ [Seçilen sonuç ve detaylar] | NODE/DEĞERLER: [bulunan soru ile ilişkili node,type ve data ilişkisi]"
-- YETERSİZ ise: "⚠️ Bu sonuçlar yetersiz: [neden yetersiz] | NODE/DEĞERLER: [bulunan soru ile ilişkili node,type ve data ilişkisi]"
+- BAŞARILI ise: "✅ [Seçilen sonuç ve detaylar] | NODE/DEĞERLER: [bulunan soru ile ilişkili node,type ve data ilişkisi, sonraki querylerde kullanılabilir]"
+- YETERSİZ ise: "⚠️ Bu sonuçlar yetersiz: [neden yetersiz] | NODE/DEĞERLER: [bulunan soru ile ilişkili node, type ve data ilişkisi]"
 - KISMEN YETERLİ ise: "⚠️ Bu sonuçlar kısmen yeterli: [neden kısmen yeterli] | NODE/DEĞERLER: [bulunan soru ile ilişkili node type ve data ilişkisi]"
 """
 
@@ -1198,118 +1200,101 @@ SADECE TEK CÜMLE ile cevap ver."""
         context_prompt += "\n**🚀 BU BİLGİLERİ KULLANARAK SONRAKI ADIMI BELİRLE**\n\n"
         self.context_memory = context_prompt
 
-    def parse_agent_response(self, response: str) -> Tuple[str, Tuple[str, str]]:
-        """Agent cevabını parse et - yıldızlı formatları da destekle (observation kaldırıldı)"""
-
+    def parse_agent_response(self, response: str) -> Tuple[str, str, Tuple[str, str]]:
+        """Agent cevabını parse et - yıldızlı formatları da destekle"""
+        
         # Tool call sonrası response'da JSON blokları varsa temizle
         import re
-
         # JSON formatındaki tool_uses bloklarını temizle
         tool_uses_pattern = r'\{\s*"tool_uses"\s*:\s*\[.*?\]\s*\}'
-        response = re.sub(tool_uses_pattern, "", response, flags=re.DOTALL)
-
+        response = re.sub(tool_uses_pattern, '', response, flags=re.DOTALL)
+        
         # Başka tool call pattern'leri de temizle
-        tool_array_pattern = (
-            r'\[\s*\{\s*"recipient_name"\s*:\s*"functions\.[^"]+"\s*,.*?\}\s*\]'
-        )
-        response = re.sub(tool_array_pattern, "", response, flags=re.DOTALL)
-
-        # Tek tool call objelerini temizle
+        tool_array_pattern = r'\[\s*\{\s*"recipient_name"\s*:\s*"functions\.[^"]+"\s*,.*?\}\s*\]'
+        response = re.sub(tool_array_pattern, '', response, flags=re.DOTALL)
+        
+        # Tek tool call objelerini temizle  
         single_tool_pattern = r'\{\s*"recipient_name"\s*:\s*"functions\.[^"]+"\s*,.*?\}'
-        response = re.sub(single_tool_pattern, "", response, flags=re.DOTALL)
-
+        response = re.sub(single_tool_pattern, '', response, flags=re.DOTALL)
+        
         # Fazla boşlukları ve newline'ları temizle
-        response = re.sub(r"\n\s*\n\s*\n+", "\n\n", response).strip()
-
-        # Thought, Action'ı ayır (observation kaldırıldı)
+        response = re.sub(r'\n\s*\n\s*\n+', '\n\n', response).strip()
+        
+        # Observation, Thought, Action'ı ayır
+        observation = ""
         thought = ""
         action = ""
         action_content = ""
-
-        lines = response.strip().split("\n")
+        
+        lines = response.strip().split('\n')
         current_section = None
-
+        
         for line in lines:
             line = line.strip()
-            # Yıldızlı formatları da destekle (observation satırları atlanacak)
-            if line.startswith("Observation:") or line.startswith("**Observation:**"):
-                current_section = "skip_observation"  # Observation'ları atla
-                continue
-            elif line.startswith("Thought:") or line.startswith("**Thought:**"):
-                current_section = "thought"
-                thought = (
-                    line.replace("**Thought:**", "").replace("Thought:", "").strip()
-                )
-            elif line.startswith("Action:") or line.startswith("**Action:**"):
-                current_section = "action"
-                action = line.replace("**Action:**", "").replace("Action:", "").strip()
-            elif line.startswith("Query:"):
-                action_content = line.replace("Query:", "").strip()
-            elif line.startswith("Answer:"):
-                action_content = line.replace("Answer:", "").strip()
-            elif line.startswith("Content:") or line.startswith("**Content:**"):
+            # Yıldızlı formatları da destekle
+            if line.startswith('Observation:') or line.startswith('**Observation:**'):
+                current_section = 'observation'
+                observation = line.replace('**Observation:**', '').replace('Observation:', '').strip()
+            elif line.startswith('Thought:') or line.startswith('**Thought:**'):
+                current_section = 'thought'
+                thought = line.replace('**Thought:**', '').replace('Thought:', '').strip()
+            elif line.startswith('Action:') or line.startswith('**Action:**'):
+                current_section = 'action'
+                action = line.replace('**Action:**', '').replace('Action:', '').strip()
+            elif line.startswith('Query:'):
+                action_content = line.replace('Query:', '').strip()
+            elif line.startswith('Answer:'):
+                action_content = line.replace('Answer:', '').strip()
+            elif line.startswith('Content:') or line.startswith('**Content:**'):
                 # "Content:" prefix'ini kaldır ve action_content'e ekle
-                content_on_same_line = (
-                    line.replace("**Content:**", "").replace("Content:", "").strip()
-                )
+                content_on_same_line = line.replace('**Content:**', '').replace('Content:', '').strip()
                 if content_on_same_line:
                     action_content = content_on_same_line
-                current_section = "content"  # Content section'a geç
-            elif current_section and line and not line.startswith("```"):
+                current_section = 'content'  # Content section'a geç
+            elif current_section and line and not line.startswith('```'):
                 # Kod blokları hariç
-                if current_section == "skip_observation":
-                    continue  # Observation satırlarını atla
-                elif current_section == "thought":
-                    thought += " " + line
-                elif current_section == "action":
+                if current_section == 'observation':
+                    observation += ' ' + line
+                elif current_section == 'thought':
+                    thought += ' ' + line
+                elif current_section == 'action':
                     if not action:
                         action = line
                     else:
                         # Eğer line "Content:" ile başlamıyorsa ve cypher/query değilse action_content'e ekle
-                        if not line.startswith("Content:") and not line.startswith(
-                            "**Content:**"
-                        ):
+                        if not line.startswith('Content:') and not line.startswith('**Content:**'):
                             # Kod blokları action_content'e git
-                            if "MATCH" in line or "RETURN" in line or "WHERE" in line:
-                                action_content += " " + line
+                            if 'MATCH' in line or 'RETURN' in line or 'WHERE' in line:
+                                action_content += ' ' + line
                             elif action_content == "":  # İlk content satırı
                                 action_content = line
                             else:
-                                action_content += " " + line
-                elif current_section == "content":
+                                action_content += ' ' + line
+                elif current_section == 'content':
                     # Content section'dayken tüm satırları action_content'e ekle
                     if action_content:
-                        action_content += (
-                            "\n" + line
-                        )  # Çok satırlı content için yeni satır ekle
+                        action_content += '\n' + line  # Çok satırlı content için yeni satır ekle
                     else:
                         action_content = line  # İlk content satırı
-
+        
         # Kod bloklarını ve gereksiz karakterleri temizle
         if action_content:
-            action_content = (
-                action_content.replace("```cypher", "").replace("```", "").strip()
-            )
+            action_content = action_content.replace('```cypher', '').replace('```', '').strip()
             # Başında pipe (|) karakteri varsa kaldır (YAML multiline format)
-            if action_content.startswith("|"):
+            if action_content.startswith('|'):
                 action_content = action_content[1:].strip()
             # Başında newline varsa kaldır
-            action_content = action_content.lstrip("\n").strip()
-
+            action_content = action_content.lstrip('\n').strip()
+        
         # ReAct formatı bulunamadıysa fallback: Düz text'i final_answer olarak kabul et
         if not action and not action_content and response.strip():
             # JSON temizlenmiş response'da eğer ReAct formatı yoksa, direk final_answer kabul et
-            logger.info(
-                "🔍 ReAct formatı bulunamadı, response'u final_answer olarak parse ediliyor"
-            )
+            logger.info("🔍 ReAct formatı bulunamadı, response'u final_answer olarak parse ediliyor")
             action = "final_answer"
             action_content = response.strip()
             thought = "Tool call sonrası direkt final answer alındı"
-
-        return (
-            thought.strip(),
-            (action.strip(), action_content.strip()),
-        )
+        
+        return observation.strip(), thought.strip(), (action.strip(), action_content.strip())
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """LLM için kullanılabilir tool'ların tanımını döndürür (OpenAI Function Calling formatında)"""
@@ -2011,7 +1996,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                     tools = self.get_available_tools()
                     model_with_tools = self.llm.bind_tools(tools)
                     response = model_with_tools.invoke(messages)
-
+                    print("TOOLCALL RESPONSE", response)
                     # Tool call var mı kontrol et
                     if hasattr(response, "tool_calls") and response.tool_calls:
                         logger.info(
@@ -2074,7 +2059,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         agent_response = raw_content
                 # print("agent_response", agent_response)
                 # Response'u parse et - action type'ını almak için önce parse
-                thought, (action, action_content) = (
+                observation, thought, (action, action_content) = (
                     self.parse_agent_response(agent_response)
                 )
 
@@ -2173,7 +2158,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                     # Conversation history'ye ekle
                     conversation_history.append(
-                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content}...\nSonuç: {current_observation}"
+                        f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content}...\nSonuç: {current_observation}"
                     )
                     break
 
@@ -2199,7 +2184,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             
                             # Conversation history'ye ekle
                             conversation_history.append(
-                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                                f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                             )
                             continue  # Bir sonraki iterasyona geç
                         
@@ -2266,7 +2251,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         if document_filenames_found:
                             filename_info = f" Document filenames keşfedildi: {document_filenames_found}. Sonraki chunk sorgusunda bu filename'leri kullan!"
 
-                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver, eğer detaylı içerik gerekiyorsa başka cypher_query ile chunk'ları ara."
+                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver"
 
                         # 🧠 MEM0: Başarılı stratejiyi takip et - DEVRE DIŞI
                         # strategy_type = self._classify_cypher_strategy(action_content)
@@ -2480,12 +2465,12 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                         # Conversation history'ye ekle - Başarılı cypher query
                         conversation_history.append(
-                            f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                            f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                         )
 
                     elif success and not result:
                         # Başarılı sorgu ama boş sonuç - analiz et ve öneride bulun
-                        logger.info(f"✅ Cypher sorgusu başarılı ama boş sonuç: {action_content}")
+                        logger.info(f"Cypher sorgusu boş sonuç döndürdü: {action_content}")
                         
                         # LLM ile boş sonucu analiz et
                         analysis = self.analyze_empty_result(
@@ -2505,7 +2490,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         
                         # Conversation history'ye ekle - Boş sonuç cypher query
                         conversation_history.append(
-                            f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                            f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                         )
 
                     else:
@@ -2551,7 +2536,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                             # Conversation history'ye ekle - Başarısız cypher query (retry)
                             conversation_history.append(
-                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                                f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                             )
                         else:
                             # Son başarısız denemeden sonra da state'e ekle
@@ -2566,11 +2551,11 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                             logger.info(
                                 f"❌ Entity query {state.max_entity_query_attempts} kez başarısız. Vector search'e geç."
                             )
-                            current_observation = f"Entity sorguları {state.max_entity_query_attempts} kez başarısız oldu. Artık vector search kullanarak chunk araması yap (generate_embeddings_for_cypher + GDS similarity)."
+                            current_observation = f"Entity sorguları {state.max_entity_query_attempts} kez başarısız oldu. "
 
                             # Conversation history'ye ekle - Başarısız cypher query (final)
                             conversation_history.append(
-                                f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
+                                f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                             )
 
                 else:
@@ -2578,7 +2563,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
 
                     # Conversation history'ye ekle - Bilinmeyen action
                     conversation_history.append(
-                        f"İterasyon {state.iteration_count}:\nThought: {thought}\nAction: {action}\nContent: {action_content[:100] if action_content else 'N/A'}...\nSonuç: {current_observation}"
+                        f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100] if action_content else 'N/A'}...\nSonuç: {current_observation}"
                     )
 
                 # Chunk limit kontrolü
@@ -2776,6 +2761,12 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 4. **RELATIONSHIPS**: Sadece schema'da gösterilen relationship type'larını kullan
 5. **NO ASSUMPTIONS**: Schema'da yoksa kullanma - hardcoded domain bilgisi yasak!
 
+
+### 🔍 AKILLI ARAMA STRATEJİSİ:
+**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
+**METADATA SORULARI için entity araması** 
+
+
 ### �📝 CYPHER QUERY KURALLARI:
 1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
    - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
@@ -2791,7 +2782,7 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 4. **Embedding Field Hariç Tutma**: Schema'da `embedding_vector` tipindeki field'larda CONTAINS araması yapma - bunlar vector search için kullanılır
 
-5. **Return Clause**: Sorguya uygun alanları döndür (id, name, properties vs.)
+5. **Return Clause**: Sorguya uygun alanları döndür
 
 ### 🔍 ARAMA STRATEJİSİ:
 
@@ -2806,7 +2797,7 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 // ADIM 1: Schema'daki tüm node türlerinde ilgili property'lerde ara
 MATCH (n:SchemaNodeType)  // <-- SchemaNodeType'ı gerçek node türü ile değiştir
 WHERE toLower(apoc.text.clean(n.schema_property)) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-RETURN n.schema_property, id(n), labels(n) as node_type, properties(n)
+RETURN n.schema_property, labels(n) as node_type, properties(n)
 LIMIT 5
 
 ```
@@ -2891,6 +2882,10 @@ LIMIT 5
 - Filename discovery → content search chain
 
 
+**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
+sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
+- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
+
 ### 🔍 VECTOR ARAMA STRATEJİSİ (Schema-Driven, Domain Agnostic):
 
 **A) METADATA + VECTOR ARAMA (Schema-Driven):**
@@ -2901,7 +2896,7 @@ WHERE toLower(apoc.text.clean(coalesce(toString(container_node.schema_property),
   AND content_node.embedding IS NOT NULL
 WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+RETURN content_node.text, labels(content_node), labels(container_node), score
 ORDER BY score DESC LIMIT 10
 ```
 
@@ -2912,7 +2907,7 @@ MATCH (content_node)-[rel]->(container_node)
 WHERE content_node.embedding IS NOT NULL
 WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+RETURN content_node.text, labels(content_node), labels(container_node), score
 ORDER BY score DESC LIMIT 15
 ```
 
@@ -2924,7 +2919,7 @@ WHERE container_node.schema_property IN $context_list
   AND content_node.embedding IS NOT NULL
 WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
 WHERE score >= 0.5
-RETURN content_node.text, content_node.id, labels(content_node), labels(container_node), score
+RETURN content_node.text, labels(content_node), labels(container_node), score
 ORDER BY score DESC LIMIT 10
 ```
 
@@ -2936,13 +2931,25 @@ ORDER BY score DESC LIMIT 10
 
 
 
-### � AVAILABLE TOOLS (OpenAI Function Calling):
+### AVAILABLE TOOLS (OpenAI Function Calling):
 
 **generate_embeddings_for_cypher(text)**: 
 - Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
 - text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
 - LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
 - KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
+
+**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
+- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
+- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
+- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
+- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
+- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
+- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
+- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
+- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
+- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
+- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
 
 **add_page_resource(page_link)**:
 - Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
@@ -2952,7 +2959,7 @@ ORDER BY score DESC LIMIT 10
 #### 🛠️ TOOL KULLANIM KURALLARI:
 
 **TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
-- **generate_embeddings_for_cypher**: Semantic/Vector/Chunk arama için embedding oluştur  
+- **generate_embeddings_for_cypher**: Semantic/Vector arama için embedding oluştur  
 - **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
 
 **ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
@@ -2993,11 +3000,29 @@ ORDER BY score DESC LIMIT 10
 Her iterasyonda şu formatı kullan:
 
 ```
-Thought: [Mevcut durum ve stratejik planlama - spesifik detayları koru, hiç generalize etme! Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. ÖNCE: Hangi parametreler eksik? Önceki conversation'dan ne inherit edilmeli? Sonra: Sorunu nasıl çözebilirim? Bu soru önceki konuşmayla bağlantılı mı? Hangi arama stratejisi uygun? Schema'da hangi node/relation'lar relevant? ]
+Observation: [Durum ve önceki sonuçlar]
+Thought: [Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. İçerik/detay arıyorum mu yoksa metadata mı? Schema'da hangi node/relation'lar relevant? ]
 Action: [cypher_query | final_answer]
 Content: [Cypher sorgusu | final cevap]
 ```
 
+### 🎯 ACTION STRATEJİLERİ:
+
+**cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
+- Eğer semantic arama gerekiyorsa → önce tool'u çağır, sonra cypher_query yap
+- Eğer entity araması gerekiyorsa → schema'daki node türlerini ve property'lerini kullanarak cypher_query yap
+- Eğer metadata + content araması gerekiyorsa → önce entity
+- **1. İTERASYON**: Entity'leri bul (Customer, Policy) - p.source_file'ı mutlaka RETURN et!
+- **2. İTERASYON**: Keşfedilen filename'leri kullan - WHERE d.fileName IN [liste] formatında!
+- **KRİTİK**: Filename CONTAINS araması yapma, direkt IN listesi kullan!
+- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür  
+- **ZORUNLU**: Cypher sonucunda chunk bulunca, faydalandığın her chunk için add_page_resource(page_link) çağır!
+
+
+**final_answer**: Son cevabı ver
+- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
+- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
+- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
 
 ## 🎯 ITERATION BAŞLANGICI:
 
