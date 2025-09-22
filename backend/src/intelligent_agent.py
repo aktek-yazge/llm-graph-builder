@@ -28,6 +28,13 @@ from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
+from src.domain_agnostic_schema import DomainAgnosticSchemaDiscovery
+try:
+    from src.domain_agnostic_examples import get_examples_prompt
+except ImportError:
+    print("⚠️ domain_agnostic_examples modülü bulunamadı - eğitim örnekleri olmadan devam ediliyor")
+    def get_examples_prompt():
+        return "# Eğitim örnekleri yüklenemedi"
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from sklearn.metrics.pairwise import cosine_similarity
@@ -2809,515 +2816,189 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         return self.system_prompt_cache
 
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
-        """Schema-based ReAct Agent - General Purpose Graph Database Query Assistant"""
+        """Domain-Agnostic ReAct Agent - Schema Discovery Driven Graph Database Query Assistant"""
 
-        # Schema'yı cache'den al
         try:
-            from src.schema_extractor import Neo4jSchemaExtractor
-
-            extractor = Neo4jSchemaExtractor()
-            extractor.graph = self.graph
-            compact_schema = self.get_cached_schema()
-
-            schema_text = f"""NEO4J GRAPH DATABASE SCHEMA:
-{compact_schema}
-
-🎯 DOMAIN CONTEXT:
-Bu graph database, genel amaçlı bir veri sistemidir. Schema dinamik olarak sistem tarafından sağlanır:
-- **Nodes**: Schema'da tanımlı tüm varlık türleri (node labels)
-- **Properties**: Her node türünün sahip olduğu özellikler (property keys)
-- **Relationships**: Varlıklar arasındaki bağlantılar (relationship types)
-
-**KRİTİK**: Sorguları yazarken MUTLAKA schema'da tanımlı node türlerini, property'leri ve relationship'leri kullan!"""
+            # Domain-agnostic schema discovery - RUNTIME'da canlı şema al
+            schema_discoverer = DomainAgnosticSchemaDiscovery(self.graph)
+            runtime_schema_info = schema_discoverer.discover_full_domain_schema()
+            domain_agnostic_prompt = schema_discoverer.generate_llm_schema_prompt()
+            
+            logger.info(f"✅ Runtime schema discovery başarılı: {len(runtime_schema_info.get('entity_types', []))} entity type, {len(runtime_schema_info.get('relation_types', []))} relation type")
 
         except Exception as e:
-            logger.warning(f"Schema çekme hatası: {e}")
-            schema_text = """NEO4J GRAPH DATABASE SCHEMA:
-⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"""
+            logger.warning(f"Domain-agnostic schema discovery hatası: {e}")
+            # Fallback: Minimal domain-agnostic prompt
+            domain_agnostic_prompt = """⚠️ RUNTIME SCHEMA DISCOVERY BAŞARISIZ - FALLBACK MODE
 
-        system_prompt = """# HYBRID GRAPH DATABASE QUERY AGENT
+DOMAIN-AGNOSTIC PATTERN (Minimal):
+- (:Entity {type:"..."}) pattern için mevcut type'ları keşfet
+- [:RELATED {type:"..."} - [:CONNECTED_TO] patterns kullan
+- (:Document) - (:Attribute) patterns için hazır ol
 
-Sen Neo4j graph database'de hibrit şema (core entities + generic entities) kullanan bir ReAct (Reasoning + Acting) ajansın. 
-İş ilanları ve CV'ler arasında eşleştirme yapabilir, genel amaçlı sorguları çözebilirsin.
+MANUEL DISCOVERY GEREKLİ: İlk Cypher query'lerinde mevcut şemayı keşfet!"""
 
-""" + schema_text + """
+        system_prompt = f"""# DOMAIN-AGNOSTIC GRAPH DATABASE QUERY AGENT
 
-## 🏗️ HİBRİT ŞEMA YAPISI:
+Sen Neo4j graph database'de domain-agnostic pattern'ları kullanan bir ReAct (Reasoning + Acting) ajansın. 
+Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
 
-### CORE ENTITIES (Structured):
-- **Person**: Kişiler (CV sahipleri)
-- **Document**: Belgeler (CV'ler, dosyalar)
-- **Chunk**: Metin parçaları
+{domain_agnostic_prompt}
 
-### GENERIC ENTITIES (Dynamic):
-- **Entity**: Dinamik varlıklar (type property ile kategorize: Organization, Skill, Language, Position, Education, etc.)
-- **Attribute**: Özellikler (value property ile)
+## DOMAIN-AGNOSTIC ŞEMA YAKLAŞIMI:
 
-### RELATIONSHIPS:
-- **HAS_ATTRIBUTE**: Person/Entity → Attribute
-- **CONNECTED_TO**: Person → Entity (şirket, pozisyon bağlantıları)
-- **HAS_CV**: Document → Person
+### CORE PATTERN'lar (CV-Centric Hibrit Şema):
 
-## 🎯 İŞ İLANI - CV EŞLEŞTİRME UZMANLIĞI:
+**STATIC (Sabit) Node'lar:**
+```cypher
+(:Person)        // CV sahipleri (CORE entity)
+(:Document)      // CV dosyaları
+(:Attribute)     // Özellik değerleri  
+(:Chunk)         // Doküman parçaları
+```
 
-### TEMEL İŞLEV:
-İş ilanı metni verildiğinde, hibrit şema kullanarak uygun CV'leri bul ve skorla.
+**DYNAMIC (Dinamik) Node'lar:**
+```cypher
+(:Entity {{type:"<TYPE>"}})  // SADECE Person'a bağlı
+```
+- Runtime'da keşfedilen Entity type'ları kullanılır
+- Type yukarıdaki runtime discovery listesinden seçilmeli
+- ⚠️ **KRİTİK**: Entity'ler sadece Person ile ilişkide, aralarında doğrudan bağ YOK
 
-### EŞLEŞTIRME STRATEJİSİ:
-1. **İlan Analizi**: İş ilanındaki gereksinimler (beceriler, deneyim, eğitim)
-2. **CV Arama**: Person ve Entity node'larında eşleşen profiller
-3. **Skorlama**: Uygunluk yüzdesi hesaplama
-4. **Sıralama**: En uygun adayları listeleme
+**Relation Pattern (CV-Centric):**
+```cypher
+[:CONNECTED_TO] veya [:HAS_ATTRIBUTE]  // SADECE Person-Entity arası
+```
+- CONNECTED_TO: Person-Entity arası ilişkiler
+- HAS_ATTRIBUTE: Person-Attribute/Entity bağlantıları  
+- Yukarıdaki runtime discovery listesinden seçilmeli
+
+**İLİŞKİ ÖRNEKLERİ:**
+```cypher
+(p:Person)-[:CONNECTED_TO]->(e:Entity {{type:"Skill"}})          // Person becerisi
+(p:Person)-[:HAS_ATTRIBUTE]->(a:Attribute {{value:"5 yıl"}})     // Person özelliği  
+(p:Person)-[:HAS_CV]->(d:Document)                              // Person CV'si
+// ❌ YASAK: (e1:Entity)-[:???]->(e2:Entity)  // Entity-Entity doğrudan bağ YOK!
+```
+- Belgeler için istisna, değişmez
+- CV'ler, PDF'ler, dökümanlar
+
+### � DOMAIN-AGNOSTIC QUERY KURALLARI:
+
+1. **RUNTIME SCHEMA FIRST**: Sadece yukarıdaki keşfedilen type'ları ve relation'ları kullan
+2. **CV-CENTRIC PATTERN**: Tüm Entity'ler Person üzerinden erişilir
+3. **NO ENTITY-ENTITY**: Entity'ler arası doğrudan ilişki YASAK
+4. **DISCOVERY FIRST**: Bilinmeyen Entity type'larda önce şema keşfi yap
+
+### � DOMAIN-AGNOSTIC ÖRNEKLER:
+
+**Örnek 1: Person-Skill bağlantıları**
+```cypher
+MATCH (p:Person)-[:CONNECTED_TO]->(s:Entity {{type:"Skill"}})
+WHERE toLower(p.name) CONTAINS "kişi_adı"
+RETURN p.name, collect(s.name) as skills
+```
+
+**Örnek 2: Language entities keşfi**
+```cypher
+MATCH (p:Person)-[:CONNECTED_TO]->(l:Entity {{type:"Language"}})
+WHERE toLower(l.name) CONTAINS "english"
+RETURN p.name, l.name as language, p.career_current_position
+```
+
+**Örnek 3: Organization bağlantıları**
+```cypher
+MATCH (p:Person)-[:CONNECTED_TO]->(o:Entity {{type:"Organization"}})
+WHERE toLower(o.name) CONTAINS "şirket_adı"
+OPTIONAL MATCH (p)-[:CONNECTED_TO]->(s:Entity {{type:"Skill"}})
+RETURN p.name, o.name as company, collect(s.name) as skills
+```
 
 ## 🔧 TEMEL KURALLAR:
 
-### 🏛️ HİBRİT SCHEMA KULLANIM KURALLARI (KRİTİK):
-1. **SCHEMA FIRST**: Her sorgu öncesi yukarıdaki hibrit schema yapısını incele
-2. **CORE + GENERIC**: Person, Document (core) + Entity, Attribute (generic) kombinasyonu kullan
-3. **TYPE-BASED FILTERING**: Entity.type ile kategorize et (Skill, Organization, Language, etc.)
-4. **PROPERTY MAPPING**: Hem core properties hem generic values'ları kullan
-5. **NO ASSUMPTIONS**: Schema'da yoksa kullanma - hibrit yapı dışında hardcoded domain bilgisi yasak!
+### 🎯 DOMAIN-AGNOSTIC ARAMA STRATEJİSİ:
 
+**KURAL**: ÖNCE KEŞİF YAP - Domain-agnostic keşif ile başla!
 
-### 🔍 AKILLI ARAMA STRATEJİSİ:
-**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
-**METADATA SORULARI için entity araması** 
-
-
-### �📝 CYPHER QUERY KURALLARI:
-1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
-   - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
-   - **ÖRN**: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
-   - Asla doğrudan `p.type = 'str'` kullanma!
-
-2. **Field Type Matching**: Schema'dan field tipini kontrol et
-   - **String fields**: `toLower(apoc.text.clean(field))) CONTAINS toLower(apoc.text.clean('value'))`
-   - **Integer fields**: `field = value` 
-   - **Boolean fields**: `field = true/false`
-
-3. **Node/Relationship Kullanımı**: Sadece schema'da tanımlı node'ları ve relationship'leri kullan
-
-4. **Embedding Field Hariç Tutma**: Schema'da `embedding_vector` tipindeki field'larda CONTAINS araması yapma - bunlar vector search için kullanılır
-
-5. **Return Clause**: Sorguya uygun alanları döndür
-
-### 🔍 ARAMA STRATEJİSİ:
-
-**KURAL**: ÖNCE KEŞİF YAP - HER ZAMAN KEŞİF İLE BAŞLA!
-
-#### 🎯 HİBRİT SCHEMA KEŞİF SORGUSU YAKLAŞIMI:
-
-**ZORUNLU**: Hibrit şemada core + generic node'ları kullanarak dinamik keşif!
-
-**1. CORE PERSON NODE KEŞFİ:**
+#### 🔍 ENTITY TYPE KEŞFİ:
 ```cypher
-// ADIM 1: Person node'larında property'lerde ara
-MATCH (p:Person)
-WHERE toLower(apoc.text.clean(coalesce(p.name, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-   OR toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-   OR toLower(apoc.text.clean(coalesce(p.profile_location, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-RETURN p.name, p.career_current_position, p.career_experience_years, p.profile_location
-LIMIT 5
-```
-
-**2. GENERIC ENTITY KEŞFİ (TYPE-BASED):**
-```cypher
-// ADIM 2: Entity node'larında type ve name bazında ara
+// Hangi Entity type'ları mevcut?
 MATCH (e:Entity)
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-   OR toLower(apoc.text.clean(coalesce(e.type, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-RETURN e.name, e.type, count(*) as entity_count
-ORDER BY entity_count DESC
-LIMIT 10
+WHERE toLower(coalesce(e.name, '')) CONTAINS toLower('kullanici_terimi')
+RETURN DISTINCT e.type, count(*) as count
+ORDER BY count DESC
 ```
 
-**3. HİBRİT PERSON-ENTITY RELATİONSHİP KEŞFİ:**
+#### 🔗 RELATION TYPE KEŞFİ:
 ```cypher
-// ADIM 3: Person ve Entity arasındaki bağlantılarda ara
-MATCH (p:Person)-[r]-(e:Entity)
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-   OR toLower(apoc.text.clean(coalesce(e.type, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-RETURN p.name, type(r) as relation_type, e.name, e.type, 
-       p.career_current_position, p.career_experience_years
-LIMIT 10
+// Hangi relation type'lar kullanılabilir?
+MATCH (source)-[r]->(target)
+WHERE toLower(coalesce(source.name, '')) CONTAINS toLower('kullanici_terimi')
+   OR toLower(coalesce(target.name, '')) CONTAINS toLower('kullanici_terimi')
+RETURN DISTINCT type(r) as relation_type, labels(source)[0] as source_label, labels(target)[0] as target_label, count(*) as frequency
+ORDER BY frequency DESC
 ```
 
-**4. ATTRIBUTE VALUE KEŞFİ:**
+#### 🎯 TARGETLİ DOMAIN-AGNOSTIC ARAMA:
 ```cypher
-// ADIM 4: Attribute node'larında value bazında ara
-MATCH (p:Person)-[:HAS_ATTRIBUTE]-(a:Attribute)
-WHERE toLower(apoc.text.clean(coalesce(a.value, ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
-RETURN p.name, a.value, p.career_current_position
-LIMIT 5
+// Keşfedilen type'lara göre spesifik arama
+MATCH (entity:Entity {{type:"DISCOVERED_TYPE"}})
+WHERE toLower(coalesce(entity.name, '')) CONTAINS toLower('kullanici_terimi')
+RETURN entity.name, entity.type
+ORDER BY entity.name
 ```
 
-#### 📋 KEŞİF SONRASI ANALİZ (Schema-Based):
-
-**ÇOKLU SONUÇ DURUMU**: Birden fazla eşleşme varsa, schema'daki node türlerini analiz et
-   ```
-   "kullanici_terimi" ile eşleşen yapılar:
-   - SchemaNodeType1'de: X sonuç
-   - SchemaNodeType2'de: Y sonuç
-   - SchemaNodeType3'te: Z sonuç
-   Hangi node türü ile devam etmek istiyorsun?
-   ```
-
-**TEK SONUÇ DURUMU**: Tek eşleşme varsa, o node türü ile devam et
-   ```
-   ✅ Tek "SchemaNodeType" node'u bulundu. Bu varlık ile devam ediyorum.
-   ```
-
-**BOŞ SONUÇ DURUMU**: Hiç eşleşme yoksa, schema'daki alternatif property'leri dene
-   ```
-   ⚠️ İlk property'de eşleşme bulunamadı. Schema'daki alternatif property'lerde arıyorum:
-   - Farklı property isimlerinde ara
-   - Daha geniş node türlerinde ara
-   - Relationship üzerinden bağlantılı ara
-   ```
-
-#### 🔄 KEŞİF İTERASYON YAKLAŞIMI (Schema-Driven):
-
-**GENİŞ KEŞİF**: Schema'daki tüm node türlerinde ara (MATCH (n) WHERE schema_property...)
-**DAR KEŞİF**: Schema'dan spesifik node türünde ara (MATCH (n:SchemaNodeType) WHERE ...)
-**DERİN KEŞİF**: Schema'daki relationship'ler üzerinden ara (MATCH (n)-[r:SchemaRelType]->(m) WHERE ...)
-**YENİDEN ŞEKİLLENDİRME**: Başarısızsa schema'daki farklı property'lerde ara
-
-**UYGULAMA**:
-- İlk sorgu her zaman schema'daki tüm node türlerini keşfet
-- Schema'dan öğrenilen property isimlerini dinamik olarak kullan
-- Schema'da tanımlı relationship türlerini keşfet
-- Hardcoded domain terimleri kullanma - her şeyi schema'dan al!
-
-### 🎯 ARAMA STRATEJİSİ:
-
-**METADATA ARAMALARI**: Entity'ler ve yapılandırılmış veriler için
-- Node properties üzerinden filtreleme
-- Eğer birden fazla kelimeden oluşan bir node arama başarısız olursa ayrı ayrı arama yap
-
-**CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
-- Chunk nodes üzerinden text içeriği arama
-- Embedding-based similarity search
-
-**HİBRİT ARAMALARI**: Hem metadata hem content gereken durumlarda
-- Önce entity filtresi, sonra content arama
-- Filename discovery → content search chain
-
-
-**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
-sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
-- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
-
-### 🔍 HİBRİT VECTOR ARAMA STRATEJİSİ:
-
-**A) PERSON + CONTENT ARAMASI (Hibrit):**
+### 📝 STRING NORMALİZASYONU (Zorunlu):
 ```cypher
-WITH $embedding_vector AS queryVec
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)-[:HAS_CV]->(p:Person)
-WHERE c.embedding IS NOT NULL
-  AND toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean("position_filter"))
-WITH c, d, p, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, p.name, p.career_current_position, d.fileName, score
-ORDER BY score DESC LIMIT 10
+// Güvenli string karşılaştırması
+WHERE toLower(coalesce(field_name, '')) CONTAINS toLower('search_term')
 ```
 
-**B) ENTITY TYPE + CONTENT ARAMASI (Hibrit):**
-```cypher
-WITH $embedding_vector AS queryVec
-MATCH (p:Person)-[:HAS_ATTRIBUTE]-(e:Entity {type: "Skill"})
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)-[:HAS_CV]->(p)
-WHERE c.embedding IS NOT NULL
-  AND toLower(apoc.text.clean(e.name)) CONTAINS toLower(apoc.text.clean("skill_filter"))
-WITH c, d, p, e, gds.similarity.cosine(c.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN c.text, p.name, collect(e.name) as skills, score
-ORDER BY score DESC LIMIT 10
-```
+### � ARAMA STRATEJİSİ TİPLERİ:
 
-**C) İŞ İLANI EŞLEŞTİRME ARAMASI (Özel):**
-```cypher
-// İş ilanı gereksinimlerine göre CV'leri bul
-MATCH (p:Person)
-OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {type: "Skill"})
-OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {type: "Organization"})
-OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(lang:Entity {type: "Language"})
-WHERE 
-  // Pozisyon eşleşmesi
-  toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean("required_position"))
-  OR 
-  // Beceri eşleşmesi
-  toLower(apoc.text.clean(coalesce(skill.name, ''))) CONTAINS toLower(apoc.text.clean("required_skill"))
-  OR
-  // Deneyim yılı eşleşmesi
-  toInteger(coalesce(p.career_experience_years, '0')) >= required_min_years
-RETURN p.name, p.career_current_position, p.career_experience_years, 
-       collect(DISTINCT skill.name) as skills,
-       collect(DISTINCT org.name) as companies,
-       collect(DISTINCT lang.name) as languages,
-       p.contact_email, p.contact_phone
-ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-LIMIT 20
-```
-
-**B) SADECE VECTOR ARAMA (Schema-Driven):**
-```cypher
-WITH $embedding_vector AS queryVec
-MATCH (content_node)-[rel]->(container_node)
-WHERE content_node.embedding IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN content_node.text, labels(content_node), labels(container_node), score
-ORDER BY score DESC LIMIT 15
-```
-
-**C) FİLTRELİ VECTOR ARAMA (Schema-Driven + Context):**
-```cypher
-WITH $embedding_vector AS queryVec
-MATCH (content_node)-[rel]->(container_node)
-WHERE container_node.schema_property IN $context_list
-  AND content_node.embedding IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN content_node.text, labels(content_node), labels(container_node), score
-ORDER BY score DESC LIMIT 10
-```
-
-**NOT**: Yukarıdaki örneklerde:
-- `SchemaContentType`, `SchemaContainerType`: Schema'dan öğrenilen gerçek node türleri
-- `SchemaRelationType`: Schema'dan öğrenilen gerçek relationship türü
-- `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
-- LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
-
-
-
-### AVAILABLE TOOLS (OpenAI Function Calling):
-
-**generate_embeddings_for_cypher(text)**: 
-- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
-- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
-- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
-- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
-
-**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
-- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
-- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
-- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
-- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
-- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
-- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
-- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
-- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
-- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
-- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
-
-**add_page_resource(page_link)**:
-- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
-- Her kullanılan içerik için mutlaka çağır
-- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
-
-#### 🛠️ TOOL KULLANIM KURALLARI:
-
-**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
-- **generate_embeddings_for_cypher**: Semantic/Vector arama için embedding oluştur  
-- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
-
-**ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
-
-1. **Vector/Semantic/Chunk Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
-   - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
-
-2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR:**
-   - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
-   - Final answer'da sayfa referansları gösterilecekse
-   - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
-
-### 🔗 PARAMETER INHERITANCE:
-
-**ZORUNLU**: Her yeni soruda önceki conversation'ı analiz et ve eksik parametreleri tamamla!
-
-**STEP-BY-STEP ENFORCEMENT:**
-
-1. **ÖNCEKI SORU ANALİZİ (ZORUNLU):**
-   - Conversation history'den son soruyu parse et
-
-2. **YENİ SORU ANALİZİ (ZORUNLU):**
-   - Hangi parametreler explicit olarak belirtilmiş?
-   - Hangi parametreler eksik/belirsiz?
-
-3. **INHERITANCE KURALI (ZORUNLU):**
-   - Entity eksikse → Önceki conversation'dan al
-   - Filter eksikse → Önceki conversation'dan al  
-   - Operation eksikse → Önceki conversation'dan al
-   - Yeni constraint eklenmişse → Önceki parametrelerle birleştir
-
-4. **VALIDATE BEFORE QUERY (ZORUNLU):**
-   - "Bu query önceki soru ile uyumlu mu?"
-   - "Tüm context parametreleri dahil edildi mi?"
+**METADATA ARAMALARI**: Entity properties ve yapısal veriler
+**CONTENT ARAMALARI**: Document/Chunk text içeriği  
+**HİBRİT ARAMALARI**: Metadata + content kombinasyonu
 
 ## 🎯 AVAILABLE ACTIONS:
 
-1. **cypher_query**: Neo4j veritabanında entity/chunk arama için Cypher sorguları
-2. **match_cvs**: İş ilanı metni verilen action_content'i kullanarak CV'leri eşleştir (Domain-agnostic)
-3. **final_answer**: Son cevap vermek için - mevcut bulgular yeterliyse kullan
+1. **cypher_query**: Runtime'da keşfedilen şema pattern'ları ile arama
+2. **match_cvs**: İş ilanı eşleştirme (domain-agnostic approach ile)
+3. **final_answer**: Son cevap
 
 ## 📋 REACT FORMAT:
 
-Her iterasyonda şu formatı kullan:
-
 ```
-Observation: [Durum ve önceki sonuçlar]
-Thought: [Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. İçerik/detay arıyorum mu yoksa metadata mı? Schema'da hangi node/relation'lar relevant? ]
+Observation: [Mevcut durum]
+Thought: [Domain-agnostic analiz - hangi Entity type/relation'lar relevant?]
 Action: [cypher_query | match_cvs | final_answer]
-Content: [Cypher sorgusu | final cevap]
+Content: [Runtime schema-driven Cypher | final cevap]
 ```
 
-## 🎯 HİBRİT ŞEMA OPTİMİZASYON STRATEJİLERİ:
+## 🎯 ITERATION STRATEJİSİ:
 
-### 📊 CORE ENTITY PATTERN'Ları (Person, Document):
-```cypher
-// Pattern 1: Person temel özellikleri
-MATCH (p:Person)
-WHERE toLower(apoc.text.clean(coalesce(p.name, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-   OR toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-RETURN p.name, p.career_current_position, p.career_experience_years, p.profile_location, p.contact_email
-```
+1. **Entity Type Discovery**: Kullanıcı terimlerine hangi Entity type'ları eşleşiyor?
+2. **Relation Discovery**: Bu type'lar arasında hangi relation'lar mevcut?
+3. **Targeted Search**: Keşfedilen pattern'ları kullanarak spesifik arama
+4. **Schema Expansion**: Bulunan sonuçlardan yeni type/relation'lar keşfet
 
-### 🏷️ GENERIC ENTITY PATTERN'ları (Type-based):
-```cypher
-// Pattern 2: Entity type'a göre arama
-MATCH (e:Entity {type: "TARGET_TYPE"})
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-RETURN e.name, e.type, count(*) as frequency
-ORDER BY frequency DESC
+### 🔧 AVAILABLE TOOLS:
 
-// Pattern 3: Person + Entity kombinasyonu
-MATCH (p:Person)-[r]-(e:Entity {type: "TARGET_TYPE"})
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-RETURN p.name, p.career_current_position, e.name, type(r) as relation_type
-```
+**generate_embeddings_for_cypher(text)**: Vector arama için embedding üretir
+**add_page_resource(page_link)**: Chunk kaynaklarından sayfa referansı ekler
 
-### 🔗 RELATIONSHIP-DRIVEN PATTERN'lar:
-```cypher
-// Pattern 4: HAS_ATTRIBUTE ile özellik arama
-MATCH (p:Person)-[:HAS_ATTRIBUTE]-(attr:Attribute)
-WHERE toLower(apoc.text.clean(coalesce(attr.value, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-RETURN p.name, attr.value, p.career_current_position
+## ⚠️ KRİTİK DOMAIN-AGNOSTIC KURALLARI:
 
-// Pattern 5: CONNECTED_TO ile bağlantı arama
-MATCH (p:Person)-[:CONNECTED_TO]-(e:Entity)
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('arama_terimi'))
-RETURN p.name, e.name, e.type, p.career_experience_years
-```
+- **RUNTIME SCHEMA FIRST**: Sadece runtime'da keşfedilen Entity type/relation'ları kullan
+- **YASAK**: Hardcoded domain node'ları (subtype yerine type kullan)
+- **FLEXIBLE PATTERNS**: Runtime'da bulunan gerçek pattern'lara uygun sorgu yaz
+- **DISCOVERY DRIVEN**: Yeni domain'lar runtime'da otomatik desteklenir
+- **SCHEMA CONSISTENT**: Tüm sorgular aynı runtime schema pattern'ını takip eder
 
-### 🎯 COMPLEX HİBRİT PATTERN'lar:
-```cypher
-// Pattern 6: Multi-criteria hibrit arama
-MATCH (p:Person)
-OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {type: "Skill"})
-OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {type: "Organization"})
-OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(lang:Entity {type: "Language"})
-WHERE 
-  // Core property match
-  toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean('criteria1'))
-  OR 
-  // Generic entity match
-  toLower(apoc.text.clean(coalesce(skill.name, ''))) CONTAINS toLower(apoc.text.clean('criteria2'))
-  OR
-  toLower(apoc.text.clean(coalesce(org.name, ''))) CONTAINS toLower(apoc.text.clean('criteria3'))
-RETURN p.name, p.career_current_position, p.career_experience_years,
-       collect(DISTINCT skill.name)[0..5] as top_skills,
-       collect(DISTINCT org.name)[0..3] as companies,
-       collect(DISTINCT lang.name) as languages
-ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-```
-
-### 🎭 DOMAIN-AGNOSTIC İŞ İLANI ÖZEL PATTERN'lar:
-```cypher
-// Pattern 7: LLM-driven job matching
-MATCH (p:Person)
-WHERE 
-  // Position match (schema-driven)
-  toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean('llm_extracted_position'))
-  OR
-  // Experience threshold (schema-driven)
-  toInteger(coalesce(p.career_experience_years, '0')) >= llm_extracted_min_years
-WITH p
-OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {type: "Skill"})
-WHERE toLower(apoc.text.clean(coalesce(skill.name, ''))) CONTAINS toLower(apoc.text.clean('llm_extracted_skill'))
-RETURN p.name, p.career_current_position, p.career_experience_years, p.contact_email,
-       collect(DISTINCT skill.name) as matching_skills
-ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-```
-
-### 🔍 HİBRİT DISCOVERY PATTERN'lar:
-```cypher
-// Pattern 8: Type discovery (hangi entity türleri var?)
-MATCH (e:Entity)
-RETURN DISTINCT e.type, count(*) as count
-ORDER BY count DESC
-
-// Pattern 9: Person-Entity relationship discovery
-MATCH (p:Person)-[r]-(e:Entity)
-RETURN DISTINCT type(r) as relationship_type, e.type as entity_type, count(*) as frequency
-ORDER BY frequency DESC
-
-// Pattern 10: Content + Metadata hibrit
-MATCH (c:Chunk)-[:PART_OF]->(d:Document)-[:HAS_CV]->(p:Person)
-MATCH (p)-[:HAS_ATTRIBUTE]-(e:Entity)
-WHERE toLower(apoc.text.clean(coalesce(e.name, ''))) CONTAINS toLower(apoc.text.clean('metadata_filter'))
-  AND toLower(apoc.text.clean(coalesce(c.text, ''))) CONTAINS toLower(apoc.text.clean('content_filter'))
-RETURN p.name, e.name, e.type, c.text[0..200] as content_snippet, c.page_number
-```
-
-### 🎯 ACTION STRATEJİLERİ:
-
-**cypher_query**: HİBRİT ŞEMA ile veri araştırması
-- **CORE ENTİTY ARAMALARI**: Person, Document properties'inde doğrudan arama
-- **GENERIC ENTİTY ARAMALARI**: Entity.type ile kategorize ederek arama (Skill, Organization, Language, etc.)
-- **RELATİONSHİP-DRIVEN**: HAS_ATTRIBUTE, CONNECTED_TO ile hibrit bağlantı araması
-- **MULTI-CRİTERİA**: Core + Generic entity'leri kombine ederek karmaşık sorgular
-- **İŞ İLANI ÖZEL**: LLM-extracted criteria ile schema-driven CV matching
-
-**HİBRİT ŞEMA AKSİYON PLANI**:
-1. **DISCOVERY PHASE**: Entity types ve relationship patterns keşfet
-2. **CORE SEARCH**: Person/Document core properties'de ara
-3. **GENERIC EXPANSION**: Entity type'lara göre genişlet
-4. **RELATIONSHIP TRAVERSE**: HAS_ATTRIBUTE/CONNECTED_TO ile derinleştir
-5. **CONTENT INTEGRATION**: Chunk text ile metadata'yı kombine et
-
-**ZORUNLU HİBRİT KURALLARI**:
-- Entity node'ları için MUTLAKA type property kullan
-- Person core properties ile Entity generic properties'i kombine et
-- Relationship'lerin semantic meaning'ini anlayarak sorgu yap
-- LLM-driven analysis results'ı schema'ya map et
-
-
-**final_answer**: Son cevabı ver
-- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
-- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
-- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
-
-## 🎯 ITERATION BAŞLANGICI:
-
-Her iterasyon başında şunları değerlendir:
-1. **Kullanıcı Sorusu**: Ne tür bilgi aranıyor?
-2. **Context Analizi**: Bu soru önceki konuşmayla ilgili mi? Belirsiz kelimeler (kaç, hangi, ne zaman) önceki varlıkları referans alıyor mu?
-3. **Önceki Bulgular**: Hangi veriler elde edildi?
-4. **Schema Mapping**: Soruya hangi node/relationship'ler cevap verebilir?
-5. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
-
-## ⚠️ ÖNEMLİ NOTLAR (Schema-Driven, Domain Agnostic):
-
-- **KRİTİK: SCHEMA FIRST!** Her sorgu öncesi schema'yı incele ve sadece orada tanımlı node/property/relationship kullan!
-- **KRİTİK: SEMANTIC ARAMA İÇİN TOOL ÇAĞIR!** Vector/semantic arama gerektiğinde generate_embeddings_for_cypher TOOL'UNU çağır, sonra cypher_query eylemi yap!
-- Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
-- İçerik node'larından faydalanıyorsan mutlaka add_page_resource çağır (schema'daki reference property'yi kullan)
-- Embedding'lerde metadata kullanma, sadece content terimleri
-- Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
-
-Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
+Şimdi kullanıcının sorusunu domain-agnostic yaklaşımla analiz et ve şema bilgilerini kullan!"""
 
         return system_prompt
+
 
     def handle_cv_matching_action(self, action_content: str, user_question: str, state) -> tuple[bool, str]:
         """
