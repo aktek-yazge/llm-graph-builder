@@ -134,7 +134,22 @@ def generate_reference_links(chunkdetails, sources):
     
     # Kaynaklardan eksik belgeleri ekle
     for source in sources:
-        if source not in document_refs:
+        # Source'un string olduğundan emin ol (dictionary olabilir)
+        source_filename = source
+        if isinstance(source, dict):
+            # Dictionary ise filename'ı çıkar
+            if 'filename' in source:
+                source_filename = source['filename']
+            elif 'file_path' in source:
+                source_filename = source['file_path']
+            elif 'name' in source:
+                source_filename = source['name']
+            else:
+                continue  # Uygun key bulunamadıysa skip et
+        elif not isinstance(source, str):
+            continue  # String değilse skip et
+            
+        if source_filename not in document_refs:
             # S3 yerine direkt BASE_URL kullan
             doc_url = None
             
@@ -151,9 +166,9 @@ def generate_reference_links(chunkdetails, sources):
             
             # URL encode the source filename for proper handling of Turkish characters and spaces
             import urllib.parse
-            encoded_source = urllib.parse.quote(source, safe='', encoding='utf-8')
+            encoded_source = urllib.parse.quote(source_filename, safe='', encoding='utf-8')
             
-            document_refs[source] = {
+            document_refs[source_filename] = {
                 'doc_link': doc_url or f"{os.getenv('BASE_URL', 'http://localhost:8000')}/files/{encoded_source}",  # BASE_URL fallback
                 'pages': set()
             }
@@ -2995,18 +3010,33 @@ async def process_chat_response_stream(messages, history, question, model, graph
             agent_result = None
         
         # IntelligentAgent'tan gelen sonuçları kontrol et
-        if (agent_result and isinstance(agent_result, dict) and 
-            agent_result.get('final_answer')):
-            
-            yield {
-                "type": "status",
-                "session_id": session_id,
-                "message": f"IntelligentAgent sonuçları alındı, direkt kullanılıyor...",
-                "user": "chatbot"
-            }
-            
-            # IntelligentAgent direkt cevap verdiği için formatted_docs'a gerek yok
-            formatted_docs = ""
+        if (agent_result and isinstance(agent_result, dict)):
+            # CV eşleştirme sonuçları varsa özel işlem
+            if agent_result.get('match_type') in ['job_posting_cv_matching', 'cv_matching_action_result']:
+                yield {
+                    "type": "status",
+                    "session_id": session_id,
+                    "message": f"İş ilanı CV eşleştirme sonuçları alındı...",
+                    "user": "chatbot"
+                }
+                
+                # CV eşleştirme sonuçları için formatted_docs'a gerek yok
+                formatted_docs = ""
+                
+                # CV resource links'leri sources olarak ayarla
+                if agent_result.get('resource_links'):
+                    sources = agent_result.get('resource_links', [])
+                
+            elif agent_result.get('final_answer'):
+                yield {
+                    "type": "status",
+                    "session_id": session_id,
+                    "message": f"IntelligentAgent sonuçları alındı, direkt kullanılıyor...",
+                    "user": "chatbot"
+                }
+                
+                # IntelligentAgent direkt cevap verdiği için formatted_docs'a gerek yok
+                formatted_docs = ""
         else:
             # IntelligentAgent final_answer yoksa normal RAG flow
             if docs:
@@ -3054,48 +3084,90 @@ async def process_chat_response_stream(messages, history, question, model, graph
         full_response = ""
         total_tokens_count = 0
         
-        # IntelligentAgent'tan final_answer varsa direkt kullan
-        if (agent_result and isinstance(agent_result, dict) and 
-            agent_result.get('final_answer')):
+        # IntelligentAgent'tan gelen sonuçları işle
+        if (agent_result and isinstance(agent_result, dict)):
             
-            # IntelligentAgent'ın final_answer'ını direkt stream'le
-            full_response = agent_result.get('final_answer', '')
-            
-            # Agent'tan gelen token kullanımını kullan
-            if agent_token_usage:
-                total_tokens_count = agent_token_usage.get('total_tokens', 0)
-            else:
-                # Fallback: kelime sayısından tahmin et
-                total_tokens_count = len(full_response.split())
-            
-            # Streaming efekti - IntelligentAgent cevabını chunk'lar halinde gönder
-            tokens = re.findall(r'\S+|\n+', full_response)
-            streamed_content = ""
-            
-            for i, token in enumerate(tokens):
-                if token.startswith('\n'):
-                    # Newline karakterleri için
-                    streamed_content += token
-                    yield {
-                        "type": "message_chunk",
-                        "session_id": session_id,
-                        "content": token,
-                        "full_message": streamed_content,
-                        "is_complete": i == len(tokens) - 1,
-                        "user": "chatbot"
-                    }
+            # CV eşleştirme sonuçları için özel stream işlemi
+            if agent_result.get('match_type') in ['job_posting_cv_matching', 'cv_matching_action_result']:
+                # CV eşleştirme cevabını al
+                full_response = agent_result.get('answer', '')
+                
+                # Agent'tan gelen token kullanımını kullan
+                if agent_token_usage:
+                    total_tokens_count = agent_token_usage.get('total_tokens', 0)
                 else:
-                    # Normal kelimeler için
-                    streamed_content += token + " "
-                    yield {
-                        "type": "message_chunk",
-                        "session_id": session_id,
-                        "content": token + " ",
-                        "full_message": streamed_content.rstrip(),
-                        "is_complete": i == len(tokens) - 1,
-                        "user": "chatbot"
-                    }
-                await asyncio.sleep(0.03)
+                    # Fallback: kelime sayısından tahmin et
+                    total_tokens_count = len(full_response.split())
+                
+                # Streaming efekti - CV eşleştirme cevabını chunk'lar halinde gönder
+                tokens = re.findall(r'\S+|\n+', full_response)
+                streamed_content = ""
+                
+                for i, token in enumerate(tokens):
+                    if token.startswith('\n'):
+                        # Newline karakterleri için
+                        streamed_content += token
+                        yield {
+                            "type": "message_chunk",
+                            "session_id": session_id,
+                            "content": token,
+                            "full_message": streamed_content,
+                            "is_complete": i == len(tokens) - 1,
+                            "user": "chatbot"
+                        }
+                    else:
+                        # Normal kelimeler için
+                        streamed_content += token + " "
+                        yield {
+                            "type": "message_chunk",
+                            "session_id": session_id,
+                            "content": token + " ",
+                            "full_message": streamed_content.rstrip(),
+                            "is_complete": i == len(tokens) - 1,
+                            "user": "chatbot"
+                        }
+                    await asyncio.sleep(0.03)
+                    
+            # Normal IntelligentAgent final_answer varsa direkt kullan
+            elif agent_result.get('final_answer'):
+                # IntelligentAgent'ın final_answer'ını direkt stream'le
+                full_response = agent_result.get('final_answer', '')
+                
+                # Agent'tan gelen token kullanımını kullan
+                if agent_token_usage:
+                    total_tokens_count = agent_token_usage.get('total_tokens', 0)
+                else:
+                    # Fallback: kelime sayısından tahmin et
+                    total_tokens_count = len(full_response.split())
+                
+                # Streaming efekti - IntelligentAgent cevabını chunk'lar halinde gönder
+                tokens = re.findall(r'\S+|\n+', full_response)
+                streamed_content = ""
+                
+                for i, token in enumerate(tokens):
+                    if token.startswith('\n'):
+                        # Newline karakterleri için
+                        streamed_content += token
+                        yield {
+                            "type": "message_chunk",
+                            "session_id": session_id,
+                            "content": token,
+                            "full_message": streamed_content,
+                            "is_complete": i == len(tokens) - 1,
+                            "user": "chatbot"
+                        }
+                    else:
+                        # Normal kelimeler için
+                        streamed_content += token + " "
+                        yield {
+                            "type": "message_chunk",
+                            "session_id": session_id,
+                            "content": token + " ",
+                            "full_message": streamed_content.rstrip(),
+                            "is_complete": i == len(tokens) - 1,
+                            "user": "chatbot"
+                        }
+                    await asyncio.sleep(0.03)
         
         else:
             # IntelligentAgent final_answer yoksa fallback: RAG Chain ile streaming
@@ -3168,6 +3240,18 @@ async def process_chat_response_stream(messages, history, question, model, graph
         
         # IntelligentAgent bilgilerini ekle
         if agent_result:
+            # CV eşleştirme sonuçları için özel bilgiler
+            if agent_result.get('match_type') in ['job_posting_cv_matching', 'cv_matching_action_result']:
+                response_info["cv_matching_mode"] = True
+                response_info["cv_matched_candidates"] = agent_result.get('matched_candidates', [])
+                response_info["cv_job_requirements"] = agent_result.get('job_requirements', {})
+                response_info["cv_resource_links"] = agent_result.get('resource_links', [])
+                response_info["cv_total_matches"] = len(agent_result.get('matched_candidates', []))
+                
+                # CV eşleştirme sonuçlarını sources olarak da ekle
+                if agent_result.get('resource_links'):
+                    sources = agent_result.get('resource_links', [])
+                    
             # IntelligentAgent chunk ve entity detaylarını nodedetails'e ekle
             if agent_result.get('chunk_details'):
                 # Agent'tan gelen chunk detaylarını nodedetails formatına çevir
@@ -3188,8 +3272,8 @@ async def process_chat_response_stream(messages, history, question, model, graph
                     
                     nodedetails["chunkdetails"] = converted_chunks
                     
-                    # Ayrıca sources olarak da ekle
-                    if not sources:
+                    # Ayrıca sources olarak da ekle (sadece CV eşleştirme değilse)
+                    if not sources and agent_result.get('match_type') not in ['job_posting_cv_matching', 'cv_matching_action_result']:
                         sources = list(set([chunk.get('document', 'IntelligentAgent') for chunk in agent_chunks]))
             
             if agent_result.get('entity_details'):
@@ -3238,7 +3322,22 @@ async def process_chat_response_stream(messages, history, question, model, graph
         
         # 📋 RAG belgelerinden referans linklerini oluştur ve cevaba ekle
         chunkdetails = nodedetails.get("chunkdetails", [])
-        sources_for_refs = sources if isinstance(sources, list) else []
+        
+        # Sources'ı uygun formata çevir - dictionary'lerin listesi olabilir (CV matching durumunda)
+        sources_for_refs = []
+        if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict):
+                    # Dictionary ise filename'ı al
+                    if 'filename' in source:
+                        sources_for_refs.append(source['filename'])
+                    elif 'file_path' in source:
+                        sources_for_refs.append(source['file_path'])
+                    elif 'name' in source:
+                        sources_for_refs.append(source['name'])
+                elif isinstance(source, str):
+                    # String ise direkt ekle
+                    sources_for_refs.append(source)
         
         if chunkdetails or sources_for_refs:
             reference_links = generate_reference_links(chunkdetails, sources_for_refs)
