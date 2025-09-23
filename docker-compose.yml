@@ -1,23 +1,75 @@
 services:
+# Backend - Production servisi
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile # Production Dockerfile
+    env_file:
+      - ./backend/.production.env
+    container_name: backend
+    ports:
+      - '8005:8000'
+    environment:
+      - PYTHONPATH=/code
+      - ENV=production
+    networks:
+      - llm-graph-builder_prod
+    restart: unless-stopped
+
+  # Frontend - Production servisi
+  frontend:
+    depends_on:
+      - backend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile # Production Dockerfile
+      args:
+        - VITE_BACKEND_API_URL=${VITE_BACKEND_API_URL-http://localhost:8000}
+        - VITE_REACT_APP_SOURCES=${VITE_REACT_APP_SOURCES-local,wiki,s3}
+        - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID-}
+        - VITE_BLOOM_URL=${VITE_BLOOM_URL-https://workspace-preview.neo4j.io/workspace/explore?connectURL={CONNECT_URL}&search=Show+me+a+graph&featureGenAISuggestions=true&featureGenAISuggestionsInternal=true}
+        - VITE_TIME_PER_PAGE=${VITE_TIME_PER_PAGE-50}
+        - VITE_CHUNK_SIZE=${VITE_CHUNK_SIZE-5242880}
+        - VITE_LARGE_FILE_SIZE=${VITE_LARGE_FILE_SIZE-5242880}
+        - VITE_ENV=${VITE_ENV-PROD}
+        - VITE_CHAT_MODES=${VITE_CHAT_MODES-}
+        - VITE_BATCH_SIZE=${VITE_BATCH_SIZE-2}
+        - VITE_LLM_MODELS=${VITE_LLM_MODELS-}
+        - VITE_LLM_MODELS_PROD=${VITE_LLM_MODELS_PROD-openai_gpt_4o,openai_gpt_4o_mini,diffbot,gemini_1.5_flash}
+        - VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN-}
+        - VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID-}
+        - VITE_DISABLE_AUTH=${VITE_DISABLE_AUTH-false}
+        - VITE_CHUNK_OVERLAP=${VITE_CHUNK_OVERLAP-20}
+        - VITE_TOKENS_PER_CHUNK=${VITE_TOKENS_PER_CHUNK-200}
+        - VITE_CHUNK_TO_COMBINE=${VITE_CHUNK_TO_COMBINE-1}
+        - DEPLOYMENT_ENV=production
+    env_file:
+      - ./frontend/.production.env
+    container_name: frontend
+    ports:
+      - '8085:8080' # Production port
+    networks:
+      - llm-graph-builder_prod
+    restart: unless-stopped
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: qdrant
+    container_name: qdrant-service
     ports:
       - '6333:6333'
       - '6334:6334'
     volumes:
-      - qdrant_storage:/qdrant/storage
+      - qdrant_storage_prod:/qdrant/storage
     deploy:
       resources:
         limits:
           memory: 16g
           cpus: '4'
     networks:
-      - llm-graph-builder_net
+      - llm-graph-builder_prod
 
   neo4j:
     image: neo4j:2025.07.1
-    container_name: dinkal-neo4j
+    container_name: neo4j-service
     restart: always
     ports:
       - '7474:7474'
@@ -41,19 +93,19 @@ services:
           memory: 16g
           cpus: '4'
     volumes:
-      - neo4j_data:/data
-      - neo4j_plugins:/plugins
-      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_data_prod:/data
+      - neo4j_plugins_prod:/plugins
+      - neo4j_import_prod:/var/lib/neo4j/import
     networks:
-      - llm-graph-builder_net
+      - llm-graph-builder_prod
 
 networks:
-  llm-graph-builder_net:
+  llm-graph-builder_prod:
     driver: bridge
 
 volumes:
-  qdrant_storage:
-  neo4j_data:
-  neo4j_plugins:
-  neo4j_import:
+  qdrant_storage_prod:
+  neo4j_data_prod:
+  neo4j_plugins_prod:
+  neo4j_import_prod:
 
