@@ -2053,7 +2053,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                     tools = self.get_available_tools()
                     model_with_tools = self.llm.bind_tools(tools)
                     response = model_with_tools.invoke(messages)
-                    print("TOOLCALL RESPONSE", response)
+                    # print("TOOLCALL RESPONSE", response)
                     # Tool call var mı kontrol et
                     if hasattr(response, "tool_calls") and response.tool_calls:
                         logger.info(
@@ -2843,6 +2843,16 @@ MANUEL DISCOVERY GEREKLİ: İlk Cypher query'lerinde mevcut şemayı keşfet!"""
 Sen Neo4j graph database'de domain-agnostic pattern'ları kullanan bir ReAct (Reasoning + Acting) ajansın. 
 Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
 
+## 🎯 TEMEL YETKİNLİKLER:
+1. **CV & İş İlanı Eşleştirme**: İş ilanı metni verildiğinde uygun CV'leri bul ve skorla
+2. **Domain-Agnostic Sorgulama**: Runtime şema keşfi ile her türlü veriyi ara
+3. **Hibrit Şema Desteği**: Static (Person, Document) + Dynamic (Entity) node'ları kombine et
+
+## 🚀 İŞ İLANI EŞLEŞTIRME UZMANLIĞI:
+**TEMEL İŞLEV**: İş ilanı metinlerini analiz ederek graph'taki CV'lerle otomatik eşleştirme
+**TETIKLEME**: Kullanıcı iş pozisyonu + gereksinimler gönderdiğinde otomatik olarak match_cvs action'ı kullan
+**ÇIKTI**: Skorlanmış aday listesi, beceri uygunluğu, deneyim analizi
+
 {domain_agnostic_prompt}
 
 ## DOMAIN-AGNOSTIC ŞEMA YAKLAŞIMI:
@@ -2873,12 +2883,12 @@ Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
 - HAS_ATTRIBUTE: Person-Attribute/Entity bağlantıları  
 - Yukarıdaki runtime discovery listesinden seçilmeli
 
-**İLİŞKİ ÖRNEKLERİ:**
+**CORE RELATION PATTERNS:**
 ```cypher
-(p:Person)-[:CONNECTED_TO]->(e:Entity {{type:"Skill"}})          // Person becerisi
-(p:Person)-[:HAS_ATTRIBUTE]->(a:Attribute {{value:"5 yıl"}})     // Person özelliği  
-(p:Person)-[:HAS_CV]->(d:Document)                              // Person CV'si
-// ❌ YASAK: (e1:Entity)-[:???]->(e2:Entity)  // Entity-Entity doğrudan bağ YOK!
+// Runtime mapping'e göre doğru relation'ı kullan:
+(p:Person)-[:HAS_ATTRIBUTE|CONNECTED_TO]->(e:Entity)  // Mapping'e bak!
+(p:Person)-[:HAS_CV]->(d:Document)                    // CV bağlantısı
+// ❌ YASAK: (e1:Entity)-[:???]->(e2:Entity)          // Entity-Entity doğrudan bağ YOK!
 ```
 - Belgeler için istisna, değişmez
 - CV'ler, PDF'ler, dökümanlar
@@ -2890,29 +2900,17 @@ Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
 3. **NO ENTITY-ENTITY**: Entity'ler arası doğrudan ilişki YASAK
 4. **DISCOVERY FIRST**: Bilinmeyen Entity type'larda önce şema keşfi yap
 
-### � DOMAIN-AGNOSTIC ÖRNEKLER:
+### 🎯 RUNTIME SCHEMA-DRIVEN APPROACH:
 
-**Örnek 1: Person-Skill bağlantıları**
-```cypher
-MATCH (p:Person)-[:CONNECTED_TO]->(s:Entity {{type:"Skill"}})
-WHERE toLower(p.name) CONTAINS "kişi_adı"
-RETURN p.name, collect(s.name) as skills
-```
+**RUNTIME SCHEMA FIRST**: Yukarıdaki şema bilgilerini kullan!
+- Entity-Relation mapping'i takip et (⚠️CRITICAL_MAPPING)
+- Doğru relation type'ları için runtime discovery sonuçlarına bak
+- Sabit örneklere güvenme, runtime şema verilerini öncelikle
 
-**Örnek 2: Language entities keşfi**
-```cypher
-MATCH (p:Person)-[:CONNECTED_TO]->(l:Entity {{type:"Language"}})
-WHERE toLower(l.name) CONTAINS "english"
-RETURN p.name, l.name as language, p.career_current_position
-```
-
-**Örnek 3: Organization bağlantıları**
-```cypher
-MATCH (p:Person)-[:CONNECTED_TO]->(o:Entity {{type:"Organization"}})
-WHERE toLower(o.name) CONTAINS "şirket_adı"
-OPTIONAL MATCH (p)-[:CONNECTED_TO]->(s:Entity {{type:"Skill"}})
-RETURN p.name, o.name as company, collect(s.name) as skills
-```
+**DISCOVERY STRATEJİSİ:**
+1. Kullanıcı terimi → Hangi Entity type'ları relevant?
+2. Bu Entity type'ları → Hangi relation'larla Person'a bağlı?
+3. Runtime mapping'e göre doğru relation'ı seç
 
 ## 🔧 TEMEL KURALLAR:
 
@@ -2963,24 +2961,114 @@ WHERE toLower(coalesce(field_name, '')) CONTAINS toLower('search_term')
 ## 🎯 AVAILABLE ACTIONS:
 
 1. **cypher_query**: Runtime'da keşfedilen şema pattern'ları ile arama
-2. **match_cvs**: İş ilanı eşleştirme (domain-agnostic approach ile)
+2. **match_cvs**: İş ilanı metni verildiğinde CV eşleştirme yap
+   - **NE ZAMAN KULLAN**: Kullanıcı açık bir iş ilanı metni gönderdiğinde
+   - **İŞ İLANI TESPİTİ**: "... aranıyor", "... deneyimli", "... gereklidir", "... iş ilanı" gibi ifadeler
+   - **CONTENT**: Tüm iş ilanı metnini action_content'e koy
+   - **ÇIKTI**: En uygun CV'ler, skorları ve aday bilgileri
 3. **final_answer**: Son cevap
+
+### 🎯 İŞ İLANI TESPİT KURALLARI:
+
+**match_cvs ACTION TETİKLEYİCİLERİ:**
+- **İLK İŞ İLANI**: Kullanıcı iş pozisyonu + gereksinimler yazıyorsa
+- **DEVAM EDİLEN İŞ İLANI**: Önceki konuşmada iş ilanı varsa ve kullanıcı filtre soruyor
+- **FİLTRE SORULARI**: "Almanca", "Python", "5 yıl deneyim" gibi spesifik kriterler
+- **ADAY LİSTESİ FİLTRELEME**: Var olan iş ilanına ek kriterler
+
+**GENİŞLETİLMİŞ TETİKLEYİCİLER:**
+- "Aranıyor", "istiyoruz", "gereklidir" gibi iş ilanı dili (İLK)
+- "peki almanca?", "python bilenler?", "5+ yıl deneyimi olanlar?" (FİLTRE)
+- Beceri listesi + deneyim gereksinimleri
+- Şirket tanıtımı + pozisyon açıklaması
+
+**ÖRNEK İŞ İLANI PATTERN'leri:**
+```
+"Senior Python Developer aranıyor. 5+ yıl deneyim, Django, FastAPI bilgisi gerekli..."
+"Frontend geliştiricisi istiyoruz. React, TypeScript, 3 yıl deneyim..."
+"Veri analisti pozisyonu için SQL, Python, Excel bilgisi şart..."
+```
+
+**ACTION SELECTION LOGIC:**
+- İş ilanı metni tespit edilirse → **match_cvs** (YENİ İŞ İLANI)
+- Önceki konuşmada iş ilanı var + kullanıcı filtre soruyor → **match_cvs** (FİLTRELİ ARAMA)
+- Context'te iş ilanı yok + spesifik CV/kişi arama → **cypher_query**  
+- Genel bilgi isteği → **cypher_query**
+
+**CONTEXT KONTROLÜ:**
+```
+# Önceki konuşmada iş ilanı var mı?
+Conversation history'de "match_cvs" kullanılmış mı?
+EVET → Kullanıcı sorusu filtre mi? → match_cvs kullan
+HAYIR → Normal query logic
+```
 
 ## 📋 REACT FORMAT:
 
 ```
 Observation: [Mevcut durum]
-Thought: [Domain-agnostic analiz - hangi Entity type/relation'lar relevant?]
+Thought: [Domain-agnostic analiz - Bu bir iş ilanı mı? Hangi Entity type/relation'lar relevant?]
 Action: [cypher_query | match_cvs | final_answer]
-Content: [Runtime schema-driven Cypher | final cevap]
+Content: [Runtime schema-driven Cypher | İş ilanı metni | final cevap]
+```
+
+### 🎯 THOUGHT PROCESS ÖRNEĞİ:
+
+**İş İlanı Tespiti için:**
+```
+Thought: Kullanıcı mesajında "Senior Developer aranıyor, 5+ yıl deneyim" ifadeleri var. 
+Bu bir iş ilanı metni. CV eşleştirme yapmalı. match_cvs action kullanacağım.
+Action: match_cvs
+Content: [Tüm iş ilanı metni buraya]
+```
+
+**Devam Eden İş İlanında Filtre için:**
+```
+Thought: Önceki konuşmada iş ilanı eşleştirmesi yapıldı. Şimdi kullanıcı "almanca" diye SPESİFİK filtre soruyor.
+Bu sadece Almanca bilen adayları bulma. Orijinal iş ilanından dil kısmını "Almanca dil bilgisi" ile DEĞİŞTİRmeliyim.
+Action: match_cvs
+Content: [Orijinal iş ilanı - İngilizce gereksinimi + Almanca dil bilgisi SADECE]
+```
+
+**FİLTRE DEĞİŞTİRME KURALLARI:**
+- "peki almanca?" = Sadece Almanca bilen adaylar (İngilizce DEĞİL)
+- "python bilenler?" = Sadece Python becerisi (diğer tech stack'ler DEĞİL)  
+- "5+ yıl deneyim?" = Minimum 5 yıl deneyim kriteri (önceki deneyim REQ değişir)
+- **SPESİFİK filtre = O kritere odaklan, benzer kategorileri SİL**
+
+**ÖNEMLİ:** Kullanıcı "peki X?" derse, orijinal iş ilanından X ile çelişen gereksinimleri tamamen çıkar!
+
+**Normal Sorgu için:**
+```
+Thought: Kullanıcı spesifik kişi/beceri arıyor. Schema'da Person-Entity pattern'ları relevant.
+Action: cypher_query  
+Content: MATCH (p:Person)...
 ```
 
 ## 🎯 ITERATION STRATEJİSİ:
 
-1. **Entity Type Discovery**: Kullanıcı terimlerine hangi Entity type'ları eşleşiyor?
-2. **Relation Discovery**: Bu type'lar arasında hangi relation'lar mevcut?
-3. **Targeted Search**: Keşfedilen pattern'ları kullanarak spesifik arama
-4. **Schema Expansion**: Bulunan sonuçlardan yeni type/relation'lar keşfet
+### 🔍 İLK ADIM - İÇERİK ANALİZİ:
+1. **İş İlanı Tespiti**: Mesajda "aranıyor", "gerekli", "deneyim", pozisyon tanımı var mı?
+   - EVET → **match_cvs** action kullan
+   - HAYIR → Normal sorgu için schema discovery'ye geç
+
+### 🗃️ SCHEMA DISCOVERY ADIMLARı:
+2. **Entity Type Discovery**: Kullanıcı terimlerine hangi Entity type'ları eşleşiyor?
+3. **Relation Discovery**: Bu type'lar arasında hangi relation'lar mevcut?
+4. **Targeted Search**: Keşfedilen pattern'ları kullanarak spesifik arama
+5. **Schema Expansion**: Bulunan sonuçlardan yeni type/relation'lar keşfet
+
+### 🎯 ACTION DECISION TREE:
+```
+Kullanıcı Mesajı
+     ↓
+İş ilanı keywords var mı? (aranıyor, gerekli, deneyim, pozisyon)
+     ↓                              ↓
+   EVET                           HAYIR
+     ↓                              ↓
+match_cvs                     cypher_query
+(İş ilanı metni)             (Schema discovery)
+```
 
 ### 🔧 AVAILABLE TOOLS:
 
@@ -3299,10 +3387,29 @@ Sadece JSON döndür, domain-specific terimleri kullanma."""
                     unique_candidates[candidate_key]['cv_files'] = merged_cv_files
 
             # 4. Schema-driven skorlara göre sırala ve filtrele
-            final_candidates = [
-                candidate for candidate in unique_candidates.values()
-                if candidate['match_score'] >= min_match_score
-            ]
+            final_candidates = []
+            for candidate in unique_candidates.values():
+                # Min score check
+                if candidate['match_score'] < min_match_score:
+                    continue
+                    
+                # **STRICT LANGUAGE FILTER** - Eğer language requirement varsa
+                language_requirements = requirements.get("language_entities", [])
+                if language_requirements:
+                    candidate_languages = [lang.lower() for lang in candidate.get('languages', [])]
+                    required_languages = [req.lower() for req in language_requirements]
+                    
+                    # En az bir required language match etmeli
+                    language_match = any(
+                        any(req_lang in cand_lang for cand_lang in candidate_languages)
+                        for req_lang in required_languages
+                    )
+                    
+                    if not language_match:
+                        continue  # Language requirement karşılamıyor, skip
+                
+                final_candidates.append(candidate)
+                
             final_candidates.sort(key=lambda x: x['match_score'], reverse=True)
 
             logger.info(f"✅ Schema-driven iş ilanı eşleştirme tamamlandı: {len(final_candidates)} aday bulundu")
