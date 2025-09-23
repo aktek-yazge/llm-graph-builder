@@ -75,7 +75,7 @@ class DomainAgnosticSchemaDiscovery:
 
     def discover_document_patterns(self) -> Dict[str, Any]:
         """
-        (:Document) node'larının özelliklerini keşfeder
+        (:Document) node'larının özelliklerini keşfeder (Runtime)
         
         Returns:
             Dict[str, Any]: Document pattern bilgileri
@@ -86,19 +86,35 @@ class DomainAgnosticSchemaDiscovery:
             cypher_query = """
             MATCH (d:Document)
             RETURN count(d) as document_count,
-                   collect(DISTINCT keys(d))[0..10] as sample_properties
+                   collect(DISTINCT keys(d)) as all_properties
             """
             
+            count_query = "MATCH (d:Document) RETURN count(d) as total_count"
+            
+            # Önce toplam sayıyı al
+            count_result = self.graph.query(count_query)
+            total_count = count_result[0]["total_count"] if count_result else 0
+            
+            # Sonra sample properties al
             result = self.graph.query(cypher_query)
-            if result:
-                document_info = result[0]
-                logger.info(f"✅ {document_info['document_count']} Document node bulundu")
+            if result and len(result) > 0 and result[0].get("all_properties"):
+                # Nested listleri düzleştir
+                all_props = []
+                for prop_list in result[0]["all_properties"]:
+                    if isinstance(prop_list, list):
+                        all_props.extend(prop_list)
+                    else:
+                        all_props.append(prop_list)
+                
+                unique_properties = list(set(all_props))
+                logger.info(f"✅ {total_count} Document node bulundu, {len(unique_properties)} farklı property")
+                
                 return {
-                    "count": document_info["document_count"],
-                    "sample_properties": document_info.get("sample_properties", [])
+                    "count": total_count,
+                    "sample_properties": sorted(unique_properties)
                 }
             
-            return {"count": 0, "sample_properties": []}
+            return {"count": total_count, "sample_properties": []}
             
         except Exception as e:
             logger.error(f"❌ Document pattern keşfi hatası: {e}")
@@ -163,102 +179,124 @@ class DomainAgnosticSchemaDiscovery:
         except:
             return 0
 
+    def _get_person_count(self) -> int:
+        """Person node sayısını döndürür"""
+        try:
+            result = self.graph.query("MATCH (p:Person) RETURN count(p) as count")
+            return result[0]["count"] if result else 0
+        except:
+            return 0
+
+    def _get_person_properties(self) -> List[str]:
+        """Person node'larının property isimlerini döndürür"""
+        try:
+            result = self.graph.query("""
+            MATCH (p:Person) 
+            RETURN DISTINCT keys(p) as properties
+            """)
+            
+            all_properties = set()
+            for record in result:
+                all_properties.update(record["properties"])
+            
+            return sorted(list(all_properties))
+        except:
+            return ["name"]  # Fallback
+
+    def _get_all_relation_types(self) -> List[str]:
+        """TÜM relation type'ları döndürür (sadece Person-Entity değil)"""
+        try:
+            result = self.graph.query("""
+            MATCH ()-[r]-()
+            RETURN DISTINCT type(r) as relation_type
+            ORDER BY relation_type
+            """)
+            
+            return [record["relation_type"] for record in result if record["relation_type"]]
+        except:
+            return ["CONNECTED_TO"]  # Fallback
+
+    def _get_entity_relation_mapping(self) -> Dict[str, str]:
+        """Entity type'ları ile kullanılan relation'ları eşleştirir (RUNTIME MAPPING)"""
+        try:
+            result = self.graph.query("""
+            MATCH (p:Person)-[r]->(e:Entity)
+            RETURN e.type as entity_type, type(r) as relation_type, count(*) as count
+            ORDER BY entity_type, count DESC
+            """)
+            
+            # Her entity type için en çok kullanılan relation'ı al
+            mapping = {}
+            for record in result:
+                entity_type = record["entity_type"]
+                relation_type = record["relation_type"]
+                
+                # İlk karşılaşılan (en çok kullanılan) relation'ı kaydet
+                if entity_type not in mapping:
+                    mapping[entity_type] = relation_type
+            
+            return mapping
+        except:
+            return {"Language": "HAS_ATTRIBUTE", "Organization": "CONNECTED_TO"}  # Fallback
+
     def generate_llm_schema_prompt(self) -> str:
         """
-        LLM için hibrit CV şema prompt'u oluşturur (GERÇEK ŞEMA)
+        Ultra-minimal token-efficient FULL şema prompt'u - RELATION MAPPING öncelikli!
         
         Returns:
-            str: LLM'e verilebilecek şema açıklaması
+            str: Minimal şema prompt'u
         """
         schema_info = self.discover_full_domain_schema()
         
+        # TÜM bilgileri al (limit yok!)
         entity_types = schema_info["entity_types"]
         relation_types = schema_info["relation_types"]
-        stats = schema_info["statistics"]
+        person_props = self._get_person_properties()
+        doc_props = schema_info["document_info"]["sample_properties"]
         
-        prompt = f"""## 🏗️ HİBRİT CV NEO4J SCHEMA (MCP Aura Keşfi)
-
-### 📊 KEŞFEDILEN GERÇEK ŞEMA YAPISI:
-
-**Person Pattern (Core):**
-```
-(:Person)
-```
-- 76 CV sahibi kişi
-- Properties: name, career_current_position, career_experience_years, contact_email, etc.
-
-**Entity Pattern (Dynamic):**
-```
-(:Entity {{type:"<entity_type>"}})
-```
-
-**Kullanılabilir Entity type değerleri ({len(entity_types)} adet):**
-{', '.join(f'"{et}"' for et in entity_types)}
-
-**Relationship Patterns:**
-```
-(:Person)-[:HAS_ATTRIBUTE]->(:Entity|:Attribute)
-(:Person)-[:CONNECTED_TO]->(:Entity)
-(:Person)-[:HAS_CV]->(:Document)
-```
-
-**Kullanılabilir relation type değerleri ({len(relation_types)} adet):**
-{', '.join(f'"{rt}"' for rt in relation_types)}
-
-**Document Pattern:**
-```
-(:Document)
-```
-
-### 📈 VERİTABANI İSTATİSTİKLERİ:
-- 👤 Person: 76
-- 🏷️ Entity: {stats['total_entities']:,}
-- 🔗 Person-Entity Relations: {stats['total_relations']:,}
-- 📄 Document: {schema_info['document_info']['count']:,}
-
-### 🎯 HİBRİT ŞEMA KULLANIM KURALLARI:
-
-1. **PERSON CORE** properties direkt kullanılır
-2. **ENTITY TYPE** filtering ile kategorize edilir  
-3. **HAS_ATTRIBUTE** dynamic attributes için
-4. **CONNECTED_TO** formal connections için
-5. **ASLA** (:Entity {{subtype:"..."}}) kullanma - gerçek şemada yok!
-
-### 💡 GERÇEK ŞEMA ÖRNEKLERI:
-
-```cypher
-// Pattern 1: Person core + Entity skill
-MATCH (p:Person)-[:HAS_ATTRIBUTE]->(e:Entity {{type:"Skill"}})
-WHERE toLower(apoc.text.clean(e.name)) CONTAINS "python"
-RETURN p.name, p.career_current_position, e.name as skill
-
-// Pattern 2: Person + Organization connection  
-MATCH (p:Person)-[:CONNECTED_TO]->(org:Entity {{type:"Organization"}})
-WHERE toLower(apoc.text.clean(org.name)) CONTAINS "microsoft"
-RETURN p.name, org.name, r.role, r.start_date
-```
-
-**KRİTİK**: Bu gerçek şema! (:Entity {{type:"..."}}) pattern'ini kullan, subtype değil!
-"""
+        # TÜM relation type'ları keşfet (sadece Person-Entity değil)
+        all_relations = self._get_all_relation_types()
+        
+        # RUNTIME ENTITY-RELATION MAPPING keşfet
+        entity_relation_map = self._get_entity_relation_mapping()
+        
+        # Ultra-compact format
+        et = ','.join(entity_types) if entity_types else 'TYPE'
+        rt = ','.join(relation_types) if relation_types else 'REL'
+        all_rt = ','.join(all_relations) if all_relations else 'REL'
+        pp = ','.join(person_props) if person_props else 'name'
+        dp = ','.join(doc_props) if doc_props else 'name'
+        
+        # Entity-Relation mapping'i daha vurgulu format'ta
+        mapping_rules = []
+        for etype, rel in entity_relation_map.items():
+            mapping_rules.append(f"Person-[:{rel}]->Entity{{type:\"{etype}\"}}")
+        
+        prompt = f"""SCHEMA:Person[{pp}]|Entity[type:{et}]|Document[{dp}]
+RELATIONS:[{all_rt}]
+⚠️CRITICAL_MAPPING:{';'.join(mapping_rules)}
+PATTERNS:Person-Entity,Person-Document,Entity-Document,Entity-Entity
+CORRECT_EXAMPLE:MATCH(p:Person)-[:HAS_ATTRIBUTE]->(e:Entity{{type:"Language"}})WHERE apoc.text.clean(e.name)=~".*almanca.*"RETURN p.name,e.name"""
         
         return prompt
 
     def get_compact_schema_summary(self) -> str:
         """
-        Kompakt şema özeti döndürür
+        Kompakt şema özeti döndürür (Runtime Data)
         
         Returns:
             str: Özet şema bilgisi
         """
         schema_info = self.discover_full_domain_schema()
         
-        entity_count = len(schema_info["entity_subtypes"])
+        entity_count = len(schema_info["entity_types"])  # Düzeltildi: entity_subtypes -> entity_types
         relation_count = len(schema_info["relation_types"])
         document_count = schema_info["document_info"]["count"]
+        person_count = self._get_person_count()
         
-        return f"""DOMAIN-AGNOSTIC SCHEMA: 
-Entity({entity_count} subtypes) + RELATED({relation_count} types) + Document({document_count:,} nodes)
-Pattern: (:Entity {{subtype:"TYPE"}}) -[:RELATED {{type:"TYPE"}}]-> (:Entity) | (:Document)"""
+        return f"""DOMAIN-AGNOSTIC SCHEMA (Runtime): 
+Person({person_count}) + Entity({entity_count} types) + Relations({relation_count} types) + Document({document_count:,})
+Pattern: (:Entity {{type:"TYPE"}}) -[:RELATION_TYPE]-> (:Person|:Entity) | (:Document)"""
 
 
 def get_domain_agnostic_schema(graph) -> Dict[str, Any]:
