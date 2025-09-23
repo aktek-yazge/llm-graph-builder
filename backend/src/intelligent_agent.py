@@ -2910,59 +2910,29 @@ Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
 **DISCOVERY STRATEJİSİ:**
 1. Kullanıcı terimi → Hangi Entity type'ları relevant?
 2. Bu Entity type'ları → Hangi relation'larla Person'a bağlı?
-3. Runtime mapping'e göre doğru relation'ı seç
+3. Şema mapping'e göre doğru relation'ı seç
 
 ## 🔧 TEMEL KURALLAR:
 
 ### 🎯 DOMAIN-AGNOSTIC ARAMA STRATEJİSİ:
 
-**KURAL**: ÖNCE KEŞİF YAP - Domain-agnostic keşif ile başla!
-
-#### 🔍 ENTITY TYPE KEŞFİ:
-```cypher
-// Hangi Entity type'ları mevcut?
-MATCH (e:Entity)
-WHERE toLower(coalesce(e.name, '')) CONTAINS toLower('kullanici_terimi')
-RETURN DISTINCT e.type, count(*) as count
-ORDER BY count DESC
-```
-
-#### 🔗 RELATION TYPE KEŞFİ:
-```cypher
-// Hangi relation type'lar kullanılabilir?
-MATCH (source)-[r]->(target)
-WHERE toLower(coalesce(source.name, '')) CONTAINS toLower('kullanici_terimi')
-   OR toLower(coalesce(target.name, '')) CONTAINS toLower('kullanici_terimi')
-RETURN DISTINCT type(r) as relation_type, labels(source)[0] as source_label, labels(target)[0] as target_label, count(*) as frequency
-ORDER BY frequency DESC
-```
-
-#### 🎯 TARGETLİ DOMAIN-AGNOSTIC ARAMA:
-```cypher
-// Keşfedilen type'lara göre spesifik arama
-MATCH (entity:Entity {{type:"DISCOVERED_TYPE"}})
-WHERE toLower(coalesce(entity.name, '')) CONTAINS toLower('kullanici_terimi')
-RETURN entity.name, entity.type
-ORDER BY entity.name
-```
-
 ### 📝 STRING NORMALİZASYONU (Zorunlu):
 ```cypher
 // Güvenli string karşılaştırması
-WHERE toLower(coalesce(field_name, '')) CONTAINS toLower('search_term')
+WHERE toLower(field_name, '') CONTAINS toLower('search_term')
 ```
 
 ### � ARAMA STRATEJİSİ TİPLERİ:
 
 **METADATA ARAMALARI**: Entity properties ve yapısal veriler
-**CONTENT ARAMALARI**: Document/Chunk text içeriği  
+**CONTENT ARAMALARI**: Semantci vector aramalar (embedding tabanlı)  
 **HİBRİT ARAMALARI**: Metadata + content kombinasyonu
 
 ## 🎯 AVAILABLE ACTIONS:
 
-1. **cypher_query**: Runtime'da keşfedilen şema pattern'ları ile arama
+1. **cypher_query**: Sağlanan şema pattern'ları ile arama
 2. **match_cvs**: İş ilanı metni verildiğinde CV eşleştirme yap
-   - **NE ZAMAN KULLAN**: Kullanıcı açık bir iş ilanı metni gönderdiğinde
+   - **NE ZAMAN KULLAN**: Kullanıcı açık bir iş ilanı metni gönderdiğinde veya bir yetenek veya bir deneyim bilgisi sorduğunda(örneğin, "Python bilenler", "5 yıl deneyimli" gibi)
    - **İŞ İLANI TESPİTİ**: "... aranıyor", "... deneyimli", "... gereklidir", "... iş ilanı" gibi ifadeler
    - **CONTENT**: Tüm iş ilanı metnini action_content'e koy
    - **ÇIKTI**: En uygun CV'ler, skorları ve aday bilgileri
@@ -2989,11 +2959,6 @@ WHERE toLower(coalesce(field_name, '')) CONTAINS toLower('search_term')
 "Veri analisti pozisyonu için SQL, Python, Excel bilgisi şart..."
 ```
 
-**ACTION SELECTION LOGIC:**
-- İş ilanı metni tespit edilirse → **match_cvs** (YENİ İŞ İLANI)
-- Önceki konuşmada iş ilanı var + kullanıcı filtre soruyor → **match_cvs** (FİLTRELİ ARAMA)
-- Context'te iş ilanı yok + spesifik CV/kişi arama → **cypher_query**  
-- Genel bilgi isteği → **cypher_query**
 
 **CONTEXT KONTROLÜ:**
 ```
@@ -3045,30 +3010,12 @@ Action: cypher_query
 Content: MATCH (p:Person)...
 ```
 
-## 🎯 ITERATION STRATEJİSİ:
-
-### 🔍 İLK ADIM - İÇERİK ANALİZİ:
-1. **İş İlanı Tespiti**: Mesajda "aranıyor", "gerekli", "deneyim", pozisyon tanımı var mı?
-   - EVET → **match_cvs** action kullan
-   - HAYIR → Normal sorgu için schema discovery'ye geç
-
 ### 🗃️ SCHEMA DISCOVERY ADIMLARı:
 2. **Entity Type Discovery**: Kullanıcı terimlerine hangi Entity type'ları eşleşiyor?
 3. **Relation Discovery**: Bu type'lar arasında hangi relation'lar mevcut?
 4. **Targeted Search**: Keşfedilen pattern'ları kullanarak spesifik arama
 5. **Schema Expansion**: Bulunan sonuçlardan yeni type/relation'lar keşfet
 
-### 🎯 ACTION DECISION TREE:
-```
-Kullanıcı Mesajı
-     ↓
-İş ilanı keywords var mı? (aranıyor, gerekli, deneyim, pozisyon)
-     ↓                              ↓
-   EVET                           HAYIR
-     ↓                              ↓
-match_cvs                     cypher_query
-(İş ilanı metni)             (Schema discovery)
-```
 
 ### 🔧 AVAILABLE TOOLS:
 
