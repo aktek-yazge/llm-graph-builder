@@ -1,0 +1,64 @@
+{
+  "name": "LLM Graph Builder - Full Stack Dev",
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "./docker-compose.dev.yml"
+  ],
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "none",
+  "overrideCommand": true,
+  "postCreateCommand": "/workspace/.devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Python Backend Extensions
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.pylint",
+        "ms-toolsai.jupyter",
+        // Frontend Extensions
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        // General Development
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml",
+        "ms-vscode-remote.remote-containers"
+      ],
+      "settings": {}
+    }
+  },
+  "forwardPorts": [
+    8000,
+    5173,
+    7474,
+    7687,
+    6333
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": "Backend API",
+      "onAutoForward": "silent"
+    },
+    "5173": {
+      "label": "Frontend Vite Dev",
+      "onAutoForward": "silent"
+    },
+    "7474": {
+      "label": "Neo4j Browser",
+      "onAutoForward": "silent"
+    },
+    "7687": {
+      "label": "Neo4j Bolt",
+      "onAutoForward": "silent"
+    },
+    "6333": {
+      "label": "Qdrant API",
+      "onAutoForward": "silent"
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  ]
+}
