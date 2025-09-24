@@ -1,5 +1,5 @@
 services:
-# Backend - Production servisi
+  # Backend - Production servisi
   backend:
     build:
       context: ./backend
