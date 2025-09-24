@@ -4,6 +4,8 @@ FROM node:24-alpine3.21 AS build
 WORKDIR /app
 COPY package.json yarn.lock ./
 RUN yarn install
+# Copy .env before build so Vite can use it
+COPY .env ./
 COPY . ./
 RUN yarn run build
 

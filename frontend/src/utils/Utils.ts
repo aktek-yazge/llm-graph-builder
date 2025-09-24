@@ -1,5 +1,13 @@
 import { calcWordColor } from '@neo4j-devtools/word-color';
 import type { Relationship } from '@neo4j-nvl/base';
+import gcslogo from '../assets/images/gcs.webp';
+import s3logo from '../assets/images/s3logo.png';
+import webdarklogo from '../assets/images/web-darkmode.svg';
+import weblogo from '../assets/images/web.svg';
+import Wikipediadarkmode from '../assets/images/wikipedia-darkmode.svg';
+import Wikipediadlogo from '../assets/images/wikipedia.svg';
+import youtubedarklogo from '../assets/images/youtube-darkmode.svg';
+import youtubelightlogo from '../assets/images/youtube-lightmode.svg';
 import {
   CustomFile,
   Entity,
@@ -8,26 +16,19 @@ import {
   filedate,
   GraphType,
   Messages,
+  OptionType,
   Scheme,
   SourceNode,
-  UserCredentials,
-  OptionType,
-  UserDefinedGraphSchema,
   TupleType,
+  UserCredentials,
+  UserDefinedGraphSchema,
 } from '../types';
-import Wikipediadarkmode from '../assets/images/wikipedia-darkmode.svg';
-import Wikipediadlogo from '../assets/images/wikipedia.svg';
-import webdarklogo from '../assets/images/web-darkmode.svg';
-import weblogo from '../assets/images/web.svg';
-import youtubedarklogo from '../assets/images/youtube-darkmode.svg';
-import youtubelightlogo from '../assets/images/youtube-lightmode.svg';
-import s3logo from '../assets/images/s3logo.png';
-import gcslogo from '../assets/images/gcs.webp';
 import { chatModeLables, EXPIRATION_DAYS } from './Constants';
 
 // Get the Url
 export const url = () => {
   let url = window.location.href.replace('5173', '8000');
+  console.log("process.env.VITE_BACKEND_API_URL", process.env.VITE_BACKEND_API_URL)
   if (process.env.VITE_BACKEND_API_URL) {
     url = process.env.VITE_BACKEND_API_URL;
   }
