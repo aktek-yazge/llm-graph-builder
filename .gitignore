@@ -178,6 +178,7 @@ startupfrontend.sh
 dinkal
 .vscode
 *.json
+!.devcontainer/devcontainer.json
 *.out
 temp
 output
