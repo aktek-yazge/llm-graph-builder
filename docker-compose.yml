@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile # Production Dockerfile
     env_file:
       - ./backend/.env
-    container_name: backend
+    container_name: backend-prod
     ports:
       - '8000:8000'
     environment:
@@ -23,9 +23,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile # Production Dockerfile
+      args:
+        - DEPLOYMENT_ENV=prod
     env_file:
       - ./frontend/.env
-    container_name: frontend
+    container_name: frontend-prod
     ports:
       - '8080:8080' # Production port
     networks:
@@ -33,7 +35,7 @@ services:
     restart: unless-stopped
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: qdrant-service
+    container_name: qdrant-service-prod
     ports:
       - '6333:6333'
       - '6334:6334'
@@ -49,7 +51,7 @@ services:
 
   neo4j:
     image: neo4j:2025.07.1
-    container_name: neo4j-service
+    container_name: neo4j-service-prod
     restart: always
     ports:
       - '7474:7474'
