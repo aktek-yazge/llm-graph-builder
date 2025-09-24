@@ -1,7 +1,6 @@
 {
   "name": "LLM Graph Builder - Full Stack Dev",
   "dockerComposeFile": [
-    "../docker-compose.yml",
     "./docker-compose.dev.yml"
   ],
   "service": "devcontainer",
