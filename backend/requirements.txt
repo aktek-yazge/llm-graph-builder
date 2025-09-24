@@ -62,7 +62,7 @@ frozenlist
 fsspec==2024.12.0
 gmpy2
 graphdatascience==1.15.1
--e ./graphiti-core
+# -e ./graphiti-core
 groq==0.30.0
 grpcio==1.74.0
 gunicorn==23.0.0
@@ -116,7 +116,7 @@ langchain-openai>=0.3.23
 langchain-google-vertexai>=2.1.0
 langchain-text-splitters>=0.3.8
 langdetect==1.0.9
--e ./langextract
+# -e ./langextract
 langserve==0.3.1
 langsmith==0.3.45
 latex2mathml==3.78.0
