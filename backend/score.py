@@ -1,3 +1,13 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+
+# Ensure UTF-8 encoding for Turkish characters
+if sys.stdout.encoding != 'utf-8':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
