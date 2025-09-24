@@ -4,11 +4,11 @@ Bu proje **3 farklı Docker ortamı** destekler: **Development**, **Staging**, v
 
 ## 📋 Ortam Özeti
 
-| Ortam           | Amaç                  | Backend/Frontend           | Neo4j/Qdrant           | Database         |
-| --------------- | --------------------- | -------------------------- | ---------------------- | ---------------- |
-| **Development** | Geliştirme, debugging | 8000, 5173                | 6333, 7474, 7687       | Development data |
-| **Staging**     | Production test, QA   | 8001, 8081                | **Shared with Dev**    | **Shared with Dev** |
-| **Production**  | Canlı sistem          | 8000, 8080                | 6333, 7474, 7687       | Production data  |
+| Ortam           | Amaç                  | Backend/Frontend | Neo4j/Qdrant        | Database            |
+| --------------- | --------------------- | ---------------- | ------------------- | ------------------- |
+| **Development** | Geliştirme, debugging | 8000, 5173       | 6333, 7474, 7687    | Development data    |
+| **Staging**     | Production test, QA   | 8001, 8081       | **Shared with Dev** | **Shared with Dev** |
+| **Production**  | Canlı sistem          | 8000, 8080       | 6333, 7474, 7687    | Production data     |
 
 ---
 
@@ -99,12 +99,14 @@ eslint frontend/src/
 ### 🚀 Çalıştırma:
 
 #### Otomatik Script ile (Önerilen):
+
 ```bash
 # DevContainer dependency'leri kontrol eder ve staging'i başlatır
 ./start-staging.sh
 ```
 
 #### Manuel Docker Compose ile:
+
 ```bash
 # Önce DevContainer servislerinin çalıştığından emin ol
 docker-compose -f .devcontainer/docker-compose.dev.yml up -d neo4j qdrant
@@ -152,6 +154,7 @@ docker-compose -f docker-compose.staging.yml logs frontend
 ```
 
 ### ⚡ **Staging'in Benzersiz Avantajı:**
+
 - ✅ **Aynı veri seti** ile production build test
 - ✅ **Zero data migration** - development datası ile test
 - ✅ **Resource efficient** - shared services
@@ -279,7 +282,7 @@ Development + Staging (Shared):
 
 Production (Separate):
 - backend-prod
-- frontend-prod  
+- frontend-prod
 - qdrant-service-prod
 - neo4j-service-prod
 ```
@@ -403,3 +406,4 @@ frontend/
 - ✅ Use specific tags for production images
 - ✅ Document environment-specific configurations
 - ✅ Regular cleanup of unused containers/volumes
+
