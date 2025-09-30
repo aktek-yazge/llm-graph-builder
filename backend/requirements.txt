@@ -62,7 +62,6 @@ frozenlist
 fsspec==2024.12.0
 gmpy2
 graphdatascience==1.15.1
-# -e ./graphiti-core
 groq==0.30.0
 grpcio==1.74.0
 gunicorn==23.0.0
