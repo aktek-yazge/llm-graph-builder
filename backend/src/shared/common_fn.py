@@ -55,16 +55,12 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
   logging.info("creating list of chunks and graph documents in get_chunk_and_graphDocument func")
   lst_chunk_chunkId_document=[]
   for graph_document in graph_document_list:            
-          # Normal LLM metadata formatı: 'combined_chunk_ids'
+          # Metadata'dan chunk_ids al
           chunk_ids = graph_document.source.metadata.get('combined_chunk_ids')
           
-          # LangExtract metadata formatı: 'chunk_ids' 
+          # Eğer yoksa boş liste kullan
           if chunk_ids is None:
-              chunk_ids = graph_document.source.metadata.get('chunk_ids')
-          
-          # Eğer ikisi de yoksa boş liste kullan
-          if chunk_ids is None:
-              logging.warning(f"GraphDocument metadata'sında ne 'combined_chunk_ids' ne de 'chunk_ids' bulunamadı: {graph_document.source.metadata}")
+              logging.warning(f"GraphDocument metadata'sında 'combined_chunk_ids' bulunamadı: {graph_document.source.metadata}")
               chunk_ids = []
           
           # Her chunk ID için mapping oluştur

@@ -149,11 +149,6 @@ def get_llm(model: str):
                 extract_types=["entities", "facts"],
             )
         
-        elif "langextract" in model:
-            # LangExtract için özel durum - gerçek LLM değil
-            model_name = "langextract"
-            llm = "langextract"  # Placeholder, gerçek kullanımda farklı handle edilecek
-        
         else: 
             model_name, api_endpoint, api_key = env_value.split(",")
             llm = ChatOpenAI(
@@ -622,10 +617,8 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
        existing_nodes = get_upload_time_nodes(graph, file_name) if graph and file_name else []
        enhanced_instructions = enhance_instructions_with_existing_nodes(additional_instructions, existing_nodes)
        
-       # LangExtract kontrolü - model "langextract" içeriyorsa LangExtract kullan
+       # Model kontrol ediliyor
        logging.info(f"🔍 Model kontrol ediliyor: '{model}'")
-       logging.info(f"🔍 Model lower: '{model.lower()}'")
-       logging.info(f"🔍 'langextract' in model.lower(): {'langextract' in model.lower()}")
        
        # Normal LLM processing için combined chunks hazırla
        combined_chunk_document_list = get_combined_chunks(chunkId_chunkDoc_list, chunks_to_combine)
@@ -637,21 +630,6 @@ async def get_graph_from_llm(model, chunkId_chunkDoc_list, allowedNodes, allowed
                raise ValueError(f"Hiç chunk bulunamadı. Dosya '{file_name}' yüklendi mi? Chunk'lar oluşturuldu mu?")
            else:
                raise ValueError("Chunk'lar var ama combined_chunk_document_list boş. combine işleminde sorun var.")
-       
-       if "langextract" in model.lower():
-           from src.langextract_llm import get_graph_from_langextract_full_document
-           logging.info(f"🔄 LangExtract model tespit edildi: {model}")
-           logging.info(f"🚀 FULL DOCUMENT EXTRACTION modunda çalışacak")
-           return await get_graph_from_langextract_full_document(
-               model=model,
-               combined_chunk_document_list=combined_chunk_document_list,  # Combined chunks gönder
-               allowedNodes=allowedNodes,
-               allowedRelationship=allowedRelationship,
-               file_name=file_name,
-               additional_instructions=enhanced_instructions,  # Enhanced instruction kullan
-               graph=graph,
-               max_pages=max_pages  # Sayfa sınırlandırma parametresi
-           )
        
        # Normal LLM processing
        logging.info(f"� LLMGraphTransformer normal processing modu başlıyor")
