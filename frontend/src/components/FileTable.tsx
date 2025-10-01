@@ -1,4 +1,6 @@
+import { useAuth0 } from '@auth0/auth0-react';
 import {
+  Checkbox,
   DataGrid,
   DataGridComponents,
   Flex,
@@ -8,11 +10,32 @@ import {
   TextLink,
   Typography,
   useCopyToClipboard,
-  Checkbox,
   useMediaQuery,
   useSpotlightContext,
 } from '@neo4j-ndl/react';
 import {
+  ArrowPathIconSolid,
+  ClipboardDocumentIconSolid,
+  DocumentTextIconSolid,
+  ExploreIcon,
+  InformationCircleIconOutline,
+  XMarkIconOutline,
+} from '@neo4j-ndl/react/icons';
+import {
+  CellContext,
+  ColumnFiltersState,
+  Row,
+  Table,
+  createColumnHelper,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from '@tanstack/react-table';
+import { AxiosError } from 'axios';
+import React, {
+  ForwardRefRenderFunction,
   forwardRef,
   useContext,
   useEffect,
@@ -20,56 +43,32 @@ import {
   useMemo,
   useRef,
   useState,
-  ForwardRefRenderFunction,
 } from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  createColumnHelper,
-  ColumnFiltersState,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  CellContext,
-  Table,
-  Row,
-  getSortedRowModel,
-} from '@tanstack/react-table';
-import { useFileContext } from '../context/UsersFiles';
-import { getSourceNodes } from '../services/GetFiles';
 import { v4 as uuidv4 } from 'uuid';
-import {
-  statusCheck,
-  isFileCompleted,
-  calculateProcessedCount,
-  getFileSourceStatus,
-  isProcessingFileValid,
-  capitalizeWithUnderscore,
-  getParsedDate,
-} from '../utils/Utils';
-import { SourceNode, CustomFile, FileTableProps, UserCredentials, statusupdate, ChildRef } from '../types';
+import { ThemeWrapperContext } from '../context/ThemeWrapper';
 import { useCredentials } from '../context/UserCredentials';
-import {
-  ArrowPathIconSolid,
-  ClipboardDocumentIconSolid,
-  DocumentTextIconSolid,
-  ExploreIcon,
-} from '@neo4j-ndl/react/icons';
-import CustomProgressBar from './UI/CustomProgressBar';
+import { useFileContext } from '../context/UsersFiles';
+import useServerSideEvent from '../hooks/useSse';
+import cancelAPI from '../services/CancelAPI';
+import { getSourceNodes } from '../services/GetFiles';
 import subscribe from '../services/PollingAPI';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
-import useServerSideEvent from '../hooks/useSse';
-import { AxiosError } from 'axios';
-import { XMarkIconOutline } from '@neo4j-ndl/react/icons';
-import cancelAPI from '../services/CancelAPI';
-import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
+import { ChildRef, CustomFile, FileTableProps, SourceNode, UserCredentials, statusupdate } from '../types';
 import { batchSize, largeFileSize, llms } from '../utils/Constants';
 import { showErrorToast, showNormalToast } from '../utils/Toasts';
-import { ThemeWrapperContext } from '../context/ThemeWrapper';
-import BreakDownPopOver from './BreakDownPopOver';
-import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
-import { useAuth0 } from '@auth0/auth0-react';
-import React from 'react';
 import { normalizeFileName } from '../utils/utf8';
+import {
+  calculateProcessedCount,
+  capitalizeWithUnderscore,
+  getFileSourceStatus,
+  getParsedDate,
+  isFileCompleted,
+  isProcessingFileValid,
+  statusCheck,
+} from '../utils/Utils';
+import BreakDownPopOver from './BreakDownPopOver';
+import CustomProgressBar from './UI/CustomProgressBar';
+import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
 
 let onlyfortheFirstRender = true;
 

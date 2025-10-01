@@ -1,30 +1,30 @@
-import React, { useRef, useState } from 'react';
 import { Dialog, SideNavigation, SpotlightTarget, TextLink, Tooltip, useMediaQuery } from '@neo4j-ndl/react';
 import {
-  ArrowRightIconOutline,
+  ArrowDownTrayIconOutline,
   ArrowLeftIconOutline,
+  ArrowRightIconOutline,
   ArrowsPointingOutIconOutline,
   ChatBubbleOvalLeftEllipsisIconOutline,
   CloudArrowUpIconSolid,
-  ArrowDownTrayIconOutline,
   TrashIconOutline,
 } from '@neo4j-ndl/react/icons';
+import React, { useRef, useState } from 'react';
 
-import { SideNavProps } from '../../types';
-import Chatbot from '../ChatBot/Chatbot';
 import { createPortal } from 'react-dom';
-import { useMessageContext } from '../../context/UserMessages';
-import { downloadClickHandler, getIsLoading } from '../../utils/Utils';
-import ExpandedChatButtonContainer from '../ChatBot/ExpandedChatButtonContainer';
-import { APP_SOURCES, tooltips } from '../../utils/Constants';
-import ChatModeToggle from '../ChatBot/ChatModeToggle';
 import { RiChatSettingsLine } from 'react-icons/ri';
-import { IconButtonWithToolTip } from '../UI/IconButtonToolTip';
-import GCSButton from '../DataSources/GCS/GCSButton';
-import S3Component from '../DataSources/AWS/S3Bucket';
-import WebButton from '../DataSources/Web/WebButton';
-import DropZoneForSmallLayouts from '../DataSources/Local/DropZoneForSmallLayouts';
 import { useCredentials } from '../../context/UserCredentials';
+import { useMessageContext } from '../../context/UserMessages';
+import { SideNavProps } from '../../types';
+import { APP_SOURCES, tooltips } from '../../utils/Constants';
+import { downloadClickHandler, getIsLoading } from '../../utils/Utils';
+import Chatbot from '../ChatBot/Chatbot';
+import ChatModeToggle from '../ChatBot/ChatModeToggle';
+import ExpandedChatButtonContainer from '../ChatBot/ExpandedChatButtonContainer';
+import S3Component from '../DataSources/AWS/S3Bucket';
+import GCSButton from '../DataSources/GCS/GCSButton';
+import DropZoneForSmallLayouts from '../DataSources/Local/DropZoneForSmallLayouts';
+import WebButton from '../DataSources/Web/WebButton';
+import { IconButtonWithToolTip } from '../UI/IconButtonToolTip';
 import TooltipWrapper from '../UI/TipWrapper';
 
 const SideNav: React.FC<SideNavProps> = ({
