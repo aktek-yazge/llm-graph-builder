@@ -10,6 +10,7 @@ import {
   useCopyToClipboard,
   Checkbox,
   useMediaQuery,
+  useSpotlightContext,
 } from '@neo4j-ndl/react';
 import {
   forwardRef,
@@ -77,6 +78,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const { filesData, setFilesData, model, rowSelection, setRowSelection, setSelectedRows, setProcessedCount, queue } =
     useFileContext();
   const { userCredentials, isReadOnlyUser } = useCredentials();
+  const { setIsOpen } = useSpotlightContext();
   const columnHelper = createColumnHelper<CustomFile>();
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -786,6 +788,8 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           }
           setIsLoading(false);
           setFilesData(prefiles);
+          // Close spotlight overlay after successful sources_list response
+          setIsOpen(false);
         } else {
           throw new Error(res?.data?.error);
         }

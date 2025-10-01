@@ -82,7 +82,7 @@ const SideNav: React.FC<SideNavProps> = ({
 
     if (!isLargeDesktop && position === 'left') {
       dataSourceItems.push(
-        <SpotlightTarget id='dropzone' indicatorVariant='point' indicatorPlacement='middle-right'>
+        <SpotlightTarget key='dropzone' id='dropzone' indicatorVariant='point' indicatorPlacement='middle-right'>
           <SideNavigation.Item
             key='local'
             icon={
@@ -172,7 +172,7 @@ const SideNav: React.FC<SideNavProps> = ({
           )}
 
           {position === 'right' && !isExpanded && (
-            <SpotlightTarget id='chatbtn' indicatorVariant='point' indicatorPlacement='middle-left'>
+            <SpotlightTarget key='chatbtn' id='chatbtn' indicatorVariant='point' indicatorPlacement='middle-left'>
               <SideNavigation.Item
                 htmlAttributes={{ onClick: handleClick }}
                 icon={
