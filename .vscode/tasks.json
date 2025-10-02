@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "🚀 Start Backend",
+      "type": "shell",
+      "command": "/workspace/.devcontainer/start-backend.sh",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "options": {
+        "cwd": "/workspace"
+      }
+    },
+    {
+      "label": "🎨 Start Frontend",
+      "type": "shell",
+      "command": "/workspace/.devcontainer/start-frontend.sh",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "new"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "options": {
+        "cwd": "/workspace"
+      }
+    }
+  ]
+}
