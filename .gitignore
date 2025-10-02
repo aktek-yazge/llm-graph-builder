@@ -175,7 +175,7 @@ startupfrontend.sh
 *.zip
 dinkal
 .vscode
-*.json
+
 !.devcontainer/devcontainer.json
 *.out
 temp

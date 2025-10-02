@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "neo4j-gds": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "src/mcp_server_neo4j_gds",
+        "gds-agent"
+      ]
+    }
+  }
+}

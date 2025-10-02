@@ -1,0 +1,7 @@
+{
+  "frontend/**/*.{ts,tsx}": ["prettier --write", "eslint --fix"],
+  "frontend/**/*.json": ["prettier --write"],
+  "frontend/**/*.js": ["prettier --write"],
+  "backend/**/*.py": ["python -m py_compile"]
+}
+
