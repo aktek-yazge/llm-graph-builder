@@ -185,3 +185,4 @@ backend/logs/simple-logs.jsonl
 backend/logs/simple-logs.jsonl.*
 backend/logs/test-rotation.jsonl*
 *.txt
+*logs
