@@ -28,8 +28,6 @@ from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
-from src.domain_agnostic_schema import DomainAgnosticSchemaDiscovery
-
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from sklearn.metrics.pairwise import cosine_similarity
@@ -148,7 +146,6 @@ class ResourceManager:
 
     def __init__(self):
         self.page_resources = []  # Sayfa görselleri için (chunk'lar)
-        self.cv_resources = []    # CV PDF'leri için
 
     def add_page_resource(self, page_link: str):
         """Sayfa görseli kaynağı ekle"""
@@ -157,37 +154,13 @@ class ResourceManager:
             return f"✅ Page resource eklendi: {page_link}"
         return f"⚠️ Page resource zaten mevcut: {page_link}"
 
-    def add_resource(self, resource_type: str, title: str, url: str, description: str):
-        """Genel resource ekleme (CV, PDF vs.)"""
-        resource = {
-            "type": resource_type,
-            "title": title,
-            "url": url,
-            "description": description
-        }
-        
-        if resource_type == "pdf":
-            # CV PDF'leri için
-            if not any(r["url"] == url for r in self.cv_resources):
-                self.cv_resources.append(resource)
-                return f"✅ CV resource eklendi: {title}"
-            return f"⚠️ CV resource zaten mevcut: {title}"
-        
-        # Diğer türler için genişletilebilir
-        return f"⚠️ Desteklenmeyen resource türü: {resource_type}"
-
     def get_all_resources(self):
         """Tüm kaynakları döndür"""
-        return {
-            "pages": self.page_resources, 
-            "cvs": self.cv_resources,
-            "total_count": len(self.page_resources) + len(self.cv_resources)
-        }
+        return {"pages": self.page_resources, "total_count": len(self.page_resources)}
 
     def clear_resources(self):
         """Kaynakları temizle"""
         self.page_resources = []
-        self.cv_resources = []
 
 
 class IntelligentAgent:
@@ -260,32 +233,6 @@ class IntelligentAgent:
         except Exception as e:
             logger.error(f"❌ Schema cache'leme hatası: {e}")
             self.schema_cache = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
-
-    def _parse_experience_years(self, experience_str: str) -> int:
-        """
-        Experience years string'ini integer'a çevir.
-        "10+", "5-8", "3" gibi formatları handle eder.
-        """
-        if not experience_str:
-            return 0
-            
-        experience_str = str(experience_str).strip()
-        
-        try:
-            # "10+" formatı
-            if "+" in experience_str:
-                return int(experience_str.replace("+", ""))
-            
-            # "5-8" formatı - alt değeri al
-            if "-" in experience_str:
-                return int(experience_str.split("-")[0])
-            
-            # "3" gibi düz sayı
-            return int(experience_str)
-            
-        except (ValueError, TypeError):
-            # Parse edilemezse 0 döndür
-            return 0
 
     def get_cached_schema(self) -> str:
         """Cache'lenmiş schema bilgisini döndür"""
@@ -1934,6 +1881,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         # Cypher embedding storage
         self._cypher_embeddings = {}
 
+
         # Schema-based system prompt'u al (cache'den veya oluştur)
         system_prompt = self.get_system_prompt()
 
@@ -2610,48 +2558,8 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
                             )
 
-                elif action == "match_cvs":
-                    # İş ilanı temelli CV eşleştirme
-                    success, result = self.handle_cv_matching_action(action_content, user_question, state)
-                    
-                    if success:
-                        # Eğer result dict ise (structured result), CV matching response döndür
-                        if isinstance(result, dict) and result.get("success"):
-                            logger.info(f"🎯 CV eşleştirme başarılı: {result.get('matched_count', 0)} aday bulundu")
-                            
-                            # CV matching result'ını direkt döndür (final answer benzeri)
-                            return {
-                                "answer": result.get("formatted_response", "CV eşleştirme sonucu hazırlandı"),
-                                "chunks": [],
-                                "entities": [],
-                                "relationships": [],
-                                "state": state,
-                                "token_usage": self.token_usage,
-                                "conversation_context": conversation_context,
-                                "resource_links": result.get("resource_links", []),
-                                "match_type": "cv_matching_action_result",
-                                "matched_candidates": result.get("candidates", []),
-                                "job_requirements": result.get("job_requirements", {}),
-                                "iterations": state.iteration_count
-                            }
-                        else:
-                            # String result ise (observation) normal flow devam
-                            current_observation = str(result)
-                        
-                        # Conversation history'ye ekle - Başarılı CV eşleştirme
-                        conversation_history.append(
-                            f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
-                        )
-                    else:
-                        current_observation = f"CV eşleştirme başarısız: {result}"
-                        
-                        # Conversation history'ye ekle - Başarısız CV eşleştirme
-                        conversation_history.append(
-                            f"İterasyon {state.iteration_count}:\nObservation: {observation}\nThought: {thought}\nAction: {action}\nContent: {action_content[:100]}...\nSonuç: {current_observation}"
-                        )
-
                 else:
-                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, match_cvs, final_answer"
+                    current_observation = f"Bilinmeyen action: {action}. Geçerli action'lar: cypher_query, final_answer"
 
                     # Conversation history'ye ekle - Bilinmeyen action
                     conversation_history.append(
@@ -2811,907 +2719,332 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         return self.system_prompt_cache
 
     def create_enhanced_system_prompt(self, schema: Dict[str, Any] = None) -> str:
-        """Domain-Agnostic ReAct Agent - Schema Discovery Driven Graph Database Query Assistant"""
+        """Schema-based ReAct Agent - General Purpose Graph Database Query Assistant"""
 
+        # Schema'yı cache'den al
         try:
-            # Domain-agnostic schema discovery - RUNTIME'da canlı şema al
-            schema_discoverer = DomainAgnosticSchemaDiscovery(self.graph)
-            runtime_schema_info = schema_discoverer.discover_full_domain_schema()
-            domain_agnostic_prompt = schema_discoverer.generate_llm_schema_prompt()
-            
-            logger.info(f"✅ Runtime schema discovery başarılı: {len(runtime_schema_info.get('entity_types', []))} entity type, {len(runtime_schema_info.get('relation_types', []))} relation type")
+            from src.schema_extractor import Neo4jSchemaExtractor
+
+            extractor = Neo4jSchemaExtractor()
+            extractor.graph = self.graph
+            compact_schema = self.get_cached_schema()
+
+            schema_text = f"""NEO4J GRAPH DATABASE SCHEMA:
+{compact_schema}
+
+🎯 DOMAIN CONTEXT:
+Bu graph database, genel amaçlı bir veri sistemidir. Schema dinamik olarak sistem tarafından sağlanır:
+- **Nodes**: Schema'da tanımlı tüm varlık türleri (node labels)
+- **Properties**: Her node türünün sahip olduğu özellikler (property keys)
+- **Relationships**: Varlıklar arasındaki bağlantılar (relationship types)
+
+**KRİTİK**: Sorguları yazarken MUTLAKA schema'da tanımlı node türlerini, property'leri ve relationship'leri kullan!"""
 
         except Exception as e:
-            logger.warning(f"Domain-agnostic schema discovery hatası: {e}")
-            # Fallback: Minimal domain-agnostic prompt
-            domain_agnostic_prompt = """⚠️ RUNTIME SCHEMA DISCOVERY BAŞARISIZ - FALLBACK MODE
+            logger.warning(f"Schema çekme hatası: {e}")
+            schema_text = """NEO4J GRAPH DATABASE SCHEMA:
+⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"""
 
-DOMAIN-AGNOSTIC PATTERN (Minimal):
-- (:Entity {type:"..."}) pattern için mevcut type'ları keşfet
-- [:RELATED {type:"..."} - [:CONNECTED_TO] patterns kullan
-- (:Document) - (:Attribute) patterns için hazır ol
+        system_prompt = f"""# GRAPH DATABASE QUERY AGENT
 
-MANUEL DISCOVERY GEREKLİ: İlk Cypher query'lerinde mevcut şemayı keşfet!"""
+Sen verilen Neo4j graph database şemasını kullanan bir ReAct (Reasoning + Acting) ajansın. 
+Kullanıcı sorularını analiz ederek en uygun graph database sorgularını oluşturur ve sonuçları yorumlarsın.
 
-        system_prompt = f"""# DOMAIN-AGNOSTIC GRAPH DATABASE QUERY AGENT
-
-Sen Neo4j graph database'de domain-agnostic pattern'ları kullanan bir ReAct (Reasoning + Acting) ajansın. 
-Runtime'da şema keşfi yaparak tamamen esnek domain desteği sağlarsın.
-
-## 🎯 TEMEL YETKİNLİKLER:
-1. **CV & İş İlanı Eşleştirme**: İş ilanı metni verildiğinde uygun CV'leri bul ve skorla
-2. **Domain-Agnostic Sorgulama**: Runtime şema keşfi ile her türlü veriyi ara
-3. **Hibrit Şema Desteği**: Static (Person, Document) + Dynamic (Entity) node'ları kombine et
-
-## 🚀 İŞ İLANI EŞLEŞTIRME UZMANLIĞI:
-**TEMEL İŞLEV**: İş ilanı metinlerini analiz ederek graph'taki CV'lerle otomatik eşleştirme
-**TETIKLEME**: Kullanıcı iş pozisyonu + gereksinimler gönderdiğinde otomatik olarak match_cvs action'ı kullan
-**ÇIKTI**: Skorlanmış aday listesi, beceri uygunluğu, deneyim analizi
-
-{domain_agnostic_prompt}
-
-## DOMAIN-AGNOSTIC ŞEMA YAKLAŞIMI:
-
-### CORE PATTERN'lar (CV-Centric Hibrit Şema):
-
-**STATIC (Sabit) Node'lar:**
-```cypher
-(:Person)        // CV sahipleri (CORE entity)
-(:Document)      // CV dosyaları
-(:Attribute)     // Özellik değerleri  
-(:Chunk)         // Doküman parçaları
-```
-
-**DYNAMIC (Dinamik) Node'lar:**
-```cypher
-(:Entity {{type:"<TYPE>"}})  // SADECE Person'a bağlı
-```
-- Runtime'da keşfedilen Entity type'ları kullanılır
-- Type yukarıdaki runtime discovery listesinden seçilmeli
-- ⚠️ **KRİTİK**: Entity'ler sadece Person ile ilişkide, aralarında doğrudan bağ YOK
-
-**Relation Pattern (CV-Centric):**
-```cypher
-[:CONNECTED_TO] veya [:HAS_ATTRIBUTE]  // SADECE Person-Entity arası
-```
-- CONNECTED_TO: Person-Entity arası ilişkiler
-- HAS_ATTRIBUTE: Person-Attribute/Entity bağlantıları  
-- Yukarıdaki runtime discovery listesinden seçilmeli
-
-**CORE RELATION PATTERNS:**
-```cypher
-// Runtime mapping'e göre doğru relation'ı kullan:
-(p:Person)-[:HAS_ATTRIBUTE|CONNECTED_TO]->(e:Entity)  // Mapping'e bak!
-(p:Person)-[:HAS_CV]->(d:Document)                    // CV bağlantısı
-// ❌ YASAK: (e1:Entity)-[:???]->(e2:Entity)          // Entity-Entity doğrudan bağ YOK!
-```
-- Belgeler için istisna, değişmez
-- CV'ler, PDF'ler, dökümanlar
-
-### � DOMAIN-AGNOSTIC QUERY KURALLARI:
-
-1. **RUNTIME SCHEMA FIRST**: Sadece yukarıdaki keşfedilen type'ları ve relation'ları kullan
-2. **CV-CENTRIC PATTERN**: Tüm Entity'ler Person üzerinden erişilir
-3. **NO ENTITY-ENTITY**: Entity'ler arası doğrudan ilişki YASAK
-4. **DISCOVERY FIRST**: Bilinmeyen Entity type'larda önce şema keşfi yap
-
-### 🎯 RUNTIME SCHEMA-DRIVEN APPROACH:
-
-**RUNTIME SCHEMA FIRST**: Yukarıdaki şema bilgilerini kullan!
-- Entity-Relation mapping'i takip et (⚠️CRITICAL_MAPPING)
-- Doğru relation type'ları için runtime discovery sonuçlarına bak
-- Sabit örneklere güvenme, runtime şema verilerini öncelikle
-
-**DISCOVERY STRATEJİSİ:**
-1. Kullanıcı terimi → Hangi Entity type'ları relevant?
-2. Bu Entity type'ları → Hangi relation'larla Person'a bağlı?
-3. Şema mapping'e göre doğru relation'ı seç
+{schema_text}
 
 ## 🔧 TEMEL KURALLAR:
 
-### 🎯 DOMAIN-AGNOSTIC ARAMA STRATEJİSİ:
+### � SCHEMA KULLANIM KURALLARI (KRİTİK):
+1. **SCHEMA FIRST**: Her sorgu öncesi yukarıdaki schema bölümünü incele
+2. **NODE TYPES**: Sadece schema'da listelenen node label'larını kullan
+3. **PROPERTIES**: Sadece schema'da tanımlı property key'lerini kullan
+4. **RELATIONSHIPS**: Sadece schema'da gösterilen relationship type'larını kullan
+5. **NO ASSUMPTIONS**: Schema'da yoksa kullanma - hardcoded domain bilgisi yasak!
 
-### 📝 STRING NORMALİZASYONU (Zorunlu):
+
+### 🔍 AKILLI ARAMA STRATEJİSİ:
+**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
+**METADATA SORULARI için entity araması** 
+
+
+### �📝 CYPHER QUERY KURALLARI:
+1. **STRING NORMALİZASYONU ZORUNLU**: Tüm string karşılaştırmalarında MUTLAKA:
+   - **Güvenli toString kullanımı**: `toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))`
+   - **ÖRN**: `toLower(apoc.text.clean(p.type)) CONTAINS toLower(apoc.text.clean('str'))`
+   - Asla doğrudan `p.type = 'str'` kullanma!
+
+2. **Field Type Matching**: Schema'dan field tipini kontrol et
+   - **String fields**: `toLower(apoc.text.clean(field))) CONTAINS toLower(apoc.text.clean('value'))`
+   - **Integer fields**: `field = value` 
+   - **Boolean fields**: `field = true/false`
+
+3. **Node/Relationship Kullanımı**: Sadece schema'da tanımlı node'ları ve relationship'leri kullan
+
+4. **Embedding Field Hariç Tutma**: Schema'da `embedding_vector` tipindeki field'larda CONTAINS araması yapma - bunlar vector search için kullanılır
+
+5. **Return Clause**: Sorguya uygun alanları döndür
+
+### 🔍 ARAMA STRATEJİSİ:
+
+**KURAL**: ÖNCE KEŞİF YAP - HER ZAMAN KEŞİF İLE BAŞLA!
+
+#### 🎯 KEŞİF SORGUSU YAKLAŞIMI (Schema-Driven):
+
+**ZORUNLU**: Keşif sorgularında schema'dan öğrenilen node türlerini ve property'lerini dinamik olarak kullan!
+
+**1. SCHEMA-BASED NODE KEŞFİ:**
 ```cypher
-// Güvenli string karşılaştırması
-WHERE toLower(field_name, '') CONTAINS toLower('search_term')
+// ADIM 1: Schema'daki tüm node türlerinde ilgili property'lerde ara
+MATCH (n:SchemaNodeType)  // <-- SchemaNodeType'ı gerçek node türü ile değiştir
+WHERE toLower(apoc.text.clean(n.schema_property)) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+RETURN n.schema_property, labels(n) as node_type, properties(n)
+LIMIT 5
+
 ```
 
-### � ARAMA STRATEJİSİ TİPLERİ:
-
-**METADATA ARAMALARI**: Entity properties ve yapısal veriler
-**CONTENT ARAMALARI**: Semantci vector aramalar (embedding tabanlı)  
-**HİBRİT ARAMALARI**: Metadata + content kombinasyonu
-
-## 🎯 AVAILABLE ACTIONS:
-
-1. **cypher_query**: Sağlanan şema pattern'ları ile arama
-2. **match_cvs**: İş ilanı metni verildiğinde CV eşleştirme yap
-   - **NE ZAMAN KULLAN**: Kullanıcı açık bir iş ilanı metni gönderdiğinde veya bir yetenek veya bir deneyim bilgisi sorduğunda(örneğin, "Python bilenler", "5 yıl deneyimli" gibi)
-   - **İŞ İLANI TESPİTİ**: "... aranıyor", "... deneyimli", "... gereklidir", "... iş ilanı" gibi ifadeler
-   - **CONTENT**: Tüm iş ilanı metnini action_content'e koy
-   - **ÇIKTI**: En uygun CV'ler, skorları ve aday bilgileri
-3. **final_answer**: Son cevap
-
-### 🎯 İŞ İLANI TESPİT KURALLARI:
-
-**match_cvs ACTION TETİKLEYİCİLERİ:**
-- **İLK İŞ İLANI**: Kullanıcı iş pozisyonu + gereksinimler yazıyorsa
-- **DEVAM EDİLEN İŞ İLANI**: Önceki konuşmada iş ilanı varsa ve kullanıcı filtre soruyor
-- **FİLTRE SORULARI**: "Almanca", "Python", "5 yıl deneyim" gibi spesifik kriterler
-- **ADAY LİSTESİ FİLTRELEME**: Var olan iş ilanına ek kriterler
-
-**GENİŞLETİLMİŞ TETİKLEYİCİLER:**
-- "Aranıyor", "istiyoruz", "gereklidir" gibi iş ilanı dili (İLK)
-- "peki almanca?", "python bilenler?", "5+ yıl deneyimi olanlar?" (FİLTRE)
-- Beceri listesi + deneyim gereksinimleri
-- Şirket tanıtımı + pozisyon açıklaması
-
-**ÖRNEK İŞ İLANI PATTERN'leri:**
-```
-"Senior Python Developer aranıyor. 5+ yıl deneyim, Django, FastAPI bilgisi gerekli..."
-"Frontend geliştiricisi istiyoruz. React, TypeScript, 3 yıl deneyim..."
-"Veri analisti pozisyonu için SQL, Python, Excel bilgisi şart..."
+**2. SCHEMA-BASED PROPERTY KEŞFİ:**
+```cypher
+// ADIM 2: Schema'da bulunan property'leri dinamik olarak kontrol et
+// Embedding fieldlarını hariç tutarak arama yap
+MATCH (n)
+WHERE any(prop IN keys(n) WHERE 
+    prop <> 'embedding' AND NOT prop CONTAINS 'vector' AND
+    toLower(apoc.text.clean(coalesce(toString(n[prop]), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi')))
+RETURN labels(n) as node_type, keys(n) as properties, 
+       [prop IN keys(n) WHERE 
+         prop <> 'embedding' AND NOT prop CONTAINS 'vector' AND
+         toLower(apoc.text.clean(coalesce(toString(n[prop]), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi')) 
+       | {{property: prop, value: n[prop]}}] as matches
+LIMIT 5
 ```
 
+**3. SCHEMA-BASED RELATİONSHİP KEŞFİ:**
+```cypher
+// ADIM 3: Schema'da tanımlı relationship'leri kullanarak bağlantılı ara
+// Schema'dan öğrenilen relationship türlerini kullan
+MATCH (n)-[r:SchemaRelationType]->(m)  // <-- SchemaRelationType'ı gerçek relationship türü ile değiştir
+WHERE toLower(apoc.text.clean(coalesce(toString(n.schema_property), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+   OR toLower(apoc.text.clean(coalesce(toString(m.schema_property), ''))) CONTAINS toLower(apoc.text.clean('kullanici_terimi'))
+RETURN labels(n) as source_type, type(r) as relation_type, labels(m) as target_type,
+       n.schema_property as source_value, m.schema_property as target_value
+LIMIT 5
+```
 
-**CONTEXT KONTROLÜ:**
+#### 📋 KEŞİF SONRASI ANALİZ (Schema-Based):
+
+**ÇOKLU SONUÇ DURUMU**: Birden fazla eşleşme varsa, schema'daki node türlerini analiz et
+   ```
+   "kullanici_terimi" ile eşleşen yapılar:
+   - SchemaNodeType1'de: X sonuç
+   - SchemaNodeType2'de: Y sonuç
+   - SchemaNodeType3'te: Z sonuç
+   Hangi node türü ile devam etmek istiyorsun?
+   ```
+
+**TEK SONUÇ DURUMU**: Tek eşleşme varsa, o node türü ile devam et
+   ```
+   ✅ Tek "SchemaNodeType" node'u bulundu. Bu varlık ile devam ediyorum.
+   ```
+
+**BOŞ SONUÇ DURUMU**: Hiç eşleşme yoksa, schema'daki alternatif property'leri dene
+   ```
+   ⚠️ İlk property'de eşleşme bulunamadı. Schema'daki alternatif property'lerde arıyorum:
+   - Farklı property isimlerinde ara
+   - Daha geniş node türlerinde ara
+   - Relationship üzerinden bağlantılı ara
+   ```
+
+#### 🔄 KEŞİF İTERASYON YAKLAŞIMI (Schema-Driven):
+
+**GENİŞ KEŞİF**: Schema'daki tüm node türlerinde ara (MATCH (n) WHERE schema_property...)
+**DAR KEŞİF**: Schema'dan spesifik node türünde ara (MATCH (n:SchemaNodeType) WHERE ...)
+**DERİN KEŞİF**: Schema'daki relationship'ler üzerinden ara (MATCH (n)-[r:SchemaRelType]->(m) WHERE ...)
+**YENİDEN ŞEKİLLENDİRME**: Başarısızsa schema'daki farklı property'lerde ara
+
+**UYGULAMA**:
+- İlk sorgu her zaman schema'daki tüm node türlerini keşfet
+- Schema'dan öğrenilen property isimlerini dinamik olarak kullan
+- Schema'da tanımlı relationship türlerini keşfet
+- Hardcoded domain terimleri kullanma - her şeyi schema'dan al!
+
+### 🎯 ARAMA STRATEJİSİ:
+
+**METADATA ARAMALARI**: Entity'ler ve yapılandırılmış veriler için
+- Node properties üzerinden filtreleme
+- Eğer birden fazla kelimeden oluşan bir node arama başarısız olursa ayrı ayrı arama yap
+
+**CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
+- Chunk nodes üzerinden text içeriği arama
+- Embedding-based similarity search
+
+**HİBRİT ARAMALARI**: Hem metadata hem content gereken durumlarda
+- Önce entity filtresi, sonra content arama
+- Filename discovery → content search chain
+
+
+**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
+sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
+- Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
+
+### 🔍 VECTOR ARAMA STRATEJİSİ (Schema-Driven, Domain Agnostic):
+
+**A) METADATA + VECTOR ARAMA (Schema-Driven):**
+```cypher
+WITH $embedding_vector AS queryVec
+MATCH (content_node)-[rel]->(container_node)
+WHERE toLower(apoc.text.clean(coalesce(toString(container_node.schema_property), ''))) CONTAINS toLower(apoc.text.clean("filter_term"))
+  AND content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.text, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 10
 ```
-# Önceki konuşmada iş ilanı var mı?
-Conversation history'de "match_cvs" kullanılmış mı?
-EVET → Kullanıcı sorusu filtre mi? → match_cvs kullan
-HAYIR → Normal query logic
+
+**B) SADECE VECTOR ARAMA (Schema-Driven):**
+```cypher
+WITH $embedding_vector AS queryVec
+MATCH (content_node)-[rel]->(container_node)
+WHERE content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.text, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 15
 ```
+
+**C) FİLTRELİ VECTOR ARAMA (Schema-Driven + Context):**
+```cypher
+WITH $embedding_vector AS queryVec
+MATCH (content_node)-[rel]->(container_node)
+WHERE container_node.schema_property IN $context_list
+  AND content_node.embedding IS NOT NULL
+WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
+WHERE score >= 0.5
+RETURN content_node.text, labels(content_node), labels(container_node), score
+ORDER BY score DESC LIMIT 10
+```
+
+**NOT**: Yukarıdaki örneklerde:
+- `SchemaContentType`, `SchemaContainerType`: Schema'dan öğrenilen gerçek node türleri
+- `SchemaRelationType`: Schema'dan öğrenilen gerçek relationship türü
+- `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
+- LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
+
+
+
+### AVAILABLE TOOLS (OpenAI Function Calling):
+
+**generate_embeddings_for_cypher(text)**: 
+- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
+- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
+- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
+- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
+
+**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
+- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
+- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
+- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
+- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
+- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
+- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
+- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
+- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
+- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
+- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
+
+**add_page_resource(page_link)**:
+- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
+- Her kullanılan içerik için mutlaka çağır
+- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
+
+#### 🛠️ TOOL KULLANIM KURALLARI:
+
+**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
+- **generate_embeddings_for_cypher**: Semantic/Vector arama için embedding oluştur  
+- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
+
+**ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
+
+1. **Vector/Semantic/Chunk Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
+   - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
+
+2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR:**
+   - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
+   - Final answer'da sayfa referansları gösterilecekse
+   - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
+
+### 🔗 PARAMETER INHERITANCE:
+
+**ZORUNLU**: Her yeni soruda önceki conversation'ı analiz et ve eksik parametreleri tamamla!
+
+**STEP-BY-STEP ENFORCEMENT:**
+
+1. **ÖNCEKI SORU ANALİZİ (ZORUNLU):**
+   - Conversation history'den son soruyu parse et
+
+2. **YENİ SORU ANALİZİ (ZORUNLU):**
+   - Hangi parametreler explicit olarak belirtilmiş?
+   - Hangi parametreler eksik/belirsiz?
+
+3. **INHERITANCE KURALI (ZORUNLU):**
+   - Entity eksikse → Önceki conversation'dan al
+   - Filter eksikse → Önceki conversation'dan al  
+   - Operation eksikse → Önceki conversation'dan al
+   - Yeni constraint eklenmişse → Önceki parametrelerle birleştir
+
+4. **VALIDATE BEFORE QUERY (ZORUNLU):**
+   - "Bu query önceki soru ile uyumlu mu?"
+   - "Tüm context parametreleri dahil edildi mi?"
 
 ## 📋 REACT FORMAT:
 
-```
-Observation: [Mevcut durum]
-Thought: [Domain-agnostic analiz - Bu bir iş ilanı mı? Hangi Entity type/relation'lar relevant?]
-Action: [cypher_query | match_cvs | final_answer]
-Content: [Runtime schema-driven Cypher | İş ilanı metni | final cevap]
-```
+Her iterasyonda şu formatı kullan:
 
-### 🎯 THOUGHT PROCESS ÖRNEĞİ:
-
-**İş İlanı Tespiti için:**
 ```
-Thought: Kullanıcı mesajında "Senior Developer aranıyor, 5+ yıl deneyim" ifadeleri var. 
-Bu bir iş ilanı metni. CV eşleştirme yapmalı. match_cvs action kullanacağım.
-Action: match_cvs
-Content: [Tüm iş ilanı metni buraya]
+Observation: [Durum ve önceki sonuçlar]
+Thought: [Kullanıcının sorusundaki TÜM terimleri thought kısmında da kullan. İçerik/detay arıyorum mu yoksa metadata mı? Schema'da hangi node/relation'lar relevant? ]
+Action: [cypher_query | final_answer]
+Content: [Cypher sorgusu | final cevap]
 ```
 
-**Devam Eden İş İlanında Filtre için:**
-```
-Thought: Önceki konuşmada iş ilanı eşleştirmesi yapıldı. Şimdi kullanıcı "almanca" diye SPESİFİK filtre soruyor.
-Bu sadece Almanca bilen adayları bulma. Orijinal iş ilanından dil kısmını "Almanca dil bilgisi" ile DEĞİŞTİRmeliyim.
-Action: match_cvs
-Content: [Orijinal iş ilanı - İngilizce gereksinimi + Almanca dil bilgisi SADECE]
-```
+### 🎯 ACTION STRATEJİLERİ:
 
-**FİLTRE DEĞİŞTİRME KURALLARI:**
-- "peki almanca?" = Sadece Almanca bilen adaylar (İngilizce DEĞİL)
-- "python bilenler?" = Sadece Python becerisi (diğer tech stack'ler DEĞİL)  
-- "5+ yıl deneyim?" = Minimum 5 yıl deneyim kriteri (önceki deneyim REQ değişir)
-- **SPESİFİK filtre = O kritere odaklan, benzer kategorileri SİL**
-
-**ÖNEMLİ:** Kullanıcı "peki X?" derse, orijinal iş ilanından X ile çelişen gereksinimleri tamamen çıkar!
-
-**Normal Sorgu için:**
-```
-Thought: Kullanıcı spesifik kişi/beceri arıyor. Schema'da Person-Entity pattern'ları relevant.
-Action: cypher_query  
-Content: MATCH (p:Person)...
-```
-
-### 🗃️ SCHEMA DISCOVERY ADIMLARı:
-2. **Entity Type Discovery**: Kullanıcı terimlerine hangi Entity type'ları eşleşiyor?
-3. **Relation Discovery**: Bu type'lar arasında hangi relation'lar mevcut?
-4. **Targeted Search**: Keşfedilen pattern'ları kullanarak spesifik arama
-5. **Schema Expansion**: Bulunan sonuçlardan yeni type/relation'lar keşfet
+**cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
+- Eğer semantic arama gerekiyorsa → önce tool'u çağır, sonra cypher_query yap
+- Eğer entity araması gerekiyorsa → schema'daki node türlerini ve property'lerini kullanarak cypher_query yap
+- Eğer metadata + content araması gerekiyorsa → önce entity
+- **1. İTERASYON**: Entity'leri bul (Customer, Policy) - p.source_file'ı mutlaka RETURN et!
+- **2. İTERASYON**: Keşfedilen filename'leri kullan - WHERE d.fileName IN [liste] formatında!
+- **KRİTİK**: Filename CONTAINS araması yapma, direkt IN listesi kullan!
+- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür  
+- **ZORUNLU**: Cypher sonucunda chunk bulunca, faydalandığın her chunk için add_page_resource(page_link) çağır!
 
 
-### 🔧 AVAILABLE TOOLS:
+**final_answer**: Son cevabı ver
+- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
+- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
+- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
 
-**generate_embeddings_for_cypher(text)**: Vector arama için embedding üretir
-**add_page_resource(page_link)**: Chunk kaynaklarından sayfa referansı ekler
+## 🎯 ITERATION BAŞLANGICI:
 
-## ⚠️ KRİTİK DOMAIN-AGNOSTIC KURALLARI:
+Her iterasyon başında şunları değerlendir:
+1. **Kullanıcı Sorusu**: Ne tür bilgi aranıyor?
+2. **Context Analizi**: Bu soru önceki konuşmayla ilgili mi? Belirsiz kelimeler (kaç, hangi, ne zaman) önceki varlıkları referans alıyor mu?
+3. **Önceki Bulgular**: Hangi veriler elde edildi?
+4. **Schema Mapping**: Soruya hangi node/relationship'ler cevap verebilir?
+5. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
 
-- **RUNTIME SCHEMA FIRST**: Sadece runtime'da keşfedilen Entity type/relation'ları kullan
-- **YASAK**: Hardcoded domain node'ları (subtype yerine type kullan)
-- **FLEXIBLE PATTERNS**: Runtime'da bulunan gerçek pattern'lara uygun sorgu yaz
-- **DISCOVERY DRIVEN**: Yeni domain'lar runtime'da otomatik desteklenir
-- **SCHEMA CONSISTENT**: Tüm sorgular aynı runtime schema pattern'ını takip eder
+## ⚠️ ÖNEMLİ NOTLAR (Schema-Driven, Domain Agnostic):
 
-Şimdi kullanıcının sorusunu domain-agnostic yaklaşımla analiz et ve şema bilgilerini kullan!"""
+- **KRİTİK: SCHEMA FIRST!** Her sorgu öncesi schema'yı incele ve sadece orada tanımlı node/property/relationship kullan!
+- **KRİTİK: SEMANTIC ARAMA İÇİN TOOL ÇAĞIR!** Vector/semantic arama gerektiğinde generate_embeddings_for_cypher TOOL'UNU çağır, sonra cypher_query eylemi yap!
+- Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
+- İçerik node'larından faydalanıyorsan mutlaka add_page_resource çağır (schema'daki reference property'yi kullan)
+- Embedding'lerde metadata kullanma, sadece content terimleri
+- Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
+
+Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
 
         return system_prompt
-
-
-    def handle_cv_matching_action(self, action_content: str, user_question: str, state) -> tuple[bool, str]:
-        """
-        match_cvs action'ını handle eder
-        action_content: İş ilanı metni veya CV eşleştirme kriterleri
-        """
-        try:
-            logger.info(f"🎯 CV eşleştirme action'ı başlatılıyor...")
-            
-            # Action content'i iş ilanı metni olarak kullan
-            job_posting_text = action_content.strip()
-            
-            if not job_posting_text:
-                return False, "İş ilanı metni boş. CV eşleştirme için iş ilanı metni gerekli."
-            
-            # CV eşleştirme fonksiyonunu çağır
-            matching_result = self.match_job_posting_to_cvs(
-                job_posting_text, 
-                min_match_score=0.3
-            )
-            
-            if matching_result["success"]:
-                matched_count = len(matching_result.get("matched_candidates", []))
-                
-                # CV PDF linklerini resource_links için hazırla
-                cv_resource_links = []
-                try:
-                    import urllib.parse
-                    for candidate in matching_result.get("matched_candidates", []):
-                        cv_files = candidate.get('cv_files', [])
-                        for cv_file in cv_files:
-                            if cv_file and cv_file.strip():
-                                encoded_filename = urllib.parse.quote(cv_file, safe="", encoding="utf-8")
-                                cv_link = f"{BASE_URL}/files/{encoded_filename}"
-                                cv_resource_links.append({
-                                    "type": "pdf",
-                                    "title": f"CV: {candidate.get('p.name', 'Bilinmeyen')} - {cv_file}",
-                                    "url": cv_link,
-                                    "description": f"{candidate.get('p.name', 'Bilinmeyen')} adayının CV dosyası"
-                                })
-                except Exception as e:
-                    logger.error(f"CV resource links oluşturulurken hata: {e}")
-                
-                # State'e başarılı bulgu olarak ekle
-                summary = f"CV Eşleştirme: {matched_count} aday bulundu"
-                self.add_successful_finding(
-                    state,
-                    state.iteration_count,
-                    "cv_matching",
-                    summary,
-                    0.9,  # Yüksek relevance
-                    matching_result,  # Ham matching sonuçları
-                )
-                
-                # Resource links'i Resource Manager'a ekle
-                for link in cv_resource_links:
-                    self.resource_manager.add_resource(
-                        link["type"], link["title"], link["url"], link["description"]
-                    )
-                
-                # CV eşleştirme sonucunu structured format'ta döndür
-                match_result = {
-                    "success": True,
-                    "matched_count": matched_count,
-                    "candidates": matching_result.get("matched_candidates", []),
-                    "job_requirements": matching_result.get("job_requirements", {}),
-                    "resource_links": cv_resource_links,
-                    "formatted_response": self._format_job_matching_response(matching_result)
-                }
-                
-                observation = f"CV eşleştirme başarılı: {matched_count} uygun aday bulundu. Structured result hazır."
-                return True, match_result
-                
-            else:
-                error_msg = matching_result.get("error", "Bilinmeyen hata")
-                return False, f"CV eşleştirme başarısız: {error_msg}"
-                
-        except Exception as e:
-            logger.error(f"CV eşleştirme action'ında hata: {e}")
-            return False, f"CV eşleştirme action'ında hata: {str(e)}"
-
-    def match_job_posting_to_cvs(self, job_posting_text: str, min_match_score: float = 0.3) -> Dict[str, Any]:
-        """
-        İş ilanı metnini alıp uygun CV'leri hibrit şema kullanarak bulur
-        TAMAMEN domain-agnostic, LLM-based, şema-driven yaklaşım
-        """
-        logger.info(f"🎯 Domain-agnostic İş ilanı CV eşleştirme başlıyor...")
-        logger.info(f"İş ilanı metni uzunluğu: {len(job_posting_text)} karakter")
-        
-        try:
-            # 1. LLM ile schema-driven iş ilanı analizi (domain bilgisi YASAK)
-            analysis_prompt = f"""SCHEMA-DRIVEN İŞ İLANI ANALİZİ
-
-Hibrit Graph Schema'ya uygun iş ilanı analizi yap:
-
-GRAPH SCHEMA:
-- Person: Kişiler (core entity)
-- Entity: Dinamik varlıklar (type property ile: "Skill", "Language", "Organization", "Position", "Education", vb.)
-- Attribute: Özellikler (value property ile)
-- Relationships: HAS_ATTRIBUTE, CONNECTED_TO
-
-İŞ İLANI METNİ:
-{job_posting_text}
-
-GÖREV: İş ilanından schema-uyumlu terimleri çıkar (hardcoded domain bilgisi YASAK):
-
-ÇIKTI FORMATI (JSON):
-{{
-    "schema_requirements": {{
-        "position_terms": ["pozisyon1", "pozisyon2"],
-        "skill_entities": ["skill1", "skill2"],
-        "experience_attributes": {{"min_years": sayı, "level": "seviye"}},
-        "language_entities": ["lang1", "lang2"],
-        "education_entities": ["eğitim1", "eğitim2"],
-        "organization_types": ["sektör1", "sektör2"],
-        "location_attributes": ["şehir", "ülke"],
-        "other_requirements": ["req1", "req2"]
-    }},
-    "search_strategy": {{
-        "primary_filters": ["ana filtreler"],
-        "secondary_filters": ["ikincil filtreler"],
-        "scoring_weights": {{"position": 0.3, "skills": 0.4, "experience": 0.2, "languages": 0.1}}
-    }}
-}}
-
-Sadece JSON döndür, domain-specific terimleri kullanma."""
-
-            # LLM'den schema-driven analiz al
-            analysis_response = self.llm.invoke(analysis_prompt)
-            analysis_text = analysis_response.content.strip()
-            
-            logger.info(f"Schema-driven analiz yanıtı: {analysis_text[:200]}...")
-            
-            # JSON parse et
-            try:
-                if '{' in analysis_text and '}' in analysis_text:
-                    start_idx = analysis_text.find('{')
-                    end_idx = analysis_text.rfind('}') + 1
-                    json_text = analysis_text[start_idx:end_idx]
-                    schema_analysis = json.loads(json_text)
-                else:
-                    raise ValueError("JSON format bulunamadı")
-            except Exception as e:
-                logger.error(f"Schema analiz JSON parse hatası: {e}")
-                # Fallback: Minimal schema structure
-                schema_analysis = {
-                    "schema_requirements": {
-                        "position_terms": [],
-                        "skill_entities": [],
-                        "experience_attributes": {"min_years": 0, "level": "any"},
-                        "language_entities": [],
-                        "education_entities": [],
-                        "organization_types": [],
-                        "location_attributes": [],
-                        "other_requirements": []
-                    },
-                    "search_strategy": {
-                        "primary_filters": [],
-                        "secondary_filters": [],
-                        "scoring_weights": {"position": 0.3, "skills": 0.4, "experience": 0.2, "languages": 0.1}
-                    }
-                }
-
-            logger.info(f"✅ Schema-driven analiz tamamlandı: {schema_analysis}")
-
-            # 2. Hibrit şema kullanarak domain-agnostic CV eşleştirme sorguları
-            matching_results = []
-            requirements = schema_analysis["schema_requirements"]
-            
-            # 2a. Person core entity pozisyon eşleştirme (schema-driven)
-            for position_term in requirements.get("position_terms", []):
-                if position_term:
-                    position_query = f"""
-                    MATCH (p:Person)
-                    WHERE toLower(apoc.text.clean(coalesce(p.career_current_position, ''))) CONTAINS toLower(apoc.text.clean('{position_term}'))
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {{type: "Skill"}})
-                    OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {{type: "Organization"}})
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(lang:Entity {{type: "Language"}})
-                    OPTIONAL MATCH (p)-[:HAS_CV]-(cv_doc:Document)
-                    RETURN p.name, p.career_current_position, p.career_experience_years, p.profile_location,
-                           p.contact_email, p.contact_phone, p.profile_summary,
-                           collect(DISTINCT skill.name) as skills,
-                           collect(DISTINCT org.name) as companies,
-                           collect(DISTINCT lang.name) as languages,
-                           collect(DISTINCT cv_doc.fileName) as cv_files
-                    ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-                    LIMIT 15
-                    """
-                    
-                    success, position_results = self.execute_cypher_query(position_query)
-                    if success and position_results:
-                        for result in position_results:
-                            result['match_type'] = f'position_{position_term}'
-                            result['match_score'] = self._calculate_schema_match_score(result, schema_analysis)
-                            matching_results.append(result)
-
-            # 2b. Entity skill eşleştirme (schema-driven)
-            for skill_entity in requirements.get("skill_entities", []):
-                if skill_entity:
-                    skill_query = f"""
-                    MATCH (p:Person)-[:HAS_ATTRIBUTE]-(skill:Entity {{type: "Skill"}})
-                    WHERE toLower(apoc.text.clean(skill.name)) CONTAINS toLower(apoc.text.clean('{skill_entity}'))
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(other_skill:Entity {{type: "Skill"}})
-                    OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {{type: "Organization"}})
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(lang:Entity {{type: "Language"}})
-                    OPTIONAL MATCH (p)-[:HAS_CV]-(cv_doc:Document)
-                    RETURN DISTINCT p.name, p.career_current_position, p.career_experience_years, p.profile_location,
-                           p.contact_email, p.contact_phone, p.profile_summary,
-                           collect(DISTINCT other_skill.name) as skills,
-                           collect(DISTINCT org.name) as companies,
-                           collect(DISTINCT lang.name) as languages,
-                           collect(DISTINCT cv_doc.fileName) as cv_files
-                    ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-                    LIMIT 10
-                    """
-                    
-                    success, skill_results = self.execute_cypher_query(skill_query)
-                    if success and skill_results:
-                        for result in skill_results:
-                            result['match_type'] = f'skill_{skill_entity}'
-                            result['match_score'] = self._calculate_schema_match_score(result, schema_analysis)
-                            matching_results.append(result)
-
-            # 2c. Experience attribute eşleştirme (schema-driven)
-            exp_attrs = requirements.get("experience_attributes", {})
-            min_years = exp_attrs.get("min_years", 0)
-            if min_years > 0:
-                experience_query = f"""
-                MATCH (p:Person)
-                WHERE toInteger(coalesce(p.career_experience_years, '0')) >= {min_years}
-                OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {{type: "Skill"}})
-                OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {{type: "Organization"}})
-                OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(lang:Entity {{type: "Language"}})
-                OPTIONAL MATCH (p)-[:HAS_CV]-(cv_doc:Document)
-                RETURN p.name, p.career_current_position, p.career_experience_years, p.profile_location,
-                       p.contact_email, p.contact_phone, p.profile_summary,
-                       collect(DISTINCT skill.name) as skills,
-                       collect(DISTINCT org.name) as companies,
-                       collect(DISTINCT lang.name) as languages,
-                       collect(DISTINCT cv_doc.fileName) as cv_files
-                ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-                LIMIT 15
-                """
-                
-                success, exp_results = self.execute_cypher_query(experience_query)
-                if success and exp_results:
-                    for result in exp_results:
-                        result['match_type'] = 'experience_attribute'
-                        result['match_score'] = self._calculate_schema_match_score(result, schema_analysis)
-                        matching_results.append(result)
-
-            # 2d. Language entity eşleştirme (schema-driven)
-            for lang_entity in requirements.get("language_entities", []):
-                if lang_entity:
-                    lang_query = f"""
-                    MATCH (p:Person)-[:HAS_ATTRIBUTE]-(lang:Entity {{type: "Language"}})
-                    WHERE toLower(apoc.text.clean(lang.name)) CONTAINS toLower(apoc.text.clean('{lang_entity}'))
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(skill:Entity {{type: "Skill"}})
-                    OPTIONAL MATCH (p)-[:CONNECTED_TO]-(org:Entity {{type: "Organization"}})
-                    OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]-(other_lang:Entity {{type: "Language"}})
-                    OPTIONAL MATCH (p)-[:HAS_CV]-(cv_doc:Document)
-                    RETURN DISTINCT p.name, p.career_current_position, p.career_experience_years, p.profile_location,
-                           p.contact_email, p.contact_phone, p.profile_summary,
-                           collect(DISTINCT skill.name) as skills,
-                           collect(DISTINCT org.name) as companies,
-                           collect(DISTINCT other_lang.name) as languages,
-                           collect(DISTINCT cv_doc.fileName) as cv_files
-                    ORDER BY toInteger(coalesce(p.career_experience_years, '0')) DESC
-                    LIMIT 10
-                    """
-                    
-                    success, lang_results = self.execute_cypher_query(lang_query)
-                    if success and lang_results:
-                        for result in lang_results:
-                            result['match_type'] = f'language_{lang_entity}'
-                            result['match_score'] = self._calculate_schema_match_score(result, schema_analysis)
-                            matching_results.append(result)
-
-            # 3. Sonuçları birleştir ve tekilleştir (schema-driven)
-            unique_candidates = {}
-            for result in matching_results:
-                candidate_key = result['p.name']
-                if candidate_key not in unique_candidates:
-                    unique_candidates[candidate_key] = result
-                else:
-                    # Skorları schema weights'e göre birleştir
-                    existing_score = unique_candidates[candidate_key]['match_score']
-                    new_score = result['match_score']
-                    # En yüksek skoru al (çünkü farklı kriterlerden gelebilir)
-                    unique_candidates[candidate_key]['match_score'] = max(existing_score, new_score)
-                    
-                    # CV dosyalarını birleştir (tekilleştir)
-                    existing_cv_files = set(unique_candidates[candidate_key].get('cv_files', []))
-                    new_cv_files = set(result.get('cv_files', []))
-                    merged_cv_files = list(existing_cv_files.union(new_cv_files))
-                    # None ve boş string'leri filtrele
-                    merged_cv_files = [f for f in merged_cv_files if f and f.strip()]
-                    unique_candidates[candidate_key]['cv_files'] = merged_cv_files
-
-            # 4. Schema-driven skorlara göre sırala ve filtrele
-            final_candidates = []
-            for candidate in unique_candidates.values():
-                # Min score check
-                if candidate['match_score'] < min_match_score:
-                    continue
-                    
-                # **STRICT LANGUAGE FILTER** - Eğer language requirement varsa
-                language_requirements = requirements.get("language_entities", [])
-                if language_requirements:
-                    candidate_languages = [lang.lower() for lang in candidate.get('languages', [])]
-                    required_languages = [req.lower() for req in language_requirements]
-                    
-                    # En az bir required language match etmeli
-                    language_match = any(
-                        any(req_lang in cand_lang for cand_lang in candidate_languages)
-                        for req_lang in required_languages
-                    )
-                    
-                    if not language_match:
-                        continue  # Language requirement karşılamıyor, skip
-                
-                final_candidates.append(candidate)
-                
-            final_candidates.sort(key=lambda x: x['match_score'], reverse=True)
-
-            logger.info(f"✅ Schema-driven iş ilanı eşleştirme tamamlandı: {len(final_candidates)} aday bulundu")
-
-            return {
-                "success": True,
-                "schema_analysis": schema_analysis,
-                "matched_candidates": final_candidates[:20],  # Top 20
-                "total_matches": len(final_candidates),
-                "min_match_score": min_match_score,
-                "job_requirements": requirements  # Backward compatibility
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Schema-driven iş ilanı CV eşleştirme hatası: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-                "schema_analysis": {},
-                "matched_candidates": [],
-                "total_matches": 0,
-                "job_requirements": {}
-            }
-
-    def _calculate_schema_match_score(self, candidate: Dict, schema_analysis: Dict) -> float:
-        """
-        Schema-driven aday eşleştirme skoru hesapla (0.0 - 1.0)
-        LLM'den gelen schema analizi ve hibrit şema yapısına uygun
-        """
-        score = 0.0
-        max_score = 0.0
-        
-        try:
-            requirements = schema_analysis.get("schema_requirements", {})
-            weights = schema_analysis.get("search_strategy", {}).get("scoring_weights", {
-                "position": 0.3, "skills": 0.4, "experience": 0.2, "languages": 0.1
-            })
-            
-            # 1. Position entity eşleşmesi (LLM-determined weight)
-            position_weight = weights.get("position", 0.3)
-            position_terms = requirements.get("position_terms", [])
-            if position_terms and candidate.get("p.career_current_position"):
-                max_score += position_weight
-                candidate_position = candidate["p.career_current_position"].lower()
-                
-                # Schema'dan gelen position terms ile eşleştir
-                position_matches = sum(1 for term in position_terms 
-                                     if term.lower() in candidate_position or 
-                                        candidate_position in term.lower())
-                
-                if position_matches > 0:
-                    position_ratio = min(position_matches / len(position_terms), 1.0)
-                    score += position_weight * position_ratio
-
-            # 2. Skill entities eşleşmesi (LLM-determined weight)
-            skill_weight = weights.get("skills", 0.4)
-            skill_entities = requirements.get("skill_entities", [])
-            candidate_skills = [s.lower() for s in candidate.get("skills", [])]
-            
-            if skill_entities:
-                max_score += skill_weight
-                
-                # Schema'dan gelen skill entities ile eşleştir
-                matched_skills = 0
-                for skill_entity in skill_entities:
-                    skill_entity_lower = skill_entity.lower()
-                    if any(skill_entity_lower in cand_skill or cand_skill in skill_entity_lower 
-                           for cand_skill in candidate_skills):
-                        matched_skills += 1
-                
-                if skill_entities:
-                    skill_ratio = matched_skills / len(skill_entities)
-                    score += skill_weight * skill_ratio
-
-            # 3. Experience attributes eşleşmesi (LLM-determined weight)
-            exp_weight = weights.get("experience", 0.2)
-            exp_attributes = requirements.get("experience_attributes", {})
-            min_years = exp_attributes.get("min_years", 0)
-            candidate_exp = self._parse_experience_years(candidate.get("p.career_experience_years", "0"))
-            
-            if min_years > 0:
-                max_score += exp_weight
-                if candidate_exp >= min_years:
-                    score += exp_weight
-                elif candidate_exp >= min_years * 0.8:  # %80'i varsa kısmi puan
-                    score += exp_weight * 0.6
-
-            # 4. Language entities eşleşmesi (LLM-determined weight)
-            lang_weight = weights.get("languages", 0.1)
-            language_entities = requirements.get("language_entities", [])
-            candidate_languages = [l.lower() for l in candidate.get("languages", [])]
-            
-            if language_entities:
-                max_score += lang_weight
-                
-                # Schema'dan gelen language entities ile eşleştir
-                matched_languages = 0
-                for lang_entity in language_entities:
-                    lang_entity_lower = lang_entity.lower()
-                    if any(lang_entity_lower in cand_lang or cand_lang in lang_entity_lower 
-                           for cand_lang in candidate_languages):
-                        matched_languages += 1
-                
-                if language_entities:
-                    lang_ratio = matched_languages / len(language_entities)
-                    score += lang_weight * lang_ratio
-
-            # 5. Bonus: Eğitim ve diğer faktörler (schema-driven)
-            education_entities = requirements.get("education_entities", [])
-            if education_entities:
-                # Profile summary'de eğitim araması (hibrit yaklaşım)
-                profile_summary = candidate.get("p.profile_summary", "").lower()
-                education_matches = sum(1 for edu in education_entities 
-                                      if edu.lower() in profile_summary)
-                if education_matches > 0:
-                    bonus_score = 0.05 * min(education_matches / len(education_entities), 1.0)
-                    score += bonus_score
-
-            # Normalizing (schema weights'e göre)
-            if max_score > 0:
-                normalized_score = min(score / max_score, 1.0)
-            else:
-                # Fallback: Basit heuristic
-                normalized_score = 0.1 if candidate.get("p.career_experience_years") else 0.0
-                
-            return round(normalized_score, 3)
-            
-        except Exception as e:
-            logger.error(f"Schema-driven skor hesaplama hatası: {e}")
-            return 0.0
-
-    def _calculate_match_score(self, candidate: Dict, job_requirements: Dict) -> float:
-        """
-        Aday ile iş ilanı arasında eşleşme skoru hesapla (0.0 - 1.0)
-        Hibrit şema yapısına uygun scoring
-        """
-        score = 0.0
-        max_score = 0.0
-        
-        try:
-            # 1. Pozisyon eşleşmesi (ağırlık: 0.3)
-            if job_requirements.get("position") and candidate.get("p.career_current_position"):
-                max_score += 0.3
-                position_req = job_requirements["position"].lower()
-                candidate_position = candidate["p.career_current_position"].lower()
-                if position_req in candidate_position or candidate_position in position_req:
-                    score += 0.3
-                elif any(word in candidate_position for word in position_req.split()):
-                    score += 0.15
-
-            # 2. Beceri eşleşmesi (ağırlık: 0.4)
-            required_skills = [s.lower() for s in job_requirements.get("required_skills", [])]
-            candidate_skills = [s.lower() for s in candidate.get("skills", [])]
-            
-            if required_skills:
-                max_score += 0.4
-                matched_skills = sum(1 for req_skill in required_skills 
-                                   if any(req_skill in cand_skill or cand_skill in req_skill 
-                                         for cand_skill in candidate_skills))
-                skill_ratio = matched_skills / len(required_skills)
-                score += 0.4 * skill_ratio
-
-            # 3. Deneyim eşleşmesi (ağırlık: 0.2)
-            min_exp = job_requirements.get("min_experience_years", 0)
-            candidate_exp = self._parse_experience_years(candidate.get("p.career_experience_years", "0"))
-            
-            if min_exp > 0:
-                max_score += 0.2
-                if candidate_exp >= min_exp:
-                    score += 0.2
-                elif candidate_exp >= min_exp * 0.8:  # %80'i varsa kısmi puan
-                    score += 0.1
-
-            # 4. Dil eşleşmesi (ağırlık: 0.1)
-            required_languages = [l.lower() for l in job_requirements.get("languages", [])]
-            candidate_languages = [l.lower() for l in candidate.get("languages", [])]
-            
-            if required_languages:
-                max_score += 0.1
-                matched_languages = sum(1 for req_lang in required_languages 
-                                      if any(req_lang in cand_lang or cand_lang in req_lang 
-                                            for cand_lang in candidate_languages))
-                lang_ratio = matched_languages / len(required_languages) if required_languages else 0
-                score += 0.1 * lang_ratio
-
-            # Normalizing
-            if max_score > 0:
-                normalized_score = min(score / max_score, 1.0)
-            else:
-                normalized_score = 0.0
-                
-            return round(normalized_score, 3)
-            
-        except Exception as e:
-            logger.error(f"Skor hesaplama hatası: {e}")
-            return 0.0
-
-    def _detect_job_posting_with_llm(self, text: str) -> Dict[str, Any]:
-        """
-        LLM kullanarak domain-agnostic iş ilanı tespiti
-        Herhangi bir domain'e özel keyword kullanmaz
-        """
-        try:
-            detection_prompt = f"""Verilen metni analiz et ve bu metnin bir iş ilanı olup olmadığını belirle.
-
-METIN:
-{text}
-
-GÖREV: Aşağıdaki JSON formatında yanıt ver:
-
-{{
-    "is_job_posting": true/false,
-    "confidence": 0.0-1.0,
-    "indicators": ["tespit edilen göstergeler"],
-    "cleaned_job_text": "sadece iş ilanı metni (eğer iş ilanı ise)"
-}}
-
-İŞ İLANI GÖSTERGELERİ (domain-agnostic):
-- Pozisyon/rol tanımları
-- Gereksinimler/nitelikler
-- Başvuru bilgileri
-- Şirket tanıtımı
-- Çalışma koşulları
-- Maaş/ücret bilgileri
-
-ÖRNEKLERİ AYIRMA KRİTERLERİ:
-- Soru soruyorsa: İş ilanı DEĞİL
-- CV arıyorsa: İş ilanı DEĞİL  
-- Genel soruysa: İş ilanı DEĞİL
-- İlan formatında yazıyorsa: İş ilanı OLABİLİR
-
-Sadece JSON döndür, açıklama yapma."""
-
-            response = self.llm.invoke(detection_prompt)
-            response_text = response.content.strip()
-            
-            # JSON parse et
-            try:
-                if '{' in response_text and '}' in response_text:
-                    start_idx = response_text.find('{')
-                    end_idx = response_text.rfind('}') + 1
-                    json_text = response_text[start_idx:end_idx]
-                    result = json.loads(json_text)
-                    
-                    logger.info(f"İş ilanı tespiti sonucu: {result}")
-                    return result
-                else:
-                    raise ValueError("JSON format bulunamadı")
-            except Exception as e:
-                logger.error(f"İş ilanı tespit JSON parse hatası: {e}")
-                return {
-                    "is_job_posting": False,
-                    "confidence": 0.0,
-                    "indicators": [],
-                    "cleaned_job_text": text
-                }
-
-        except Exception as e:
-            logger.error(f"İş ilanı tespit hatası: {e}")
-            return {
-                "is_job_posting": False,
-                "confidence": 0.0,
-                "indicators": [],
-                "cleaned_job_text": text
-            }
-
-    def _format_job_matching_response(self, matching_result: Dict) -> str:
-        """
-        İş ilanı CV eşleştirme sonuçlarını kullanıcı dostu formata çevir
-        """
-        try:
-            # Yeni schema_analysis formatını kullan
-            schema_analysis = matching_result.get("schema_analysis", {})
-            schema_requirements = schema_analysis.get("schema_requirements", {})
-            
-            # Backward compatibility için job_requirements'ı da kontrol et
-            job_reqs = matching_result.get("job_requirements", schema_requirements)
-            candidates = matching_result["matched_candidates"]
-            
-            # Schema formatından bilgileri çıkar
-            position_terms = schema_requirements.get("position_terms", [])
-            skill_entities = schema_requirements.get("skill_entities", [])
-            experience_attrs = schema_requirements.get("experience_attributes", {})
-            language_entities = schema_requirements.get("language_entities", [])
-            location_attrs = schema_requirements.get("location_attributes", [])
-            
-            # Eski format ile uyumlu fallback
-            position = ", ".join(position_terms) if position_terms else job_reqs.get('position', 'Belirtilmemiş')
-            min_experience = experience_attrs.get("min_years", job_reqs.get('min_experience_years', 0))
-            skills = skill_entities if skill_entities else job_reqs.get('required_skills', [])
-            languages = language_entities if language_entities else job_reqs.get('languages', [])
-            location = ", ".join(location_attrs) if location_attrs else job_reqs.get('location', 'Belirtilmemiş')
-            
-            response = f"""# 🎯 İş İlanı CV Eşleştirme Sonuçları
-
-## 📋 İş İlanı Analizi:
-- **Pozisyon**: {position}
-- **Minimum Deneyim**: {min_experience} yıl
-- **Aranan Beceriler**: {', '.join(skills[:5]) if skills else 'Belirtilmemiş'}
-- **Dil Gereksinimleri**: {', '.join(languages) if languages else 'Belirtilmemiş'}
-- **Lokasyon**: {location}
-
-## 👥 Uygun Adaylar ({len(candidates)} aday bulundu):
-
-"""
-            
-            for i, candidate in enumerate(candidates[:10], 1):  # Top 10
-                name = candidate.get('p.name', 'Bilinmeyen')
-                position = candidate.get('p.career_current_position', 'Belirtilmemiş')
-                experience = candidate.get('p.career_experience_years', '0')
-                score = candidate.get('match_score', 0.0)
-                email = candidate.get('p.contact_email', 'Belirtilmemiş')
-                phone = candidate.get('p.contact_phone', 'Belirtilmemiş')
-                skills = candidate.get('skills', [])
-                companies = candidate.get('companies', [])
-                languages = candidate.get('languages', [])  # Dil bilgilerini al
-                cv_files = candidate.get('cv_files', [])
-                
-                score_percent = int(score * 100)
-                score_emoji = "🟢" if score >= 0.7 else "🟡" if score >= 0.5 else "🔴"
-                
-                # CV PDF linklerini oluştur
-                cv_links = []
-                if cv_files:
-                    import urllib.parse
-                    for cv_file in cv_files:
-                        if cv_file and cv_file.strip():
-                            encoded_filename = urllib.parse.quote(cv_file, safe="", encoding="utf-8")
-                            cv_link = f"{BASE_URL}/files/{encoded_filename}"
-                            cv_links.append(f"[{cv_file}]({cv_link})")
-                
-                cv_section = ""
-                if cv_links:
-                    cv_section = f"- **CV Dosyaları**: {' | '.join(cv_links)}\n"
-                
-                response += f"""### {i}. {name} {score_emoji} (%{score_percent} uyumlu)
-- **Mevcut Pozisyon**: {position}
-- **Deneyim**: {experience} yıl
-- **İletişim**: {email} | {phone}
-- **Beceriler**: {', '.join(skills[:5])}
-- **Diller**: {', '.join(languages) if languages else 'Belirtilmemiş'}
-- **Şirket Deneyimi**: {', '.join(companies[:3])}
-{cv_section}
-"""
-            
-            if len(candidates) > 10:
-                response += f"\n*Toplam {len(candidates)} aday bulundu, ilk 10'u gösteriliyor.*\n"
-                
-            response += f"""
-## 📊 Eşleştirme Bilgileri:
-- **Minimum Uyum Skoru**: %{int(matching_result['min_match_score'] * 100)}
-- **Toplam Aday**: {matching_result['total_matches']}
-- **Hibrit Şema**: Person, Entity, Attribute node'ları kullanıldı
-"""
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Job matching response format hatası: {e}")
-            return "İş ilanı CV eşleştirme sonuçları formatlanırken hata oluştu."
 
 
 def test_agent():
