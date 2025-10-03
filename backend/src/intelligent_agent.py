@@ -29,12 +29,7 @@ from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
 from src.domain_agnostic_schema import DomainAgnosticSchemaDiscovery
-try:
-    from src.domain_agnostic_examples import get_examples_prompt
-except ImportError:
-    print("⚠️ domain_agnostic_examples modülü bulunamadı - eğitim örnekleri olmadan devam ediliyor")
-    def get_examples_prompt():
-        return "# Eğitim örnekleri yüklenemedi"
+
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from sklearn.metrics.pairwise import cosine_similarity
