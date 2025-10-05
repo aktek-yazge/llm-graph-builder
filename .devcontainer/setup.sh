@@ -22,9 +22,9 @@ else
         echo "📦 Requirements değişti veya cache yok. Python paketleri yükleniyor..."
     fi
     
-    pip install --upgrade pip
+    # pip upgrade atlayıp direkt requirements yükle - sistem paketlerini ignore et
     if [ -f "requirements.txt" ]; then
-        pip install -r requirements.txt
+        python3 -m pip install -r requirements.txt --break-system-packages --ignore-installed
         echo "$REQUIREMENTS_HASH" > "$CACHE_FILE"
         FINAL_COUNT=$(pip list --format=freeze | wc -l)
         echo "✅ Python paketleri yüklendi ve cache'lendi ($FINAL_COUNT paket)"

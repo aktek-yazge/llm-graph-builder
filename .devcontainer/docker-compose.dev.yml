@@ -3,14 +3,24 @@
 # DevContainer için tek container - hem Python hem Node.js
 
 services:
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+    container_name: jaeger
+    ports:
+      - "16686:16686" # Web UI
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+      - "5778:5778" # Configuration server
+      - "9411:9411" # Zipkin compatible endpoint
+    restart: unless-stopped
   # Full-stack development container
   devcontainer:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - '8000:8000' # Backend API
-      - '5173:5173' # Frontend Vite
+      - "8000:8000" # Backend API
+      - "5173:5173" # Frontend Vite
     volumes:
       - ../:/workspace:cached # Full workspace mount
       - backend_pip_cache:/root/.cache/pip # Python cache
@@ -19,7 +29,7 @@ services:
     environment:
       - PYTHONPATH=/workspace/backend
     working_dir: /workspace
-    command: ['tail', '-f', '/dev/null'] # Manuel başlatma
+    command: ["tail", "-f", "/dev/null"] # Manuel başlatma
     depends_on:
       - neo4j
       - qdrant
@@ -27,7 +37,7 @@ services:
       resources:
         limits:
           memory: 16g
-          cpus: '8'
+          cpus: "8"
         reservations:
           memory: 8g
     networks:
@@ -37,15 +47,15 @@ services:
     image: qdrant/qdrant:latest
     container_name: qdrant-service
     ports:
-      - '6333:6333'
-      - '6334:6334'
+      - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
     deploy:
       resources:
         limits:
           memory: 16g
-          cpus: '4'
+          cpus: "4"
     networks:
       - llm-graph-builder_net
 
@@ -54,8 +64,8 @@ services:
     container_name: neo4j-service
     restart: always
     ports:
-      - '7474:7474'
-      - '7687:7687'
+      - "7474:7474"
+      - "7687:7687"
     environment:
       - NEO4J_AUTH=neo4j/qwerty5555
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
@@ -73,7 +83,7 @@ services:
       resources:
         limits:
           memory: 16g
-          cpus: '4'
+          cpus: "4"
     volumes:
       - neo4j_data:/data
       - neo4j_plugins:/plugins
@@ -106,4 +116,3 @@ networks:
   llm-graph-builder_net:
     external: true
     name: workspace_llm-graph-builder_net
-
