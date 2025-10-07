@@ -241,6 +241,18 @@ class IntelligentAgent:
             self._initialize_schema_cache()
         return self.schema_cache
 
+    def add_page_resource(self, page_link: str) -> str:
+        """ResourceManager üzerinden sayfa referansı ekler - MCP tool'u için"""
+        try:
+            logger.info(f"📄 Page resource ekleniyor: {page_link}")
+            result = self.resource_manager.add_page_resource(page_link)
+            logger.info(f"✅ Page resource sonucu: {result}")
+            return result
+        except Exception as e:
+            error_msg = f"❌ Page resource ekleme hatası: {e}"
+            logger.error(error_msg)
+            return error_msg
+
     def interpret_final_answer_with_llm(
         self,
         raw_answer: str,
