@@ -186,3 +186,8 @@ backend/logs/simple-logs.jsonl.*
 backend/logs/test-rotation.jsonl*
 *.txt
 *logs
+
+# Secret files
+gen-lang-client-*.json
+*.secrets.yaml
+.vscode/mcp.json
