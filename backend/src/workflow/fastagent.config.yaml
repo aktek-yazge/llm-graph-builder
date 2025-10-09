@@ -1,14 +1,14 @@
 # Please edit this configuration file to match your environment (on Windows).
 # Examples in comments below - check/change the paths.
 #
-#
+default_model: gpt-4o-mini
 
 logger:
   type: file
   level: debug
   show_chat: true # Show chat messages on console
   show_tools: true # Show MCP Server tool calls on console
-  truncate_tools: true # Truncate long tool calls in display
+  truncate_tools: false # Truncate long tool calls in display
   enable_markup: true # Disable if outputs conflict with rich library markup
 mcp:
   servers:
@@ -45,6 +45,23 @@ mcp:
         NEO4J_USERNAME: 'neo4j'
         NEO4J_PASSWORD: 'qwerty5555'
         NEO4J_DATABASE: 'neo4j'
+
+    # neo4j-memory server (Agent Memory Management)
+    neo4j-memory:
+      command: 'npx'
+      args: ['@knowall-ai/mcp-neo4j-agent-memory']
+      env:
+        NEO4J_URI: 'bolt://3.76.55.209:7687'
+        NEO4J_USERNAME: 'neo4j'
+        NEO4J_PASSWORD: 'qwerty5555'
+        NEO4J_DATABASE: 'neo4j'
+
+    # embedding server (Cypher Embedding Generation)
+    embedding:
+      command: 'python3'
+      args: ['embedding_mcp_server.py']
+      env:
+        PYTHONPATH: '/workspace/backend/src'
 
 otel:
   enabled: true

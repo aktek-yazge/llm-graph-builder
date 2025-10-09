@@ -574,8 +574,11 @@ GÖREV:
     def generate_embeddings_for_cypher(self, text: str) -> Tuple[bool, Any]:
         """Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
 
-        Bu fonksiyon LLM'in tool olarak çağırdığı ve embedding'leri sakladığı fonksiyondur.
-        LLM bu embedding'leri Cypher'da $embedding_vector değişkeni olarak kullanır.
+        ⚠️ DEPRECATED: Bu fonksiyon artık MCP server üzerinden çalışıyor!
+        Fast Agent konfigürasyonunda 'embedding' MCP server'ı kullanılıyor.
+
+        Bu fonksiyon geriye dönük uyumluluk için korunuyor ancak artık
+        MCP embedding server'ı tercih edilmeli.
 
         Args:
             text: Embedding oluşturulacak text
@@ -584,7 +587,8 @@ GÖREV:
             Tuple[bool, list]: Başarı durumu ve embedding vektörü
         """
         try:
-            logger.info(f"🧠 Cypher için embedding oluşturuluyor: {text}")
+            logger.info(f"🧠 [DEPRECATED] Cypher için embedding oluşturuluyor: {text}")
+            logger.info(f"⚠️ Bu fonksiyon deprecated - MCP embedding server kullanın!")
 
             # Text'i normalize et
             normalized_text = normalize_unicode_text(text)
@@ -594,12 +598,12 @@ GÖREV:
             embedding_vector = self.embedding_model.embed_query(normalized_text)
 
             logger.info(
-                f"✅ Cypher embedding oluşturuldu: {len(embedding_vector)} boyutlu vektör"
+                f"✅ [DEPRECATED] Cypher embedding oluşturuldu: {len(embedding_vector)} boyutlu vektör"
             )
             return True, embedding_vector
 
         except Exception as e:
-            logger.error(f"❌ Cypher embedding oluşturma hatası: {e}")
+            logger.error(f"❌ [DEPRECATED] Cypher embedding oluşturma hatası: {e}")
             return False, str(e)
 
     def log_detailed_token_report(self):

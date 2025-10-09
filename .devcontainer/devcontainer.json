@@ -33,7 +33,10 @@
     5173,
     7474,
     7687,
-    6333
+    6333,
+    6274,
+    6277,
+    16686
   ],
   "portsAttributes": {
     "8000": {
@@ -54,6 +57,18 @@
     },
     "6333": {
       "label": "Qdrant API",
+      "onAutoForward": "silent"
+    },
+    "6274": {
+      "label": "MCP Inspector UI",
+      "onAutoForward": "silent"
+    },
+    "6277": {
+      "label": "MCP Inspector Proxy",
+      "onAutoForward": "silent"
+    },
+    "16686": {
+      "label": "Jaeger UI",
       "onAutoForward": "silent"
     }
   },

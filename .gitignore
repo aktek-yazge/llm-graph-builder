@@ -191,3 +191,4 @@ backend/logs/test-rotation.jsonl*
 gen-lang-client-*.json
 *.secrets.yaml
 .vscode/mcp.json
+backend/src/workflow/fastagent.jsonl
