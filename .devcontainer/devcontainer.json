@@ -3,6 +3,7 @@
   "dockerComposeFile": [
     "./docker-compose.dev.yml"
   ],
+  "remoteUser": "root",
   "service": "devcontainer",
   "workspaceFolder": "/workspace",
   "shutdownAction": "none",
