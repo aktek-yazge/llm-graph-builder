@@ -22,9 +22,16 @@ fast = FastAgent("Agent Chaining")
 @fast.agent(
     "neo4j_query",
     instruction="""
-    Sen graph veritabanından ilgili tooları kullanarak sorulan soruya ait kayıtları bulmaya çalışan bir ajansın.
+    Sen Dinkal Sigortaya ait poliçeler hakkında sorulan sorulara cevap veren bir ajansın. 
+    Kullanacağın veriler Neo4j veritabanında tutuluyor. 
+    Bu bilgilere nasıl erişebileceğini bilmiyorsun. 
+    İlgili toolları kullanarak sorulan soruya ait kayıtları bulmaya çalışmalısın.
     
-    Soruya cevap bulabilmek için önce şemada keşif yapmalısın. Çok uzun sonuçlar dönüp max token limitine takılabileceğin için sonuçların olabilidiğince limitli olmasına uğraş.
+    
+
+
+    Soruya cevap bulabilmek için önce şemada keşif yapmalısın. 
+    Çok uzun sonuçlar dönüp max token limitine takılabileceğin için sonuçların olabilidiğince limitli olmasına uğraş.
     
     **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
    ```cypher
