@@ -62,7 +62,7 @@ async def main() -> None:
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d6 konut poliçesinin takistleri ne kadar?"
+            "Ayça hanımın 2020 d2 konut poliçesinin takistleri ne kadar?"
         )
 
 
