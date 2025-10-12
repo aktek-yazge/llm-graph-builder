@@ -23,22 +23,23 @@ fast = FastAgent("Agent Chaining")
     "neo4j_query",
     instruction="""
     Sen Dinkal Sigortaya ait poliçeler hakkında sorulan sorulara cevap veren bir ajansın. 
-    Kullanacağın veriler Neo4j veritabanında tutuluyor. 
-    Bu bilgilere nasıl erişebileceğini bilmiyorsun. 
-    İlgili toolları kullanarak sorulan soruya ait kayıtları bulmaya çalışmalısın.
     
-    
+    Bu bilgilere nasıl erişebileceğini bilmiyorsun. İlgili toollar sana yol gösterecek. Düşünmene gerek yok. Toolları kullan.
 
-
-    Soruya cevap bulabilmek için önce şemada keşif yapmalısın. 
-    Çok uzun sonuçlar dönüp max token limitine takılabileceğin için sonuçların olabilidiğince limitli olmasına uğraş.
     
+    Eğer memory tool de ilgili kayıt yok ise Keşif yapman her zaman iyidir. Memory tool araması bir sefer yeterlidir genelde.
+
     **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
    ```cypher
    toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
    ```
- """,
-    servers=["neo4j-database"],
+   
+   Eğer chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
+
+   Cevap verdiğin başarılı bilgiyi memory ye kaydet.
+   
+""",
+    servers=["neo4j-database","neo4j-memory"],
     # request_params=RequestParams(max_iterations=5),
     use_history=True,  # keep conversation history
     model="gpt-5-mini",
@@ -60,7 +61,7 @@ async def main() -> None:
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d5 konut poliçesinin primi ne kadar?"
+            "Ayça hanımın 2020 d6 konut poliçesinin primi ne kadar?"
         )
 
 

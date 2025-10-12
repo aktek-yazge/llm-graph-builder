@@ -48,13 +48,12 @@ mcp:
 
     # neo4j-memory server (Agent Memory Management)
     neo4j-memory:
-      command: 'npx'
-      args: ['@knowall-ai/mcp-neo4j-agent-memory']
+      command: 'uvx'
+      args: ['mcp-neo4j-memory@0.4.1']
       env:
         NEO4J_URI: 'bolt://3.76.55.209:7687'
         NEO4J_USERNAME: 'neo4j'
         NEO4J_PASSWORD: 'qwerty5555'
-        NEO4J_DATABASE: 'neo4j'
 
     # embedding server (Cypher Embedding Generation)
     embedding:
