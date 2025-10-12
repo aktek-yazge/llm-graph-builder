@@ -26,8 +26,9 @@ fast = FastAgent("Agent Chaining")
     
     Bu bilgilere nasıl erişebileceğini bilmiyorsun. İlgili toollar sana yol gösterecek. Düşünmene gerek yok. Toolları kullan.
 
+    İlk önce first SavedAnswer ve şema keşfi yapman herzaman en iyisisidr.
     
-    Eğer memory tool de ilgili kayıt yok ise Keşif yapman her zaman iyidir. Memory tool araması bir sefer yeterlidir genelde.
+    SavedAnswer ilgili cevapları içerebilri. Eğer SavedAnswer de ilgili kayıt yok ise Keşif yapman her zaman iyidir. SavedAnswer araması bir sefer yeterlidir genelde.
 
     **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
    ```cypher
@@ -36,10 +37,10 @@ fast = FastAgent("Agent Chaining")
    
    Eğer chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
 
-   Cevap verdiğin başarılı bilgiyi memory ye kaydet.
+   Cevap verdiğin başarılı bilgiyi SavedAnswer ye kaydet.
    
 """,
-    servers=["neo4j-database","neo4j-memory"],
+    servers=["neo4j-database"],
     # request_params=RequestParams(max_iterations=5),
     use_history=True,  # keep conversation history
     model="gpt-5-mini",
@@ -61,7 +62,7 @@ async def main() -> None:
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d6 konut poliçesinin primi ne kadar?"
+            "Ayça hanımın 2020 d6 konut poliçesinin takistleri ne kadar?"
         )
 
 
