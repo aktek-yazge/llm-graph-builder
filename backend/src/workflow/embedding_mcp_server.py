@@ -8,7 +8,11 @@ import logging
 import sys
 import os
 from typing import Tuple, Any
-from mcp.server.fastmcp import FastMCP
+from fastmcp import Client, Context, FastMCP
+from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
+
+
+from fastmcp.tools.tool import ToolResult
 
 from dotenv import load_dotenv
 
@@ -53,7 +57,7 @@ except ImportError as e:
     logger = logging.getLogger(__name__)
 
 # Initialize FastMCP app
-app = FastMCP(name="Embedding Server")
+mcp = FastMCP(name="Embedding Server")
 
 # Global embedding model instance
 _embedding_model = None
@@ -72,56 +76,63 @@ def _initialize_embedding_model():
             raise
     return _embedding_model
 
-
-@app.tool(
+@mcp.tool(
     name="generate_embeddings_for_cypher",
-    description="Text'ten embedding oluşturur ve sonraki Cypher sorgularında $embedding_vector parametresi olarak kullanılmak üzere hazırlar. SADECE İÇERİK KELİMELERİNDEN embedding oluştur (müşteri adı, tarih, vb. metadata değil).",
+    description=(
+        "Verilen text'ten embedding oluşturur ve sonraki Cypher sorgularında "
+        "$embedding_vector parametresi olarak kullanılmak üzere hazırlar. "
+        "Sadece içerik kelimelerinden embedding oluştur (müşteri adı, tarih, vb. metadata değil)."
+    ),
 )
-def generate_embeddings_for_cypher(text: str) -> dict:
+def generate_embeddings_for_cypher(text: str, context) -> ToolResult:
     """
-    Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
-
-    Args:
-        text: Embedding oluşturulacak text (sadece içerik kavramları)
-
-    Returns:
-        dict: Başarı durumu ve embedding vektörü
+    Cypher sorgularında kullanılacak embedding'i oluşturur.
     """
     try:
         logger.info(f"🧠 Cypher için embedding oluşturuluyor: {text}")
 
-        # Embedding model'i initialize et
+        # Modeli yükle
         embedding_model = _initialize_embedding_model()
 
-        # Text'i normalize et
+        # Normalize et
         normalized_text = normalize_unicode_text(text)
         logger.info(f"🧹 Normalize edilmiş text: {normalized_text}")
 
-        # OpenAI embedding oluştur
+        # Embedding oluştur
         embedding_vector = embedding_model.embed_query(normalized_text)
+        dim = len(embedding_vector)
 
-        logger.info(
-            f"✅ Cypher embedding oluşturuldu: {len(embedding_vector)} boyutlu vektör"
+        logger.info(f"✅ {dim} boyutlu embedding oluşturuldu.")
+
+        # 🔹 MCP 2025 uyumlu ToolResult
+        return ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text="Semantic arama için 'structuredContent.embedding_vector' değişkenini kullanmalısın.",
+                )
+            ],
+            structuredContent={
+                "embedding_vector": embedding_vector,
+                "dimensions": dim,
+                "text": normalized_text,
+                "success": True,
+            },
         )
 
-        return {
-            "success": True,
-            "embedding_vector": embedding_vector,
-            "text": normalized_text,
-            "dimensions": len(embedding_vector),
-            "cypher_parameter": "embedding_vector",
-            "usage_note": "Bu embedding'i Cypher sorgusunda $embedding_vector parametresi olarak kullanın",
-            "message": f"✅ Embedding hazır: {len(embedding_vector)} boyut, Cypher'da $embedding_vector olarak kullanılabilir",
-        }
-
     except Exception as e:
-        error_msg = f"❌ Cypher embedding oluşturma hatası: {e}"
-        logger.error(error_msg)
-        return {"success": False, "error": str(e), "message": error_msg}
-
+        error_msg = f"❌ Embedding oluşturma hatası: {e}"
+        logger.exception(error_msg)
+        return ToolResult(
+            content=[TextContent(type="text", text=error_msg)],
+            structuredContent={
+                "success": False,
+                "error": str(e),
+            },
+        )
 
 # Resources - Embedding server hakkında bilgi
-@app.resource("resource://embedding/info")
+@mcp.resource("resource://embedding/info")
 def embedding_info():
     """Embedding server hakkında bilgi"""
     return {
@@ -138,7 +149,7 @@ def embedding_info():
 
 
 # Prompts - Embedding kullanım örnekleri
-@app.prompt("embedding_usage_guide")
+@mcp.prompt("embedding_usage_guide")
 def embedding_usage_guide(query_type: str = "general") -> str:
     """Embedding kullanım kılavuzu"""
     return f"""
@@ -159,17 +170,34 @@ def embedding_usage_guide(query_type: str = "general") -> str:
 ```cypher
 // 1. Önce embedding oluştur (MCP tool ile)
 // 2. Sonra Cypher'da kullan:
+WITH $embedding_vector AS queryVec
 MATCH (c:Chunk)
-WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8
-RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score
+WHERE gds.similarity.cosine(c.embedding, queryVec) > 0.8
+RETURN c.text, gds.similarity.cosine(c.embedding, queryVec) as score
 ORDER BY score DESC
 ```
 """
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    # Command line arguments
+    parser = argparse.ArgumentParser(description="Embedding MCP Server")
+    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio", 
+                       help="Transport mode: stdio or http")
+    parser.add_argument("--port", type=int, default=8001, 
+                       help="HTTP port (default: 8001)")
+    parser.add_argument("--host", default="0.0.0.0", 
+                       help="HTTP host (default: 0.0.0.0)")
+    args = parser.parse_args()
+    
     # Environment değişkenlerini kontrol et ve log'la
     logger.info("🚀 Embedding MCP Server başlatılıyor...")
+    logger.info(f"🌐 Transport mode: {args.transport}")
+    if args.transport == "http":
+        logger.info(f"🌐 HTTP Server: http://{args.host}:{args.port}")
+    
     logger.info("🔧 Environment değişkenleri kontrol ediliyor...")
 
     # OpenAI API key kontrol
@@ -190,6 +218,10 @@ if __name__ == "__main__":
     logger.info(f"📂 Current working directory: {os.getcwd()}")
     logger.info(f"📂 Script directory: {os.path.dirname(os.path.abspath(__file__))}")
 
-    # Run in stdio mode
-    logger.info("📡 MCP Server stdio modunda başlatılıyor...")
-    app.run()
+    # Run server based on transport mode
+    if args.transport == "http":
+        logger.info("📡 MCP Server HTTP modunda başlatılıyor...")
+        mcp.run(transport="http", host=args.host, port=args.port)
+    else:
+        logger.info("📡 MCP Server stdio modunda başlatılıyor...")
+        mcp.run()

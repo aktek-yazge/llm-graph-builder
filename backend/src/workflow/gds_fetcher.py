@@ -24,26 +24,43 @@ fast = FastAgent("Agent Chaining")
     instruction="""
     Sen Dinkal Sigortaya ait poliçeler hakkında sorulan sorulara cevap veren bir ajansın. 
     
-    Bu bilgilere nasıl erişebileceğini bilmiyorsun. İlgili toollar sana yol gösterecek. Düşünmene gerek yok. Toolları kullan.
-
-    İlk önce first SavedAnswer ve şema keşfi yapman herzaman en iyisisidr.
+    Bu bilgilere nasıl erişebileceğini bilmiyorsun. Öğrenmek için get_neo4j_schema sana yol gösterecek.
     
-    SavedAnswer ilgili cevapları içerebilri. Eğer SavedAnswer de ilgili kayıt yok ise Keşif yapman her zaman iyidir. SavedAnswer araması bir sefer yeterlidir genelde.
-
-    **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
+   **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
    ```cypher
    toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
    ```
    
-   Eğer chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
+    Şema bilgisine göre tool çağrıları yaparak sonuca ulaşmaya çalış.
+    
+    Şema dışına çıkma sorgularında.
+    
+    Şemada olmayan alanları kullanamazsın. Alanlar hakkında tahminleme yapamazsın. 
 
-   Cevap verdiğin başarılı bilgiyi SavedAnswer ye kaydet.
+    Sorudan çıkarım yaparak field tahminlemesi yapma. Db veri yapısını öğrenmek için soruyu tek kelimeli parçalara bölerek her seferinde bir odak kelimeyi aratarak limitli sorgular ile anlamaya çalış.
+    
+    Genel query aramaları yapmaktan kaçın.
+
+    Şema Keşif yaptıktan sonra Cypher query ile *SavedAnswer* nodlarına bakman herzaman en iyisisidr.
+    
+    Doğru sorguyu yapabilmek için limitli(5) sorgular atarak örnek datalara bakman herzaman daha iyidir.
+    
+    Elde ettiğin limitli sorgular cevap bulunamadı manasına gelmez. Bunlar sadece tablo veri yapısını anlamanı sağlar.
+    
+    SavedAnswer araması bir sefer yeterlidir genelde.
+
+    İçerik, Konu, bağlam hakkındaki bilgiler Chunk nodelarında text alanında saklıdır. İlgili belgeleri bulduktan sonra (**STRING NORMALİZASYON**) ile içerik araması yap ve ilgili aramalara metadata filtreleri ile tekil keywordler ile aranmalı.
+
+    Eğer Chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
+
+    Sadece doğru Cevap bulunmuş ise bilgiyi sessizce SavedAnswer ye kaydet.
    
 """,
-    servers=["neo4j-database"],
-    # request_params=RequestParams(max_iterations=5),
+    servers=["neo4j-database","embedding"],
+    request_params=RequestParams(max_iterations=15,),
     use_history=True,  # keep conversation history
-    model="gpt-5-mini",
+    model="gpt-5-mini.low",
+    
 )
 # @fast.agent(
 #     "analyser",
@@ -55,14 +72,15 @@ fast = FastAgent("Agent Chaining")
 # )
 @fast.chain(
     name="query_analyser",
-    sequence=["neo4j_query"],
+    sequence=["neo4j_query"]
+    
 )
 async def main() -> None:
     """Execute the query_analyser chain workflow to process Neo4j queries."""
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d2 konut poliçesinin takistleri ne kadar?"
+            "Ayça hanımın 2020 d3 konut poliçesinin takistleri ne kadar?"
         )
 
 
