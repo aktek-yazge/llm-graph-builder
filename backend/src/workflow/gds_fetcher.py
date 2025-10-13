@@ -43,9 +43,13 @@ fast = FastAgent("Agent Chaining")
 
     Şema Keşif yaptıktan sonra Cypher query ile *SavedAnswer* nodlarına bakman herzaman en iyisisidr.
     
-    Doğru sorguyu yapabilmek için limitli(5) sorgular atarak örnek datalara bakman herzaman daha iyidir.
+    Doğru sorguyu yapabilmek için limitli(1-5) sorgular atarak örnek datalara bakman herzaman daha iyidir.
     
-    Elde ettiğin limitli sorgular cevap bulunamadı manasına gelmez. Bunlar sadece tablo veri yapısını anlamanı sağlar.
+    Mesela diyelimki 5 tane kayıt buldun ve içinde soruyu cevaplayan kayıt yok ama sana örnek kayıtlara gözatma imkanı sunduğu için tahmin yürüterek sonuçlara ulaşmaya çalışabilirsin. Bunlara keşif sorguları diyebiliriz.
+
+    Elde ettiğin keşif sorguları cevap bulunamadı manasına gelmez. Bunlar sadece tablo veri yapısını anlamanı sağlar.
+
+    Keşif sorguları yaparken özne ve nesneye odaklanarak tekil kelimeler ile arama yapmalısın.
     
     SavedAnswer araması bir sefer yeterlidir genelde.
 
@@ -80,7 +84,10 @@ async def main() -> None:
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d3 konut poliçesinin takistleri ne kadar?"
+            "Ayça hanımın 2020 d6 konut poliçesinin takistleri ne kadar?"
+            # "amasyalı soy adı olan sigortalımız var mı?"
+            # "Ayça Dinçkök Çeşme Adresinde konut poliçesi mevcut mu?"
+            # "2021-2022 kaç poliçe yapıldı?"
         )
 
 
