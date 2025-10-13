@@ -63,6 +63,7 @@ fast = FastAgent("Agent Chaining")
     servers=["neo4j-database","embedding"],
     request_params=RequestParams(max_iterations=15,),
     use_history=True,  # keep conversation history
+    # model="gpt-4o-mini",
     model="gpt-5-mini.low",
     
 )
@@ -84,8 +85,11 @@ async def main() -> None:
     async with fast.run() as agent:
         # using chain workflow
         await agent.query_analyser.send(
-            "Ayça hanımın 2020 d6 konut poliçesinin takistleri ne kadar?"
-            # "amasyalı soy adı olan sigortalımız var mı?"
+            # "SavedAnswer nodlarını sil"
+            # "Ayça hanımın 2020 d2 konut poliçesinin takistleri ne kadar?"
+            # "Birkan Akdoğan ın kayıtlarda kaç poliçesi var ?"
+            # "34ERA50 NİN KASKO POLİÇESİ MEVCUT MU? 2022 ve 2023 te varmı"
+            "amasyalı soy adı olan sigortalımız var mı? hangi poliçeleri var?"
             # "Ayça Dinçkök Çeşme Adresinde konut poliçesi mevcut mu?"
             # "2021-2022 kaç poliçe yapıldı?"
         )

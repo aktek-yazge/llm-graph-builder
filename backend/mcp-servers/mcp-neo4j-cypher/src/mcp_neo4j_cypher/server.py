@@ -19,6 +19,93 @@ from .utils import _truncate_string_to_tokens, _value_sanitize
 logger = logging.getLogger("mcp_neo4j_cypher")
 
 
+def _to_minimal_schema_format(schema_json):
+    """
+    Neo4j şemasını minimal formata çevirir - simple_test.py'dan alınmıştır
+    """
+    if isinstance(schema_json, str):
+        schema = json.loads(schema_json)
+    else:
+        schema = schema_json
+    
+    lines = []
+    
+    # Tip kısaltmaları
+    type_mapping = {
+        "STRING": "str",
+        "INTEGER": "int", 
+        "DATE_TIME": "dt",
+        "LOCAL_DATE_TIME": "ldt",
+        "BOOLEAN": "bool",
+        "LIST": "list",
+        "FLOAT": "float"
+    }
+    
+    # Tüm node'ları işle - şemadan otomatik çıkar
+    for node_name, node_data in schema.items():
+        if node_data.get("type") == "node":
+            count = node_data.get("count", 0)
+            # İlk 6 property'yi kısa tip bilgisiyle al
+            properties = node_data.get("properties", {})
+            props_with_types = []
+            for prop_name, prop_info in list(properties.items())[:6]:
+                prop_type = prop_info.get("type", "?")
+                short_type = type_mapping.get(prop_type, prop_type.lower()[:3])
+                props_with_types.append(f"{prop_name}:{short_type}")
+            lines.append(f"({node_name}:{count}){{{','.join(props_with_types)}}}")
+    
+    return '\n'.join(lines)
+
+
+def _handle_datetime_in_record(record):
+    """
+    Neo4j record'ındaki DateTime objelerini string'e çevirir
+    """
+    def _convert_datetime(obj):
+        """Recursive olarak DateTime objelerini string'e çevirir"""
+        if hasattr(obj, 'year') and hasattr(obj, 'month') and hasattr(obj, 'day'):
+            # Neo4j DateTime objesi
+            if hasattr(obj, 'hour'):  # DateTime
+                return f"{obj.year}-{obj.month:02d}-{obj.day:02d}T{obj.hour:02d}:{obj.minute:02d}:{obj.second:02d}"
+            else:  # Date
+                return f"{obj.year}-{obj.month:02d}-{obj.day:02d}"
+        elif isinstance(obj, dict):
+            return {k: _convert_datetime(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [_convert_datetime(item) for item in obj]
+        else:
+            return obj
+    
+    return _convert_datetime(record)
+
+
+def _to_minimal_data_format(data):
+    """
+    Cypher sorgu sonuçlarını minimal formata çevirir - simple_test.py'dan alınmıştır
+    """
+    if isinstance(data, str):
+        data = json.loads(data)
+    
+    if not isinstance(data, list):
+        return "Error: Veri list formatında olmalı"
+    
+    if not data:
+        return "[]"
+    
+    # Her kaydı minimal hale çevir
+    minimal_records = []
+    for i, record in enumerate(data):
+        # Key-value çiftlerini oluştur
+        props = []
+        for key, value in record.items():
+            props.append(f"{key}:{value}")
+        
+        # (Record:index){key1:value1,key2:value2} formatında
+        minimal_records.append(f"(R:{i}){{{','.join(props)}}}")
+    
+    return '\n'.join(minimal_records)
+
+
 def _format_namespace(namespace: str) -> str:
     if namespace:
         if namespace.endswith("-"):
@@ -143,9 +230,10 @@ def create_mcp_server(
 
             schema_clean = clean_schema(results_json_str[0].get("value"))
 
-            schema_clean_str = json.dumps(schema_clean, default=str)
+            # Minimal format'a çevir
+            minimal_schema = _to_minimal_schema_format(schema_clean)
 
-            return ToolResult(content=[TextContent(type="text", text=schema_clean_str)])
+            return ToolResult(content=[TextContent(type="text", text=minimal_schema)])
 
         except ClientError as e:
             if "Neo.ClientError.Procedure.ProcedureNotFound" in str(e):
@@ -192,16 +280,21 @@ def create_mcp_server(
                 database_=database,
                 result_transformer_=lambda r: r.data(),
             )
-            sanitized_results = [_value_sanitize(el) for el in results]
-            results_json_str = json.dumps(sanitized_results, default=str)
+            # Önce DateTime objelerini handle et, sonra sanitize et
+            datetime_handled_results = [_handle_datetime_in_record(el) for el in results]
+            sanitized_results = [_value_sanitize(el) for el in datetime_handled_results]
+            
+            # Minimal format'a çevir
+            minimal_results = _to_minimal_data_format(sanitized_results)
+            
             if token_limit:
-                results_json_str = _truncate_string_to_tokens(
-                    results_json_str, token_limit
+                minimal_results = _truncate_string_to_tokens(
+                    minimal_results, token_limit
                 )
 
-            logger.debug(f"Read query returned {len(results_json_str)} rows")
+            logger.debug(f"Read query returned {len(results)} rows, minimal format: {len(minimal_results)} chars")
 
-            return ToolResult(content=[TextContent(type="text", text=results_json_str)])
+            return ToolResult(content=[TextContent(type="text", text=minimal_results)])
 
         except Neo4jError as e:
             logger.error(f"Neo4j Error executing read query: {e}\n{query}\n{params}")
