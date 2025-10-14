@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
+from src.fast_agent_integration_simple import stream_fast_agent_response
 from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
@@ -1766,7 +1767,8 @@ async def chat_bot_stream(
     session_id: str = Form(None),
     mode: str = Form(None),
     email: str = Form(None),
-    files: Optional[str] = Form(None)
+    files: Optional[str] = Form(None),
+    agent_type: str = Form("standard")  # "standard" veya "fast_agent"
 ):
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile 
@@ -1823,43 +1825,67 @@ async def chat_bot_stream(
             graph_DB_dataAccess = graphDBdataAccess(graph)
             write_access = graph_DB_dataAccess.check_account_access(database=database)
             
-            # Gerçek streaming başlat
+            # Agent tipine göre streaming yaklaşımı seç
             final_result = None
             total_tokens = 0
             
-            # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
-            intelligent_agent = None
-            try:
-                # 🚀 SESSION-BASED CACHED AGENT - Performance optimization
-                intelligent_agent = get_cached_agent(session_id, graph, model)
-                print(f"🎯 Cached agent alındı - Session: {session_id}")
-            except Exception as e:
-                print(f"❌ Cached agent hatası - Session: {session_id} | Hata: {e}")
+            if agent_type != "fast_agent":
+                # FastAgent kullanarak streaming
+                yield f"data: {json.dumps({'type': 'status', 'message': 'FastAgent ile işleniyor...', 'status': 'fast_agent_processing'}, ensure_ascii=False)}\n\n"
+                
+                async for chunk in stream_fast_agent_response(
+                    question=question,
+                    # model=model,
+                    session_id=session_id
+                ):
+                    # Client disconnect kontrolü
+                    if await request.is_disconnected():
+                        logging.info("SSE Client disconnected during FastAgent streaming")
+                        break
+                    
+                    # Chunk'ı client'a gönder
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    
+                    # Final result'ı sakla
+                    if chunk.get("type") == "complete":
+                        final_result = chunk
+                        total_tokens = chunk.get("info", {}).get("total_tokens", 0)
+                        
+            else:
+                # Standart QA_RAG streaming
+                # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
                 intelligent_agent = None
+                try:
+                    # 🚀 SESSION-BASED CACHED AGENT - Performance optimization
+                    intelligent_agent = get_cached_agent(session_id, graph, model)
+                    print(f"🎯 Cached agent alındı - Session: {session_id}")
+                except Exception as e:
+                    print(f"❌ Cached agent hatası - Session: {session_id} | Hata: {e}")
+                    intelligent_agent = None
 
-            async for chunk in QA_RAG_stream(
-                graph=graph,
-                model=model,
-                question=question,
-                document_names=document_names,
-                session_id=session_id,
-                mode=mode,
-                write_access=write_access,
-                intelligent_agent=intelligent_agent,
-                files=downloadedFiles
-            ):
-                # Client disconnect kontrolü
-                if await request.is_disconnected():
-                    logging.info("SSE Client disconnected during real streaming")
-                    break
-                
-                # Chunk'ı client'a gönder
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                
-                # Final result'ı sakla
-                if chunk.get("type") == "complete":
-                    final_result = chunk
-                    total_tokens = chunk.get("info", {}).get("total_tokens", 0)
+                async for chunk in QA_RAG_stream(
+                    graph=graph,
+                    model=model,
+                    question=question,
+                    document_names=document_names,
+                    session_id=session_id,
+                    mode=mode,
+                    write_access=write_access,
+                    intelligent_agent=intelligent_agent,
+                    files=downloadedFiles
+                ):
+                    # Client disconnect kontrolü
+                    if await request.is_disconnected():
+                        logging.info("SSE Client disconnected during real streaming")
+                        break
+                    
+                    # Chunk'ı client'a gönder
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    
+                    # Final result'ı sakla
+                    if chunk.get("type") == "complete":
+                        final_result = chunk
+                        total_tokens = chunk.get("info", {}).get("total_tokens", 0)
             
             # Timing bilgilerini ekle
             total_call_time = time.time() - qa_rag_start_time
@@ -1910,6 +1936,40 @@ async def chat_bot_stream(
             gc.collect()
     
     return EventSourceResponse(generate_real_streaming_response())
+
+@app.post("/test_fast_agent")
+async def test_fast_agent(
+    question: str = Form("Amasyalı soy adı olan sigortalımız var mı?"),
+    model: str = Form("gpt-4o-mini"),
+    session_id: str = Form("test_session")
+):
+    """FastAgent'i test etmek için basit endpoint"""
+    try:
+        from src.fast_agent_integration_simple import stream_fast_agent_response
+        
+        # Test response'u topla
+        response_parts = []
+        async for chunk in stream_fast_agent_response(
+            question=question,
+            # model=model,
+            session_id=session_id
+        ):
+            response_parts.append(chunk)
+        
+        return create_api_response('Success', 
+            data={
+                'chunks': response_parts,
+                'total_chunks': len(response_parts),
+                'question': question,
+                'model': model,
+                'session_id': session_id
+            }, 
+            message="FastAgent test completed successfully"
+        )
+        
+    except Exception as e:
+        logging.error(f"FastAgent test error: {e}")
+        return create_api_response('Failed', message=f"FastAgent test failed: {str(e)}")
 
 @app.get("/agent_cache_sessions")
 async def get_agent_cache_sessions():

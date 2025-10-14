@@ -48,6 +48,7 @@ docstring_parser==0.17.0
 easyocr==1.7.2
 effdet==0.4.1
 emoji==2.14.1
+fast-agent-mcp>=0.3.5
 et_xmlfile==2.0.0
 exceptiongroup
 executing

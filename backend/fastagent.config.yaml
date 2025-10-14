@@ -1,0 +1,59 @@
+# FastAgent Configuration File
+# Neo4j Graph Database Query Agent Configuration
+
+default_model: 'gpt-4o-mini'
+
+# MCP (Model Context Protocol) Servers
+mcp:
+  servers:
+    neo4j-database:
+      command: 'python'
+      args: ['-m', 'mcp_neo4j_cypher']
+      cwd: '/workspace/backend/mcp-servers/mcp-neo4j-cypher'
+      env:
+        NEO4J_URI: '${NEO4J_URI:-bolt://localhost:7687}'
+        NEO4J_USERNAME: '${NEO4J_USERNAME:-neo4j}'
+        NEO4J_PASSWORD: '${NEO4J_PASSWORD:-password}'
+        NEO4J_DATABASE: '${NEO4J_DATABASE:-neo4j}'
+        PYTHONPATH: '/workspace/backend/mcp-servers/mcp-neo4j-cypher/src'
+
+    embedding:
+      command: 'python'
+      args: ['src/workflow/embedding_mcp_server.py']
+      cwd: '/workspace/backend'
+      env:
+        PYTHONPATH: '/workspace/backend'
+
+# MCP Timeline Configuration for debugging
+mcp_timeline:
+  steps: 20
+  step_seconds: 30
+
+# MCP UI Configuration
+mcp_ui_output_dir: '.fast-agent/ui'
+mcp_ui_mode: enabled
+
+# OpenAI Configuration
+openai:
+  api_key: '${OPENAI_API_KEY}'
+  base_url: 'https://api.openai.com/v1'
+
+# Anthropic Configuration
+anthropic:
+  api_key: '${ANTHROPIC_API_KEY}'
+  base_url: 'https://api.anthropic.com/v1'
+# Azure OpenAI Configuration (if needed)
+# azure:
+#   api_key: "${AZURE_OPENAI_API_KEY}"
+#   resource_name: "${AZURE_OPENAI_RESOURCE_NAME}"
+#   azure_deployment: "${AZURE_OPENAI_DEPLOYMENT}"
+#   api_version: "2023-05-15"
+
+# Google Configuration (if needed)
+# google:
+#   api_key: "${GOOGLE_API_KEY}"
+
+# Groq Configuration (if needed)
+# groq:
+#   api_key: "${GROQ_API_KEY}"
+#   base_url: "https://api.groq.com/openai/v1"
