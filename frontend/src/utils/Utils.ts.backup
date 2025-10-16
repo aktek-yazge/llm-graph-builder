@@ -25,13 +25,6 @@ import {
 } from '../types';
 import { chatModeLables, EXPIRATION_DAYS } from './Constants';
 
-// Regex constants to avoid Vite import analysis issues
-const S3_URL_REGEX = new RegExp('^s3://([^/]+)/?$');
-const WIKI_URL_REGEX = new RegExp('https://([a-zA-Z]{2,3})\\.wikipedia\\.org/wiki/(.*)', 'gm');
-const WEB_URL_REGEX = new RegExp('(http(s)?://..)?(www\\.)?[-a-zA-Z0-9@:%._~#=]{2,256}\\.[a-z]{2,6}\\b([-a-zA-Z0-9@:%_.~#?&/=]*)', 'g');
-const YOUTUBE_URL_REGEX = new RegExp('^(?:https?://)?(?:www\\.)?(?:youtu\\.be/|youtube\\.com/(?:embed/|v/|watch\\?v=|watch\\?.+&v=))((\\w|-){11})(?:\\S+)?$');
-const IMPORTER_URL_REGEX = new RegExp('^https://console-preview\\.neo4j\\.io/tools/import/models(/.*)?', 'i');
-
 // Get the Url
 export const url = () => {
   let url = window.location.href.replace('5173', '8000').replace('8080', '8000');
@@ -44,22 +37,24 @@ export const url = () => {
 
 // validation check for s3 bucket url
 export const validation = (url: string) => {
-  return url.trim() != '' && S3_URL_REGEX.test(url) != false;
+  return url.trim() != '' && /^s3:\/\/([^/]+)\/?$/.test(url) != false;
 };
 
 export const wikiValidation = (url: string) => {
-  return url.trim() != '' && WIKI_URL_REGEX.test(url) != false;
+  return url.trim() != '' && /https:\/\/([a-zA-Z]{2,3})\.wikipedia\.org\/wiki\/(.*)/gm.test(url) != false;
 };
 export const webLinkValidation = (url: string) => {
   return (
     url.trim() != '' &&
-    WEB_URL_REGEX.test(url) != false
+    /(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_.~#?&//=]*)/g.test(url) != false
   );
 };
 export const youtubeLinkValidation = (url: string) => {
   return (
     url.trim() != '' &&
-    YOUTUBE_URL_REGEX.test(url) != false
+    /^(?:https?:\/\/)?(?:www\.)?(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))((\w|-){11})(?:\S+)?$/.test(
+      url
+    ) != false
   );
 };
 // Status indicator icons to status column
@@ -901,5 +896,5 @@ export const deduplicateByFullPattern = (arrays: { value: string; label: string 
 };
 
 export const importerValidation = (url: string) => {
-  return url.trim() !== '' && IMPORTER_URL_REGEX.test(url);
+  return url.trim() !== '' && /^https:\/\/console-preview\.neo4j\.io\/tools\/import\/models(\/.*)?$/i.test(url);
 };

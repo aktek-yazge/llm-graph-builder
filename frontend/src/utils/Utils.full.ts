@@ -30,7 +30,7 @@ const S3_URL_REGEX = new RegExp('^s3://([^/]+)/?$');
 const WIKI_URL_REGEX = new RegExp('https://([a-zA-Z]{2,3})\\.wikipedia\\.org/wiki/(.*)', 'gm');
 const WEB_URL_REGEX = new RegExp('(http(s)?://..)?(www\\.)?[-a-zA-Z0-9@:%._~#=]{2,256}\\.[a-z]{2,6}\\b([-a-zA-Z0-9@:%_.~#?&/=]*)', 'g');
 const YOUTUBE_URL_REGEX = new RegExp('^(?:https?://)?(?:www\\.)?(?:youtu\\.be/|youtube\\.com/(?:embed/|v/|watch\\?v=|watch\\?.+&v=))((\\w|-){11})(?:\\S+)?$');
-const IMPORTER_URL_REGEX = new RegExp('^https://console-preview\\.neo4j\\.io/tools/import/models(/.*)?', 'i');
+const IMPORTER_URL_REGEX = new RegExp('^https://console-preview\\.neo4j\\.io/tools/import/models(/.*)?' ,'i');
 
 // Get the Url
 export const url = () => {

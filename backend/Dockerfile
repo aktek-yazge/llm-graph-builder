@@ -1,13 +1,25 @@
-FROM python:3.12-slim
+FROM ubuntu:24.04
 WORKDIR /code
 ENV PORT 8000
 EXPOSE 8000
+
+# Install Python 3.13 and pip properly
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.13 python3.13-venv python3.13-dev python3-pip && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
+    python3.13 -m ensurepip || true
+
 # Install dependencies and clean up in one layer
 RUN apt-get update && \
    apt-get install -y --no-install-recommends \
        build-essential \
        gcc \
        g++ \
+       libdbus-1-dev libglib2.0-dev \
        pkg-config \
        libgmp-dev \
        libmpfr-dev \
@@ -26,9 +38,20 @@ RUN apt-get update && \
        cmake \
        poppler-utils \
        tesseract-ocr \
-       git && \
+       git \
+       curl \
+       ca-certificates \
+       libcairo2-dev \
+       libgirepository1.0-dev \
+       gobject-introspection \
+       gir1.2-gtk-3.0 \
+       python3-dbus \
+       python3-gi \
+       python3-setuptools \
+       python3-wheel && \
    apt-get clean && \
    rm -rf /var/lib/apt/lists/*
+
 # Set LD_LIBRARY_PATH for both x86_64 and aarch64
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
 
@@ -37,13 +60,21 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
 
+# Python environment
+ENV PYTHONPATH=/code
+ENV PYTHONUNBUFFERED=1
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Copy dependency files
+COPY pyproject.toml uv.lock /code/
+
+# Install dependencies using uv
+RUN cd /code && uv sync --frozen --no-dev
+
 # Copy application code
 COPY . /code
-# Copy requirements file and install Python dependencies
-COPY requirements.txt /code/
-# --no-cache-dir --upgrade 
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
 
-# Set command with UTF-8 encoding support
-CMD ["gunicorn", "score:app", "--workers", "8", "--threads", "8", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "300", "--preload"]
+# Set command with UTF-8 encoding support using uv
+CMD ["uv", "run", "gunicorn", "score:app", "--workers", "8", "--threads", "8", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "300", "--preload"]
