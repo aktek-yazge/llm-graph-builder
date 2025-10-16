@@ -12,8 +12,6 @@ services:
     environment:
       - PYTHONPATH=/code
       - ENV=preview
-    networks:
-      - workspace_llm-graph-builder_net # DevContainer network kullan
     restart: unless-stopped
 
   # Frontend - preview servisi
@@ -30,17 +28,9 @@ services:
     container_name: frontend-preview
     ports:
       - "8080:8080" # preview port - production test
-    networks:
-      - workspace_llm-graph-builder_net # DevContainer network kullan
     restart: unless-stopped
 
-  # Neo4j ve Qdrant servisleri DevContainer'dan kullanılacak
-  # Bu servisler kaldırıldı - DevContainer'daki mevcut servisler kullanılır
+  # Neo4j ve Qdrant servisleri default bridge network üzerinde mevcut
+  # Bu servisler kaldırıldı - mevcut servisler kullanılır
 
-# DevContainer network'ünü kullan - Neo4j ve Qdrant için
-networks:
-  workspace_llm-graph-builder_net:
-    external: true
-
-# Neo4j ve Qdrant volume'ları DevContainer'dan kullanılacak - kaldırıldı
-volumes: {}
+# Network tanımı kaldırıldı - default bridge network otomatik kullanılır
