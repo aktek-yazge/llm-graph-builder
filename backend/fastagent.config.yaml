@@ -60,5 +60,5 @@ mcp:
 
 otel:
   enabled: true
-  otlp_endpoint: 'http://host.docker.internal:4318/v1/traces'
+  otlp_endpoint: 'http://jaeger-preview:4318/v1/traces'  # Use Jaeger container name
 

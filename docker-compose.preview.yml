@@ -1,4 +1,16 @@
 services:
+  # Jaeger - OpenTelemetry tracing
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+    container_name: jaeger-preview
+    ports:
+      - "16686:16686" # Web UI
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+      - "5778:5778" # Configuration server
+      - "9411:9411" # Zipkin compatible endpoint
+    restart: unless-stopped
+
   # Backend - preview servisi
   backend:
     build:
@@ -13,6 +25,8 @@ services:
       - PYTHONPATH=/code
       - ENV=preview
     restart: unless-stopped
+    depends_on:
+      - jaeger
 
   # Frontend - preview servisi
   frontend:
