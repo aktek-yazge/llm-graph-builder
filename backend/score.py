@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
-from src.fast_agent_integration_simple import stream_fast_agent_response
+from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
 from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
@@ -1835,6 +1835,7 @@ async def chat_bot_stream(
                 
                 async for chunk in stream_fast_agent_response(
                     question=question,
+                    graph=graph,
                     # model=model,
                     session_id=session_id
                 ):
@@ -1945,7 +1946,7 @@ async def test_fast_agent(
 ):
     """FastAgent'i test etmek için basit endpoint"""
     try:
-        from src.fast_agent_integration_simple import stream_fast_agent_response
+        from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
         
         # Test response'u topla
         response_parts = []
