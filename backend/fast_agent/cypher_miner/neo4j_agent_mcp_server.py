@@ -6,18 +6,27 @@ Bu modül, Neo4j veritabanı sorguları için FastAgent'ı MCP server olarak ça
 
 import asyncio
 import logging
-from fast_agent import FastAgent, RequestParams, Prompt
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
+from fast_agent.core.fastagent import FastAgent
+from fast_agent import RequestParams
 
 # Logging ayarları
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create the application
+# Structured output modeli
+class QueryResult(BaseModel):
+    """Cypher sorgu sonucu için structured model"""
+    answer: str
+    cypher_query: Optional[str] = None
+    result_count: Optional[int] = None
+    raw_data: Optional[List[Dict[str, Any]]] = None
+
 fast = FastAgent("Neo4j Intelligence Agent")
 
 # Define the agent
 @fast.agent(
-    name="neo4j_intelligence", 
     instruction="""
     Sen Dinkal Sigortaya ait poliçeler hakkında sorulan sorulara cevap veren bir ajansın. 
         
@@ -50,28 +59,28 @@ fast = FastAgent("Neo4j Intelligence Agent")
     İçerik, Konu, bağlam hakkındaki bilgiler Chunk nodelarında text alanında saklıdır. İlgili belgeleri bulduktan sonra (**STRING NORMALİZASYON**) ile içerik araması yap ve ilgili aramalara metadata filtreleri ile tekil keywordler ile aranmalı.
 
     Eğer Chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
-
-    Verdiğin son cevapta teknik bilgilerden bahsetmeni istemiyorum. Sadece son kullanıcıya yönelik sade ve anlaşılır cevaplar ver.
+    
+    If the tool call gives a valid or complete result,
+    return that result directly as the final output without generating any text.
+    Do not describe or explain the result.
     """,
     servers=["neo4j-database", "embedding"],
-    request_params=RequestParams(max_iterations=15),
-    use_history=True,
-    model="gpt-5-mini.low",
+    request_params=RequestParams(
+        max_iterations=15,  # Daha az iteration
+    ),
+    use_history=True,     # History'yi kapatıyoruz
+    model="gpt-5-mini.low",   # Daha hızlı model
+    
 )
 async def main():
-    async with fast.run() as agent:
-        # If run as a server, it will listen for requests.
-        # You can add interactive() here for local testing/debugging if needed,
-        # but it won't be active when run as a server for the router.
-        # await agent.interactive()
-        pass  # The agent will wait for incoming MCP messages when run as a server
-
-if __name__ == "__main__":
-    # Start this agent as an MCP server
-    asyncio.run(fast.start_server(
-        transport="http",  # Or "sse"
+    # Start as a server programmatically
+    await fast.start_server(
+        transport="http",  # SSE yerine streamable-http kullanıyoruz
         host="0.0.0.0",
-        port=8011,  # Farklı port kullanıyorum
+        port=8011,
         server_name="neo4j_intelligence_agent",
         server_description="Provides Neo4j database query capabilities for Dinkal Sigorta policies"
-    ))
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
