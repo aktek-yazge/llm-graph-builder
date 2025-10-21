@@ -127,7 +127,7 @@ class DomainAgnosticSchemaDiscovery:
         Returns:
             Dict[str, Any]: Keşfedilen şema bilgileri
         """
-        logger.info("🚀 Hibrit CV şema keşfi başlıyor...")
+        logger.info("🚀 Hibrit şema keşfi başlıyor...")
         
         # Tüm discovery'leri paralel çalıştır
         entity_types = self.discover_entity_subtypes()  # Gerçekte entity type'ları
@@ -151,12 +151,12 @@ class DomainAgnosticSchemaDiscovery:
             "patterns": {
                 "entity_pattern": "(:Entity {type:\"<entity_type>\"})",  # Gerçek pattern
                 "person_pattern": "(:Person)",
-                "relation_patterns": ["[:HAS_ATTRIBUTE]", "[:CONNECTED_TO]", "[:HAS_CV]"],
+                "relation_patterns": ["[:HAS_ATTRIBUTE]", "[:CONNECTED_TO]"],
                 "document_pattern": "(:Document)"
             }
         }
         
-        logger.info(f"🎯 Hibrit CV şema keşfi tamamlandı:")
+        logger.info(f"🎯 Hibrit şema keşfi tamamlandı:")
         logger.info(f"   📊 {len(entity_types)} Entity type")
         logger.info(f"   🔗 {len(relation_types)} Relation type") 
         logger.info(f"   📄 {document_info['count']} Document")

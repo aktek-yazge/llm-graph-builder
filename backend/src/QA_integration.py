@@ -3011,23 +3011,7 @@ async def process_chat_response_stream(messages, history, question, model, graph
         
         # IntelligentAgent'tan gelen sonuçları kontrol et
         if (agent_result and isinstance(agent_result, dict)):
-            # CV eşleştirme sonuçları varsa özel işlem
-            if agent_result.get('match_type') in ['job_posting_cv_matching', 'cv_matching_action_result']:
-                yield {
-                    "type": "status",
-                    "session_id": session_id,
-                    "message": f"İş ilanı CV eşleştirme sonuçları alındı...",
-                    "user": "chatbot"
-                }
-                
-                # CV eşleştirme sonuçları için formatted_docs'a gerek yok
-                formatted_docs = ""
-                
-                # CV resource links'leri sources olarak ayarla
-                if agent_result.get('resource_links'):
-                    sources = agent_result.get('resource_links', [])
-                
-            elif agent_result.get('final_answer'):
+            if agent_result.get('final_answer'):
                 yield {
                     "type": "status",
                     "session_id": session_id,
@@ -3099,7 +3083,7 @@ async def process_chat_response_stream(messages, history, question, model, graph
                     # Fallback: kelime sayısından tahmin et
                     total_tokens_count = len(full_response.split())
                 
-                # Streaming efekti - CV eşleştirme cevabını chunk'lar halinde gönder
+                # Streaming efekti - cevabı chunk'lar halinde gönder
                 tokens = re.findall(r'\S+|\n+', full_response)
                 streamed_content = ""
                 
