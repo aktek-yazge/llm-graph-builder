@@ -10,6 +10,7 @@ from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
+from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
 
@@ -1032,6 +1033,49 @@ class graphDBdataAccess:
     def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
         """Customer node oluşturur ve ilişkilendirir"""
         try:
+            # Entity resolution kontrolü
+            new_entity = {
+                'id': customer_name,
+                'name': customer_name,
+                'entity_type': 'Customer'
+            }
+            
+            existing_entity_id = resolve_entity_before_creation(new_entity, self.graph, "Customer")
+            if existing_entity_id:
+                logging.info(f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}")
+                
+                # Mevcut entity ile ilişkileri oluştur
+                link_queries = [
+                    # Customer -> Document HAS_DOC ilişkisi
+                    """
+                        MATCH (c) WHERE elementId(c) = $entity_id
+                        MATCH (d:Document {fileName: $file_name})
+                        MERGE (c)-[r:HAS_DOC]->(d)
+                        SET r.created_at = datetime()
+                        SET c.updatedAt = datetime(),
+                            c.policyCount = coalesce(c.policyCount, 0) + 1
+                        RETURN count(r) as links_created
+                    """,
+                    # Customer -> Policy HAS_POLICY ilişkisi
+                    """
+                        MATCH (c) WHERE elementId(c) = $entity_id
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (c)-[r:HAS_POLICY]->(p)
+                        SET r.created_at = datetime()
+                        RETURN count(r) as links_created
+                    """
+                ]
+                
+                for query in link_queries:
+                    self.graph.query(query, {
+                        "entity_id": existing_entity_id,
+                        "file_name": file_name,
+                        "policy_id": policy_id
+                    }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Mevcut Customer ile ilişkiler oluşturuldu: {customer_name}")
+                return
+            
             # Customer node oluştur veya güncelle
             create_customer_query = """
                 MERGE (c:Customer {name: $customer_name})
@@ -2544,6 +2588,33 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         try:
             customer_name = customer_data.get('name', '').strip()
             if not customer_name:
+                return
+                
+            # Entity resolution kontrolü
+            new_entity = {
+                'id': customer_name,
+                'name': customer_name,
+                'entity_type': 'Customer'
+            }
+            
+            existing_entity_id = resolve_entity_before_creation(new_entity, self.graph, "Customer")
+            if existing_entity_id:
+                logging.info(f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}")
+                # Mevcut entity ile Policy'yi ilişkilendir
+                link_query = """
+                    MATCH (c) WHERE elementId(c) = $entity_id
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (c)-[r:HAS_POLICY]->(p)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    SET c.updatedAt = datetime(),
+                        c.policyCount = coalesce(c.policyCount, 0) + 1
+                    RETURN c.name as customer_name
+                """
+                self.graph.query(link_query, {
+                    "entity_id": existing_entity_id,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
                 return
             
             query = """
