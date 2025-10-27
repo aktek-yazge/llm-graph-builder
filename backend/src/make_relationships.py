@@ -317,13 +317,17 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document], pag
         # UTF-8 ve Unicode normalization for consistent hashing
         content = normalize_unicode_text(chunk.page_content)
         
-        # Chunk ID'yi dosya adı + içerik hash'i ile oluştur
-        # Bu şekilde farklı dosyalardaki aynı içerikler farklı ID'lere sahip olur
-        content_with_filename = f"{file_name}:::{content}"
-        page_content_sha1 = hashlib.sha1(content_with_filename.encode('utf-8'))
-        previous_chunk_id = current_chunk_id
-        current_chunk_id = page_content_sha1.hexdigest()
-        position = i + 1 
+        # Position ve lokasyon bazlı unique ID oluştur (content duplicate'lar için)
+        # Bu yaklaşım aynı content'in farklı lokasyonlarda farklı chunk'lar olmasını sağlar
+        position = i + 1
+        page_num = chunk.metadata.get('page_number', 0) if hasattr(chunk, 'metadata') and chunk.metadata else 0
+        
+        # Lokasyon bazlı unique ID: filename + position + page + content_hash
+        content_hash = hashlib.sha1(content.encode('utf-8')).hexdigest()[:16]  # Kısa hash
+        location_identifier = f"{file_name}::pos_{position}::page_{page_num}::content_{content_hash}"
+        current_chunk_id = hashlib.sha1(location_identifier.encode('utf-8')).hexdigest()
+        
+        previous_chunk_id = current_chunk_id if i == 0 else lst_chunks_including_hash[i-1]['chunk_id'] 
         if i>0:
             offset += len(chunks[i-1].page_content)
         if i == 0:
@@ -420,7 +424,7 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document], pag
         WITH c, relationship
         MATCH (pc:Chunk {id: relationship.previous_chunk_id})
         FOREACH(r IN CASE WHEN relationship.type = 'NEXT_CHUNK' THEN [1] ELSE [] END |
-                MERGE (c)<-[:NEXT_CHUNK]-(pc))
+                MERGE (pc)-[:NEXT_CHUNK]->(c))
         """  
     execute_graph_query(graph,query_to_create_NEXT_CHUNK_relation, params={"relationships": relationships})
     return lst_chunks_including_hash
@@ -630,7 +634,25 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
     Returns:
         List of created chunk IDs with chunk documents (extract format)
     """
-    logging.info(f"🔄 Creating {len(chunks)} chunk nodes for upload (extract-compatible structure)")
+    logging.info(f"🔄 STARTING CHUNK CREATION FOR UPLOAD")
+    logging.info(f"📁 File: {file_name}")
+    logging.info(f"🧩 Input chunks count: {len(chunks)}")
+    logging.info(f"🖼️ Page images: {len(page_images) if page_images else 0}")
+    logging.info(f"⚡ Generate embedding: {generate_embedding}")
+    
+    # Mevcut chunk'ları kontrol et
+    existing_check_query = """
+        MATCH (c:Chunk {fileName: $file_name})
+        RETURN count(c) as existing_count
+    """
+    existing_result = execute_graph_query(graph, existing_check_query, params={"file_name": file_name})
+    existing_count = existing_result[0]['existing_count'] if existing_result else 0
+    
+    if existing_count > 0:
+        logging.warning(f"⚠️ EXISTING CHUNKS DETECTED: {existing_count} chunks already exist for this file!")
+        logging.warning(f"⚠️ This might cause duplicate relationships!")
+    
+    logging.info(f"�🔄 Creating {len(chunks)} chunk nodes for upload (extract-compatible structure)")
     
     # Extract'daki content normalizasyon fonksiyonunu kullan
     from src.utf8_utils import normalize_unicode_text
@@ -646,16 +668,39 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         content = chunk.page_content.strip()
         content = normalize_unicode_text(content)
         
-        # Extract'daki gibi SHA1 hash ID oluştur (filename ile kombine)
-        content_with_filename = f"{file_name}:::{content}"
-        page_content_sha1 = hashlib.sha1(content_with_filename.encode('utf-8'))
-        current_chunk_id = page_content_sha1.hexdigest()
-        
+        # Position ve lokasyon bazlı unique ID oluştur (content duplicate'lar için)
+        # Bu yaklaşım aynı content'in farklı lokasyonlarda farklı chunk'lar olmasını sağlar
         position = i + 1
+        page_num = chunk.metadata.get('page_number', 0) if hasattr(chunk, 'metadata') and chunk.metadata else 0
+        
+        # Lokasyon bazlı unique ID: filename + position + page + content_hash
+        content_hash = hashlib.sha1(content.encode('utf-8')).hexdigest()[:16]  # Kısa hash
+        location_identifier = f"{file_name}::pos_{position}::page_{page_num}::content_{content_hash}"
+        current_chunk_id = hashlib.sha1(location_identifier.encode('utf-8')).hexdigest()
+        
+        logging.info(f"� CHUNK #{position}: ID={current_chunk_id[:8]}..., Page={page_num}, Length={len(content)}")
+        logging.info(f"   📍 Location ID: pos_{position}::page_{page_num}::content_{content_hash}")
+        
         if i > 0:
             offset += len(chunks[i-1].page_content)
         
         firstChunk = (i == 0)
+        
+        # Detaylı chunk loglama
+        content_preview = content[:100] + "..." if len(content) > 100 else content
+        
+        # Aynı content'in farklı yerlerde olup olmadığını kontrol et (bilgi amaçlı)
+        similar_content_count = sum(1 for item in lst_chunks_including_hash 
+                                   if item['chunk_doc'].page_content.strip() == content)
+        if similar_content_count > 0:
+            logging.info(f"   � INFO: Similar content found in {similar_content_count} previous chunk(s) - this is normal for headers/footers")
+        
+        logging.info(f"   📝 Content preview: '{content_preview}'")
+        
+        if i > 0:
+            logging.info(f"🔗 RELATIONSHIP: Chunk #{position-1} (ID={previous_chunk_id[:8] if previous_chunk_id else 'None'}...) -> Chunk #{position} (ID={current_chunk_id[:8]}...)")
+        else:
+            logging.info(f"🏁 FIRST_CHUNK: Chunk #{position} (ID={current_chunk_id[:8]}...)")
         
         # Extract'daki gibi metadata yapısı
         metadata = {"position": position, "length": len(chunk.page_content), "content_offset": offset}
@@ -709,17 +754,27 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         # Chunk relationship'leri hazırla (extract'daki gibi)
         if firstChunk:
             relationships.append({"type": "FIRST_CHUNK", "chunk_id": current_chunk_id})
+            logging.info(f"📝 RELATIONSHIP ADDED: FIRST_CHUNK -> {current_chunk_id[:8]}...")
         else:
             relationships.append({
                 "type": "NEXT_CHUNK",
                 "previous_chunk_id": previous_chunk_id,
                 "current_chunk_id": current_chunk_id
             })
+            logging.info(f"📝 RELATIONSHIP ADDED: NEXT_CHUNK {previous_chunk_id[:8] if previous_chunk_id else 'None'}... -> {current_chunk_id[:8]}...")
         
         previous_chunk_id = current_chunk_id
     
     # Chunk node'ları ve PART_OF ilişkilerini oluştur (extract'daki gibi)
     logging.info(f"🔄 Creating chunk nodes and PART_OF relationships for {len(batch_data)} chunks")
+    logging.info(f"📊 BATCH_DATA SUMMARY: Total chunks to create: {len(batch_data)}")
+    
+    for i, chunk_data in enumerate(batch_data[:5]):  # İlk 5 chunk'ı logla
+        logging.info(f"   CHUNK {i+1}: ID={chunk_data['id'][:8]}..., Position={chunk_data['position']}, FileName={chunk_data['f_name']}")
+    
+    if len(batch_data) > 5:
+        logging.info(f"   ... ve {len(batch_data) - 5} chunk daha")
+    
     query_to_create_chunk_and_PART_OF_relation = """
         UNWIND $batch_data AS data
         MERGE (c:Chunk {id: data.id})
@@ -760,19 +815,33 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
     first_check_result = execute_graph_query(graph, first_check_query, params={"file_name": file_name})
     logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
     
-    # NEXT_CHUNK ilişkilerini oluştur (extract'daki gibi)
-    next_relationships = [r for r in relationships if r["type"] == "NEXT_CHUNK"]
-    logging.info(f"🔄 Creating NEXT_CHUNK relationships for {len(next_relationships)} chunk pairs")
+    # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
+    logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
+    
+    # Önce mevcut chunk'ların position'larını kontrol et
+    position_check_query = """
+        MATCH (c:Chunk {fileName: $file_name})
+        RETURN c.position as position, c.id as chunk_id
+        ORDER BY c.position
+    """
+    existing_positions = execute_graph_query(graph, position_check_query, params={"file_name": file_name})
+    
+    if existing_positions:
+        logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
+        for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
+            logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
+        if len(existing_positions) > 10:
+            logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
+    
     query_to_create_NEXT_relation = """
-        UNWIND $relationships AS relationship
-        MATCH (c1:Chunk {id: relationship.previous_chunk_id})
-        MATCH (c2:Chunk {id: relationship.current_chunk_id})
-        WHERE relationship.type = 'NEXT_CHUNK'
+        MATCH (c1:Chunk {fileName: $file_name})
+        MATCH (c2:Chunk {fileName: $file_name})
+        WHERE c2.position = c1.position + 1
         MERGE (c1)-[:NEXT_CHUNK]->(c2)
         RETURN count(*) as created_count
     """
-    next_result = execute_graph_query(graph, query_to_create_NEXT_relation, params={"relationships": relationships})
-    logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships")
+    next_result = execute_graph_query(graph, query_to_create_NEXT_relation, params={"file_name": file_name})
+    logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using position-based approach")
     
     # Embedding'leri oluştur (eğer isteniyorsa)
     if generate_embedding:

@@ -116,140 +116,124 @@ class CreateChunksofDocument:
             hasattr(self.pages[0], 'page_content') and 
             "[PAGE BREAK]" in self.pages[0].page_content):
             
-            log_chunking("🔍 Single document with [PAGE BREAK] markers detected - splitting pages manually")
+            log_chunking("🔍 Single document with [PAGE BREAK] markers detected - using direct approach")
             
-            # Split by PAGE BREAK markers first
-            full_content = self.pages[0].page_content
-            page_parts = full_content.split("[PAGE BREAK]")
+            # Use original content directly without splitting/rejoining
+            full_text = self.pages[0].page_content
+            log_chunking(f"📄 Using original content with [PAGE BREAK] markers preserved")
+            log_chunking(f"DEBUG: Original content length: {len(full_text)} chars")
+            log_chunking(f"DEBUG: PAGE BREAK markers found: {full_text.count('[PAGE BREAK]')}")
             
-            # Create proper page documents with page numbers
-            page_documents = []
-            for idx, page_content in enumerate(page_parts, start=1):
-                if page_content.strip():  # Only non-empty pages
-                    page_metadata = dict(self.pages[0].metadata) if self.pages[0].metadata else {}
-                    page_metadata['page_number'] = idx
-                    page_documents.append(Document(
-                        page_content=page_content.strip(), 
-                        metadata=page_metadata
-                    ))
+        else:
+            # Handle multiple pages case (fallback to existing logic)
+            log_chunking("📄 Multiple pages detected - concatenating with separators")
             
-            log_chunking(f"📄 Created {len(page_documents)} pages from PAGE BREAK markers")
+            # Concatenate pages with page separators
+            page_texts = []
+            separator = "\n\n---\n\n"
             
-            # Now update self.pages for processing
-            self.pages = page_documents
+            for i, p in enumerate(self.pages):
+                page_text = p.page_content if hasattr(p, 'page_content') else str(p)
+                page_text = str(page_text).strip()
+                page_texts.append(page_text)
+                
+                log_chunking(f"DEBUG: Page {i+1} length: {len(page_text)} chars")
+                if i < 3:  # Log first 3 pages content preview
+                    log_chunking(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
 
-        # Concatenate pages with page separators and record start/end offsets for each page
-        page_texts = []
-        page_starts = []
-        page_ends = []
-        current_offset = 0
-        separator = "\n\n---\n\n"
-        
-        for i, p in enumerate(self.pages):
-            page_text = p.page_content if hasattr(p, 'page_content') else str(p)
-            # Clean and normalize text
-            page_text = str(page_text).strip()
-            
-            page_texts.append(page_text)
-            page_starts.append(current_offset)
-            current_offset += len(page_text)
-            page_ends.append(current_offset)
-            
-            # Add separator length for next page (except for the last page)
-            if i < len(self.pages) - 1:
-                current_offset += len(separator)
-            
-            log_chunking(f"DEBUG: Page {i+1} - start: {page_starts[i]}, end: {page_ends[i]}, length: {len(page_text)}")
-            if i < 3:  # Log first 3 pages content preview
-                log_chunking(f"DEBUG: Page {i+1} preview: {page_text[:100]}...")
+            # Join pages with markdown page separators
+            full_text = separator.join(page_texts)
+            log_chunking(f"DEBUG: Full text length after concatenation: {len(full_text)} chars")
 
-        # Join pages with markdown page separators (preserving markdown structure)
-        full_text = separator.join(page_texts)
-        log_chunking(f"DEBUG: Full markdown text length after concatenation: {len(full_text)} chars")
-        log_chunking(f"DEBUG: Full markdown text preview: {full_text[:200]}...")
+        log_chunking(f"DEBUG: Final full_text preview: {full_text[:200]}...")
 
         # No max chunks limit for markdown splitting - process entire document
         log_chunking(f"DEBUG: No chunk limit applied, chunk_size: {chunk_size}")
         log_chunking(f"DEBUG: No chunk limit applied, chunk_overlap: {chunk_overlap}")
 
-        # Use MarkdownTextSplitter to respect markdown structure
-        splitter = MarkdownTextSplitter(
+        # Use RecursiveCharacterTextSplitter with custom separators including PAGE BREAK
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        
+        # Custom separators including PAGE BREAK (highest priority)
+        custom_separators = [
+            "[PAGE BREAK]",      # Page breaks (highest priority)
+            "\n#{1,6} ",         # Markdown headers (# ## ### etc.)
+            "```\n",             # Code block ends
+            "\n\\*\\*\\*+\n",     # Horizontal lines (***)
+            "\n---+\n",          # Horizontal lines (---)
+            "\n___+\n",          # Horizontal lines (___)
+            "\n\n",              # Paragraph breaks
+            "\n",                # Line breaks
+            " ",                 # Word breaks
+            "",                  # Character breaks (fallback)
+        ]
+        
+        splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
+            chunk_overlap=chunk_overlap,
+            separators=custom_separators,
+            is_separator_regex=True  # Enable regex for markdown patterns
         )
+        
+        log_chunking(f"DEBUG: RecursiveCharacterTextSplitter created with PAGE BREAK support")
+        log_chunking(f"DEBUG: full_text type: {type(full_text)}, length: {len(full_text) if full_text else 'None'}")
+        
+        if not full_text or len(full_text.strip()) == 0:
+            log_chunking("ERROR: full_text is empty or None!")
+            return []
 
         # Create documents from the markdown text
         documents = splitter.create_documents([full_text])
         log_chunking(f"DEBUG: Markdown chunks created: {len(documents)}")
 
-        # Add page metadata to each chunk
+        # Add page metadata to each chunk using overlap-aware PAGE BREAK counting
+        current_page = 1  # Start from page 1
+        prev_chunk_end = ""  # Track end of previous chunk to detect overlap
+        
         for ch_idx, doc in enumerate(documents):
-            # Try to find which page(s) this chunk belongs to
-            chunk_text = doc.page_content
+            chunk_text = doc.page_content.strip()
             
-            # Try multiple search strategies to find chunk position
-            idx = -1
-            search_attempts = [
-                chunk_text,  # exact match
-                chunk_text.strip(),  # stripped
-                chunk_text[:min(100, len(chunk_text))],  # first 100 chars
-            ]
-            
-            for attempt in search_attempts:
-                if not attempt:
-                    continue
-                try:
-                    idx = full_text.index(attempt)
-                    break
-                except ValueError:
-                    continue
-            
-            meta = {}
-            if idx >= 0:
-                start_idx = idx
-                end_idx = idx + len(chunk_text) - 1
-
-                # Find start_page and end_page
-                start_page = None
-                end_page = None
+            # Detect overlap with previous chunk
+            overlap_length = 0
+            if ch_idx > 0 and prev_chunk_end:
+                # Find how much of current chunk overlaps with previous chunk end
+                # Check different overlap lengths to find the longest match
+                max_check_length = min(len(chunk_text), len(prev_chunk_end), 500)  # Limit check to reasonable size
                 
-                # Find which page contains the start of the chunk
-                for pi, (s, e) in enumerate(zip(page_starts, page_ends)):
-                    if start_idx >= s and start_idx < e:
-                        start_page = pi + 1
+                for test_length in range(max_check_length, 0, -1):
+                    if chunk_text.startswith(prev_chunk_end[-test_length:]):
+                        overlap_length = test_length
                         break
+            
+            # Count PAGE BREAK markers in this chunk, excluding overlap
+            if overlap_length > 0:
+                overlap_part = chunk_text[:overlap_length]
+                non_overlap_part = chunk_text[overlap_length:]
+                page_breaks_in_overlap = overlap_part.count("[PAGE BREAK]")
+                page_breaks_in_new_content = non_overlap_part.count("[PAGE BREAK]")
                 
-                # Find which page contains the end of the chunk
-                for pi, (s, e) in enumerate(zip(page_starts, page_ends)):
-                    if end_idx >= s and end_idx < e:
-                        end_page = pi + 1
-                        break
+                log_chunking(f"DEBUG: Chunk {ch_idx+1} - overlap detected: {overlap_length} chars, PAGE BREAKs in overlap: {page_breaks_in_overlap}, in new content: {page_breaks_in_new_content}")
                 
-                # Assign metadata based on what we found
-                if start_page and end_page:
-                    if start_page == end_page:
-                        meta['page_number'] = start_page
-                    else:
-                        meta['page_number'] = start_page  # Use start page as primary
-                        meta['end_page'] = end_page
-                elif start_page:
-                    meta['page_number'] = start_page
-                elif end_page:
-                    meta['page_number'] = end_page
-                else:
-                    # Fallback: assign to middle page based on chunk index
-                    estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(documents)) + 1))
-                    meta['page_number'] = estimated_page
-                    logging.warning(f"Could not determine exact page for chunk {ch_idx+1}, assigned estimated page {estimated_page}")
+                # Only count PAGE BREAK markers that are NOT in the overlap
+                page_breaks_to_add = page_breaks_in_new_content
             else:
-                # Could not find chunk in full text, use estimation
-                estimated_page = min(len(self.pages), max(1, (ch_idx * len(self.pages) // len(documents)) + 1))
-                meta['page_number'] = estimated_page
-                logging.warning(f"Could not locate chunk {ch_idx+1} in full text, assigned estimated page {estimated_page}")
-
-            # Update document metadata
+                page_breaks_to_add = chunk_text.count("[PAGE BREAK]")
+                log_chunking(f"DEBUG: Chunk {ch_idx+1} - no overlap detected, PAGE BREAKs in chunk: {page_breaks_to_add}")
+            
+            # This chunk starts on current_page
+            page_number = current_page
+            
+            # Update current_page for next chunk based on NEW PAGE BREAK markers found
+            if page_breaks_to_add > 0:
+                current_page += page_breaks_to_add
+                log_chunking(f"DEBUG: Chunk {ch_idx+1} - found {page_breaks_to_add} new PAGE BREAK(s), next chunks will start from page {current_page}")
+            
+            # Store end of current chunk for next iteration's overlap detection
+            prev_chunk_end = chunk_text[-200:] if len(chunk_text) > 200 else chunk_text  # Keep last 200 chars
+            
+            meta = {'page_number': page_number}
             doc.metadata.update(meta)
-            log_chunking(f"DEBUG: Final chunk {ch_idx+1} - metadata: {meta}, content length: {len(chunk_text)}")
+            log_chunking(f"DEBUG: Chunk {ch_idx+1} - assigned page {page_number}, new PAGE BREAKs: {page_breaks_to_add}, content length: {len(chunk_text)}")
 
         log_chunking(f"DEBUG: Total final documents created with metadata: {len(documents)}")
         return documents
