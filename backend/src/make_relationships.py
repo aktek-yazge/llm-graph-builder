@@ -640,7 +640,7 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
     logging.info(f"🖼️ Page images: {len(page_images) if page_images else 0}")
     logging.info(f"⚡ Generate embedding: {generate_embedding}")
     
-    # Mevcut chunk'ları kontrol et
+    # Mevcut chunk'ları kontrol et (bilgi amaçlı - otomatik temizlik önceden yapıldı)
     existing_check_query = """
         MATCH (c:Chunk {fileName: $file_name})
         RETURN count(c) as existing_count
@@ -649,10 +649,11 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
     existing_count = existing_result[0]['existing_count'] if existing_result else 0
     
     if existing_count > 0:
-        logging.warning(f"⚠️ EXISTING CHUNKS DETECTED: {existing_count} chunks already exist for this file!")
-        logging.warning(f"⚠️ This might cause duplicate relationships!")
+        logging.info(f"ℹ️ Found {existing_count} existing chunks (should have been cleaned by auto-cleanup)")
+    else:
+        logging.info(f"✅ No existing chunks found - ready for fresh creation")
     
-    logging.info(f"�🔄 Creating {len(chunks)} chunk nodes for upload (extract-compatible structure)")
+    logging.info(f"� Creating {len(chunks)} chunk nodes for upload (extract-compatible structure)")
     
     # Extract'daki content normalizasyon fonksiyonunu kullan
     from src.utf8_utils import normalize_unicode_text

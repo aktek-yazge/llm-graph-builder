@@ -496,8 +496,7 @@ CEVAP:
             MATCH (d:Document {fileName: $file_name})
             MERGE (c)-[:HAS_POLICY]->(p)
             MERGE (c)-[:HAS_DOC]->(d)
-            SET c.updatedAt = datetime(),
-                c.policyCount = coalesce(c.policyCount, 0) + 1
+            SET c.updatedAt = datetime()
             """
             
             execute_graph_query(self.graph, link_query, params={
@@ -513,11 +512,9 @@ CEVAP:
         ON CREATE SET 
             c.fullName = $customer_name,
             c.createdAt = datetime(),
-            c.extractedFromContent = true,
-            c.policyCount = 1
+            c.extractedFromContent = true
         ON MATCH SET
-            c.updatedAt = datetime(),
-            c.policyCount = coalesce(c.policyCount, 0) + 1
+            c.updatedAt = datetime()
         WITH c
         MATCH (p:Policy {id: $policy_id})
         MATCH (d:Document {fileName: $file_name})

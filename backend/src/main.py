@@ -1726,6 +1726,15 @@ def upload_file(
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
         
+        # ✨ ÖNCE: Upload öncesi otomatik temizlik yap (dosya varsa temizle)
+        log_upload(f"🧹 Starting pre-upload cleanup check for: {normalized_filename}")
+        graphDb_data_Access = graphDBdataAccess(graph)
+        cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(normalized_filename)
+        if cleanup_result:
+            log_upload(f"✅ Pre-upload cleanup completed successfully")
+        else:
+            log_upload(f"ℹ️ No cleanup needed or cleanup skipped")
+        
         # Desteklenen belge formatları için hem text hem image extraction (tek seferde)
         merged_file_path = os.path.join(merged_dir, normalized_filename)
         doc_link = None
@@ -1960,8 +1969,7 @@ def upload_file(
                 logging.error(f"❌ Failed to create chunk nodes for {originalname}: {chunk_error}")
                 # Continue without chunk creation
         
-        # Source node'u veritabanına kaydet
-        graphDb_data_Access = graphDBdataAccess(graph)
+        # Source node'u veritabanına kaydet (temizlik zaten yapıldı)
         graphDb_data_Access.create_source_node(obj_source_node)
         log_upload(f"Source node successfully created in database for: {originalname}")
         logging.info(f"📋 Source node created in database for: {originalname}")

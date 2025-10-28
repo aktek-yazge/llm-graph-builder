@@ -56,9 +56,10 @@ class EntityResolver:
         
         return normalized
         
-    def calculate_name_similarity(self, name1: str, name2: str) -> float:
+    def calculate_name_similarity(self, name1: str, name2: str, entity_type: str = None) -> float:
         """
         İki isim arasında benzerlik hesaplar
+        Önce kesin kontroller (contains), sonra similarity hesabı
         """
         if not name1 or not name2:
             return 0.0
@@ -67,21 +68,86 @@ class EntityResolver:
         norm1 = self.normalize_name(name1)
         norm2 = self.normalize_name(name2)
         
+        # 1. TAM EŞLEŞİK KONTROLl
         if norm1 == norm2:
             return 1.0
             
-        # Levenshtein similarity
-        similarity = difflib.SequenceMatcher(None, norm1, norm2).ratio()
-        
-        # İsim parçalarını kontrol et (Ayça Dinçkök vs Ayça Dinçkök Dinkal)
-        words1 = set(norm1.split())
-        words2 = set(norm2.split())
-        
-        if words1.issubset(words2) or words2.issubset(words1):
-            # Bir isim diğerinin alt kümesi ise yüksek benzerlik ver
-            similarity = max(similarity, 0.9)
+        # 2. ÇİFT TARAFLI CONTAINS KONTROLÜ (APOC benzeri)
+        # Bir ismin diğerini tamamen içermesi durumu
+        if norm1 in norm2 or norm2 in norm1:
+            # Kesin içerme varsa yüksek skor ver ama tam 1.0 değil
+            return 0.95
             
-        return similarity
+        # 3. KELİME BAZLI CONTAINS KONTROLÜ
+        words1 = norm1.split()
+        words2 = norm2.split()
+        
+        # Her iki yönde de kelime bazlı contains kontrolü
+        words1_set = set(words1)
+        words2_set = set(words2)
+        
+        # Tüm kelimeler eşleşiyorsa (sadece sıra farklı olabilir)
+        if words1_set == words2_set:
+            return 0.98  # Çok yüksek ama tam değil
+            
+        # Bir tarafın kelimeleri diğerinin tamamen alt kümesi mi?
+        if words1_set.issubset(words2_set) or words2_set.issubset(words1_set):
+            # Örnek: "Ayça Dinçkök" ⊆ "Ayça Dinçkök Dinkal"
+            return 0.92
+            
+        # 4. Customer'lar için ÖZel SIKI KONTROL
+        if entity_type and entity_type.lower() == 'customer':
+            # Customer'larda ortak kelime sayısını kontrol et
+            common_words = words1_set & words2_set
+            
+            # Sadece 1 kelime ortaksa (genellikle soyisim) -> Çok düşük skor
+            if len(common_words) == 1:
+                return 0.25  # Çok düşük - muhtemelen farklı kişiler
+                
+            # 2 veya daha fazla ortak kelime varsa similarity hesabına geç
+            if len(common_words) >= 2:
+                # Kesin ortak kelimeler var, similarity hesapla
+                return self._calculate_advanced_similarity(norm1, norm2, words1, words2)
+            else:
+                # Hiç ortak kelime yok
+                return 0.0
+        
+        # 5. SIMILARITY HESABI (Customer olmayan veya Customer'da 2+ ortak kelime)
+        return self._calculate_advanced_similarity(norm1, norm2, words1, words2)
+        
+    def _calculate_advanced_similarity(self, norm1: str, norm2: str, words1: list, words2: list) -> float:
+        """
+        Gelişmiş similarity hesabı
+        """
+        # Levenshtein similarity
+        levenshtein_sim = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+        
+        # Kelime bazlı similarity
+        words1_set = set(words1)
+        words2_set = set(words2)
+        
+        # Jaccard similarity (ortak kelime / toplam unique kelime)
+        intersection = len(words1_set & words2_set)
+        union = len(words1_set | words2_set)
+        jaccard_sim = intersection / union if union > 0 else 0
+        
+        # Pozisyon bazlı similarity (aynı pozisyondaki kelimeler)
+        position_matches = 0
+        min_length = min(len(words1), len(words2))
+        for i in range(min_length):
+            if words1[i] == words2[i]:
+                position_matches += 1
+        
+        position_sim = position_matches / max(len(words1), len(words2)) if max(len(words1), len(words2)) > 0 else 0
+        
+        # Weighted combination
+        final_similarity = (
+            levenshtein_sim * 0.4 +    # Karakter bazlı
+            jaccard_sim * 0.4 +        # Kelime bazlı 
+            position_sim * 0.2         # Pozisyon bazlı
+        )
+        
+        return min(1.0, final_similarity)
         
     def get_entity_embedding(self, entity_id: str, entity_type: str, entity_name: str = None) -> np.ndarray:
         """
@@ -142,28 +208,48 @@ class EntityResolver:
             if new_type.lower() != existing_type.lower():
                 continue
                 
-            # İsim benzerliği kontrolü
-            name_similarity = self.calculate_name_similarity(new_name, existing_name)
+            # İsim benzerliği kontrolü - entity_type'ı geç
+            name_similarity = self.calculate_name_similarity(new_name, existing_name, new_type)
             
             # Embedding benzerliği kontrolü
             existing_embedding = self.get_entity_embedding(existing_id, existing_type, existing_name)
             embedding_similarity = cosine_similarity([new_embedding], [existing_embedding])[0][0]
             
-            # Kombinasyon skoru (isim %60, embedding %40)
-            combined_score = (name_similarity * 0.6) + (embedding_similarity * 0.4)
+            # Customer'lar için daha sıkı kombinasyon skoru
+            if new_type.lower() == 'customer':
+                # Customer'larda isim benzerliği daha önemli (%80 isim, %20 embedding)
+                combined_score = (name_similarity * 0.8) + (embedding_similarity * 0.2)
+            else:
+                # Diğer entity'lerde mevcut oran (%60 isim, %40 embedding)
+                combined_score = (name_similarity * 0.6) + (embedding_similarity * 0.4)
             
             logging.debug(f"  - Karşılaştırma: '{existing_id}' (name: '{existing_name}')")
             logging.debug(f"    İsim benzerliği: {name_similarity:.3f}")
             logging.debug(f"    Embedding benzerliği: {embedding_similarity:.3f}")
             logging.debug(f"    Kombinasyon skoru: {combined_score:.3f}")
             
-            # Eşik kontrolü
-            if (name_similarity >= self.name_similarity_threshold or 
-                embedding_similarity >= self.similarity_threshold or
-                combined_score >= self.similarity_threshold):
+            # Eşik kontrolü - Customer'lar için çok daha sıkı kurallar
+            if new_type.lower() == 'customer':
+                # Customer'lar için çok sıkı eşikler
+                customer_name_threshold = 0.90   # İsim benzerliği en az %90
+                customer_combined_threshold = 0.88  # Kombinasyon skoru en az %88
                 
-                similar_entities.append((existing_entity, combined_score))
-                logging.info(f"  ✅ Benzer entity bulundu: '{existing_id}' -> skor: {combined_score:.3f}")
+                if (name_similarity >= customer_name_threshold and 
+                    combined_score >= customer_combined_threshold):
+                    similar_entities.append((existing_entity, combined_score))
+                    logging.info(f"  ✅ Benzer Customer bulundu: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
+                else:
+                    logging.debug(f"  ❌ Customer eşik altı: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
+            else:
+                # Diğer entity'ler için mevcut eşikler
+                if (name_similarity >= self.name_similarity_threshold or 
+                    embedding_similarity >= self.similarity_threshold or
+                    combined_score >= self.similarity_threshold):
+                    
+                    similar_entities.append((existing_entity, combined_score))
+                    logging.info(f"  ✅ Benzer entity bulundu: '{existing_id}' -> skor: {combined_score:.3f}")
+                else:
+                    logging.debug(f"  ❌ Entity eşik altı: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
         
         # Skora göre sırala
         similar_entities.sort(key=lambda x: x[1], reverse=True)
@@ -315,21 +401,32 @@ def resolve_entity_before_creation(new_entity: Dict, graph, entity_type: str = "
         Mevcut entity'nin element ID'si (varsa) veya None
     """
     try:
-        # Mevcut benzer entity'leri ara
-        query = """
-        MATCH (e)
-        WHERE $entity_type IN labels(e) OR e.entity_type = $entity_type
+        # Mevcut benzer entity'leri ara - sadece belirtilen entity_type için
+        query = f"""
+        MATCH (e:{entity_type})
+        WHERE e.id IS NOT NULL OR e.name IS NOT NULL
         RETURN e.id as id, 
                e.name as name,
-               e.entity_type as entity_type,
+               '{entity_type}' as entity_type,
                elementId(e) as element_id,
                properties(e) as properties
         """
         
-        existing_entities = graph.run(query, entity_type=entity_type)
+        existing_entities_result = graph.query(query)
         
-        if not existing_entities:
+        if not existing_entities_result:
             return None
+        
+        # Query result'ını list of dict format'a çevir
+        existing_entities = []
+        for record in existing_entities_result:
+            existing_entities.append({
+                'id': record.get('id'),
+                'name': record.get('name'),
+                'entity_type': record.get('entity_type'),
+                'element_id': record.get('element_id'),
+                'properties': record.get('properties', {})
+            })
             
         # Benzer entity'leri bul
         similar_entities = entity_resolver.find_similar_entities(
