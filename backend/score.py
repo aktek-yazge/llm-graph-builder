@@ -737,614 +737,614 @@ async def create_source_knowledge_graph_url(
     finally:
         gc.collect()
 
-@app.post("/extract")
-async def extract_knowledge_graph_from_file(
-    uri=Form(None),
-    userName=Form(None),
-    password=Form(None),
-    model=Form(),
-    database=Form(None),
-    source_url=Form(None),
-    aws_access_key_id=Form(None),
-    aws_secret_access_key=Form(None),
-    wiki_query=Form(None),
-    gcs_project_id=Form(None),
-    gcs_bucket_name=Form(None),
-    gcs_bucket_folder=Form(None),
-    gcs_blob_filename=Form(None),
-    source_type=Form(None),
-    file_name=Form(None),
-    allowedNodes=Form(None),
-    allowedRelationship=Form(None),
-    token_chunk_size: Optional[int] = Form(None),
-    chunk_overlap: Optional[int] = Form(None),
-    chunks_to_combine: Optional[int] = Form(None),
-    language=Form(None),
-    access_token=Form(None),
-    retry_condition=Form(None),
-    additional_instructions=Form(None),
-    # Sayfa sınırlandırma parametresi
-    max_pages: str = Form(None),  # String olarak al, sonra validate et
-    # Post-processing parametreleri
-    enable_post_processing=Form(False),
-    post_processing_rules=Form(None),  # JSON array: [{"sourceNodeType":"Year","targetNodeType":"Document","relationshipType":"HAS_YEAR","removeExistingRelationships":false}]
-    # Entity Promotion parametreleri
-    enable_entity_promotion=Form(True),  # Default olarak aktif
-    entity_promotion_rules=Form(None),   # JSON array: ["Address", "Company", "Person", "Phone", "Email"]
-    email=Form(None)
-):
-    """
-    Calls 'extract_graph_from_file' in a new thread to create Neo4jGraph from a
-    PDF file based on the model.
+# @app.post("/extract")
+# async def extract_knowledge_graph_from_file(
+#     uri=Form(None),
+#     userName=Form(None),
+#     password=Form(None),
+#     model=Form(),
+#     database=Form(None),
+#     source_url=Form(None),
+#     aws_access_key_id=Form(None),
+#     aws_secret_access_key=Form(None),
+#     wiki_query=Form(None),
+#     gcs_project_id=Form(None),
+#     gcs_bucket_name=Form(None),
+#     gcs_bucket_folder=Form(None),
+#     gcs_blob_filename=Form(None),
+#     source_type=Form(None),
+#     file_name=Form(None),
+#     allowedNodes=Form(None),
+#     allowedRelationship=Form(None),
+#     token_chunk_size: Optional[int] = Form(None),
+#     chunk_overlap: Optional[int] = Form(None),
+#     chunks_to_combine: Optional[int] = Form(None),
+#     language=Form(None),
+#     access_token=Form(None),
+#     retry_condition=Form(None),
+#     additional_instructions=Form(None),
+#     # Sayfa sınırlandırma parametresi
+#     max_pages: str = Form(None),  # String olarak al, sonra validate et
+#     # Post-processing parametreleri
+#     enable_post_processing=Form(False),
+#     post_processing_rules=Form(None),  # JSON array: [{"sourceNodeType":"Year","targetNodeType":"Document","relationshipType":"HAS_YEAR","removeExistingRelationships":false}]
+#     # Entity Promotion parametreleri
+#     enable_entity_promotion=Form(True),  # Default olarak aktif
+#     entity_promotion_rules=Form(None),   # JSON array: ["Address", "Company", "Person", "Phone", "Email"]
+#     email=Form(None)
+# ):
+#     """
+#     Calls 'extract_graph_from_file' in a new thread to create Neo4jGraph from a
+#     PDF file based on the model.
 
-    Args:
-          uri: URI of the graph to extract
-          userName: Username to use for graph creation
-          password: Password to use for graph creation
-          file: File object containing the PDF file
-          model: Type of model to use ('Diffbot'or'OpenAI GPT')
+#     Args:
+#           uri: URI of the graph to extract
+#           userName: Username to use for graph creation
+#           password: Password to use for graph creation
+#           file: File object containing the PDF file
+#           model: Type of model to use ('Diffbot'or'OpenAI GPT')
 
-    Returns:
-          Nodes and Relations created in Neo4j databse for the pdf file
-    """
-    try:
-        start_time = time.time()
+#     Returns:
+#           Nodes and Relations created in Neo4j databse for the pdf file
+#     """
+#     try:
+#         start_time = time.time()
         
-        # max_pages validation - undefined string'i None'a çevir
-        validated_max_pages = None
-        if max_pages is not None and max_pages.strip() not in ['', 'undefined', 'null']:
-            try:
-                validated_max_pages = int(max_pages)
-                if validated_max_pages <= 0:
-                    validated_max_pages = None
-                    logging.info(f"ℹ️ max_pages değeri sıfır veya negatif, None olarak ayarlandı")
-            except (ValueError, TypeError) as e:
-                logging.warning(f"⚠️ max_pages değeri geçersiz '{max_pages}', None olarak ayarlandı: {e}")
-                validated_max_pages = None
+#         # max_pages validation - undefined string'i None'a çevir
+#         validated_max_pages = None
+#         if max_pages is not None and max_pages.strip() not in ['', 'undefined', 'null']:
+#             try:
+#                 validated_max_pages = int(max_pages)
+#                 if validated_max_pages <= 0:
+#                     validated_max_pages = None
+#                     logging.info(f"ℹ️ max_pages değeri sıfır veya negatif, None olarak ayarlandı")
+#             except (ValueError, TypeError) as e:
+#                 logging.warning(f"⚠️ max_pages değeri geçersiz '{max_pages}', None olarak ayarlandı: {e}")
+#                 validated_max_pages = None
         
-        logging.info(f"📊 max_pages validation: '{max_pages}' -> {validated_max_pages}")
+#         logging.info(f"📊 max_pages validation: '{max_pages}' -> {validated_max_pages}")
         
-        graph = create_graph_database_connection(uri, userName, password, database)   
-        graphDb_data_Access = graphDBdataAccess(graph)
-        if source_type == 'local file':
-            file_name = sanitize_filename(file_name)
-            merged_file_path = validate_file_path(MERGED_DIR, file_name)
+#         graph = create_graph_database_connection(uri, userName, password, database)   
+#         graphDb_data_Access = graphDBdataAccess(graph)
+#         if source_type == 'local file':
+#             file_name = sanitize_filename(file_name)
+#             merged_file_path = validate_file_path(MERGED_DIR, file_name)
             
-            # Debug loglama: Dosya yolu ve varlık kontrolü
-            logging.info(f"🔍 DEBUG - Original file_name: {file_name}")
-            logging.info(f"🔍 DEBUG - Sanitized file_name: {file_name}")
-            logging.info(f"🔍 DEBUG - MERGED_DIR: {MERGED_DIR}")
-            logging.info(f"🔍 DEBUG - Constructed merged_file_path: {merged_file_path}")
-            logging.info(f"🔍 DEBUG - File exists check: {os.path.exists(merged_file_path)}")
+#             # Debug loglama: Dosya yolu ve varlık kontrolü
+#             logging.info(f"🔍 DEBUG - Original file_name: {file_name}")
+#             logging.info(f"🔍 DEBUG - Sanitized file_name: {file_name}")
+#             logging.info(f"🔍 DEBUG - MERGED_DIR: {MERGED_DIR}")
+#             logging.info(f"🔍 DEBUG - Constructed merged_file_path: {merged_file_path}")
+#             logging.info(f"🔍 DEBUG - File exists check: {os.path.exists(merged_file_path)}")
             
-            # Merged files klasöründeki tüm dosyaları listele
-            if os.path.exists(MERGED_DIR):
-                files_in_dir = os.listdir(MERGED_DIR)
-                logging.info(f"🔍 DEBUG - Files in {MERGED_DIR}: {files_in_dir}")
+#             # Merged files klasöründeki tüm dosyaları listele
+#             if os.path.exists(MERGED_DIR):
+#                 files_in_dir = os.listdir(MERGED_DIR)
+#                 logging.info(f"🔍 DEBUG - Files in {MERGED_DIR}: {files_in_dir}")
                 
-                # Dosya adı karşılaştırması
-                for existing_file in files_in_dir:
-                    if existing_file == file_name:
-                        logging.info(f"✅ DEBUG - Exact match found: {existing_file}")
-                    else:
-                        logging.info(f"❌ DEBUG - No match: '{existing_file}' != '{file_name}'")
-                        logging.info(f"🔍 DEBUG - Bytes comparison: {existing_file.encode('utf-8')} vs {file_name.encode('utf-8')}")
+#                 # Dosya adı karşılaştırması
+#                 for existing_file in files_in_dir:
+#                     if existing_file == file_name:
+#                         logging.info(f"✅ DEBUG - Exact match found: {existing_file}")
+#                     else:
+#                         logging.info(f"❌ DEBUG - No match: '{existing_file}' != '{file_name}'")
+#                         logging.info(f"🔍 DEBUG - Bytes comparison: {existing_file.encode('utf-8')} vs {file_name.encode('utf-8')}")
             
-            # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
-            if not os.path.exists(merged_file_path):
-                # Unicode normalizasyon farklılıkları için alternatif dosya adlarını dene
-                logging.warning(f"File not found with NFC normalization, trying NFD normalization")
+#             # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
+#             if not os.path.exists(merged_file_path):
+#                 # Unicode normalizasyon farklılıkları için alternatif dosya adlarını dene
+#                 logging.warning(f"File not found with NFC normalization, trying NFD normalization")
                 
-                import unicodedata
-                # NFD normalizasyonu dene (Decomposed)
-                file_name_nfd = unicodedata.normalize('NFD', file_name)
-                merged_file_path_nfd = validate_file_path(MERGED_DIR, file_name_nfd)
+#                 import unicodedata
+#                 # NFD normalizasyonu dene (Decomposed)
+#                 file_name_nfd = unicodedata.normalize('NFD', file_name)
+#                 merged_file_path_nfd = validate_file_path(MERGED_DIR, file_name_nfd)
                 
-                logging.info(f"🔍 DEBUG - Trying NFD normalized file_name: {file_name_nfd}")
-                logging.info(f"🔍 DEBUG - NFD file path: {merged_file_path_nfd}")
-                logging.info(f"🔍 DEBUG - NFD file exists: {os.path.exists(merged_file_path_nfd)}")
+#                 logging.info(f"🔍 DEBUG - Trying NFD normalized file_name: {file_name_nfd}")
+#                 logging.info(f"🔍 DEBUG - NFD file path: {merged_file_path_nfd}")
+#                 logging.info(f"🔍 DEBUG - NFD file exists: {os.path.exists(merged_file_path_nfd)}")
                 
-                if os.path.exists(merged_file_path_nfd):
-                    logging.info(f"✅ Found file with NFD normalization: {merged_file_path_nfd}")
-                    merged_file_path = merged_file_path_nfd
-                    file_name = file_name_nfd
-                else:
-                    # Her iki normalizasyon da başarısız, dosya gerçekten yok
-                    logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
-                    raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
+#                 if os.path.exists(merged_file_path_nfd):
+#                     logging.info(f"✅ Found file with NFD normalization: {merged_file_path_nfd}")
+#                     merged_file_path = merged_file_path_nfd
+#                     file_name = file_name_nfd
+#                 else:
+#                     # Her iki normalizasyon da başarısız, dosya gerçekten yok
+#                     logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
+#                     raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
             
-            uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions, enable_post_processing, post_processing_rules, validated_max_pages)
+#             uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions, enable_post_processing, post_processing_rules, validated_max_pages)
 
-        elif source_type == 's3 bucket' and source_url:
-            uri_latency, result = await extract_graph_from_file_s3(uri, userName, password, database, model, source_url, aws_access_key_id, aws_secret_access_key, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+#         elif source_type == 's3 bucket' and source_url:
+#             uri_latency, result = await extract_graph_from_file_s3(uri, userName, password, database, model, source_url, aws_access_key_id, aws_secret_access_key, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
         
-        elif source_type == 'web-url':
-            uri_latency, result = await extract_graph_from_web_page(uri, userName, password, database, model, source_url, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+#         elif source_type == 'web-url':
+#             uri_latency, result = await extract_graph_from_web_page(uri, userName, password, database, model, source_url, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
-        elif source_type == 'youtube' and source_url:
-            uri_latency, result = await extract_graph_from_file_youtube(uri, userName, password, database, model, source_url, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+#         elif source_type == 'youtube' and source_url:
+#             uri_latency, result = await extract_graph_from_file_youtube(uri, userName, password, database, model, source_url, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
-        elif source_type == 'Wikipedia' and wiki_query:
-            uri_latency, result = await extract_graph_from_file_Wikipedia(uri, userName, password, database, model, wiki_query, language, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+#         elif source_type == 'Wikipedia' and wiki_query:
+#             uri_latency, result = await extract_graph_from_file_Wikipedia(uri, userName, password, database, model, wiki_query, language, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
-        elif source_type == 'gcs bucket' and gcs_bucket_name:
-            uri_latency, result = await extract_graph_from_file_gcs(uri, userName, password, database, model, gcs_project_id, gcs_bucket_name, gcs_bucket_folder, gcs_blob_filename, access_token, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
-        else:
-            return create_api_response('Failed',message='source_type is other than accepted source')
-        extract_api_time = time.time() - start_time
-        if result is not None:
-            logging.info("Going for counting nodes and relationships in extract")
-            count_node_time = time.time()
-            graph = create_graph_database_connection(uri, userName, password, database)   
-            graphDb_data_Access = graphDBdataAccess(graph)
-            # Thread'e taşı - blocking işlem
-            count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
-            logging.info("Nodes and Relationship Counts updated")
+#         elif source_type == 'gcs bucket' and gcs_bucket_name:
+#             uri_latency, result = await extract_graph_from_file_gcs(uri, userName, password, database, model, gcs_project_id, gcs_bucket_name, gcs_bucket_folder, gcs_blob_filename, access_token, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
+#         else:
+#             return create_api_response('Failed',message='source_type is other than accepted source')
+#         extract_api_time = time.time() - start_time
+#         if result is not None:
+#             logging.info("Going for counting nodes and relationships in extract")
+#             count_node_time = time.time()
+#             graph = create_graph_database_connection(uri, userName, password, database)   
+#             graphDb_data_Access = graphDBdataAccess(graph)
+#             # Thread'e taşı - blocking işlem
+#             count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
+#             logging.info("Nodes and Relationship Counts updated")
             
-            # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
-            # try:
-            #     from src.make_relationships import create_document_relationships
-            #     doc_relationships_start = time.time()
-            #     doc_connections = await asyncio.to_thread(create_document_relationships, graph, file_name)
-            #     doc_relationships_end = time.time()
-            #     logging.info(f"Document relationships created for {file_name}: {doc_connections} in {doc_relationships_end - doc_relationships_start:.2f} seconds")
-            #     result['document_relationships'] = doc_connections
-            # except Exception as doc_rel_error:
-            #     logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
-            #     result['document_relationships'] = {'error': str(doc_rel_error)}
+#             # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
+#             # try:
+#             #     from src.make_relationships import create_document_relationships
+#             #     doc_relationships_start = time.time()
+#             #     doc_connections = await asyncio.to_thread(create_document_relationships, graph, file_name)
+#             #     doc_relationships_end = time.time()
+#             #     logging.info(f"Document relationships created for {file_name}: {doc_connections} in {doc_relationships_end - doc_relationships_start:.2f} seconds")
+#             #     result['document_relationships'] = doc_connections
+#             # except Exception as doc_rel_error:
+#             #     logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
+#             #     result['document_relationships'] = {'error': str(doc_rel_error)}
             
-            if count_response :
-                result['chunkNodeCount'] = count_response[file_name].get('chunkNodeCount',"0")
-                result['chunkRelCount'] =  count_response[file_name].get('chunkRelCount',"0")
-                result['entityNodeCount']=  count_response[file_name].get('entityNodeCount',"0")
-                result['entityEntityRelCount']=  count_response[file_name].get('entityEntityRelCount',"0")
-                result['communityNodeCount']=  count_response[file_name].get('communityNodeCount',"0")
-                result['communityRelCount']= count_response[file_name].get('communityRelCount',"0")
-                result['nodeCount'] = count_response[file_name].get('nodeCount',"0")
-                result['relationshipCount']  = count_response[file_name].get('relationshipCount',"0")
-                logging.info(f"counting completed in {(time.time()-count_node_time):.2f}")
+#             if count_response :
+#                 result['chunkNodeCount'] = count_response[file_name].get('chunkNodeCount',"0")
+#                 result['chunkRelCount'] =  count_response[file_name].get('chunkRelCount',"0")
+#                 result['entityNodeCount']=  count_response[file_name].get('entityNodeCount',"0")
+#                 result['entityEntityRelCount']=  count_response[file_name].get('entityEntityRelCount',"0")
+#                 result['communityNodeCount']=  count_response[file_name].get('communityNodeCount',"0")
+#                 result['communityRelCount']= count_response[file_name].get('communityRelCount',"0")
+#                 result['nodeCount'] = count_response[file_name].get('nodeCount',"0")
+#                 result['relationshipCount']  = count_response[file_name].get('relationshipCount',"0")
+#                 logging.info(f"counting completed in {(time.time()-count_node_time):.2f}")
             
-            # Otomatik post-processing (eğer istenirse)
-            if enable_post_processing and post_processing_rules:
-                try:
-                    logging.info(f"Otomatik post-processing başlıyor: {file_name}")
+#             # Otomatik post-processing (eğer istenirse)
+#             if enable_post_processing and post_processing_rules:
+#                 try:
+#                     logging.info(f"Otomatik post-processing başlıyor: {file_name}")
                     
-                    # JSON string'i parse et
-                    if isinstance(post_processing_rules, str):
-                        rules_list = json.loads(post_processing_rules)
-                    else:
-                        rules_list = post_processing_rules
+#                     # JSON string'i parse et
+#                     if isinstance(post_processing_rules, str):
+#                         rules_list = json.loads(post_processing_rules)
+#                     else:
+#                         rules_list = post_processing_rules
                     
-                    logging.info(f"Post-processing kuralları: {rules_list}")
+#                     logging.info(f"Post-processing kuralları: {rules_list}")
                     
-                    # Post-processing'i çalıştır - sadece bu dosya için
-                    from src.llm import apply_dynamic_entity_post_processing
-                    post_processing_start_time = time.time()
-                    post_processing_result = await asyncio.to_thread(
-                        apply_dynamic_entity_post_processing, 
-                        graph, 
-                        rules_list,
-                        target_file_names=[file_name]
-                    )
-                    post_processing_end_time = time.time()
+#                     # Post-processing'i çalıştır - sadece bu dosya için
+#                     from src.llm import apply_dynamic_entity_post_processing
+#                     post_processing_start_time = time.time()
+#                     post_processing_result = await asyncio.to_thread(
+#                         apply_dynamic_entity_post_processing, 
+#                         graph, 
+#                         rules_list,
+#                         target_file_names=[file_name]
+#                     )
+#                     post_processing_end_time = time.time()
                     
-                    logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
+#                     logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
                     
-                    # Post-processing sonuçlarını result'a ekle
-                    result['post_processing'] = {
-                        'enabled': True,
-                        'rules_applied': len(rules_list),
-                        'processed_entities': post_processing_result.get('total_processed_entities', 0),
-                        'created_relationships': post_processing_result.get('total_created_relationships', 0),
-                        'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
-                        'rules': rules_list
-                    }
+#                     # Post-processing sonuçlarını result'a ekle
+#                     result['post_processing'] = {
+#                         'enabled': True,
+#                         'rules_applied': len(rules_list),
+#                         'processed_entities': post_processing_result.get('total_processed_entities', 0),
+#                         'created_relationships': post_processing_result.get('total_created_relationships', 0),
+#                         'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
+#                         'rules': rules_list
+#                     }
                     
-                    # Node count'ları güncelle - thread'e taşı
-                    final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
-                    if final_count_response:
-                        result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
-                        result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+#                     # Node count'ları güncelle - thread'e taşı
+#                     final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
+#                     if final_count_response:
+#                         result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+#                         result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
                         
-                    logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
+#                     logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
                     
-                except Exception as post_processing_error:
-                    logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
-                    result['post_processing'] = {
-                        'enabled': True,
-                        'error': str(post_processing_error),
-                        'rules_applied': 0
-                    }
-            else:
-                result['post_processing'] = {'enabled': False}
+#                 except Exception as post_processing_error:
+#                     logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
+#                     result['post_processing'] = {
+#                         'enabled': True,
+#                         'error': str(post_processing_error),
+#                         'rules_applied': 0
+#                     }
+#             else:
+#                 result['post_processing'] = {'enabled': False}
             
-            # Policy Node Cleanup - DISABLED: Policy node'ları Document'e çevirmek yerine HAS_METADATA ile bağlıyoruz
-            # try:
-            #     logging.info(f"Policy node cleanup başlıyor: {file_name}")
-            #     
-            #     from src.policy_cleanup import cleanup_policy_nodes_to_document
-            #     policy_cleanup_start_time = time.time()
-            #     
-            #     # Policy cleanup işlemi
-            #     policy_cleanup_result = await asyncio.to_thread(
-            #         cleanup_policy_nodes_to_document,
-            #         graph,
-            #         file_name
-            #     )
-            #     
-            #     policy_cleanup_end_time = time.time()
-            #     
-            #     # Result'a Policy cleanup bilgilerini ekle
-            #     result['policy_cleanup'] = {
-            #         'status': policy_cleanup_result['status'],
-            #         'policy_nodes_found': policy_cleanup_result['policy_nodes_found'],
-            #         'relationships_moved': policy_cleanup_result['relationships_moved'],
-            #         'policy_nodes_deleted': policy_cleanup_result['policy_nodes_deleted'],
-            #         'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
-            #         'processed_policies': policy_cleanup_result.get('processed_policies', [])
-            #     }
-            #     
-            #     # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
-            #     if policy_cleanup_result['policy_nodes_deleted'] > 0:
-            #         final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
-            #         if final_count_response:
-            #             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
-            #             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
-            #             
-            #     logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
+#             # Policy Node Cleanup - DISABLED: Policy node'ları Document'e çevirmek yerine HAS_METADATA ile bağlıyoruz
+#             # try:
+#             #     logging.info(f"Policy node cleanup başlıyor: {file_name}")
+#             #     
+#             #     from src.policy_cleanup import cleanup_policy_nodes_to_document
+#             #     policy_cleanup_start_time = time.time()
+#             #     
+#             #     # Policy cleanup işlemi
+#             #     policy_cleanup_result = await asyncio.to_thread(
+#             #         cleanup_policy_nodes_to_document,
+#             #         graph,
+#             #         file_name
+#             #     )
+#             #     
+#             #     policy_cleanup_end_time = time.time()
+#             #     
+#             #     # Result'a Policy cleanup bilgilerini ekle
+#             #     result['policy_cleanup'] = {
+#             #         'status': policy_cleanup_result['status'],
+#             #         'policy_nodes_found': policy_cleanup_result['policy_nodes_found'],
+#             #         'relationships_moved': policy_cleanup_result['relationships_moved'],
+#             #         'policy_nodes_deleted': policy_cleanup_result['policy_nodes_deleted'],
+#             #         'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
+#             #         'processed_policies': policy_cleanup_result.get('processed_policies', [])
+#             #     }
+#             #     
+#             #     # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
+#             #     if policy_cleanup_result['policy_nodes_deleted'] > 0:
+#             #         final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+#             #         if final_count_response:
+#             #             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+#             #             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+#             #             
+#             #     logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
                 
             
             
-            # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
-            try:
-                if enable_entity_promotion:
-                    logging.info(f"Entity promotion başlıyor: {file_name}")
+#             # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
+#             try:
+#                 if enable_entity_promotion:
+#                     logging.info(f"Entity promotion başlıyor: {file_name}")
                     
-                    # Default entity promotion kuralları (eğer param gönderilmemişse)
-                    default_promotion_rules = ["Address", "Company", "Person", "Phone", "Email", "Agent", "InsuranceCompany"]
+#                     # Default entity promotion kuralları (eğer param gönderilmemişse)
+#                     default_promotion_rules = ["Address", "Company", "Person", "Phone", "Email", "Agent", "InsuranceCompany"]
                     
-                    if entity_promotion_rules:
-                        if isinstance(entity_promotion_rules, str):
-                            promotion_rules = json.loads(entity_promotion_rules)
-                        else:
-                            promotion_rules = entity_promotion_rules
-                    else:
-                        promotion_rules = default_promotion_rules
+#                     if entity_promotion_rules:
+#                         if isinstance(entity_promotion_rules, str):
+#                             promotion_rules = json.loads(entity_promotion_rules)
+#                         else:
+#                             promotion_rules = entity_promotion_rules
+#                     else:
+#                         promotion_rules = default_promotion_rules
                     
-                    logging.info(f"Entity promotion kuralları: {promotion_rules}")
+#                     logging.info(f"Entity promotion kuralları: {promotion_rules}")
                     
-                    from src.policy_cleanup import promote_chunk_entities_to_document
-                    entity_promotion_start_time = time.time()
+#                     from src.policy_cleanup import promote_chunk_entities_to_document
+#                     entity_promotion_start_time = time.time()
                     
-                    # Entity promotion işlemi
-                    entity_promotion_result = await asyncio.to_thread(
-                        promote_chunk_entities_to_document,
-                        graph,
-                        file_name,
-                        promotion_rules
-                    )
+#                     # Entity promotion işlemi
+#                     entity_promotion_result = await asyncio.to_thread(
+#                         promote_chunk_entities_to_document,
+#                         graph,
+#                         file_name,
+#                         promotion_rules
+#                     )
                     
-                    entity_promotion_end_time = time.time()
+#                     entity_promotion_end_time = time.time()
                     
-                    # Result'a Entity promotion bilgilerini ekle
-                    result['entity_promotion'] = {
-                        'status': entity_promotion_result['status'],
-                        'enabled': True,
-                        'promoted_entities': entity_promotion_result['promoted_entities'],
-                        'relationships_created': entity_promotion_result['relationships_created'],
-                        'elapsed_time': f"{entity_promotion_end_time - entity_promotion_start_time:.2f}",
-                        'promotion_rules': promotion_rules,
-                        'promotion_details': entity_promotion_result.get('promotion_details', [])
-                    }
+#                     # Result'a Entity promotion bilgilerini ekle
+#                     result['entity_promotion'] = {
+#                         'status': entity_promotion_result['status'],
+#                         'enabled': True,
+#                         'promoted_entities': entity_promotion_result['promoted_entities'],
+#                         'relationships_created': entity_promotion_result['relationships_created'],
+#                         'elapsed_time': f"{entity_promotion_end_time - entity_promotion_start_time:.2f}",
+#                         'promotion_rules': promotion_rules,
+#                         'promotion_details': entity_promotion_result.get('promotion_details', [])
+#                     }
                     
-                    # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle - thread'e taşı
-                    if entity_promotion_result['relationships_created'] > 0:
-                        final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
-                        if final_count_response:
-                            result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
-                            result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
+#                     # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle - thread'e taşı
+#                     if entity_promotion_result['relationships_created'] > 0:
+#                         final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
+#                         if final_count_response:
+#                             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
+#                             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
                             
-                    logging.info(f"Entity promotion tamamlandı: {entity_promotion_result['promoted_entities']} entity terfi edildi, {entity_promotion_result['relationships_created']} Document ilişkisi oluşturuldu")
-                else:
-                    result['entity_promotion'] = {'enabled': False}
-                    logging.info("Entity promotion devre dışı")
+#                     logging.info(f"Entity promotion tamamlandı: {entity_promotion_result['promoted_entities']} entity terfi edildi, {entity_promotion_result['relationships_created']} Document ilişkisi oluşturuldu")
+#                 else:
+#                     result['entity_promotion'] = {'enabled': False}
+#                     logging.info("Entity promotion devre dışı")
                 
-            except Exception as entity_promotion_error:
-                logging.error(f"Entity promotion hatası: {entity_promotion_error}")
-                result['entity_promotion'] = {
-                    'status': 'error',
-                    'enabled': True,
-                    'error': str(entity_promotion_error),
-                    'elapsed_time': '0.00'
-                }
+#             except Exception as entity_promotion_error:
+#                 logging.error(f"Entity promotion hatası: {entity_promotion_error}")
+#                 result['entity_promotion'] = {
+#                     'status': 'error',
+#                     'enabled': True,
+#                     'error': str(entity_promotion_error),
+#                     'elapsed_time': '0.00'
+#                 }
             
-            result['db_url'] = uri
-            result['api_name'] = 'extract'
-            result['source_url'] = source_url
-            result['wiki_query'] = wiki_query
-            result['source_type'] = source_type
-            result['logging_time'] = formatted_time(datetime.now(timezone.utc))
-            result['elapsed_api_time'] = f'{extract_api_time:.2f}'
-            result['userName'] = userName
-            result['database'] = database
-            result['aws_access_key_id'] = aws_access_key_id
-            result['gcs_bucket_name'] = gcs_bucket_name
-            result['gcs_bucket_folder'] = gcs_bucket_folder
-            result['gcs_blob_filename'] = gcs_blob_filename
-            result['gcs_project_id'] = gcs_project_id
-            result['language'] = language
-            result['retry_condition'] = retry_condition
-            result['email'] = email
-        logger.log_struct(result, "INFO")
-        result.update(uri_latency)
-        logging.info(f"extraction completed in {extract_api_time:.2f} seconds for file name {file_name}")
-        return create_api_response('Success', data=result, file_source= source_type)
-    except LLMGraphBuilderException as e:
-        error_message = str(e)
-        graph = create_graph_database_connection(uri, userName, password, database)   
-        graphDb_data_Access = graphDBdataAccess(graph)
-        graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
-        if source_type == 'local file':
-            failed_file_process(uri,file_name, merged_file_path)
+#             result['db_url'] = uri
+#             result['api_name'] = 'extract'
+#             result['source_url'] = source_url
+#             result['wiki_query'] = wiki_query
+#             result['source_type'] = source_type
+#             result['logging_time'] = formatted_time(datetime.now(timezone.utc))
+#             result['elapsed_api_time'] = f'{extract_api_time:.2f}'
+#             result['userName'] = userName
+#             result['database'] = database
+#             result['aws_access_key_id'] = aws_access_key_id
+#             result['gcs_bucket_name'] = gcs_bucket_name
+#             result['gcs_bucket_folder'] = gcs_bucket_folder
+#             result['gcs_blob_filename'] = gcs_blob_filename
+#             result['gcs_project_id'] = gcs_project_id
+#             result['language'] = language
+#             result['retry_condition'] = retry_condition
+#             result['email'] = email
+#         logger.log_struct(result, "INFO")
+#         result.update(uri_latency)
+#         logging.info(f"extraction completed in {extract_api_time:.2f} seconds for file name {file_name}")
+#         return create_api_response('Success', data=result, file_source= source_type)
+#     except LLMGraphBuilderException as e:
+#         error_message = str(e)
+#         graph = create_graph_database_connection(uri, userName, password, database)   
+#         graphDb_data_Access = graphDBdataAccess(graph)
+#         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
+#         if source_type == 'local file':
+#             failed_file_process(uri,file_name, merged_file_path)
         
-        # Document node durumunu güvenli bir şekilde al
-        try:
-            node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
-        except Exception as node_error:
-            logging.warning(f"Document node status alınamadı: {node_error}")
-            node_detail = None
+#         # Document node durumunu güvenli bir şekilde al
+#         try:
+#             node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
+#         except Exception as node_error:
+#             logging.warning(f"Document node status alınamadı: {node_error}")
+#             node_detail = None
         
-        # Set the status "Completed" in logging becuase we are treating these error already handled by application as like custom errors.
-        file_created_at = None
-        if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
-            file_created_at = formatted_time(node_detail[0]['created_time'])
-        else:
-            file_created_at = formatted_time(datetime.now(timezone.utc))
+#         # Set the status "Completed" in logging becuase we are treating these error already handled by application as like custom errors.
+#         file_created_at = None
+#         if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
+#             file_created_at = formatted_time(node_detail[0]['created_time'])
+#         else:
+#             file_created_at = formatted_time(datetime.now(timezone.utc))
         
-        json_obj = {'api_name':'extract','message':error_message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Completed',
-                    'db_url':uri, 'userName':userName, 'database':database,'success_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
-                    'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
-        logger.log_struct(json_obj, "INFO")
-        logging.exception(f'File Failed in extraction: {e}')
-        return create_api_response("Failed", message = error_message, error=error_message, file_name=file_name)
-    except Exception as e:
-        message=f"Failed To Process File:{file_name} or LLM Unable To Parse Content "
-        error_message = str(e)
-        graph = create_graph_database_connection(uri, userName, password, database)   
-        graphDb_data_Access = graphDBdataAccess(graph)
-        graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
-        if source_type == 'local file':
-            failed_file_process(uri,file_name, merged_file_path)
+#         json_obj = {'api_name':'extract','message':error_message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Completed',
+#                     'db_url':uri, 'userName':userName, 'database':database,'success_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
+#                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
+#         logger.log_struct(json_obj, "INFO")
+#         logging.exception(f'File Failed in extraction: {e}')
+#         return create_api_response("Failed", message = error_message, error=error_message, file_name=file_name)
+#     except Exception as e:
+#         message=f"Failed To Process File:{file_name} or LLM Unable To Parse Content "
+#         error_message = str(e)
+#         graph = create_graph_database_connection(uri, userName, password, database)   
+#         graphDb_data_Access = graphDBdataAccess(graph)
+#         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
+#         if source_type == 'local file':
+#             failed_file_process(uri,file_name, merged_file_path)
         
-        # Document node durumunu güvenli bir şekilde al
-        try:
-            node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
-        except Exception as node_error:
-            logging.warning(f"Document node status alınamadı: {node_error}")
-            node_detail = None
+#         # Document node durumunu güvenli bir şekilde al
+#         try:
+#             node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
+#         except Exception as node_error:
+#             logging.warning(f"Document node status alınamadı: {node_error}")
+#             node_detail = None
         
-        file_created_at = None
-        if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
-            file_created_at = formatted_time(node_detail[0]['created_time'])
-        else:
-            file_created_at = formatted_time(datetime.now(timezone.utc))
+#         file_created_at = None
+#         if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
+#             file_created_at = formatted_time(node_detail[0]['created_time'])
+#         else:
+#             file_created_at = formatted_time(datetime.now(timezone.utc))
         
-        json_obj = {'api_name':'extract','message':message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Failed',
-                    'db_url':uri, 'userName':userName, 'database':database,'failed_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
-                    'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
-        logger.log_struct(json_obj, "ERROR")
-        logging.exception(f'File Failed in extraction: {e}')
-        return create_api_response('Failed', message=message + error_message[:100], error=error_message, file_name = file_name)
-    finally:
-        gc.collect()
+#         json_obj = {'api_name':'extract','message':message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Failed',
+#                     'db_url':uri, 'userName':userName, 'database':database,'failed_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
+#                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
+#         logger.log_struct(json_obj, "ERROR")
+#         logging.exception(f'File Failed in extraction: {e}')
+#         return create_api_response('Failed', message=message + error_message[:100], error=error_message, file_name = file_name)
+#     finally:
+#         gc.collect()
 
-@app.post("/extract_qa_based")
-async def extract_qa_based_knowledge_graph(
-    uri=Form(None),
-    userName=Form(None),
-    password=Form(None),
-    database=Form(None),
-    model=Form(),
-    document_chunks=Form(),
-    file_name=Form(),
-    domain=Form(None),
-    custom_questions=Form(None),
-    email=Form(None)
-):
-    """
-    QA tabanlı entity çıkarma endpoint'i
-    """
-    try:
-        logging.info(f"QA tabanlı extraction başlıyor: {file_name}")
-        logging.info(f"Gelen domain parametresi: {domain}")
+# @app.post("/extract_qa_based")
+# async def extract_qa_based_knowledge_graph(
+#     uri=Form(None),
+#     userName=Form(None),
+#     password=Form(None),
+#     database=Form(None),
+#     model=Form(),
+#     document_chunks=Form(),
+#     file_name=Form(),
+#     domain=Form(None),
+#     custom_questions=Form(None),
+#     email=Form(None)
+# ):
+#     """
+#     QA tabanlı entity çıkarma endpoint'i
+#     """
+#     try:
+#         logging.info(f"QA tabanlı extraction başlıyor: {file_name}")
+#         logging.info(f"Gelen domain parametresi: {domain}")
         
-        # Parameters validate
-        if not document_chunks or not file_name or not model:
-            raise HTTPException(status_code=400, detail="document_chunks, file_name ve model parametreleri gerekli")
+#         # Parameters validate
+#         if not document_chunks or not file_name or not model:
+#             raise HTTPException(status_code=400, detail="document_chunks, file_name ve model parametreleri gerekli")
         
-        # Parse document chunks (JSON string olarak gönderilmiş olabilir)
-        if isinstance(document_chunks, str):
-            try:
-                chunks_list = json.loads(document_chunks)
-            except:
-                chunks_list = [document_chunks]  # Single chunk
-        else:
-            chunks_list = document_chunks
+#         # Parse document chunks (JSON string olarak gönderilmiş olabilir)
+#         if isinstance(document_chunks, str):
+#             try:
+#                 chunks_list = json.loads(document_chunks)
+#             except:
+#                 chunks_list = [document_chunks]  # Single chunk
+#         else:
+#             chunks_list = document_chunks
         
-        # Custom questions parse et (eğer varsa)
-        questions_dict = None
-        if custom_questions:
-            try:
-                questions_dict = json.loads(custom_questions)
-            except:
-                logging.warning("Custom questions parse edilemedi, default sorular kullanılacak")
+#         # Custom questions parse et (eğer varsa)
+#         questions_dict = None
+#         if custom_questions:
+#             try:
+#                 questions_dict = json.loads(custom_questions)
+#             except:
+#                 logging.warning("Custom questions parse edilemedi, default sorular kullanılacak")
         
-        # Domain tespiti (eğer belirtilmemişse)
-        if not domain and len(chunks_list) > 0:
-            domain = detect_document_domain(file_name, chunks_list[0])
-            logging.info(f"Otomatik domain tespiti: {domain}")
-        elif domain:
-            logging.info(f"Kullanıcı tarafından seçilen domain: {domain}")
+#         # Domain tespiti (eğer belirtilmemişse)
+#         if not domain and len(chunks_list) > 0:
+#             domain = detect_document_domain(file_name, chunks_list[0])
+#             logging.info(f"Otomatik domain tespiti: {domain}")
+#         elif domain:
+#             logging.info(f"Kullanıcı tarafından seçilen domain: {domain}")
         
-        # QA tabanlı extractor oluştur
-        extractor = QABasedEntityExtractor(model)
+#         # QA tabanlı extractor oluştur
+#         extractor = QABasedEntityExtractor(model)
         
-        # Domain'e özgü sorular al (eğer custom yoksa)
-        if not questions_dict:
-            if domain:
-                questions_dict = create_domain_specific_questions(domain)
-                logging.info(f"Domain '{domain}' için otomatik sorular oluşturuldu: {len(questions_dict)} kategori")
-                # Domain sorularını da loglayalım
-                for category, questions in questions_dict.items():
-                    logging.info(f"  {category}: {len(questions)} soru")
-            else:
-                questions_dict = extractor.default_questions
-                logging.info("Domain belirtilmediği için genel sorular kullanılıyor")
-        else:
-            logging.info("Kullanıcı tarafından özel sorular sağlandı")
+#         # Domain'e özgü sorular al (eğer custom yoksa)
+#         if not questions_dict:
+#             if domain:
+#                 questions_dict = create_domain_specific_questions(domain)
+#                 logging.info(f"Domain '{domain}' için otomatik sorular oluşturuldu: {len(questions_dict)} kategori")
+#                 # Domain sorularını da loglayalım
+#                 for category, questions in questions_dict.items():
+#                     logging.info(f"  {category}: {len(questions)} soru")
+#             else:
+#                 questions_dict = extractor.default_questions
+#                 logging.info("Domain belirtilmediği için genel sorular kullanılıyor")
+#         else:
+#             logging.info("Kullanıcı tarafından özel sorular sağlandı")
         
-        # Entity'leri çıkar
-        logging.info(f"Extractor'a gönderilen sorular: {json.dumps(questions_dict, ensure_ascii=False, indent=2)}")
-        graph_documents = await extractor.extract_entities_from_qa(
-            document_chunks=chunks_list,
-            file_name=file_name,
-            custom_questions=questions_dict
-        )
+#         # Entity'leri çıkar
+#         logging.info(f"Extractor'a gönderilen sorular: {json.dumps(questions_dict, ensure_ascii=False, indent=2)}")
+#         graph_documents = await extractor.extract_entities_from_qa(
+#             document_chunks=chunks_list,
+#             file_name=file_name,
+#             custom_questions=questions_dict
+#         )
         
-        # Çıkarılan entity ve relation sayılarını logla
-        total_entities = sum(len(doc.nodes) for doc in graph_documents)
-        total_relationships = sum(len(doc.relationships) for doc in graph_documents)
-        logging.info(f"Toplam çıkarılan entity: {total_entities}, relationship: {total_relationships}")
+#         # Çıkarılan entity ve relation sayılarını logla
+#         total_entities = sum(len(doc.nodes) for doc in graph_documents)
+#         total_relationships = sum(len(doc.relationships) for doc in graph_documents)
+#         logging.info(f"Toplam çıkarılan entity: {total_entities}, relationship: {total_relationships}")
         
-        # Her GraphDocument için ayrıntılı loglama
-        for i, doc in enumerate(graph_documents):
-            logging.info(f"GraphDocument {i}: {len(doc.nodes)} entity, {len(doc.relationships)} relationship")
-            # İlk birkaç entity'yi de logla
-            for j, node in enumerate(doc.nodes[:5]):  # İlk 5 entity
-                logging.info(f"  Entity {j}: {node.type} - {node.properties}")
+#         # Her GraphDocument için ayrıntılı loglama
+#         for i, doc in enumerate(graph_documents):
+#             logging.info(f"GraphDocument {i}: {len(doc.nodes)} entity, {len(doc.relationships)} relationship")
+#             # İlk birkaç entity'yi de logla
+#             for j, node in enumerate(doc.nodes[:5]):  # İlk 5 entity
+#                 logging.info(f"  Entity {j}: {node.type} - {node.properties}")
         
-        # Dosya adından temiz bir isim oluştur (uzantıları kaldır, özel karakterleri temizle)
-        clean_file_name = file_name.replace('.pdf', '').replace('.docx', '').replace('.txt', '')
-        clean_file_name = re.sub(r'[^\w\-_\.]', '_', clean_file_name)
+#         # Dosya adından temiz bir isim oluştur (uzantıları kaldır, özel karakterleri temizle)
+#         clean_file_name = file_name.replace('.pdf', '').replace('.docx', '').replace('.txt', '')
+#         clean_file_name = re.sub(r'[^\w\-_\.]', '_', clean_file_name)
         
-        # Neo4j'ye kaydet (opsiyonel - mevcut extract endpoint mantığını kullanarak)
-        if uri and userName and password:
-            graph = create_graph_database_connection(uri, userName, password, database)
-            graph_db = graphDBdataAccess(graph)
-            # GraphDocument'ları Neo4j'ye kaydet
-            # Bu kısmı mevcut save işlemiyle entegre edebiliriz
+#         # Neo4j'ye kaydet (opsiyonel - mevcut extract endpoint mantığını kullanarak)
+#         if uri and userName and password:
+#             graph = create_graph_database_connection(uri, userName, password, database)
+#             graph_db = graphDBdataAccess(graph)
+#             # GraphDocument'ları Neo4j'ye kaydet
+#             # Bu kısmı mevcut save işlemiyle entegre edebiliriz
         
-        # newSchema.json formatında triplet'ler oluştur
-        triplets = []
-        unique_triplets = set()
+#         # newSchema.json formatında triplet'ler oluştur
+#         triplets = []
+#         unique_triplets = set()
         
-        for doc in graph_documents:
-            for rel in doc.relationships:
-                source_type = rel.source.type if hasattr(rel.source, 'type') else 'Unknown'
-                target_type = rel.target.type if hasattr(rel.target, 'type') else 'Unknown'
-                rel_type = rel.type
+#         for doc in graph_documents:
+#             for rel in doc.relationships:
+#                 source_type = rel.source.type if hasattr(rel.source, 'type') else 'Unknown'
+#                 target_type = rel.target.type if hasattr(rel.target, 'type') else 'Unknown'
+#                 rel_type = rel.type
                 
-                # İlişki tipini büyük harfe çevir ve alt çizgi ile ayır
-                formatted_rel_type = rel_type.upper().replace(' ', '_').replace('-', '_')
+#                 # İlişki tipini büyük harfe çevir ve alt çizgi ile ayır
+#                 formatted_rel_type = rel_type.upper().replace(' ', '_').replace('-', '_')
                 
-                # Triplet formatı: "SourceType-RELATION_TYPE->TargetType" (istenen format)
-                triplet = f"{source_type}-{formatted_rel_type}->{target_type}"
+#                 # Triplet formatı: "SourceType-RELATION_TYPE->TargetType" (istenen format)
+#                 triplet = f"{source_type}-{formatted_rel_type}->{target_type}"
                 
-                # Duplicate'ları önle
-                if triplet not in unique_triplets:
-                    triplets.append(triplet)
-                    unique_triplets.add(triplet)
+#                 # Duplicate'ları önle
+#                 if triplet not in unique_triplets:
+#                     triplets.append(triplet)
+#                     unique_triplets.add(triplet)
         
-        # Node tiplerini ve relationship type'larını çıkar (schemas.json formatı için)
-        unique_labels = set()
-        unique_relationship_types = set()
+#         # Node tiplerini ve relationship type'larını çıkar (schemas.json formatı için)
+#         unique_labels = set()
+#         unique_relationship_types = set()
         
-        for doc in graph_documents:
-            # Node tiplerini topla
-            for node in doc.nodes:
-                if hasattr(node, 'type') and node.type:
-                    unique_labels.add(node.type)
+#         for doc in graph_documents:
+#             # Node tiplerini topla
+#             for node in doc.nodes:
+#                 if hasattr(node, 'type') and node.type:
+#                     unique_labels.add(node.type)
             
-            # Relationship tiplerini topla
-            for rel in doc.relationships:
-                if hasattr(rel, 'type') and rel.type:
-                    # İlişki tipini büyük harfe çevir ve format düzelt
-                    formatted_rel_type = rel.type.upper().replace(' ', '_').replace('-', '_')
-                    unique_relationship_types.add(formatted_rel_type)
+#             # Relationship tiplerini topla
+#             for rel in doc.relationships:
+#                 if hasattr(rel, 'type') and rel.type:
+#                     # İlişki tipini büyük harfe çevir ve format düzelt
+#                     formatted_rel_type = rel.type.upper().replace(' ', '_').replace('-', '_')
+#                     unique_relationship_types.add(formatted_rel_type)
         
-        # Frontend için schema formatında bilgiler oluştur
-        schema = {
-            "labels": sorted(list(unique_labels)),
-            "relationshipTypes": sorted(list(unique_relationship_types)),
-            "schema": clean_file_name
-        }
+#         # Frontend için schema formatında bilgiler oluştur
+#         schema = {
+#             "labels": sorted(list(unique_labels)),
+#             "relationshipTypes": sorted(list(unique_relationship_types)),
+#             "schema": clean_file_name
+#         }
         
-        # Şemayı kaydet
-        schema_data = {
-            'file_name': file_name,
-            'clean_file_name': clean_file_name,
-            'domain': domain,
-            'extraction_method': 'qa_based',
-            'model': model,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'entities_count': sum(len(doc.nodes) for doc in graph_documents),
-            'relationships_count': sum(len(doc.relationships) for doc in graph_documents),
-            'unique_entity_types': len(unique_labels),
-            'unique_relationship_types': len(unique_relationship_types),
-            'triplets_count': len(triplets),
-            'questions_used': questions_dict,
-            'schema': schema,  # Frontend için schema format
-            'triplets': triplets  # Triplet formatında ilişkiler
-        }
+#         # Şemayı kaydet
+#         schema_data = {
+#             'file_name': file_name,
+#             'clean_file_name': clean_file_name,
+#             'domain': domain,
+#             'extraction_method': 'qa_based',
+#             'model': model,
+#             'timestamp': datetime.now(timezone.utc).isoformat(),
+#             'entities_count': sum(len(doc.nodes) for doc in graph_documents),
+#             'relationships_count': sum(len(doc.relationships) for doc in graph_documents),
+#             'unique_entity_types': len(unique_labels),
+#             'unique_relationship_types': len(unique_relationship_types),
+#             'triplets_count': len(triplets),
+#             'questions_used': questions_dict,
+#             'schema': schema,  # Frontend için schema format
+#             'triplets': triplets  # Triplet formatında ilişkiler
+#         }
         
-        # Ana schema dosyasına kaydet (tüm detaylı bilgiler burada)
-        schema_file = f"qa_schemas/{clean_file_name}.json"
-        os.makedirs("qa_schemas", exist_ok=True)
-        with open(schema_file, 'w', encoding='utf-8') as f:
-            json.dump(schema_data, f, ensure_ascii=False, indent=2)
+#         # Ana schema dosyasına kaydet (tüm detaylı bilgiler burada)
+#         schema_file = f"qa_schemas/{clean_file_name}.json"
+#         os.makedirs("qa_schemas", exist_ok=True)
+#         with open(schema_file, 'w', encoding='utf-8') as f:
+#             json.dump(schema_data, f, ensure_ascii=False, indent=2)
         
-        logging.info(f"QA tabanlı extraction tamamlandı: {len(graph_documents)} GraphDocument oluşturuldu")
+#         logging.info(f"QA tabanlı extraction tamamlandı: {len(graph_documents)} GraphDocument oluşturuldu")
         
-        response_data = {
-            'graph_documents_count': len(graph_documents),
-            'total_entities': sum(len(doc.nodes) for doc in graph_documents),
-            'total_relationships': sum(len(doc.relationships) for doc in graph_documents),
-            'unique_entity_types': len(unique_labels),
-            'unique_relationship_types': len(unique_relationship_types),
-            'triplets_count': len(triplets),
-            'domain': domain,
-            'schema_file': schema_file,  # Ana detaylı schema dosyası
-            'extraction_method': 'qa_based',
-            'schema': schema,  # Frontend için schema format
-            'triplets': triplets  # Kolay kullanım için ayrıca triplet'leri de gönder
-        }
+#         response_data = {
+#             'graph_documents_count': len(graph_documents),
+#             'total_entities': sum(len(doc.nodes) for doc in graph_documents),
+#             'total_relationships': sum(len(doc.relationships) for doc in graph_documents),
+#             'unique_entity_types': len(unique_labels),
+#             'unique_relationship_types': len(unique_relationship_types),
+#             'triplets_count': len(triplets),
+#             'domain': domain,
+#             'schema_file': schema_file,  # Ana detaylı schema dosyası
+#             'extraction_method': 'qa_based',
+#             'schema': schema,  # Frontend için schema format
+#             'triplets': triplets  # Kolay kullanım için ayrıca triplet'leri de gönder
+#         }
         
-        return create_api_response('Success', data=response_data, file_name=file_name)
+#         return create_api_response('Success', data=response_data, file_name=file_name)
         
-    except Exception as e:
-        logging.error(f"QA tabanlı extraction hatası: {e}")
-        return create_api_response('Failed', message=str(e), file_name=file_name)
+#     except Exception as e:
+#         logging.error(f"QA tabanlı extraction hatası: {e}")
+#         return create_api_response('Failed', message=str(e), file_name=file_name)
 
-@app.post("/load_qa_schema")
-async def load_qa_schema(
-    schema_file=Form(),
-    email=Form(None)
-):
-    """
-    Kaydedilmiş QA tabanlı şemayı yükle
-    """
-    try:
-        if not os.path.exists(schema_file):
-            raise HTTPException(status_code=404, detail="Schema dosyası bulunamadı")
+# @app.post("/load_qa_schema")
+# async def load_qa_schema(
+#     schema_file=Form(),
+#     email=Form(None)
+# ):
+#     """
+#     Kaydedilmiş QA tabanlı şemayı yükle
+#     """
+#     try:
+#         if not os.path.exists(schema_file):
+#             raise HTTPException(status_code=404, detail="Schema dosyası bulunamadı")
         
-        with open(schema_file, 'r', encoding='utf-8') as f:
-            schema_data = json.load(f)
+#         with open(schema_file, 'r', encoding='utf-8') as f:
+#             schema_data = json.load(f)
         
-        return create_api_response('Success', data=schema_data)
+#         return create_api_response('Success', data=schema_data)
         
-    except Exception as e:
-        logging.error(f"Schema yükleme hatası: {e}")
-        return create_api_response('Failed', message=str(e))
+#     except Exception as e:
+#         logging.error(f"Schema yükleme hatası: {e}")
+#         return create_api_response('Failed', message=str(e))
 
 @app.get("/list_qa_schemas")
 async def list_qa_schemas():

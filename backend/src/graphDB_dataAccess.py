@@ -2197,6 +2197,47 @@ Belge İçeriği:
       * Büyük harfle yaz
     - ÖNEMLİ: Bu alan ZORUNLU! Policy türü varsa mutlaka ilişki tipi dön!
 
+14. POLICY_SPECIFIC_DETAILS (Poliçe Türü Özel Detayları):
+    - Poliçe türüne göre özel bilgileri çıkar:
+    
+    KASKO/TRAFİK POLİÇELERİ İÇİN:
+    - plateNumber: Plaka numarası (örn: "34ABC123")
+    - vehicleBrand: Araç markası (örn: "BMW", "Mercedes")
+    - vehicleModel: Araç modeli (örn: "X5", "C Class")
+    - modelYear: Model yılı (örn: 2020)
+    - engineSize: Motor hacmi (örn: "2.0", "1.6")
+    - vehicleValue: Araç değeri (sayı)
+    - chassisNumber: Şasi numarası (varsa)
+    
+    KONUT/DASK POLİÇELERİ İÇİN:
+    - buildingType: Yapı türü (örn: "Apartman", "Villa", "İş Merkezi")
+    - floorNumber: Kat numarası (sayı)
+    - totalFloors: Toplam kat sayısı (sayı)
+    - squareMeters: Metrekare (sayı)
+    - buildingAge: Bina yaşı (sayı)
+    - hasElevator: Asansör varlığı (true/false)
+    - constructionType: Yapı türü (örn: "Betonarme", "Çelik")
+    
+    İŞVEREN SORUMLULUK POLİÇELERİ İÇİN:
+    - employeeCount: Çalışan sayısı (sayı)
+    - workType: İş türü (örn: "Ofis", "İnşaat", "Üretim")
+    - riskLevel: Risk seviyesi (örn: "Düşük", "Orta", "Yüksek")
+    - hasFood: Gıda hizmeti var mı (true/false)
+    - workHours: Çalışma saatleri (örn: "08:00-18:00")
+    
+    SAĞLIK POLİÇELERİ İÇİN:
+    - inpatientLimit: Yatarak tedavi limiti (sayı)
+    - outpatientLimit: Ayakta tedavi limiti (sayı)
+    - internationalCoverage: Yurtdışı kapsamı (true/false)
+    - maternityBenefit: Doğum yardımı (true/false)
+    - dentalCoverage: Diş tedavisi kapsamı (true/false)
+
+15. DEDUCTIBLE_INFO (Muafiyet Bilgileri):
+    - deductibleAmount: Muafiyet tutarı (sayı)
+    - deductibleType: Muafiyet türü (örn: "Sabit", "Oransal")
+    - deductiblePercentage: Muafiyet oranı (varsa, %)
+    - deductibleDescription: Muafiyet açıklaması
+
 Kurallar:
 - SADECE belge içeriğinde açıkça belirtilen bilgileri çıkar
 - Emin olmadığın bilgileri UYDURMA
@@ -2261,6 +2302,24 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
     }},
     "policy_relationship": {{
         "relationship_type": "IS_KASKO_POLICY"  # Örnek: Policy türüne göre oluşturulan ilişki
+    }},
+    "policy_specific_details": {{
+        "plateNumber": "...",
+        "vehicleBrand": "...",
+        "vehicleModel": "...",
+        "modelYear": null,
+        "squareMeters": null,
+        "employeeCount": null,
+        "buildingType": "...",
+        "workType": "...",
+        "inpatientLimit": null,
+        "outpatientLimit": null
+    }},
+    "deductible_info": {{
+        "deductibleAmount": null,
+        "deductibleType": "...",
+        "deductiblePercentage": null,
+        "deductibleDescription": "..."
     }}
 }}
 """
@@ -2277,6 +2336,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     json_text = response_text[start_idx:end_idx]
                     entities_data = json.loads(json_text)
                     
+                    # OCR hatalarını düzelt ve filename'den fallback kullan
+                    entities_data = self._validate_and_fix_customer_name(entities_data, file_name)
+                    
                     logging.info(f"✅ LLM başarıyla kapsamlı varlık bilgilerini çıkardı ({len(document_content_for_llm)} karakter içerikten)")
                     return entities_data
                 else:
@@ -2290,6 +2352,142 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception as e:
             logging.error(f"Kapsamlı varlık çıkarma hatası: {e}")
             return {}
+
+    def _validate_and_fix_customer_name(self, entities_data: dict, file_name: str) -> dict:
+        """
+        OCR hatalarını düzeltir ve filename'den customer name fallback'i sağlar
+        """
+        try:
+            customer_data = entities_data.get('customer', {})
+            extracted_name = customer_data.get('name', '').strip()
+            
+            # Filename'den müşteri adını çıkar
+            filename_customer = self._extract_customer_name_from_filename(file_name)
+            
+            if extracted_name and filename_customer:
+                # Benzerlik hesapla
+                similarity = self._calculate_name_similarity_simple(extracted_name, filename_customer)
+                
+                # OCR hatalarını tespit et ve düzelt
+                if self._is_likely_ocr_error(extracted_name):
+                    logging.warning(f"🔧 OCR hatası tespit edildi: '{extracted_name}' -> '{filename_customer}' (filename'den)")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_fallback'
+                    entities_data['customer'] = customer_data
+                elif similarity >= 0.7:  # %70'den yüksekse filename'deki temiz halini kullan
+                    logging.info(f"🔧 İsim eşleşiyor, filename'deki temiz hali kullanılıyor: '{extracted_name}' -> '{filename_customer}' (benzerlik: {similarity:.2f})")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_preferred_clean'
+                    entities_data['customer'] = customer_data
+                elif similarity < 0.7:  # %70'den düşükse filename'i tercih et
+                    logging.warning(f"🔧 İsim uyumsuzluğu: '{extracted_name}' vs '{filename_customer}' (benzerlik: {similarity:.2f})")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_preferred'
+                    entities_data['customer'] = customer_data
+            elif filename_customer and not extracted_name:
+                # OCR hiç isim çıkaramamışsa filename'i kullan
+                logging.info(f"📝 Müşteri ismi OCR'dan çıkarılamadı, filename kullanılıyor: '{filename_customer}'")
+                entities_data['customer'] = {
+                    'name': filename_customer,
+                    'type': customer_data.get('type', 'Individual'),
+                    'source': 'filename_only'
+                }
+                
+            return entities_data
+            
+        except Exception as e:
+            logging.error(f"Customer name validation hatası: {e}")
+            return entities_data
+    
+    def _extract_customer_name_from_filename(self, file_name: str) -> str:
+        """
+        Dosya adından müşteri adını çıkarır
+        Örnek: "Satvet Çiftçi Barclay 14 D1 Dask_2020.pdf" -> "Satvet Çiftçi"
+        """
+        try:
+            import re
+            
+            # Dosya uzantısını kaldır
+            base_name = file_name.replace('.pdf', '').replace('.PDF', '')
+            
+            # Yaygın pattern'ler - müşteri adı genelde başta
+            patterns = [
+                # "Ad Soyad Konum/Proje Bilgi_Yıl" formatı - greedy kullanarak tam ismi yakala
+                r'^([A-ZÇĞIİÖŞÜa-zçğıiöşü\s]+)\s+(?:[A-Z0-9]+\s+|[A-ZÇĞIİÖŞÜa-zçğıiöşü]+\s+)*(?:Konut|Dask|Kasko|Trafik)',
+                # "Ad Soyad SomethingElse_Year" formatı - büyük harf/rakamdan önce dur
+                r'^([A-ZÇĞIİÖŞÜa-zçğıiöşü\s]+)\s+[A-Z0-9]',
+                # "Ad Soyad" başlangıcı (en az 2 kelime) - tam isme izin ver
+                r'^([A-ZÇĞIİÖŞÜ][a-zçğıiöşü]+(?:\s+[A-ZÇĞIİÖŞÜ][a-zçğıiöşü]+)+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.match(pattern, base_name, re.IGNORECASE)
+                if match:
+                    customer_name = match.group(1).strip()
+                    # Title case uygula (Türkçe karakterler için)
+                    customer_name = ' '.join(word.capitalize() for word in customer_name.split())
+                    logging.debug(f"Filename'den çıkarılan müşteri: '{customer_name}' (pattern: {pattern})")
+                    return customer_name
+                    
+            logging.debug(f"Filename'den müşteri adı çıkarılamadı: {file_name}")
+            return ""
+            
+        except Exception as e:
+            logging.error(f"Filename parse hatası: {e}")
+            return ""
+    
+    def _is_likely_ocr_error(self, name: str) -> bool:
+        """
+        İsmin OCR hatası içerip içermediğini kontrol eder
+        """
+        try:
+            # OCR hata belirtileri
+            ocr_error_patterns = [
+                r'[A-Z]{2,}.*[a-z].*[A-Z]',  # SATVET çtFTçi gibi karışık case
+                r'.*[çtFT].*',                # çtFT gibi anlamsız harf dizileri
+                r'.*[0-9].*',                 # İsimlerde rakam
+                r'^[A-Z]+\s+[a-z]+[A-Z]',    # WORD wordWORD pattern
+                r'.*[^a-zA-ZçğıiöşüÇĞIİÖŞÜ\s].*'  # Alfabe dışı karakterler
+            ]
+            
+            for pattern in ocr_error_patterns:
+                if re.match(pattern, name):
+                    return True
+                    
+            # Çok kısa/uzun isimler
+            words = name.split()
+            if len(words) < 2 or len(words) > 5:
+                return True
+                
+            # Her kelime en az 2 harf
+            for word in words:
+                if len(word.strip()) < 2:
+                    return True
+                    
+            return False
+            
+        except Exception:
+            return False
+    
+    def _calculate_name_similarity_simple(self, name1: str, name2: str) -> float:
+        """
+        İki isim arasında basit benzerlik hesaplar
+        """
+        try:
+            import difflib
+            
+            # Normalize et
+            norm1 = name1.lower().strip()
+            norm2 = name2.lower().strip()
+            
+            # Levenshtein similarity
+            return difflib.SequenceMatcher(None, norm1, norm2).ratio()
+            
+        except Exception:
+            return 0.0
 
     def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str):
         """
@@ -3585,7 +3783,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             logging.error(f"Chunk'lardan belge içeriği alma hatası ({file_name}): {e}")
             return ""
 
-    def _create_policy_type_relationship(self, policy_id: str, relationship_type: str, policy_type: str = ''):
+    def _create_policy_type_relationship(self, policy_id: str, relationship_type: str, policy_type: str = '', policy_details: dict = None, deductible_info: dict = None):
         """
         LLM'den gelen ilişki tipi ile Customer-Policy arasında dinamik ilişki kurar.
         
@@ -3621,25 +3819,53 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             # Customer-Policy arasında ilişki kurmak
             # Cypher'da dinamik ilişki adı için inline string kullanırız (parameterize edilemez)
             # Python f-string ile sorguyu oluşturuyoruz
+            
+            # Policy-specific details ve deductible bilgilerini prepare et
+            set_properties = []
+            query_params = {
+                "policy_id": policy_id,
+                "policy_type": policy_type,
+                "relationship_type": relationship_type
+            }
+            
+            # Temel properties
+            set_properties.extend([
+                "r.created_at = datetime()",
+                "r.policy_type = $policy_type",
+                "r.source = 'llm_extraction'", 
+                "r.llm_relationship_type = $relationship_type"
+            ])
+            
+            # Policy-specific details ekle
+            if policy_details:
+                for key, value in policy_details.items():
+                    if value is not None and value != "":
+                        param_name = f"detail_{key}"
+                        set_properties.append(f"r.{key} = ${param_name}")
+                        query_params[param_name] = value
+            
+            # Deductible info ekle
+            if deductible_info:
+                for key, value in deductible_info.items():
+                    if value is not None and value != "":
+                        param_name = f"deductible_{key}"
+                        set_properties.append(f"r.{key} = ${param_name}")
+                        query_params[param_name] = value
+            
+            set_clause = "SET " + ",\n                    ".join(set_properties)
+            
             query = f"""
                 MATCH (p:Policy {{id: $policy_id}})
                 WITH p
                 MATCH (p)<-[:HAS_POLICY]-(c:Customer)
                 MERGE (c)-[r:{relationship_name}]->(p)
-                SET r.created_at = datetime(),
-                    r.policy_type = $policy_type,
-                    r.source = 'llm_extraction',
-                    r.llm_relationship_type = $relationship_type
+                {set_clause}
                 RETURN r, type(r) as rel_type
             """
             
             logging.debug(f"📝 Cypher Query: {query[:100]}...")
             
-            result = self.graph.query(query, {
-                "policy_id": policy_id,
-                "policy_type": policy_type,
-                "relationship_type": relationship_type
-            }, session_params={"database": self.graph._database})
+            result = self.graph.query(query, query_params, session_params={"database": self.graph._database})
             
             if result:
                 logging.info(f"✅ LLM Policy ilişkisi oluşturuldu: {relationship_name} ({policy_type})")
