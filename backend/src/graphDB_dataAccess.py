@@ -1,6 +1,8 @@
 import logging
 import os
 import time
+import re
+import difflib
 from neo4j.exceptions import TransientError
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import create_gcs_bucket_folder_name_hashed, delete_uploaded_local_file, load_embedding_model
@@ -1153,6 +1155,10 @@ class graphDBdataAccess:
                 "policy_year": policy_year
             }, session_params={"database": self.graph._database})
             
+            # Duplicate customer'ları ve insurance company'leri birleştir (her dosya işleme sonrası)
+            self.merge_existing_duplicate_customers()
+            self.merge_existing_duplicate_insurance_companies()
+            
             logging.info(f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})")
             
         except Exception as e:
@@ -1235,14 +1241,23 @@ class graphDBdataAccess:
                 logging.info(f"Mevcut Customer ile ilişkiler oluşturuldu: {customer_name}")
                 return
             
-            # Customer node oluştur veya güncelle
+            # Customer node oluştur veya güncelle - case insensitive normalization ile
             create_customer_query = """
-                MERGE (c:Customer {name: $customer_name})
+                // Önce normalize edilmiş isimle eşleşen customer ara
+                OPTIONAL MATCH (existing:Customer)
+                WHERE apoc.text.clean(existing.name) = apoc.text.clean($customer_name)
+                
+                WITH existing, 
+                     CASE WHEN existing IS NULL THEN $customer_name ELSE existing.name END as final_name
+                
+                MERGE (c:Customer {name: final_name})
                 ON CREATE SET 
                     c.createdAt = datetime(),
-                    c.fullName = $customer_name
+                    c.fullName = final_name,
+                    c.normalizedName = apoc.text.clean($customer_name)
                 ON MATCH SET 
-                    c.updatedAt = datetime()
+                    c.updatedAt = datetime(),
+                    c.normalizedName = apoc.text.clean($customer_name)
                 RETURN c.name as customer_name
             """
             
@@ -2195,44 +2210,14 @@ Belge İçeriği:
       * Türkçe karakterleri İngilizceye çevir (İ→I, Ğ→G, Ü→U, Ö→O, Ş→S, Ç→C)
       * Boşluk ve özel karakterleri alt çizgi (_) ile değiştir
       * Büyük harfle yaz
+    - properties: İlişkide taşınacak poliçe türüne özel property'ler
+      * KASKO/TRAFİK POLİÇELERİ İÇİN: plateNumber, vehicleBrand, vehicleModel, modelYear, engineSize, vehicleValue, chassisNumber
+      * KONUT/DASK POLİÇELERİ İÇİN: buildingType, floorNumber, totalFloors, squareMeters, buildingAge, hasElevator, constructionType
+      * İŞVEREN SORUMLULUK İÇİN: employeeCount, workType, riskLevel, hasFood, workHours
+      * SAĞLIK POLİÇELERİ İÇİN: inpatientLimit, outpatientLimit, internationalCoverage, maternityBenefit, dentalCoverage
     - ÖNEMLİ: Bu alan ZORUNLU! Policy türü varsa mutlaka ilişki tipi dön!
 
-14. POLICY_SPECIFIC_DETAILS (Poliçe Türü Özel Detayları):
-    - Poliçe türüne göre özel bilgileri çıkar:
-    
-    KASKO/TRAFİK POLİÇELERİ İÇİN:
-    - plateNumber: Plaka numarası (örn: "34ABC123")
-    - vehicleBrand: Araç markası (örn: "BMW", "Mercedes")
-    - vehicleModel: Araç modeli (örn: "X5", "C Class")
-    - modelYear: Model yılı (örn: 2020)
-    - engineSize: Motor hacmi (örn: "2.0", "1.6")
-    - vehicleValue: Araç değeri (sayı)
-    - chassisNumber: Şasi numarası (varsa)
-    
-    KONUT/DASK POLİÇELERİ İÇİN:
-    - buildingType: Yapı türü (örn: "Apartman", "Villa", "İş Merkezi")
-    - floorNumber: Kat numarası (sayı)
-    - totalFloors: Toplam kat sayısı (sayı)
-    - squareMeters: Metrekare (sayı)
-    - buildingAge: Bina yaşı (sayı)
-    - hasElevator: Asansör varlığı (true/false)
-    - constructionType: Yapı türü (örn: "Betonarme", "Çelik")
-    
-    İŞVEREN SORUMLULUK POLİÇELERİ İÇİN:
-    - employeeCount: Çalışan sayısı (sayı)
-    - workType: İş türü (örn: "Ofis", "İnşaat", "Üretim")
-    - riskLevel: Risk seviyesi (örn: "Düşük", "Orta", "Yüksek")
-    - hasFood: Gıda hizmeti var mı (true/false)
-    - workHours: Çalışma saatleri (örn: "08:00-18:00")
-    
-    SAĞLIK POLİÇELERİ İÇİN:
-    - inpatientLimit: Yatarak tedavi limiti (sayı)
-    - outpatientLimit: Ayakta tedavi limiti (sayı)
-    - internationalCoverage: Yurtdışı kapsamı (true/false)
-    - maternityBenefit: Doğum yardımı (true/false)
-    - dentalCoverage: Diş tedavisi kapsamı (true/false)
-
-15. DEDUCTIBLE_INFO (Muafiyet Bilgileri):
+14. DEDUCTIBLE_INFO (Muafiyet Bilgileri):
     - deductibleAmount: Muafiyet tutarı (sayı)
     - deductibleType: Muafiyet türü (örn: "Sabit", "Oransal")
     - deductiblePercentage: Muafiyet oranı (varsa, %)
@@ -2301,19 +2286,19 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         "district": "..."
     }},
     "policy_relationship": {{
-        "relationship_type": "IS_KASKO_POLICY"  # Örnek: Policy türüne göre oluşturulan ilişki
-    }},
-    "policy_specific_details": {{
-        "plateNumber": "...",
-        "vehicleBrand": "...",
-        "vehicleModel": "...",
-        "modelYear": null,
-        "squareMeters": null,
-        "employeeCount": null,
-        "buildingType": "...",
-        "workType": "...",
-        "inpatientLimit": null,
-        "outpatientLimit": null
+        "relationship_type": "IS_KASKO_POLICY",  # Örnek: Policy türüne göre oluşturulan ilişki
+        "properties": {{
+            "plateNumber": "...",
+            "vehicleBrand": "...",
+            "vehicleModel": "...",
+            "modelYear": null,
+            "squareMeters": null,
+            "employeeCount": null,
+            "inpatientLimit": null,
+            "buildingType": "...",
+            "workType": "...",
+            "outpatientLimit": null
+        }}
     }},
     "deductible_info": {{
         "deductibleAmount": null,
@@ -2489,6 +2474,216 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception:
             return 0.0
 
+    def merge_existing_duplicate_customers(self):
+        """
+        Sistemde mevcut olan normalize edilmiş isme göre duplicate Customer node'larını birleştirir
+        """
+        try:
+            logging.info("🔍 Mevcut duplicate Customer node'ları kontrol ediliyor...")
+            
+            # Duplicate customer'ları bul
+            find_duplicates_query = """
+                MATCH (c:Customer)
+                WITH apoc.text.clean(c.name) as normalized_name, collect({
+                    name: c.name,
+                    element_id: elementId(c),
+                    created_at: c.createdAt
+                }) as customers
+                WHERE size(customers) > 1
+                RETURN normalized_name, 
+                       customers,
+                       size(customers) as duplicate_count
+                ORDER BY duplicate_count DESC
+            """
+            
+            duplicates_result = self.execute_query(find_duplicates_query)
+            
+            if not duplicates_result:
+                logging.info("✅ Duplicate Customer node'u bulunamadı")
+                return
+            
+            total_merged = 0
+            
+            for duplicate_group in duplicates_result:
+                normalized_name = duplicate_group['normalized_name']
+                customers = duplicate_group['customers']
+                
+                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(customers)} node")
+                
+                # En eski (veya en çok policy'si olan) customer'ı master olarak seç
+                customers_with_info = []
+                for customer in customers:
+                    policy_count_query = """
+                        MATCH (c) WHERE elementId(c) = $element_id
+                        RETURN c.name as name, 
+                               elementId(c) as element_id,
+                               c.createdAt as created_at,
+                               count { (c)-[:HAS_POLICY]->() } as policy_count
+                    """
+                    info_result = self.execute_query(policy_count_query, {
+                        "element_id": customer['element_id']
+                    })
+                    
+                    if info_result:
+                        customers_with_info.append(info_result[0])
+                
+                # Master'ı seç (en çok policy'si olan, eşitse en eski)
+                def get_timestamp(dt):
+                    if dt is None:
+                        return 0
+                    # Neo4j DateTime objesi için
+                    if hasattr(dt, 'to_native'):
+                        return dt.to_native().timestamp()
+                    # Python datetime objesi için
+                    elif hasattr(dt, 'timestamp'):
+                        return dt.timestamp()
+                    # String veya diğer formatlar için
+                    else:
+                        return 0
+                
+                master = max(customers_with_info, 
+                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
+                
+                duplicates_to_merge = [c for c in customers_with_info if c['element_id'] != master['element_id']]
+                
+                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
+                for dup in duplicates_to_merge:
+                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                
+                # APOC ile merge et
+                for duplicate in duplicates_to_merge:
+                    merge_query = """
+                        MATCH (master) WHERE elementId(master) = $master_id
+                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                        WITH [master, duplicate] as nodes
+                        CALL apoc.refactor.mergeNodes(nodes, 
+                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                        YIELD node
+                        RETURN node.name as merged_name
+                    """
+                    
+                    result = self.execute_query(merge_query, {
+                        "master_id": master['element_id'],
+                        "duplicate_id": duplicate['element_id']
+                    })
+                    
+                    if result:
+                        total_merged += 1
+                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+            
+            logging.info(f"🎉 Toplam {total_merged} duplicate Customer node birleştirildi")
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Duplicate customer merge hatası: {e}")
+            return 0
+
+    def merge_existing_duplicate_insurance_companies(self):
+        """
+        Sistemde mevcut olan normalize edilmiş isme göre duplicate InsuranceCompany node'larını birleştirir
+        """
+        try:
+            logging.info("🔍 Mevcut duplicate InsuranceCompany node'ları kontrol ediliyor...")
+            
+            # Duplicate insurance company'leri bul
+            find_duplicates_query = """
+                MATCH (ic:InsuranceCompany)
+                WITH apoc.text.clean(ic.name) as normalized_name, collect({
+                    name: ic.name,
+                    element_id: elementId(ic),
+                    created_at: ic.createdAt
+                }) as companies
+                WHERE size(companies) > 1
+                RETURN normalized_name, 
+                       companies,
+                       size(companies) as duplicate_count
+                ORDER BY duplicate_count DESC
+            """
+            
+            duplicates_result = self.execute_query(find_duplicates_query)
+            
+            if not duplicates_result:
+                logging.info("✅ Duplicate InsuranceCompany node'u bulunamadı")
+                return 0
+            
+            total_merged = 0
+            
+            for duplicate_group in duplicates_result:
+                normalized_name = duplicate_group['normalized_name']
+                companies = duplicate_group['companies']
+                
+                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(companies)} company node")
+                
+                # En eski (veya en çok policy'si olan) company'yi master olarak seç
+                companies_with_info = []
+                for company in companies:
+                    policy_count_query = """
+                        MATCH (ic) WHERE elementId(ic) = $element_id
+                        RETURN ic.name as name, 
+                               elementId(ic) as element_id,
+                               ic.createdAt as created_at,
+                               count { ()-[:ISSUED_BY]->(ic) } as policy_count
+                    """
+                    info_result = self.execute_query(policy_count_query, {
+                        "element_id": company['element_id']
+                    })
+                    
+                    if info_result:
+                        companies_with_info.append(info_result[0])
+                
+                # Master'ı seç (en çok policy'si olan, eşitse en eski)
+                def get_timestamp(dt):
+                    if dt is None:
+                        return 0
+                    # Neo4j DateTime objesi için
+                    if hasattr(dt, 'to_native'):
+                        return dt.to_native().timestamp()
+                    # Python datetime objesi için
+                    elif hasattr(dt, 'timestamp'):
+                        return dt.timestamp()
+                    # String veya diğer formatlar için
+                    else:
+                        return 0
+                
+                master = max(companies_with_info, 
+                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
+                
+                duplicates_to_merge = [c for c in companies_with_info if c['element_id'] != master['element_id']]
+                
+                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
+                for dup in duplicates_to_merge:
+                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                
+                # APOC ile merge et
+                for duplicate in duplicates_to_merge:
+                    merge_query = """
+                        MATCH (master) WHERE elementId(master) = $master_id
+                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                        WITH [master, duplicate] as nodes
+                        CALL apoc.refactor.mergeNodes(nodes, 
+                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                        YIELD node
+                        RETURN node.name as merged_name
+                    """
+                    
+                    result = self.execute_query(merge_query, {
+                        "master_id": master['element_id'],
+                        "duplicate_id": duplicate['element_id']
+                    })
+                    
+                    if result:
+                        total_merged += 1
+                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+            
+            logging.info(f"🎉 Toplam {total_merged} duplicate InsuranceCompany node birleştirildi")
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Duplicate insurance company merge hatası: {e}")
+            return 0
+
     def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str):
         """
         Çıkarılan varlık bilgilerinden Neo4j'de node ve ilişkiler oluşturur.
@@ -2520,9 +2715,10 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             # 2.5. Policy İlişki Türünü Oluştur (LLM'den gelen ilişki tipi ile - Customer bağlandıktan sonra)
             policy_relationship = entities_data.get('policy_relationship', {})
             relationship_type = policy_relationship.get('relationship_type', '')
+            relationship_properties = policy_relationship.get('properties', {})
             policy_type = policy_data.get('type', '')
             if relationship_type:
-                self._create_policy_type_relationship(policy_id, relationship_type, policy_type)
+                self._create_policy_type_relationship(policy_id, relationship_type, policy_type, relationship_properties)
             
             # 3. InsuranceCompany Node'u ve ilişkisini oluştur
             company_data = entities_data.get('insurance_company', {})
@@ -2578,6 +2774,43 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             
         except Exception as e:
             logging.error(f"Varlık node'ları oluşturma hatası: {e}")
+
+    def _create_policy_type_relationship(self, policy_id: str, relationship_type: str, policy_type: str, relationship_properties: dict = None):
+        """
+        Customer ile Policy arasında poliçe türüne özel ilişki oluşturur ve property'leri ekler
+        """
+        try:
+            if not relationship_type:
+                logging.warning(f"Relationship type boş, ilişki oluşturulamadı: {policy_id}")
+                return
+            
+            # Properties'i hazırla
+            properties = relationship_properties or {}
+            
+            # Null değerleri filtrele
+            filtered_properties = {k: v for k, v in properties.items() if v is not None and v != ""}
+            
+            # Dynamic relationship oluşturma query'si
+            create_relationship_query = f"""
+                MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy {{id: $policy_id}})
+                WITH c, p
+                CALL apoc.create.relationship(c, $relationship_type, $properties, p) YIELD rel
+                RETURN type(rel) as relationship_created, properties(rel) as rel_properties
+            """
+            
+            result = self.execute_query(create_relationship_query, {
+                "policy_id": policy_id,
+                "relationship_type": relationship_type,
+                "properties": filtered_properties
+            })
+            
+            if result:
+                logging.info(f"✅ Policy relationship oluşturuldu: {relationship_type}")
+                if filtered_properties:
+                    logging.info(f"   Properties: {list(filtered_properties.keys())}")
+            
+        except Exception as e:
+            logging.error(f"Policy relationship oluşturma hatası: {e}")
 
     def create_endorsement_entity(self, entities_data: dict, file_name: str, document_type: str = 'ENDORSEMENT'):
         """
@@ -3250,20 +3483,31 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             logging.error(f"Customer node oluşturma hatası: {e}")
 
     def _create_insurance_company_node(self, company_data: dict, policy_id: str):
-        """InsuranceCompany node'u oluşturur ve Policy ile ilişkilendirir"""
+        """InsuranceCompany node'u oluşturur ve Policy ile ilişkilendirir - case insensitive normalization ile"""
         try:
             company_name = company_data.get('name', '').strip()
             if not company_name:
                 return
             
+            # Case insensitive InsuranceCompany node oluşturma - Customer'daki gibi
             query = """
-                MERGE (ic:InsuranceCompany {name: $company_name})
+                // Önce normalize edilmiş isimle eşleşen company ara
+                OPTIONAL MATCH (existing:InsuranceCompany)
+                WHERE apoc.text.clean(existing.name) = apoc.text.clean($company_name)
+                
+                WITH existing, 
+                     CASE WHEN existing IS NULL THEN $company_name ELSE existing.name END as final_name
+                
+                MERGE (ic:InsuranceCompany {name: final_name})
                 ON CREATE SET 
                     ic.responsible_person = $responsible_person,
-                    ic.createdAt = datetime()
+                    ic.createdAt = datetime(),
+                    ic.fullName = final_name,
+                    ic.normalizedName = apoc.text.clean($company_name)
                 ON MATCH SET 
                     ic.updatedAt = datetime(),
-                    ic.responsible_person = $responsible_person
+                    ic.responsible_person = $responsible_person,
+                    ic.normalizedName = apoc.text.clean($company_name)
                 WITH ic
                 MATCH (p:Policy {id: $policy_id})
                 MERGE (p)-[r:ISSUED_BY]->(ic)
@@ -3272,13 +3516,15 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 RETURN ic.name as company_name
             """
             
-            self.graph.query(query, {
+            result = self.graph.query(query, {
                 "company_name": company_name,
                 "responsible_person": company_data.get('responsible_person', ''),
                 "policy_id": policy_id
             }, session_params={"database": self.graph._database})
             
-            logging.info(f"✅ InsuranceCompany node oluşturuldu: {company_name}")
+            if result:
+                final_company_name = result[0]['company_name']
+                logging.info(f"✅ InsuranceCompany node oluşturuldu/güncellendi: {final_company_name}")
             
         except Exception as e:
             logging.error(f"InsuranceCompany node oluşturma hatası: {e}")
