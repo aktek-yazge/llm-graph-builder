@@ -34,7 +34,10 @@ from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_google_vertexai import ChatVertexAI
 from langchain_groq import ChatGroq
 from langchain_anthropic import ChatAnthropic
-from langchain_fireworks import ChatFireworks
+try:
+    from langchain_fireworks import ChatFireworks
+except ImportError:
+    ChatFireworks = None
 from langchain_aws import ChatBedrock
 from langchain_community.chat_models import ChatOllama
 
@@ -371,7 +374,8 @@ def get_history_by_session_id(session_id, graph=None, write_access=False):
 
 def get_total_tokens(ai_response, llm):
     try:
-        if isinstance(llm, (ChatOpenAI, AzureChatOpenAI, ChatFireworks, ChatGroq)):
+        fireworks_types = (ChatFireworks,) if ChatFireworks is not None else ()
+        if isinstance(llm, (ChatOpenAI, AzureChatOpenAI, ChatGroq) + fireworks_types):
             total_tokens = ai_response.response_metadata.get('token_usage', {}).get('total_tokens', 0)
         
         elif isinstance(llm, ChatVertexAI):

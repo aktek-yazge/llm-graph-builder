@@ -10,7 +10,10 @@ from langchain_experimental.graph_transformers.diffbot import DiffbotGraphTransf
 # from langchain_experimental.graph_transformers import LLMGraphTransformer
 from src.graph_transformer.transformer import LLMGraphTransformer
 from langchain_anthropic import ChatAnthropic
-from langchain_fireworks import ChatFireworks
+try:
+    from langchain_fireworks import ChatFireworks
+except ImportError:
+    ChatFireworks = None
 from langchain_aws import ChatBedrock
 from langchain_community.chat_models import ChatOllama
 import boto3
@@ -117,6 +120,8 @@ def get_llm(model: str):
             )
 
         elif "fireworks" in model:
+            if ChatFireworks is None:
+                raise ImportError("langchain-fireworks package is not installed. Please install it to use Fireworks models.")
             model_name, api_key = env_value.split(",")
             llm = ChatFireworks(api_key=api_key, model=model_name)
 

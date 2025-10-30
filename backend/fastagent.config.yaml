@@ -35,7 +35,7 @@ mcp:
           '--transport',
           'stdio',
           '--db-url',
-          'bolt://3.76.55.209:7687',
+          'bolt://localhost:7687',
           '--username',
           'neo4j',
           '--password',
@@ -51,7 +51,7 @@ mcp:
       args: ['mcp-neo4j-memory@0.4.1']
       timeout: 300000 # 5 minutes
       env:
-        NEO4J_URI: 'bolt://3.76.55.209:7687'
+        NEO4J_URI: 'bolt://localhost:7687'
         NEO4J_USERNAME: 'neo4j'
         NEO4J_PASSWORD: 'qwerty5555'
 
@@ -62,5 +62,5 @@ mcp:
 
 otel:
   enabled: true
-  otlp_endpoint: 'http://host.docker.internal:4318/v1/traces'
+  otlp_endpoint: 'http://localhost:4318/v1/traces'
 

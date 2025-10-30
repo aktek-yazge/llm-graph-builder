@@ -19,9 +19,93 @@ from .utils import _truncate_string_to_tokens, _value_sanitize
 logger = logging.getLogger("mcp_neo4j_cypher")
 
 
+def _create_direct_schema_format(nodes_result, rels_result):
+    """
+    Doğrudan Cypher sorgu sonuçlarından minimal şema formatı oluşturur
+    """
+    lines = []
+    
+    # Tip kısaltmaları (property tahmin için)
+    type_mapping = {
+        "createdAt": "dt",
+        "updatedAt": "dt", 
+        "created_at": "dt",
+        "updated_at": "dt",
+        "amount": "float",
+        "count": "int",
+        "year": "int",
+        "month": "int"
+    }
+    
+    # Node'ları işle
+    nodes_section = []
+    for node_data in nodes_result:
+        node_name = node_data["nodeType"]
+        node_count = node_data["nodeCount"]
+        properties = node_data.get("properties", [])
+        
+        # İlk 6 property'yi kısa tip bilgisiyle al
+        props_with_types = []
+        for prop_name in properties[:6]:
+            # Basit tip tahmin
+            if prop_name in type_mapping:
+                prop_type = type_mapping[prop_name]
+            elif "id" in prop_name.lower():
+                prop_type = "str"
+            elif "name" in prop_name.lower():
+                prop_type = "str"
+            elif "address" in prop_name.lower():
+                prop_type = "str"
+            elif "content" in prop_name.lower():
+                prop_type = "str"
+            else:
+                prop_type = "str"  # default
+            
+            props_with_types.append(f"{prop_name}:{prop_type}")
+        
+        nodes_section.append(f"({node_name}:{node_count}){{{','.join(props_with_types)}}}")
+    
+    # Relationship'leri işle
+    relationships_section = []
+    for rel_data in rels_result:
+        rel_name = rel_data["relationshipType"]
+        from_node = rel_data["from_node"]
+        to_node = rel_data["to_node"]
+        rel_props = rel_data.get("rel_props", [])
+        
+        # Relationship properties (varsa ilk 3'ü)
+        rel_props_with_types = []
+        for prop_name in rel_props[:3]:
+            if prop_name in type_mapping:
+                prop_type = type_mapping[prop_name]
+            else:
+                prop_type = "str"  # default
+            rel_props_with_types.append(f"{prop_name}:{prop_type}")
+        
+        # Pattern oluştur
+        if rel_props_with_types:
+            pattern = f"({from_node})-[:{rel_name} {{{','.join(rel_props_with_types)}}}]->({to_node})"
+        else:
+            pattern = f"({from_node})-[:{rel_name}]->({to_node})"
+        
+        relationships_section.append(pattern)
+    
+    # Sonucu birleştir
+    if nodes_section:
+        lines.append("# NODES")
+        lines.extend(nodes_section)
+        
+    if relationships_section:
+        lines.append("")
+        lines.append("# RELATIONSHIPS")
+        lines.extend(relationships_section)
+    
+    return '\n'.join(lines)
+
+
 def _to_minimal_schema_format(schema_json):
     """
-    Neo4j şemasını minimal formata çevirir - simple_test.py'dan alınmıştır
+    Neo4j şemasını minimal formata çevirir - node'lar ve relationship pattern'lerini dahil eder
     """
     if isinstance(schema_json, str):
         schema = json.loads(schema_json)
@@ -41,7 +125,11 @@ def _to_minimal_schema_format(schema_json):
         "FLOAT": "float"
     }
     
-    # Tüm node'ları işle - şemadan otomatik çıkar
+    # Node'ları işle
+    nodes_section = []
+    unique_relationships = set()  # Duplicate'ları engellemek için
+    relationship_stats = {}  # Relationship istatistikleri için
+    
     for node_name, node_data in schema.items():
         if node_data.get("type") == "node":
             count = node_data.get("count", 0)
@@ -52,7 +140,68 @@ def _to_minimal_schema_format(schema_json):
                 prop_type = prop_info.get("type", "?")
                 short_type = type_mapping.get(prop_type, prop_type.lower()[:3])
                 props_with_types.append(f"{prop_name}:{short_type}")
-            lines.append(f"({node_name}:{count}){{{','.join(props_with_types)}}}")
+            nodes_section.append(f"({node_name}:{count}){{{','.join(props_with_types)}}}")
+            
+            # Relationship'leri işle - sadece OUT direction'ları al (duplicate'ları önler)
+            relationships = node_data.get("relationships", {})
+            for rel_name, rel_data in relationships.items():
+                direction = rel_data.get("direction", "OUT")
+                
+                # Sadece OUT direction'ları işle, IN'leri atla (çünkü başka node'da OUT olarak zaten var)
+                if direction != "OUT":
+                    continue
+                    
+                target_labels = rel_data.get("labels", [])
+                
+                # Relationship properties (varsa ilk 3'ü)
+                rel_props = rel_data.get("properties", {})
+                rel_props_with_types = []
+                for prop_name, prop_info in list(rel_props.items())[:3]:
+                    prop_type = prop_info.get("type", "?")
+                    short_type = type_mapping.get(prop_type, prop_type.lower()[:3])
+                    rel_props_with_types.append(f"{prop_name}:{short_type}")
+                
+                # Her target label için pattern oluştur
+                for target_label in target_labels:
+                    # APOC direction'ını doğrudan kullan (çevirme yok)
+                    if direction == "OUT":  # Node'dan target'a giden relationship
+                        if rel_props_with_types:
+                            pattern = f"({node_name})-[:{rel_name} {{{','.join(rel_props_with_types)}}}]->({target_label})"
+                        else:
+                            pattern = f"({node_name})-[:{rel_name}]->({target_label})"
+                    else:  # Target'dan node'a gelen relationship (IN)
+                        if rel_props_with_types:
+                            pattern = f"({target_label})-[:{rel_name} {{{','.join(rel_props_with_types)}}}]->({node_name})"
+                        else:
+                            pattern = f"({target_label})-[:{rel_name}]->({node_name})"
+                    
+                    # Sadece OUT direction'lı pattern'leri ekle
+                    unique_relationships.add(pattern)
+                    
+                    # İstatistik topla
+                    rel_key = f"{rel_name}"
+                    if rel_key not in relationship_stats:
+                        relationship_stats[rel_key] = set()
+                    if direction == "OUT":  # Node'dan target'a
+                        relationship_stats[rel_key].add(f"{node_name}->{target_label}")
+                    else:  # Target'dan node'a
+                        relationship_stats[rel_key].add(f"{target_label}->{node_name}")
+    
+    # Unique relationship'leri listeye çevir
+    relationships_section = list(unique_relationships)
+    
+    # Önce node'lar
+    if nodes_section:
+        lines.append("# NODES")
+        lines.extend(nodes_section)
+        
+    # Sonra relationship pattern'leri
+    if relationships_section:
+        lines.append("")
+        lines.append("# RELATIONSHIPS")
+        lines.extend(relationships_section)
+        
+
     
     return '\n'.join(lines)
 
@@ -152,11 +301,38 @@ def create_mcp_server(
     async def get_neo4j_schema() -> list[ToolResult]:
         """
         List all nodes, their attributes and their relationships to other nodes in the neo4j database.
-        This requires that the APOC plugin is installed and enabled.
+        Uses native Neo4j metadata functions instead of APOC.
         """
 
-        get_schema_query = """
-        CALL apoc.meta.schema();
+        # Node bilgilerini al
+        get_nodes_query = """
+        CALL db.labels() YIELD label
+        WITH collect(label) as labels
+        UNWIND labels as lbl
+        CALL {
+          WITH lbl
+          MATCH (n) WHERE lbl IN labels(n)
+          WITH count(n) as cnt, collect(properties(n))[0] as sample_props
+          RETURN cnt, keys(sample_props) as props
+        }
+        RETURN lbl as nodeType, cnt as nodeCount, props as properties
+        ORDER BY lbl
+        """
+        
+        # Relationship pattern'lerini al
+        get_rels_query = """
+        CALL db.relationshipTypes() YIELD relationshipType
+        CALL {
+          WITH relationshipType
+          MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
+          WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
+               collect(properties(r))[0] as sample_props, count(*) as cnt
+          ORDER BY cnt DESC
+          LIMIT 1
+          RETURN from_node, to_node, keys(sample_props) as rel_props
+        }
+        RETURN relationshipType, from_node, to_node, rel_props
+        ORDER BY relationshipType
         """
 
         def clean_schema(schema: dict) -> dict:
@@ -219,29 +395,31 @@ def create_mcp_server(
             return cleaned
 
         try:
-            results_json_str = await neo4j_driver.execute_query(
-                get_schema_query,
+            # Node bilgilerini al
+            nodes_result = await neo4j_driver.execute_query(
+                get_nodes_query,
+                routing_control=RoutingControl.READ,
+                database_=database,
+                result_transformer_=lambda r: r.data(),
+            )
+            
+            # Relationship bilgilerini al
+            rels_result = await neo4j_driver.execute_query(
+                get_rels_query,
                 routing_control=RoutingControl.READ,
                 database_=database,
                 result_transformer_=lambda r: r.data(),
             )
 
-            logger.debug(f"Read query returned {len(results_json_str)} rows")
+            logger.debug(f"Found {len(nodes_result)} nodes and {len(rels_result)} relationship types")
 
-            schema_clean = clean_schema(results_json_str[0].get("value"))
-
-            # Minimal format'a çevir
-            minimal_schema = _to_minimal_schema_format(schema_clean)
+            # Yeni format'a çevir
+            minimal_schema = _create_direct_schema_format(nodes_result, rels_result)
 
             return ToolResult(content=[TextContent(type="text", text=minimal_schema)])
 
         except ClientError as e:
-            if "Neo.ClientError.Procedure.ProcedureNotFound" in str(e):
-                raise ToolError(
-                    "Neo4j Client Error: This instance of Neo4j does not have the APOC plugin installed. Please install and enable the APOC plugin to use the `get_neo4j_schema` tool."
-                )
-            else:
-                raise ToolError(f"Neo4j Client Error: {e}")
+            raise ToolError(f"Neo4j Client Error: {e}")
 
         except Neo4jError as e:
             raise ToolError(f"Neo4j Error: {e}")

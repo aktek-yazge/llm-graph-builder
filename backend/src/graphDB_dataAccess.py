@@ -1072,7 +1072,7 @@ class graphDBdataAccess:
         node_query = """
                     CALL db.labels() YIELD label
                     WITH label
-                    WHERE NOT label IN ['Document', 'Chunk', '_Bloom_Perspective_', '__Community__', '__Entity__']
+                    WHERE NOT label IN ['_Bloom_Perspective_', '__Community__', '__Entity__', 'Session', 'Message']
                     CALL apoc.cypher.run("MATCH (n:`" + label + "`) RETURN count(n) AS count",{}) YIELD value
                     WHERE value.count > 0
                     RETURN label order by label
@@ -1080,7 +1080,7 @@ class graphDBdataAccess:
 
         relation_query = """
                 CALL db.relationshipTypes() yield relationshipType
-                WHERE NOT relationshipType  IN ['PART_OF', 'NEXT_CHUNK', 'HAS_ENTITY', '_Bloom_Perspective_','FIRST_CHUNK','SIMILAR','IN_COMMUNITY','PARENT_COMMUNITY'] 
+                WHERE NOT relationshipType  IN ['HAS_ENTITY', '_Bloom_Perspective_','SIMILAR','IN_COMMUNITY','PARENT_COMMUNITY', 'LAST_MESSAGE', 'NEXT'] 
                 return relationshipType order by relationshipType
                 """
             
@@ -1155,9 +1155,10 @@ class graphDBdataAccess:
                 "policy_year": policy_year
             }, session_params={"database": self.graph._database})
             
-            # Duplicate customer'ları ve insurance company'leri birleştir (her dosya işleme sonrası)
+            # Duplicate customer'ları, insurance company'leri ve coverage type'ları birleştir (her dosya işleme sonrası)
             self.merge_existing_duplicate_customers()
             self.merge_existing_duplicate_insurance_companies()
+            self.merge_existing_duplicate_coverage_types()
             
             logging.info(f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})")
             
@@ -2340,46 +2341,51 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
     def _validate_and_fix_customer_name(self, entities_data: dict, file_name: str) -> dict:
         """
-        OCR hatalarını düzeltir ve filename'den customer name fallback'i sağlar
+        LLM extraction'ı öncelikli kullanır, hatalı/eksikse filename'den fallback yapar
         """
         try:
             customer_data = entities_data.get('customer', {})
             extracted_name = customer_data.get('name', '').strip()
             
-            # Filename'den müşteri adını çıkar
+            # Filename'den müşteri adını çıkar (fallback için)
             filename_customer = self._extract_customer_name_from_filename(file_name)
             
-            if extracted_name and filename_customer:
-                # Benzerlik hesapla
-                similarity = self._calculate_name_similarity_simple(extracted_name, filename_customer)
-                
-                # OCR hatalarını tespit et ve düzelt
-                if self._is_likely_ocr_error(extracted_name):
-                    logging.warning(f"🔧 OCR hatası tespit edildi: '{extracted_name}' -> '{filename_customer}' (filename'den)")
-                    customer_data['name'] = filename_customer
-                    customer_data['ocr_original'] = extracted_name
-                    customer_data['source'] = 'filename_fallback'
-                    entities_data['customer'] = customer_data
-                elif similarity >= 0.7:  # %70'den yüksekse filename'deki temiz halini kullan
-                    logging.info(f"🔧 İsim eşleşiyor, filename'deki temiz hali kullanılıyor: '{extracted_name}' -> '{filename_customer}' (benzerlik: {similarity:.2f})")
-                    customer_data['name'] = filename_customer
-                    customer_data['ocr_original'] = extracted_name
-                    customer_data['source'] = 'filename_preferred_clean'
-                    entities_data['customer'] = customer_data
-                elif similarity < 0.7:  # %70'den düşükse filename'i tercih et
-                    logging.warning(f"🔧 İsim uyumsuzluğu: '{extracted_name}' vs '{filename_customer}' (benzerlik: {similarity:.2f})")
-                    customer_data['name'] = filename_customer
-                    customer_data['ocr_original'] = extracted_name
-                    customer_data['source'] = 'filename_preferred'
-                    entities_data['customer'] = customer_data
-            elif filename_customer and not extracted_name:
-                # OCR hiç isim çıkaramamışsa filename'i kullan
-                logging.info(f"📝 Müşteri ismi OCR'dan çıkarılamadı, filename kullanılıyor: '{filename_customer}'")
+            # 1. LLM başarıyla çıkardıysa ve temizse, LLM'i kullan
+            if extracted_name and not self._is_likely_ocr_error(extracted_name):
+                logging.info(f"✅ LLM'den temiz müşteri ismi alındı: '{extracted_name}'")
+                customer_data['source'] = 'llm_extraction'
+                entities_data['customer'] = customer_data
+                return entities_data
+            
+            # 2. LLM OCR hatası yapmışsa ve filename var ise filename'i kullan
+            if extracted_name and self._is_likely_ocr_error(extracted_name) and filename_customer:
+                logging.warning(f"🔧 LLM OCR hatası yaptı: '{extracted_name}' -> '{filename_customer}' (filename'den)")
+                customer_data['name'] = filename_customer
+                customer_data['ocr_original'] = extracted_name
+                customer_data['source'] = 'filename_fallback_ocr_error'
+                entities_data['customer'] = customer_data
+                return entities_data
+            
+            # 3. LLM ismi bulamadıysa filename'den al
+            elif not extracted_name and filename_customer:
+                logging.info(f"📝 LLM müşteri ismi çıkaramadı, filename kullanılıyor: '{filename_customer}'")
                 entities_data['customer'] = {
                     'name': filename_customer,
                     'type': customer_data.get('type', 'Individual'),
-                    'source': 'filename_only'
+                    'source': 'filename_fallback_no_llm'
                 }
+            
+            # 4. Her ikisi de başarısızsa LLM'deki hatalı ismi kullan (son çare)
+            elif extracted_name:
+                logging.warning(f"⚠️ LLM hatalı isim çıkardı ve filename'de isim yok, LLM'deki kullanılacak: '{extracted_name}'")
+                customer_data['source'] = 'llm_error_last_resort'
+                entities_data['customer'] = customer_data
+            
+            # 5. Hiç isim yoksa boş bırak
+            else:
+                logging.error(f"❌ Hem LLM hem filename'den müşteri ismi çıkarılamadı: {file_name}")
+                customer_data['source'] = 'extraction_failed'
+                entities_data['customer'] = customer_data
                 
             return entities_data
             
@@ -2474,103 +2480,153 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception:
             return 0.0
 
+
+
     def merge_existing_duplicate_customers(self):
         """
-        Sistemde mevcut olan normalize edilmiş isme göre duplicate Customer node'larını birleştirir
+        Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate Customer node'larını birleştirir
+        
+        Similarity kriterleri (EN YÜKSEK SKORLU - en sıkı kriterler):
+        1. Normalize edilmiş isimler tamamen eşit
+        2. Text edit distance <= 1 (sadece minimal yazım farkları)
+        3. Bir isim diğerinin substring'i (contains ilişkisi - minimum 6 karakter)
+        4. Jaro-Winkler similarity >= 0.95 (çok yüksek benzerlik threshold'u)
         """
         try:
-            logging.info("🔍 Mevcut duplicate Customer node'ları kontrol ediliyor...")
+            logging.info("🔍 Mevcut duplicate Customer node'ları text similarity ile kontrol ediliyor...")
             
-            # Duplicate customer'ları bul
+            # Text similarity parametreleri - customer için EN SIKICI kriterler
+            import os
+            max_edit_distance = int(os.environ.get('CUSTOMER_EDIT_DISTANCE', '1'))
+            min_jaro_similarity = float(os.environ.get('CUSTOMER_JARO_SIMILARITY', '0.95'))
+            min_substring_length = int(os.environ.get('CUSTOMER_MIN_SUBSTRING_LENGTH', '6'))
+            
+            logging.info(f"📊 Customer similarity parametreleri (EN YÜKSEK SKORLU):")
+            logging.info(f"   - Max edit distance: {max_edit_distance} (EN SIKI)")
+            logging.info(f"   - Min Jaro-Winkler similarity: {min_jaro_similarity} (EN YÜKSEK)")
+            logging.info(f"   - Min substring length: {min_substring_length} (EN UZUN)")
+            
+            # Duplicate customer'ları text similarity ile bul
             find_duplicates_query = """
-                MATCH (c:Customer)
-                WITH apoc.text.clean(c.name) as normalized_name, collect({
-                    name: c.name,
-                    element_id: elementId(c),
-                    created_at: c.createdAt
-                }) as customers
-                WHERE size(customers) > 1
-                RETURN normalized_name, 
-                       customers,
-                       size(customers) as duplicate_count
-                ORDER BY duplicate_count DESC
+                MATCH (c1:Customer), (c2:Customer)
+                WHERE elementId(c1) < elementId(c2)
+                  AND (
+                    // 1. Normalize edilmiş isimler tamamen eşit
+                    apoc.text.clean(c1.name) = apoc.text.clean(c2.name)
+                    OR
+                    // 2. Text edit distance kontrolü (çok minimal yazım farkları)
+                    apoc.text.distance(toLower(c1.name), toLower(c2.name)) <= $max_edit_distance
+                    OR
+                    // 3. Substring kontrolü (bir isim diğerinin içinde - uzun minimum)
+                    (
+                      size(c1.name) >= $min_substring_length AND 
+                      size(c2.name) >= $min_substring_length AND
+                      (
+                        toLower(c2.name) CONTAINS toLower(c1.name) OR
+                        toLower(c1.name) CONTAINS toLower(c2.name)
+                      )
+                    )
+                    OR
+                    // 4. Jaro-Winkler similarity kontrolü (çok yüksek threshold)
+                    apoc.text.jaroWinklerDistance(toLower(c1.name), toLower(c2.name)) >= $min_jaro_similarity
+                  )
+                WITH c1, c2,
+                     apoc.text.clean(c1.name) = apoc.text.clean(c2.name) as normalized_equal,
+                     apoc.text.distance(toLower(c1.name), toLower(c2.name)) as edit_distance,
+                     apoc.text.jaroWinklerDistance(toLower(c1.name), toLower(c2.name)) as jaro_similarity,
+                     (toLower(c2.name) CONTAINS toLower(c1.name) OR toLower(c1.name) CONTAINS toLower(c2.name)) as is_substring
+                RETURN {
+                    c1: {
+                        name: c1.name,
+                        element_id: elementId(c1),
+                        policy_count: count { (c1)-[:HAS_POLICY]->() }
+                    },
+                    c2: {
+                        name: c2.name,
+                        element_id: elementId(c2),
+                        policy_count: count { (c2)-[:HAS_POLICY]->() }
+                    },
+                    similarity_info: {
+                        normalized_equal: normalized_equal,
+                        edit_distance: edit_distance,
+                        jaro_similarity: jaro_similarity,
+                        is_substring: is_substring
+                    }
+                } as duplicate_pair
+                ORDER BY duplicate_pair.similarity_info.normalized_equal DESC, 
+                         duplicate_pair.similarity_info.jaro_similarity DESC
             """
             
-            duplicates_result = self.execute_query(find_duplicates_query)
+            duplicates_result = self.execute_query(find_duplicates_query, {
+                "max_edit_distance": max_edit_distance,
+                "min_jaro_similarity": min_jaro_similarity,
+                "min_substring_length": min_substring_length
+            })
             
             if not duplicates_result:
-                logging.info("✅ Duplicate Customer node'u bulunamadı")
-                return
+                logging.info("✅ Text similarity ile duplicate Customer node'u bulunamadı")
+                return 0
             
             total_merged = 0
+            processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
             
-            for duplicate_group in duplicates_result:
-                normalized_name = duplicate_group['normalized_name']
-                customers = duplicate_group['customers']
+            logging.info(f"🎯 {len(duplicates_result)} duplicate customer çift bulundu")
+            
+            for record in duplicates_result:
+                duplicate_pair = record['duplicate_pair']
+                c1 = duplicate_pair['c1']
+                c2 = duplicate_pair['c2']
+                similarity_info = duplicate_pair['similarity_info']
                 
-                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(customers)} node")
+                # Bu çift daha önce işlendi mi kontrol et
+                pair_key = tuple(sorted([c1['element_id'], c2['element_id']]))
+                if pair_key in processed_pairs:
+                    continue
                 
-                # En eski (veya en çok policy'si olan) customer'ı master olarak seç
-                customers_with_info = []
-                for customer in customers:
-                    policy_count_query = """
-                        MATCH (c) WHERE elementId(c) = $element_id
-                        RETURN c.name as name, 
-                               elementId(c) as element_id,
-                               c.createdAt as created_at,
-                               count { (c)-[:HAS_POLICY]->() } as policy_count
-                    """
-                    info_result = self.execute_query(policy_count_query, {
-                        "element_id": customer['element_id']
-                    })
-                    
-                    if info_result:
-                        customers_with_info.append(info_result[0])
+                processed_pairs.add(pair_key)
                 
-                # Master'ı seç (en çok policy'si olan, eşitse en eski)
-                def get_timestamp(dt):
-                    if dt is None:
-                        return 0
-                    # Neo4j DateTime objesi için
-                    if hasattr(dt, 'to_native'):
-                        return dt.to_native().timestamp()
-                    # Python datetime objesi için
-                    elif hasattr(dt, 'timestamp'):
-                        return dt.timestamp()
-                    # String veya diğer formatlar için
+                # Master'ı seç (daha çok policy ile bağlantısı olan, eşitse daha uzun isimli)
+                if c1['policy_count'] > c2['policy_count']:
+                    master, duplicate = c1, c2
+                elif c2['policy_count'] > c1['policy_count']:
+                    master, duplicate = c2, c1
+                else:
+                    # Policy sayısı eşitse, daha uzun ve detaylı ismi olan master olsun
+                    if len(c1['name']) >= len(c2['name']):
+                        master, duplicate = c1, c2
                     else:
-                        return 0
+                        master, duplicate = c2, c1
                 
-                master = max(customers_with_info, 
-                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
-                
-                duplicates_to_merge = [c for c in customers_with_info if c['element_id'] != master['element_id']]
-                
-                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
-                for dup in duplicates_to_merge:
-                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                logging.info(f"🔧 Merge işlemi (YÜKSEK SKORLU):")
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
+                logging.info(f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
+                           f"Edit_dist={similarity_info['edit_distance']}, "
+                           f"Jaro={similarity_info['jaro_similarity']:.3f}, "
+                           f"Substring={similarity_info['is_substring']}")
                 
                 # APOC ile merge et
-                for duplicate in duplicates_to_merge:
-                    merge_query = """
-                        MATCH (master) WHERE elementId(master) = $master_id
-                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
-                        WITH [master, duplicate] as nodes
-                        CALL apoc.refactor.mergeNodes(nodes, 
-                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
-                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
-                        YIELD node
-                        RETURN node.name as merged_name
-                    """
-                    
-                    result = self.execute_query(merge_query, {
-                        "master_id": master['element_id'],
-                        "duplicate_id": duplicate['element_id']
-                    })
-                    
-                    if result:
-                        total_merged += 1
-                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name
+                """
+                
+                result = self.execute_query(merge_query, {
+                    "master_id": master['element_id'],
+                    "duplicate_id": duplicate['element_id']
+                })
+                
+                if result:
+                    total_merged += 1
+                    logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                else:
+                    logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
             
             logging.info(f"🎉 Toplam {total_merged} duplicate Customer node birleştirildi")
             return total_merged
@@ -2581,107 +2637,322 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
     def merge_existing_duplicate_insurance_companies(self):
         """
-        Sistemde mevcut olan normalize edilmiş isme göre duplicate InsuranceCompany node'larını birleştirir
+        Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate InsuranceCompany node'larını birleştirir
+        
+        Similarity kriterleri:
+        1. Normalize edilmiş isimler tamamen eşit
+        2. Text edit distance <= 2 (küçük yazım farkları, insurance company için daha sıkı)
+        3. Bir isim diğerinin substring'i (contains ilişkisi)
+        4. Jaro-Winkler similarity >= 0.90 (insurance company için daha yüksek threshold)
         """
         try:
-            logging.info("🔍 Mevcut duplicate InsuranceCompany node'ları kontrol ediliyor...")
+            logging.info("🔍 Mevcut duplicate InsuranceCompany node'ları text similarity ile kontrol ediliyor...")
             
-            # Duplicate insurance company'leri bul
+            # Text similarity parametreleri - insurance company için daha sıkı kriterler
+            import os
+            max_edit_distance = int(os.environ.get('INSURANCE_COMPANY_EDIT_DISTANCE', '2'))
+            min_jaro_similarity = float(os.environ.get('INSURANCE_COMPANY_JARO_SIMILARITY', '0.90'))
+            min_substring_length = int(os.environ.get('INSURANCE_COMPANY_MIN_SUBSTRING_LENGTH', '5'))
+            
+            logging.info(f"📊 Insurance Company similarity parametreleri:")
+            logging.info(f"   - Max edit distance: {max_edit_distance}")
+            logging.info(f"   - Min Jaro-Winkler similarity: {min_jaro_similarity}")
+            logging.info(f"   - Min substring length: {min_substring_length}")
+            
+            # Duplicate insurance company'leri text similarity ile bul
             find_duplicates_query = """
-                MATCH (ic:InsuranceCompany)
-                WITH apoc.text.clean(ic.name) as normalized_name, collect({
-                    name: ic.name,
-                    element_id: elementId(ic),
-                    created_at: ic.createdAt
-                }) as companies
-                WHERE size(companies) > 1
-                RETURN normalized_name, 
-                       companies,
-                       size(companies) as duplicate_count
-                ORDER BY duplicate_count DESC
+                MATCH (ic1:InsuranceCompany), (ic2:InsuranceCompany)
+                WHERE elementId(ic1) < elementId(ic2)
+                  AND (
+                    // 1. Normalize edilmiş isimler tamamen eşit
+                    apoc.text.clean(ic1.name) = apoc.text.clean(ic2.name)
+                    OR
+                    // 2. Text edit distance kontrolü (küçük yazım farkları)
+                    apoc.text.distance(toLower(ic1.name), toLower(ic2.name)) <= $max_edit_distance
+                    OR
+                    // 3. Substring kontrolü (bir isim diğerinin içinde)
+                    (
+                      size(ic1.name) >= $min_substring_length AND 
+                      size(ic2.name) >= $min_substring_length AND
+                      (
+                        toLower(ic2.name) CONTAINS toLower(ic1.name) OR
+                        toLower(ic1.name) CONTAINS toLower(ic2.name)
+                      )
+                    )
+                    OR
+                    // 4. Jaro-Winkler similarity kontrolü
+                    apoc.text.jaroWinklerDistance(toLower(ic1.name), toLower(ic2.name)) >= $min_jaro_similarity
+                  )
+                WITH ic1, ic2,
+                     apoc.text.clean(ic1.name) = apoc.text.clean(ic2.name) as normalized_equal,
+                     apoc.text.distance(toLower(ic1.name), toLower(ic2.name)) as edit_distance,
+                     apoc.text.jaroWinklerDistance(toLower(ic1.name), toLower(ic2.name)) as jaro_similarity,
+                     (toLower(ic2.name) CONTAINS toLower(ic1.name) OR toLower(ic1.name) CONTAINS toLower(ic2.name)) as is_substring
+                RETURN {
+                    ic1: {
+                        name: ic1.name,
+                        element_id: elementId(ic1),
+                        policy_count: count { ()-[:ISSUED_BY]->(ic1) }
+                    },
+                    ic2: {
+                        name: ic2.name,
+                        element_id: elementId(ic2),
+                        policy_count: count { ()-[:ISSUED_BY]->(ic2) }
+                    },
+                    similarity_info: {
+                        normalized_equal: normalized_equal,
+                        edit_distance: edit_distance,
+                        jaro_similarity: jaro_similarity,
+                        is_substring: is_substring
+                    }
+                } as duplicate_pair
+                ORDER BY duplicate_pair.similarity_info.normalized_equal DESC, 
+                         duplicate_pair.similarity_info.jaro_similarity DESC
             """
             
-            duplicates_result = self.execute_query(find_duplicates_query)
+            duplicates_result = self.execute_query(find_duplicates_query, {
+                "max_edit_distance": max_edit_distance,
+                "min_jaro_similarity": min_jaro_similarity,
+                "min_substring_length": min_substring_length
+            })
             
             if not duplicates_result:
-                logging.info("✅ Duplicate InsuranceCompany node'u bulunamadı")
+                logging.info("✅ Text similarity ile duplicate InsuranceCompany node'u bulunamadı")
                 return 0
             
             total_merged = 0
+            processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
             
-            for duplicate_group in duplicates_result:
-                normalized_name = duplicate_group['normalized_name']
-                companies = duplicate_group['companies']
+            logging.info(f"🎯 {len(duplicates_result)} duplicate company çift bulundu")
+            
+            for record in duplicates_result:
+                duplicate_pair = record['duplicate_pair']
+                ic1 = duplicate_pair['ic1']
+                ic2 = duplicate_pair['ic2']
+                similarity_info = duplicate_pair['similarity_info']
                 
-                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(companies)} company node")
+                # Bu çift daha önce işlendi mi kontrol et
+                pair_key = tuple(sorted([ic1['element_id'], ic2['element_id']]))
+                if pair_key in processed_pairs:
+                    continue
                 
-                # En eski (veya en çok policy'si olan) company'yi master olarak seç
-                companies_with_info = []
-                for company in companies:
-                    policy_count_query = """
-                        MATCH (ic) WHERE elementId(ic) = $element_id
-                        RETURN ic.name as name, 
-                               elementId(ic) as element_id,
-                               ic.createdAt as created_at,
-                               count { ()-[:ISSUED_BY]->(ic) } as policy_count
-                    """
-                    info_result = self.execute_query(policy_count_query, {
-                        "element_id": company['element_id']
-                    })
-                    
-                    if info_result:
-                        companies_with_info.append(info_result[0])
+                processed_pairs.add(pair_key)
                 
-                # Master'ı seç (en çok policy'si olan, eşitse en eski)
-                def get_timestamp(dt):
-                    if dt is None:
-                        return 0
-                    # Neo4j DateTime objesi için
-                    if hasattr(dt, 'to_native'):
-                        return dt.to_native().timestamp()
-                    # Python datetime objesi için
-                    elif hasattr(dt, 'timestamp'):
-                        return dt.timestamp()
-                    # String veya diğer formatlar için
+                # Master'ı seç (daha çok policy ile bağlantısı olan, eşitse daha uzun isimli)
+                if ic1['policy_count'] > ic2['policy_count']:
+                    master, duplicate = ic1, ic2
+                elif ic2['policy_count'] > ic1['policy_count']:
+                    master, duplicate = ic2, ic1
+                else:
+                    # Policy sayısı eşitse, daha uzun ve detaylı ismi olan master olsun
+                    if len(ic1['name']) >= len(ic2['name']):
+                        master, duplicate = ic1, ic2
                     else:
-                        return 0
+                        master, duplicate = ic2, ic1
                 
-                master = max(companies_with_info, 
-                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
-                
-                duplicates_to_merge = [c for c in companies_with_info if c['element_id'] != master['element_id']]
-                
-                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
-                for dup in duplicates_to_merge:
-                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                logging.info(f"🔧 Merge işlemi:")
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
+                logging.info(f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
+                           f"Edit_dist={similarity_info['edit_distance']}, "
+                           f"Jaro={similarity_info['jaro_similarity']:.3f}, "
+                           f"Substring={similarity_info['is_substring']}")
                 
                 # APOC ile merge et
-                for duplicate in duplicates_to_merge:
-                    merge_query = """
-                        MATCH (master) WHERE elementId(master) = $master_id
-                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
-                        WITH [master, duplicate] as nodes
-                        CALL apoc.refactor.mergeNodes(nodes, 
-                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
-                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
-                        YIELD node
-                        RETURN node.name as merged_name
-                    """
-                    
-                    result = self.execute_query(merge_query, {
-                        "master_id": master['element_id'],
-                        "duplicate_id": duplicate['element_id']
-                    })
-                    
-                    if result:
-                        total_merged += 1
-                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name
+                """
+                
+                result = self.execute_query(merge_query, {
+                    "master_id": master['element_id'],
+                    "duplicate_id": duplicate['element_id']
+                })
+                
+                if result:
+                    total_merged += 1
+                    logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                else:
+                    logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
             
             logging.info(f"🎉 Toplam {total_merged} duplicate InsuranceCompany node birleştirildi")
             return total_merged
             
         except Exception as e:
             logging.error(f"❌ Duplicate insurance company merge hatası: {e}")
+            return 0
+
+    def merge_existing_duplicate_coverage_types(self):
+        """
+        Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate CoverageType node'larını birleştirir
+        
+        Similarity kriterleri:
+        1. Normalize edilmiş isimler tamamen eşit
+        2. Text edit distance <= 3 (küçük yazım farkları)
+        3. Bir isim diğerinin substring'i (contains ilişkisi)
+        4. Jaro-Winkler similarity >= 0.85 (yakın benzerlik)
+        """
+        try:
+            logging.info("🔍 Mevcut duplicate CoverageType node'ları text similarity ile kontrol ediliyor...")
+            
+            # Text similarity parametreleri - coverage type için daha esnek kriterler
+            import os
+            max_edit_distance = int(os.environ.get('COVERAGE_TYPE_EDIT_DISTANCE', '8'))
+            min_jaro_similarity = float(os.environ.get('COVERAGE_TYPE_JARO_SIMILARITY', '0.70'))
+            min_substring_length = int(os.environ.get('COVERAGE_TYPE_MIN_SUBSTRING_LENGTH', '3'))
+            
+            logging.info(f"📊 Similarity parametreleri:")
+            logging.info(f"   - Max edit distance: {max_edit_distance}")
+            logging.info(f"   - Min Jaro-Winkler similarity: {min_jaro_similarity}")
+            logging.info(f"   - Min substring length: {min_substring_length}")
+            
+            # Duplicate coverage type'ları text similarity ile bul
+            find_duplicates_query = """
+                MATCH (ct1:CoverageType), (ct2:CoverageType)
+                WHERE elementId(ct1) < elementId(ct2)
+                WITH ct1, ct2,
+                     // Turkish character normalization için advanced cleaning
+                     apoc.text.clean(replace(replace(replace(replace(replace(replace(
+                         toLower(ct1.name), 'ı', 'i'), 'ğ', 'g'), 'ü', 'u'), 'ş', 's'), 'ö', 'o'), 'ç', 'c')) as clean1,
+                     apoc.text.clean(replace(replace(replace(replace(replace(replace(
+                         toLower(ct2.name), 'ı', 'i'), 'ğ', 'g'), 'ü', 'u'), 'ş', 's'), 'ö', 'o'), 'ç', 'c')) as clean2
+                WHERE (
+                    // 1. Advanced normalize edilmiş isimler tamamen eşit
+                    clean1 = clean2
+                    OR
+                    // 2. Text edit distance kontrolü (esnek threshold)
+                    apoc.text.distance(clean1, clean2) <= $max_edit_distance
+                    OR
+                    // 3. Substring kontrolü (bir isim diğerinin içinde - esnek)
+                    (
+                      size(clean1) >= $min_substring_length AND 
+                      size(clean2) >= $min_substring_length AND
+                      (
+                        clean2 CONTAINS clean1 OR
+                        clean1 CONTAINS clean2
+                      )
+                    )
+                    OR
+                    // 4. Jaro-Winkler similarity kontrolü (esnek threshold)
+                    apoc.text.jaroWinklerDistance(clean1, clean2) >= $min_jaro_similarity
+                    OR
+                    // 5. Kelime bazlı benzerlik (anahtar kelimeler aynı)
+                    (
+                      size([word IN split(clean1, ' ') WHERE word IN split(clean2, ' ') | word]) >= 2
+                      AND abs(size(split(clean1, ' ')) - size(split(clean2, ' '))) <= 2
+                    )
+                  )
+                WITH ct1, ct2, clean1, clean2,
+                     clean1 = clean2 as normalized_equal,
+                     apoc.text.distance(clean1, clean2) as edit_distance,
+                     apoc.text.jaroWinklerDistance(clean1, clean2) as jaro_similarity,
+                     (clean2 CONTAINS clean1 OR clean1 CONTAINS clean2) as is_substring,
+                     size([word IN split(clean1, ' ') WHERE word IN split(clean2, ' ') | word]) as common_words
+                RETURN {
+                    ct1: {
+                        name: ct1.name,
+                        element_id: elementId(ct1),
+                        policy_count: count { (ct1)-[:APPLIED_TO]->() }
+                    },
+                    ct2: {
+                        name: ct2.name,
+                        element_id: elementId(ct2),
+                        policy_count: count { (ct2)-[:APPLIED_TO]->() }
+                    },
+                    similarity_info: {
+                        normalized_equal: normalized_equal,
+                        edit_distance: edit_distance,
+                        jaro_similarity: jaro_similarity,
+                        is_substring: is_substring,
+                        common_words: common_words
+                    }
+                } as duplicate_pair
+                ORDER BY duplicate_pair.similarity_info.normalized_equal DESC, 
+                         duplicate_pair.similarity_info.jaro_similarity DESC
+            """
+            
+            duplicates_result = self.execute_query(find_duplicates_query, {
+                "max_edit_distance": max_edit_distance,
+                "min_jaro_similarity": min_jaro_similarity,
+                "min_substring_length": min_substring_length
+            })
+            
+            if not duplicates_result:
+                logging.info("✅ Text similarity ile duplicate CoverageType node'u bulunamadı")
+                return 0
+            
+            total_merged = 0
+            processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
+            
+            logging.info(f"🎯 {len(duplicates_result)} duplicate çift bulundu")
+            
+            for record in duplicates_result:
+                duplicate_pair = record['duplicate_pair']
+                ct1 = duplicate_pair['ct1']
+                ct2 = duplicate_pair['ct2']
+                similarity_info = duplicate_pair['similarity_info']
+                
+                # Bu çift daha önce işlendi mi kontrol et
+                pair_key = tuple(sorted([ct1['element_id'], ct2['element_id']]))
+                if pair_key in processed_pairs:
+                    continue
+                
+                processed_pairs.add(pair_key)
+                
+                # Master'ı seç (daha çok policy ile bağlantısı olan, eşitse daha uzun isimli)
+                if ct1['policy_count'] > ct2['policy_count']:
+                    master, duplicate = ct1, ct2
+                elif ct2['policy_count'] > ct1['policy_count']:
+                    master, duplicate = ct2, ct1
+                else:
+                    # Policy sayısı eşitse, daha uzun ve detaylı ismi olan master olsun
+                    if len(ct1['name']) >= len(ct2['name']):
+                        master, duplicate = ct1, ct2
+                    else:
+                        master, duplicate = ct2, ct1
+                
+                logging.info(f"🔧 Merge işlemi:")
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
+                logging.info(f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
+                           f"Edit_dist={similarity_info['edit_distance']}, "
+                           f"Jaro={similarity_info['jaro_similarity']:.3f}, "
+                           f"Substring={similarity_info['is_substring']}")
+                
+                # APOC ile merge et
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name
+                """
+                
+                result = self.execute_query(merge_query, {
+                    "master_id": master['element_id'],
+                    "duplicate_id": duplicate['element_id']
+                })
+                
+                if result:
+                    total_merged += 1
+                    logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                else:
+                    logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
+            
+            logging.info(f"🎉 Toplam {total_merged} duplicate CoverageType node birleştirildi")
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Duplicate coverage type merge hatası: {e}")
             return 0
 
     def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str):
@@ -2697,8 +2968,18 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 logging.warning(f"Boş varlık verisi: {file_name}")
                 return
             
-            # Policy node'u bul veya oluştur
-            policy_id = f"policy_{normalize_file_name(file_name).replace('.', '_')}"
+            # Policy ID'yi LLM'den gelen customer name ile oluştur (eğer var ise)
+            customer_data = entities_data.get('customer', {})
+            customer_name = customer_data.get('name', '').strip()
+            
+            if customer_name:
+                # Customer name'den safe ID oluştur
+                safe_customer_name = normalize_file_name(customer_name)
+                safe_file_base = normalize_file_name(os.path.splitext(file_name)[0])
+                policy_id = f"policy_{safe_customer_name}_{safe_file_base}".replace('.', '_')
+            else:
+                # Fallback: filename'den oluştur
+                policy_id = f"policy_{normalize_file_name(file_name).replace('.', '_')}"
             
             policy_data = entities_data.get('policy', {})
             if not policy_data.get('policyNumber'):
@@ -3994,20 +4275,20 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
     def _get_document_content_from_chunks(self, file_name: str) -> str:
         """
-        Veritabanından belgenin tüm Chunk'larını alır ve birleştirir.
+        Veritabanından belgenin Chunk'larını alır ve birleştirir.
         
         Args:
             file_name: Belge adı
             
         Returns:
-            str: Belgenin birleştirilmiş metni (ilk 10 Chunk ile sınırlı)
+            str: Belgenin birleştirilmiş metni (ilk 50 Chunk ile sınırlı - daha kapsamlı analiz için)
         """
         try:
             query = """
             MATCH (c:Chunk {fileName: $file_name})
             RETURN c.text as text, c.position as position
             ORDER BY c.position ASC
-            LIMIT 20
+            LIMIT 50
             """
             
             results = self.graph.query(query, {
