@@ -2782,6 +2782,241 @@ async def merge_duplicate_nodes(uri=Form(None), userName=Form(None), password=Fo
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
+
+@app.post("/merge_duplicate_entities")
+async def merge_duplicate_entities(
+    uri=Form(None), 
+    userName=Form(None), 
+    password=Form(None), 
+    database=Form(None), 
+    node_types=Form(default=["all"]),
+    email=Form(None)
+):
+    """
+    Seçilen node türlerine göre duplicate merge işlemi yapar.
+    
+    Args:
+        node_types: Merge yapılacak node türleri. 
+                   Seçenekler: ["customers"], ["insurance_companies"], ["coverage_types"], ["all"]
+                   Birden fazla da seçilebilir: ["customers", "insurance_companies"]
+    """
+    try:
+        start = time.time()
+        
+        # Eğer userName, password, database boşsa environment'tan al
+        if not userName:
+            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+        if not password:
+            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+        if not database:
+            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
+        
+        # node_types parametresini işle
+        if isinstance(node_types, str):
+            if node_types.startswith('[') and node_types.endswith(']'):
+                # JSON string formatında geldiyse parse et
+                import json
+                node_types = json.loads(node_types)
+            else:
+                # Tek string geldiyse liste yap
+                node_types = [node_types]
+        
+        # Geçerli node türlerini kontrol et
+        valid_node_types = ['customers', 'insurance_companies', 'coverage_types', 'all']
+        if not all(nt in valid_node_types for nt in node_types):
+            invalid_types = [nt for nt in node_types if nt not in valid_node_types]
+            return create_api_response(
+                'Failed',
+                message=f"Geçersiz node türleri: {invalid_types}. Geçerli türler: {valid_node_types}",
+                error=f"Invalid node types: {invalid_types}"
+            )
+        
+        graph = create_graph_database_connection(uri, userName, password, database)
+        graphDb_data_Access = graphDBdataAccess(graph)
+        
+        # Selective merge işlemini çalıştır
+        result = graphDb_data_Access.merge_duplicate_entities_selective(node_types)
+        
+        end = time.time()
+        elapsed_time = end - start
+        
+        # Logging
+        json_obj = {
+            'api_name': 'merge_duplicate_entities',
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database,
+            'node_types': node_types,
+            'merge_results': result,
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        # Response mesajını oluştur
+        if result.get('error'):
+            return create_api_response(
+                'Failed', 
+                message="Duplicate merge işlemi sırasında hata oluştu",
+                error=result['error']
+            )
+        
+        total_merged = result.get('total_merged', 0)
+        details = []
+        for node_type, count in result.items():
+            if node_type != 'total_merged' and count > 0:
+                details.append(f"{node_type}: {count}")
+        
+        details_str = ", ".join(details) if details else "hiçbir duplicate bulunamadı"
+        message = f"Duplicate merge tamamlandı. Toplam {total_merged} node birleştirildi ({details_str})"
+        
+        return create_api_response(
+            'Success',
+            data=result,
+            message=message
+        )
+        
+    except Exception as e:
+        job_status = "Failed"
+        message = "Duplicate entities merge işlemi başarısız"
+        error_message = str(e)
+        logging.exception(f'Exception in merge duplicate entities: {error_message}')
+        return create_api_response(job_status, message=message, error=error_message)
+    finally:
+        gc.collect()
+
+@app.post("/create_embeddings")
+async def create_embeddings(
+    uri=Form(None),
+    userName=Form(None), 
+    password=Form(None),
+    database=Form(None),
+    file_names=Form(...),
+    email=Form(None)
+):
+    """
+    Belirtilen dosyalar için chunk embedding'leri oluşturur.
+    
+    Args:
+        file_names: Embedding oluşturulacak dosya adları (JSON string formatında liste)
+    """
+    try:
+        start = time.time()
+        
+        # Eğer userName, password, database boşsa environment'tan al
+        if not userName:
+            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+        if not password:
+            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+        if not database:
+            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
+        
+        # file_names parametresini işle
+        if isinstance(file_names, str):
+            if file_names.startswith('[') and file_names.endswith(']'):
+                # JSON string formatında geldiyse parse et
+                import json
+                file_names = json.loads(file_names)
+            else:
+                # Tek string geldiyse liste yap
+                file_names = [file_names]
+        
+        if not file_names or len(file_names) == 0:
+            return create_api_response(
+                'Failed',
+                message="En az bir dosya adı belirtilmelidir",
+                error="No file names provided"
+            )
+        
+        logging.info(f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}")
+        
+        graph = create_graph_database_connection(uri, userName, password, database)
+        graphDb_data_Access = graphDBdataAccess(graph)
+        
+        # Embedding oluşturma işlemini çalıştır
+        result = graphDb_data_Access.create_embeddings_for_documents(file_names)
+        
+        end = time.time()
+        elapsed_time = end - start
+        
+        # Logging
+        json_obj = {
+            'api_name': 'create_embeddings',
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database,
+            'file_names': file_names,
+            'embedding_results': {
+                'total_files': result.get('total_files', 0),
+                'total_chunks_processed': result.get('total_chunks_processed', 0),
+                'total_chunks_updated': result.get('total_chunks_updated', 0),
+                'embedding_model': result.get('embedding_model', ''),
+                'embedding_dimension': result.get('embedding_dimension', 0)
+            },
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        # Response mesajını oluştur
+        if result.get('error'):
+            return create_api_response(
+                'Failed', 
+                message="Embedding oluşturma işlemi sırasında hata oluştu",
+                error=result['error']
+            )
+        
+        total_files = result.get('total_files', 0)
+        total_chunks_updated = result.get('total_chunks_updated', 0)
+        embedding_model = result.get('embedding_model', 'Unknown')
+        
+        # Dosya bazında sonuçları özetle
+        success_files = []
+        failed_files = []
+        skipped_files = []
+        
+        for file_name, file_result in result.get('files', {}).items():
+            status = file_result.get('status', 'unknown')
+            if status == 'success':
+                success_files.append(f"{file_name} ({file_result.get('chunks_updated', 0)} chunk)")
+            elif status == 'error':
+                failed_files.append(f"{file_name} ({file_result.get('message', 'Bilinmeyen hata')})")
+            elif status == 'skipped':
+                skipped_files.append(f"{file_name} (zaten embedding'e sahip)")
+        
+        # Sonuç mesajını oluştur
+        message_parts = []
+        if success_files:
+            message_parts.append(f"✅ Başarılı: {len(success_files)} dosya")
+        if skipped_files:
+            message_parts.append(f"⏭️ Atlandı: {len(skipped_files)} dosya")
+        if failed_files:
+            message_parts.append(f"❌ Başarısız: {len(failed_files)} dosya")
+        
+        if total_chunks_updated > 0:
+            main_message = f"Embedding oluşturma tamamlandı. Toplam {total_chunks_updated} chunk için embedding oluşturuldu ({embedding_model})"
+        else:
+            main_message = "Hiçbir chunk için yeni embedding oluşturulmadı"
+        
+        if message_parts:
+            main_message += f" - {', '.join(message_parts)}"
+        
+        return create_api_response(
+            'Success',
+            data=result,
+            message=main_message
+        )
+        
+    except Exception as e:
+        job_status = "Failed"
+        message = "Embedding oluşturma işlemi başarısız"
+        error_message = str(e)
+        logging.exception(f'Exception in create embeddings: {error_message}')
+        return create_api_response(job_status, message=message, error=error_message)
+    finally:
+        gc.collect()
         
 @app.post("/drop_create_vector_index")
 async def drop_create_vector_index(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), isVectorIndexExist=Form(),email=Form(None)):

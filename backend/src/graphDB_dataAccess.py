@@ -1155,15 +1155,207 @@ class graphDBdataAccess:
                 "policy_year": policy_year
             }, session_params={"database": self.graph._database})
             
-            # Duplicate customer'ları, insurance company'leri ve coverage type'ları birleştir (her dosya işleme sonrası)
-            self.merge_existing_duplicate_customers()
-            self.merge_existing_duplicate_insurance_companies()
-            self.merge_existing_duplicate_coverage_types()
+            # NOT: Duplicate merge işlemleri manuel olarak /merge_duplicate_entities endpoint'i ile yapılacak
+            # self.merge_existing_duplicate_customers()
+            # self.merge_existing_duplicate_insurance_companies()
+            # self.merge_existing_duplicate_coverage_types()
             
             logging.info(f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})")
             
         except Exception as e:
             logging.error(f"Policy/Endorsement node oluşturma hatası ({file_name}): {e}")
+
+    def create_embeddings_for_documents(self, file_names: list):
+        """
+        Belirtilen dosyalar için chunk embedding'leri oluşturur (manuel işlem)
+        
+        Bu fonksiyon:
+        1. Belirtilen dosyalara ait Chunk node'ları bulur
+        2. Embedding'i olmayan chunk'lar için embedding oluşturur
+        3. Vector index'i kontrol eder/oluşturur
+        4. KNN graph ilişkilerini günceller
+        
+        Args:
+            file_names: Embedding oluşturulacak dosya adları listesi
+            
+        Returns:
+            dict: İşlem sonuç raporu
+        """
+        try:
+            from src.shared.common_fn import load_embedding_model
+            from src.make_relationships import create_chunk_vector_index
+            
+            logging.info(f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}")
+            
+            total_processed = 0
+            total_updated = 0
+            results = {}
+            
+            # Embedding model yükle
+            embedding_model = os.getenv('EMBEDDING_MODEL', 'openai_text_embedding_3_small')
+            embeddings, dimension = load_embedding_model(embedding_model)
+            logging.info(f"🤖 Embedding model loaded: {embedding_model} (dimension: {dimension})")
+            
+            for file_name in file_names:
+                try:
+                    # Dosya adını normalize et
+                    from src.utf8_utils import normalize_file_name
+                    normalized_file_name = normalize_file_name(file_name)
+                    logging.info(f"📁 {file_name} için embedding işlemi başlıyor...")
+                    logging.info(f"🔄 Normalized file name: {normalized_file_name}")
+                    
+                    # Dosyaya ait embedding'i olmayan chunk'ları bul
+                    find_chunks_query = """
+                        MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
+                        WHERE c.embedding IS NULL
+                        RETURN c.id as chunk_id, c.text as chunk_text
+                        ORDER BY c.position
+                    """
+                    
+                    chunks_result = self.execute_query(find_chunks_query, {"file_name": normalized_file_name})
+                    
+                    logging.info(f"🔍 Query result for {normalized_file_name}: {len(chunks_result) if chunks_result else 0} chunks found")
+                    if chunks_result:
+                        logging.info(f"📋 First chunk sample: {chunks_result[0] if chunks_result else 'None'}")
+                    
+                    if not chunks_result:
+                        logging.info(f"✅ {normalized_file_name}: Tüm chunk'lar zaten embedding'e sahip veya chunk bulunamadı")
+                        results[file_name] = {
+                            "status": "skipped",
+                            "message": "Tüm chunk'lar zaten embedding'e sahip veya chunk bulunamadı",
+                            "chunks_processed": 0,
+                            "chunks_updated": 0
+                        }
+                        continue
+                    
+                    logging.info(f"📊 {normalized_file_name}: {len(chunks_result)} chunk için embedding oluşturulacak")
+                    
+                    # Batch halinde embedding oluştur
+                    batch_data = []
+                    chunks_processed = 0
+                    
+                    for chunk_info in chunks_result:
+                        try:
+                            chunk_id = chunk_info['chunk_id']
+                            chunk_text = chunk_info['chunk_text'] or ""
+                            
+                            if not chunk_text.strip():
+                                logging.warning(f"⚠️ Boş chunk atlandı: {chunk_id}")
+                                continue
+                            
+                            # Text normalization
+                            from src.utf8_utils import normalize_unicode_text
+                            normalized_text = normalize_unicode_text(chunk_text)
+                            
+                            # Embedding oluştur
+                            embedding_vector = embeddings.embed_query(normalized_text)
+                            
+                            batch_data.append({
+                                "chunk_id": chunk_id,
+                                "embedding": embedding_vector
+                            })
+                            
+                            chunks_processed += 1
+                            
+                            # Her 50 chunk'ta bir batch işle
+                            if len(batch_data) >= 50:
+                                updated_count = self._update_chunk_embeddings_batch(batch_data)
+                                total_updated += updated_count
+                                logging.info(f"📦 Batch işlendi: {len(batch_data)} chunk, {updated_count} güncellendi")
+                                batch_data = []
+                                
+                        except Exception as chunk_error:
+                            logging.error(f"❌ Chunk embedding hatası ({chunk_id}): {chunk_error}")
+                            continue
+                    
+                    # Kalan batch'i işle
+                    if batch_data:
+                        updated_count = self._update_chunk_embeddings_batch(batch_data)
+                        total_updated += updated_count
+                        logging.info(f"📦 Son batch işlendi: {len(batch_data)} chunk, {updated_count} güncellendi")
+                    
+                    total_processed += chunks_processed
+                    
+                    results[file_name] = {
+                        "status": "success",
+                        "message": f"{chunks_processed} chunk işlendi, {len(chunks_result)} embedding oluşturuldu",
+                        "chunks_processed": chunks_processed,
+                        "chunks_updated": len(chunks_result)
+                    }
+                    
+                    logging.info(f"✅ {normalized_file_name}: {chunks_processed} chunk için embedding oluşturuldu")
+                    
+                except Exception as file_error:
+                    logging.error(f"❌ {normalized_file_name} için embedding oluşturma hatası: {file_error}")
+                    results[file_name] = {
+                        "status": "error",
+                        "message": str(file_error),
+                        "chunks_processed": 0,
+                        "chunks_updated": 0
+                    }
+            
+            # Vector index'i kontrol et/oluştur
+            if total_updated > 0:
+                try:
+                    create_chunk_vector_index(self.graph)
+                    logging.info(f"✅ Vector index checked/updated")
+                    
+                    # KNN graph ilişkilerini güncelle
+                    self.update_KNN_graph()
+                    logging.info(f"✅ KNN graph relationships updated")
+                    
+                except Exception as index_error:
+                    logging.warning(f"⚠️ Vector index/KNN update warning: {index_error}")
+            
+            # Genel sonuç raporu
+            summary = {
+                "total_files": len(file_names),
+                "total_chunks_processed": total_processed,
+                "total_chunks_updated": total_updated,
+                "files": results,
+                "embedding_model": embedding_model,
+                "embedding_dimension": dimension
+            }
+            
+            logging.info(f"🎉 Embedding oluşturma tamamlandı: {total_processed} chunk işlendi, {total_updated} embedding oluşturuldu")
+            
+            return summary
+            
+        except Exception as e:
+            error_msg = f"Embedding oluşturma hatası: {e}"
+            logging.error(f"❌ {error_msg}")
+            return {
+                "total_files": len(file_names) if file_names else 0,
+                "total_chunks_processed": 0,
+                "total_chunks_updated": 0,
+                "error": error_msg,
+                "files": {}
+            }
+    
+    def _update_chunk_embeddings_batch(self, batch_data):
+        """
+        Chunk embedding'lerini batch halinde güncelle
+        
+        Args:
+            batch_data: [{"chunk_id": "...", "embedding": [...]}] formatında liste
+            
+        Returns:
+            int: Güncellenen chunk sayısı
+        """
+        try:
+            update_query = """
+                UNWIND $batch_data AS row
+                MATCH (c:Chunk {id: row.chunk_id})
+                SET c.embedding = row.embedding
+                RETURN count(c) as updated_count
+            """
+            
+            result = self.execute_query(update_query, {"batch_data": batch_data})
+            return result[0]['updated_count'] if result else 0
+            
+        except Exception as e:
+            logging.error(f"❌ Batch embedding update hatası: {e}")
+            return 0
 
     def _create_policy_related_nodes(self, policy_info: dict, policy_id: str, file_name: str):
         """
@@ -2927,6 +3119,58 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception as e:
             logging.error(f"❌ Duplicate coverage type merge hatası: {e}")
             return 0
+
+    def merge_duplicate_entities_selective(self, node_types: list = None):
+        """
+        Seçilen node türlerine göre duplicate merge işlemi yapar.
+        
+        Args:
+            node_types (list): Merge yapılacak node türleri 
+                             ['customers', 'insurance_companies', 'coverage_types'] veya 'all'
+        
+        Returns:
+            dict: Her node türü için merge edilenerin sayısı
+        """
+        try:
+            if not node_types:
+                node_types = ['customers', 'insurance_companies', 'coverage_types']
+            elif node_types == ['all'] or 'all' in node_types:
+                node_types = ['customers', 'insurance_companies', 'coverage_types']
+            
+            results = {}
+            total_merged = 0
+            
+            logging.info(f"🔄 Selective duplicate merge başlatılıyor: {node_types}")
+            
+            if 'customers' in node_types:
+                logging.info("🔍 Customer duplicate merge işlemi...")
+                customers_merged = self.merge_existing_duplicate_customers()
+                results['customers'] = customers_merged
+                total_merged += customers_merged
+                logging.info(f"✅ {customers_merged} customer merge edildi")
+            
+            if 'insurance_companies' in node_types:
+                logging.info("🔍 Insurance Company duplicate merge işlemi...")
+                companies_merged = self.merge_existing_duplicate_insurance_companies()
+                results['insurance_companies'] = companies_merged
+                total_merged += companies_merged
+                logging.info(f"✅ {companies_merged} insurance company merge edildi")
+            
+            if 'coverage_types' in node_types:
+                logging.info("🔍 Coverage Type duplicate merge işlemi...")
+                coverage_merged = self.merge_existing_duplicate_coverage_types()
+                results['coverage_types'] = coverage_merged
+                total_merged += coverage_merged
+                logging.info(f"✅ {coverage_merged} coverage type merge edildi")
+            
+            results['total_merged'] = total_merged
+            logging.info(f"🎉 Selective merge tamamlandı. Toplam: {total_merged} node merge edildi")
+            
+            return results
+            
+        except Exception as e:
+            logging.error(f"❌ Selective duplicate merge hatası: {e}")
+            return {"error": str(e), "total_merged": 0}
 
     def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str):
         """

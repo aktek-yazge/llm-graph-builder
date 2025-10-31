@@ -1,61 +1,71 @@
-import { useEffect, useState, useMemo, useRef, Suspense, useReducer, useCallback, useContext } from 'react';
-import FileTable from './FileTable';
+import { useAuth0 } from '@auth0/auth0-react';
+import { tokens } from '@neo4j-ndl/base';
 import {
   Button,
-  Typography,
+  Checkbox,
   Flex,
-  StatusIndicator,
-  useMediaQuery,
   Menu,
   SpotlightTarget,
-  useSpotlightContext,
+  StatusIndicator,
   TextInput,
-  Checkbox,
+  Typography,
+  useMediaQuery,
+  useSpotlightContext,
 } from '@neo4j-ndl/react';
+import { ChevronDownIconOutline, ChevronUpIconOutline } from '@neo4j-ndl/react/icons';
+import axios from 'axios';
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
+import { ThemeWrapperContext } from '../context/ThemeWrapper';
 import { useCredentials } from '../context/UserCredentials';
+import { useMessageContext } from '../context/UserMessages';
 import { useFileContext } from '../context/UsersFiles';
-import { extractAPI } from '../utils/FileAPI';
-import { BannerAlertProps, ContentProps, CustomFile, OptionType, chunkdata, FileTableHandle } from '../types';
-import deleteAPI from '../services/DeleteFiles';
-import { postProcessing } from '../services/PostProcessing';
-import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
+import { useHasSelections } from '../hooks/useHasSelections';
 import useServerSideEvent from '../hooks/useSse';
+import deleteAPI from '../services/DeleteFiles';
+import { getChunkText } from '../services/getChunkText';
+import { postProcessing } from '../services/PostProcessing';
+import retry from '../services/Retry';
+import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
+import { BannerAlertProps, chunkdata, ContentProps, CustomFile, FileTableHandle, OptionType } from '../types';
 import {
   batchSize,
   buttonCaptions,
   chatModeLables,
+  chunkOverlap,
+  chunksToCombine,
   largeFileSize,
   llms,
   RETRY_OPIONS,
-  tooltips,
   tokenchunkSize,
-  chunkOverlap,
-  chunksToCombine,
+  tooltips,
 } from '../utils/Constants';
-import ButtonWithToolTip from './UI/ButtonWithToolTip';
+import { extractAPI } from '../utils/FileAPI';
+import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
+import { normalizeFileName } from '../utils/utf8';
+import { isExpired, isFileReadyToProcess } from '../utils/Utils';
 import DropdownComponent from './Dropdown';
+import FileTable from './FileTable';
+import CreateEmbeddingsModal from './Graph/CreateEmbeddingsModal';
 import GraphViewModal from './Graph/GraphViewModal';
-import { lazy } from 'react';
-import FallBackDialog from './UI/FallBackDialog';
+import MergeDuplicateEntitiesModal from './Graph/MergeDuplicateEntitiesModal';
+import ChunkPopUp from './Popups/ChunkPopUp';
 import DeletePopUp from './Popups/DeletePopUp/DeletePopUp';
 import GraphEnhancementDialog from './Popups/GraphEnhancementDialog';
-import { tokens } from '@neo4j-ndl/base';
-import axios from 'axios';
-import DatabaseStatusIcon from './UI/DatabaseStatusIcon';
-import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
-import retry from '../services/Retry';
-import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
-import { useMessageContext } from '../context/UserMessages';
 import PostProcessingToast from './Popups/GraphEnhancementDialog/PostProcessingCheckList/PostProcessingToast';
-import { getChunkText } from '../services/getChunkText';
-import ChunkPopUp from './Popups/ChunkPopUp';
-import { isExpired, isFileReadyToProcess } from '../utils/Utils';
-import { useHasSelections } from '../hooks/useHasSelections';
-import { ChevronUpIconOutline, ChevronDownIconOutline } from '@neo4j-ndl/react/icons';
-import { ThemeWrapperContext } from '../context/ThemeWrapper';
-import { useAuth0 } from '@auth0/auth0-react';
-import React from 'react';
-import { normalizeFileName } from '../utils/utf8';
+import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
+import ButtonWithToolTip from './UI/ButtonWithToolTip';
+import DatabaseStatusIcon from './UI/DatabaseStatusIcon';
+import FallBackDialog from './UI/FallBackDialog';
 
 const ConfirmationDialog = lazy(() => import('./Popups/LargeFilePopUp/ConfirmationDialog'));
 
@@ -92,6 +102,8 @@ const Content: React.FC<ContentProps> = ({
   const [totalPageCount, setTotalPageCount] = useState<number | null>(null);
   const [textChunks, setTextChunks] = useState<chunkdata[]>([]);
   const [isGraphBtnMenuOpen, setIsGraphBtnMenuOpen] = useState<boolean>(false);
+  const [openMergeDuplicateModal, setOpenMergeDuplicateModal] = useState<boolean>(false);
+  const [openCreateEmbeddingsModal, setOpenCreateEmbeddingsModal] = useState<boolean>(false);
   const graphbtnRef = useRef<HTMLDivElement>(null);
   const chunksTextAbortController = useRef<AbortController>();
   const { colorMode } = useContext(ThemeWrapperContext);
@@ -591,6 +603,22 @@ const Content: React.FC<ContentProps> = ({
     setViewPoint('showGraphView');
   };
 
+  const handleMergeDuplicateEntities = () => {
+    if (!connectionStatus) {
+      showErrorToast('Lütfen önce Neo4j veritabanına bağlanın');
+      return;
+    }
+    setOpenMergeDuplicateModal(true);
+  };
+
+  const handleCreateEmbeddings = () => {
+    if (!connectionStatus) {
+      showErrorToast('Lütfen önce Neo4j veritabanına bağlanın');
+      return;
+    }
+    setOpenCreateEmbeddingsModal(true);
+  };
+
   const disconnect = () => {
     queue.clear();
     const date = new Date();
@@ -925,6 +953,8 @@ const Content: React.FC<ContentProps> = ({
         viewPoint={viewPoint}
         selectedRows={childRef.current?.getSelectedRows()}
       />
+      <MergeDuplicateEntitiesModal open={openMergeDuplicateModal} onClose={() => setOpenMergeDuplicateModal(false)} />
+      <CreateEmbeddingsModal open={openCreateEmbeddingsModal} onClose={() => setOpenCreateEmbeddingsModal(false)} />
       <div className={`n-bg-palette-neutral-bg-default main-content-wrapper`}>
         <Flex
           className='w-full absolute top-0'
@@ -1130,6 +1160,16 @@ const Content: React.FC<ContentProps> = ({
                   title='Explore Graph'
                   onClick={handleOpenGraphClick}
                   isDisabled={!filesData.some((f) => f?.status === 'Completed')}
+                />
+                <Menu.Item
+                  title='Merge Duplicate Entities'
+                  onClick={handleMergeDuplicateEntities}
+                  isDisabled={!connectionStatus}
+                />
+                <Menu.Item
+                  title='Create Embeddings'
+                  onClick={handleCreateEmbeddings}
+                  isDisabled={!connectionStatus || filesData.length === 0}
                 />
               </Menu.Items>
             </Menu>

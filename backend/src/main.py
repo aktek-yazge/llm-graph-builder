@@ -1927,7 +1927,7 @@ def upload_file(
                         # Chunk node'ları veritabanına kaydet (extract-compatible format)
                         from src.make_relationships import create_chunks_for_upload
                         
-                        # generate_embedding kontrolü
+                        # generate_embedding kontrolü - varsayılan false (manuel embedding)
                         should_generate_embedding = generate_embedding and generate_embedding.lower() in ['true', '1', 'yes']
                         
                         chunkId_chunkDoc_list = create_chunks_for_upload(
@@ -1958,10 +1958,10 @@ def upload_file(
                             log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings")
                             logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings for: {originalname}")
                         else:
-                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes (embeddings will be generated during extract)")
+                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes (embeddings will be created manually)")
                             logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
-                            logging.info(f"ℹ️ Embedding oluşturma atlandı (generate_embedding={generate_embedding})")
-                            logging.info(f"📊 Embedding'ler extract işlemi sırasında kontrol edilecek")
+                            logging.info(f"ℹ️ Embedding oluşturma atlandı - manuel olarak /create_embeddings endpoint'i ile oluşturulacak")
+                            logging.info(f"📊 Embedding'leri manuel olarak oluşturmak için /create_embeddings endpoint'ini kullanın")
                         
                         logging.info(f"📊 Upload created chunks ready for extract processing")
                     else:
