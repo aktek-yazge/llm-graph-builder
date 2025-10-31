@@ -57,7 +57,7 @@ class graphDBdataAccess:
             logging.error(f"Error in updating document node status as failed: {error_message}")
             raise Exception(error_message)
         
-    def create_source_node(self, obj_source_node_or_filename, document_type: str = "auto", text_content: str = None):
+    def create_source_node(self, obj_source_node_or_filename, document_type: str = "auto", text_content: str = None, model: str = 'openai_gpt_4o_mini'):
         """
         Document node oluşturur. sourceNode objesi veya sadece file_name string'i alabilir.
         
@@ -203,7 +203,7 @@ class graphDBdataAccess:
             logging.info(f"Tam Document node oluşturuldu: {obj_source_node.file_name}")
             
             # Document yaratıldıktan sonra belge tipine göre node'unu yarat ve bağla
-            self._create_document_related_nodes(obj_source_node.file_name, document_type, text_content)
+            self._create_document_related_nodes(obj_source_node.file_name, document_type, text_content, model)
             
         except Exception as e:
             error_message = str(e)
@@ -212,7 +212,7 @@ class graphDBdataAccess:
                 self.update_exception_db(self, obj_source_node_or_filename.file_name, error_message)
             raise Exception(error_message)
 
-    def _create_document_related_nodes(self, file_name: str, document_type: str = "auto", text_content: str = None):
+    def _create_document_related_nodes(self, file_name: str, document_type: str = "auto", text_content: str = None, model: str = 'openai_gpt_4o_mini'):
         """
         Belge tipine göre uygun node'ları oluşturur (sadece Policy)
         
@@ -228,7 +228,7 @@ class graphDBdataAccess:
             
             # Policy node oluştur (CV seçeneği kaldırıldı)
             logging.info(f"📋 Policy node oluşturuluyor: {file_name}")
-            self.create_policy_node_from_document(file_name)
+            self.create_policy_node_from_document(file_name, model)
                 
         except Exception as e:
             logging.error(f"Document related nodes oluşturma hatası ({file_name}): {e}")
@@ -1094,7 +1094,7 @@ class graphDBdataAccess:
             print(f"Error in getting node labels/relationship types from db: {e}")
             return []
 
-    def create_policy_node_from_document(self, file_name: str):
+    def create_policy_node_from_document(self, file_name: str, model: str = 'openai_gpt_4o_mini'):
         """
         Belge içeriğinden LLM kullanarak kapsamlı poliçe/zeyilname bilgilerini çıkarır ve tüm ilgili node'ları oluşturur.
         
@@ -1112,7 +1112,7 @@ class graphDBdataAccess:
             document_content = self._get_document_content_from_chunks(file_name)
             
             # LLM ile kapsamlı varlık çıkarımı yap (belge içeriğini geçir)
-            entities_data = self.extract_comprehensive_policy_entities_with_llm(file_name, document_content)
+            entities_data = self.extract_comprehensive_policy_entities_with_llm(file_name, document_content, model)
             
             if not entities_data:
                 logging.warning(f"⚠️ {file_name} için varlık çıkarımı başarısız. Atlanıyor.")
@@ -1565,15 +1565,15 @@ class graphDBdataAccess:
             logging.error(error_msg)
             raise Exception(error_msg)
 
-    def _extract_policy_info_with_llm(self, file_name: str) -> dict:
+    def _extract_policy_info_with_llm(self, file_name: str, model: str = 'openai_gpt_4o_mini') -> dict:
         """
         LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
         """
         try:
             from src.llm import get_llm
             
-            # Sistem mevcut get_llm metodunu kullan
-            llm, _ = get_llm('openai_gpt_4o_mini')
+            # Upload endpoint'ten gelen model parametresini kullan
+            llm, _ = get_llm(model)
             
             # Prompt oluştur
             prompt = f"""
@@ -1688,7 +1688,7 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             logging.error(error_msg)
             raise Exception(error_msg)
 
-    def _extract_policy_info_from_image(self, image_path: str, file_name: str) -> dict:
+    def _extract_policy_info_from_image(self, image_path: str, file_name: str, model: str = 'openai_gpt_4o_mini') -> dict:
         """
         LLM kullanarak poliçe sayfa görselinden poliçe bilgilerini çıkarır.
         """
@@ -1699,8 +1699,8 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             import requests
             import urllib.parse
             
-            # Vision model kullan
-            llm, _ = get_llm('openai_gpt_4o_mini')
+            # Upload endpoint'ten gelen model parametresini kullan
+            llm, _ = get_llm(model)
             
             # Image'ı base64'e çevir
             image_base64 = None
@@ -2086,7 +2086,7 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             logging.error(f"❌ Zeyilname ana poliçe bağlantı hatası ({file_name}): {e}")
             return False
 
-    def extract_comprehensive_policy_entities_with_llm(self, file_name: str, document_content: str = "") -> dict:
+    def extract_comprehensive_policy_entities_with_llm(self, file_name: str, document_content: str = "", model: str = 'openai_gpt_4o_mini') -> dict:
         """
         LLM kullanarak poliçe belgesinden kapsamlı varlık bilgilerini çıkarır.
         
@@ -2107,15 +2107,17 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
         Args:
             file_name: Belge adı
             document_content: Belgenin metin içeriği (Chunk'lardan alınan)
+            model: Kullanılacak LLM modeli (upload endpoint'ten gelir)
         
         Returns:
             dict: Tüm çıkarılan varlıkları içeren dictionary
         """
+        logging.info(f"🤖 LLM Entity Extraction başlatılıyor - Model: {model}, Dosya: {file_name}")
         try:
             from src.llm import get_llm
             
-            # LLM'yi al
-            llm, _ = get_llm('openai_gpt_4o_mini')
+            # Upload endpoint'ten gelen model parametresini kullan
+            llm, _ = get_llm(model)
             
             # Belge içeriğini kullan (Chunk'lardan alınan tüm metni, optimize ediliyor)
             # Eğer çok uzunsa, otomatik olarak önemli bölümleri seçer
@@ -2350,23 +2352,14 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             # Filename'den müşteri adını çıkar (fallback için)
             filename_customer = self._extract_customer_name_from_filename(file_name)
             
-            # 1. LLM başarıyla çıkardıysa ve temizse, LLM'i kullan
-            if extracted_name and not self._is_likely_ocr_error(extracted_name):
-                logging.info(f"✅ LLM'den temiz müşteri ismi alındı: '{extracted_name}'")
+            # 1. LLM başarıyla çıkardıysa, LLM'i kullan (OCR kontrol kaldırıldı)
+            if extracted_name:
+                logging.info(f"✅ LLM'den müşteri ismi alındı: '{extracted_name}'")
                 customer_data['source'] = 'llm_extraction'
                 entities_data['customer'] = customer_data
                 return entities_data
             
-            # 2. LLM OCR hatası yapmışsa ve filename var ise filename'i kullan
-            if extracted_name and self._is_likely_ocr_error(extracted_name) and filename_customer:
-                logging.warning(f"🔧 LLM OCR hatası yaptı: '{extracted_name}' -> '{filename_customer}' (filename'den)")
-                customer_data['name'] = filename_customer
-                customer_data['ocr_original'] = extracted_name
-                customer_data['source'] = 'filename_fallback_ocr_error'
-                entities_data['customer'] = customer_data
-                return entities_data
-            
-            # 3. LLM ismi bulamadıysa filename'den al
+            # 2. LLM ismi bulamadıysa filename'den al
             elif not extracted_name and filename_customer:
                 logging.info(f"📝 LLM müşteri ismi çıkaramadı, filename kullanılıyor: '{filename_customer}'")
                 entities_data['customer'] = {
@@ -2375,13 +2368,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     'source': 'filename_fallback_no_llm'
                 }
             
-            # 4. Her ikisi de başarısızsa LLM'deki hatalı ismi kullan (son çare)
-            elif extracted_name:
-                logging.warning(f"⚠️ LLM hatalı isim çıkardı ve filename'de isim yok, LLM'deki kullanılacak: '{extracted_name}'")
-                customer_data['source'] = 'llm_error_last_resort'
-                entities_data['customer'] = customer_data
-            
-            # 5. Hiç isim yoksa boş bırak
+            # 3. Hiç isim yoksa boş bırak
             else:
                 logging.error(f"❌ Hem LLM hem filename'den müşteri ismi çıkarılamadı: {file_name}")
                 customer_data['source'] = 'extraction_failed'
@@ -2430,38 +2417,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             logging.error(f"Filename parse hatası: {e}")
             return ""
     
-    def _is_likely_ocr_error(self, name: str) -> bool:
-        """
-        İsmin OCR hatası içerip içermediğini kontrol eder
-        """
-        try:
-            # OCR hata belirtileri
-            ocr_error_patterns = [
-                r'[A-Z]{2,}.*[a-z].*[A-Z]',  # SATVET çtFTçi gibi karışık case
-                r'.*[çtFT].*',                # çtFT gibi anlamsız harf dizileri
-                r'.*[0-9].*',                 # İsimlerde rakam
-                r'^[A-Z]+\s+[a-z]+[A-Z]',    # WORD wordWORD pattern
-                r'.*[^a-zA-ZçğıiöşüÇĞIİÖŞÜ\s].*'  # Alfabe dışı karakterler
-            ]
-            
-            for pattern in ocr_error_patterns:
-                if re.match(pattern, name):
-                    return True
-                    
-            # Çok kısa/uzun isimler
-            words = name.split()
-            if len(words) < 2 or len(words) > 5:
-                return True
-                
-            # Her kelime en az 2 harf
-            for word in words:
-                if len(word.strip()) < 2:
-                    return True
-                    
-            return False
-            
-        except Exception:
-            return False
+
     
     def _calculate_name_similarity_simple(self, name1: str, name2: str) -> float:
         """
@@ -2801,16 +2757,18 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         try:
             logging.info("🔍 Mevcut duplicate CoverageType node'ları text similarity ile kontrol ediliyor...")
             
-            # Text similarity parametreleri - coverage type için daha esnek kriterler
+            # Text similarity parametreleri - coverage type için SIKI kriterler
             import os
-            max_edit_distance = int(os.environ.get('COVERAGE_TYPE_EDIT_DISTANCE', '8'))
-            min_jaro_similarity = float(os.environ.get('COVERAGE_TYPE_JARO_SIMILARITY', '0.70'))
-            min_substring_length = int(os.environ.get('COVERAGE_TYPE_MIN_SUBSTRING_LENGTH', '3'))
+            max_edit_distance = int(os.environ.get('COVERAGE_TYPE_EDIT_DISTANCE', '2'))  # Çok daha sıkı
+            min_jaro_similarity = float(os.environ.get('COVERAGE_TYPE_JARO_SIMILARITY', '0.95'))  # Çok yüksek benzerlik
+            min_substring_length = int(os.environ.get('COVERAGE_TYPE_MIN_SUBSTRING_LENGTH', '5'))  # Daha uzun substring
+            min_common_words = int(os.environ.get('COVERAGE_TYPE_MIN_COMMON_WORDS', '3'))  # Minimum 3 ortak kelime
             
-            logging.info(f"📊 Similarity parametreleri:")
-            logging.info(f"   - Max edit distance: {max_edit_distance}")
-            logging.info(f"   - Min Jaro-Winkler similarity: {min_jaro_similarity}")
+            logging.info(f"📊 Similarity parametreleri (SIKI):")
+            logging.info(f"   - Max edit distance: {max_edit_distance} (SIKI)")
+            logging.info(f"   - Min Jaro-Winkler similarity: {min_jaro_similarity} (ÇOK YÜKSEK)")
             logging.info(f"   - Min substring length: {min_substring_length}")
+            logging.info(f"   - Min common words: {min_common_words}")
             
             # Duplicate coverage type'ları text similarity ile bul
             find_duplicates_query = """
@@ -2823,29 +2781,32 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                      apoc.text.clean(replace(replace(replace(replace(replace(replace(
                          toLower(ct2.name), 'ı', 'i'), 'ğ', 'g'), 'ü', 'u'), 'ş', 's'), 'ö', 'o'), 'ç', 'c')) as clean2
                 WHERE (
-                    // 1. Advanced normalize edilmiş isimler tamamen eşit
+                    // 1. SADECE normalize edilmiş isimler tamamen eşit (en güvenli)
                     clean1 = clean2
                     OR
-                    // 2. Text edit distance kontrolü (esnek threshold)
-                    apoc.text.distance(clean1, clean2) <= $max_edit_distance
+                    // 2. ÇOK SIKI edit distance + yüksek Jaro kombinasyonu
+                    (
+                        apoc.text.distance(clean1, clean2) <= $max_edit_distance
+                        AND apoc.text.jaroWinklerDistance(clean1, clean2) >= $min_jaro_similarity
+                        AND size(clean1) >= 4 AND size(clean2) >= 4  // Çok kısa isimler için koruma
+                    )
                     OR
-                    // 3. Substring kontrolü (bir isim diğerinin içinde - esnek)
+                    // 3. SADECE tam substring eşleşmesi (uzun isimler için)
                     (
                       size(clean1) >= $min_substring_length AND 
                       size(clean2) >= $min_substring_length AND
                       (
-                        clean2 CONTAINS clean1 OR
-                        clean1 CONTAINS clean2
+                        (clean2 CONTAINS clean1 AND size(clean1) >= 6) OR
+                        (clean1 CONTAINS clean2 AND size(clean2) >= 6)
                       )
+                      AND apoc.text.jaroWinklerDistance(clean1, clean2) >= 0.85  // Ek güvence
                     )
                     OR
-                    // 4. Jaro-Winkler similarity kontrolü (esnek threshold)
-                    apoc.text.jaroWinklerDistance(clean1, clean2) >= $min_jaro_similarity
-                    OR
-                    // 5. Kelime bazlı benzerlik (anahtar kelimeler aynı)
+                    // 4. ÇOK SIKI kelime bazlı benzerlik (aynı domain terimler)
                     (
-                      size([word IN split(clean1, ' ') WHERE word IN split(clean2, ' ') | word]) >= 2
-                      AND abs(size(split(clean1, ' ')) - size(split(clean2, ' '))) <= 2
+                      size([word IN split(clean1, ' ') WHERE word IN split(clean2, ' ') AND size(word) >= 3 | word]) >= $min_common_words
+                      AND abs(size(split(clean1, ' ')) - size(split(clean2, ' '))) <= 1  // Çok sıkı kelime sayısı farkı
+                      AND apoc.text.jaroWinklerDistance(clean1, clean2) >= 0.80  // Ek güvence
                     )
                   )
                 WITH ct1, ct2, clean1, clean2,
@@ -2880,11 +2841,12 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             duplicates_result = self.execute_query(find_duplicates_query, {
                 "max_edit_distance": max_edit_distance,
                 "min_jaro_similarity": min_jaro_similarity,
-                "min_substring_length": min_substring_length
+                "min_substring_length": min_substring_length,
+                "min_common_words": min_common_words
             })
             
             if not duplicates_result:
-                logging.info("✅ Text similarity ile duplicate CoverageType node'u bulunamadı")
+                logging.info("✅ SIKI kriterlerle duplicate CoverageType node'u bulunamadı")
                 return 0
             
             total_merged = 0
@@ -2917,13 +2879,23 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     else:
                         master, duplicate = ct2, ct1
                 
-                logging.info(f"🔧 Merge işlemi:")
+                # Merge işlemi öncesi ek validasyon - şüpheli merge'leri engelle
+                if (similarity_info['jaro_similarity'] < 0.8 and 
+                    not similarity_info['normalized_equal'] and
+                    similarity_info['edit_distance'] > 2 and
+                    similarity_info['common_words'] < 2):
+                    logging.warning(f"  ⚠️ Şüpheli CoverageType merge - atlaniyor: '{duplicate['name']}' -> '{master['name']}'")
+                    logging.warning(f"     Jaro={similarity_info['jaro_similarity']:.3f}, Edit={similarity_info['edit_distance']}, Common={similarity_info['common_words']}")
+                    continue
+                
+                logging.info(f"🔧 SIKI Kriterlerle CoverageType Merge:")
                 logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
                 logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
                 logging.info(f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
                            f"Edit_dist={similarity_info['edit_distance']}, "
                            f"Jaro={similarity_info['jaro_similarity']:.3f}, "
-                           f"Substring={similarity_info['is_substring']}")
+                           f"Substring={similarity_info['is_substring']}, "
+                           f"Common_words={similarity_info['common_words']}")
                 
                 # APOC ile merge et
                 merge_query = """
@@ -2948,7 +2920,8 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 else:
                     logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
             
-            logging.info(f"🎉 Toplam {total_merged} duplicate CoverageType node birleştirildi")
+            logging.info(f"🎉 SIKI kriterlerle toplam {total_merged} duplicate CoverageType node birleştirildi")
+            logging.info(f"   (Şüpheli merge'ler engellendi - daha güvenli sonuç)")
             return total_merged
             
         except Exception as e:
@@ -2973,10 +2946,20 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             customer_name = customer_data.get('name', '').strip()
             
             if customer_name:
-                # Customer name'den safe ID oluştur
+                # Customer name'den safe ID oluştur (filename bilgisi eklenmez)
                 safe_customer_name = normalize_file_name(customer_name)
-                safe_file_base = normalize_file_name(os.path.splitext(file_name)[0])
-                policy_id = f"policy_{safe_customer_name}_{safe_file_base}".replace('.', '_')
+                # Policy verilerinden daha spesifik ID oluştur
+                policy_data = entities_data.get('policy', {})
+                policy_type = policy_data.get('policyType', '')
+                year = policy_data.get('year', '')
+                
+                if policy_type and year:
+                    policy_id = f"policy_{safe_customer_name}_{normalize_file_name(policy_type)}_{year}".replace('.', '_')
+                else:
+                    # Sadece customer name ile unique ID oluştur
+                    import time
+                    timestamp = str(int(time.time()))[-6:]  # Son 6 hanesi
+                    policy_id = f"policy_{safe_customer_name}_{timestamp}".replace('.', '_')
             else:
                 # Fallback: filename'den oluştur
                 policy_id = f"policy_{normalize_file_name(file_name).replace('.', '_')}"

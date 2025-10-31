@@ -134,7 +134,7 @@ def create_source_node_graph_url_s3(
         obj_source_node.communityRelCount = 0
         try:
             graphDb_data_Access = graphDBdataAccess(graph)
-            graphDb_data_Access.create_source_node(obj_source_node)
+            graphDb_data_Access.create_source_node(obj_source_node, model=model)
             success_count += 1
             lst_file_name.append(
                 {
@@ -203,7 +203,7 @@ def create_source_node_graph_url_gcs(
 
         try:
             graphDb_data_Access = graphDBdataAccess(graph)
-            graphDb_data_Access.create_source_node(obj_source_node)
+            graphDb_data_Access.create_source_node(obj_source_node, model=model)
             success_count += 1
             lst_file_name.append(
                 {
@@ -271,7 +271,7 @@ def create_source_node_graph_web_url(graph, model, source_url, source_type):
     obj_source_node.communityNodeCount = 0
     obj_source_node.communityRelCount = 0
     graphDb_data_Access = graphDBdataAccess(graph)
-    graphDb_data_Access.create_source_node(obj_source_node)
+    graphDb_data_Access.create_source_node(obj_source_node, model=model)
     lst_file_name.append(
         {
             "fileName": obj_source_node.file_name,
@@ -316,7 +316,7 @@ def create_source_node_graph_url_youtube(graph, model, source_url, source_type):
         obj_source_node.file_size = sys.getsizeof(transcript)
 
     graphDb_data_Access = graphDBdataAccess(graph)
-    graphDb_data_Access.create_source_node(obj_source_node)
+    graphDb_data_Access.create_source_node(obj_source_node, model=model)
     lst_file_name.append(
         {
             "fileName": obj_source_node.file_name,
@@ -365,7 +365,7 @@ def create_source_node_graph_url_wikipedia(graph, model, wiki_query, source_type
         obj_source_node.communityNodeCount = 0
         obj_source_node.communityRelCount = 0
         graphDb_data_Access = graphDBdataAccess(graph)
-        graphDb_data_Access.create_source_node(obj_source_node)
+        graphDb_data_Access.create_source_node(obj_source_node, model=model)
         success_count += 1
         lst_file_name.append(
             {
@@ -827,7 +827,7 @@ async def processing_source(
     # Document node'ın mutlaka oluşturulduğundan emin ol
     try:
         logging.info(f"Document node kontrolü ve oluşturması: {file_name}")
-        graphDb_data_Access.create_source_node(file_name)
+        graphDb_data_Access.create_source_node(file_name, model=model)
         logging.info(f"Document node garantilendi: {file_name}")
     except Exception as e:
         logging.warning(f"Document node oluşturma sırasında uyarı: {e}")
@@ -1666,6 +1666,13 @@ def upload_file(
     import unicodedata
     from src.utf8_utils import normalize_file_name
     
+    # Model parametresi kontrolü - varsayılan değer ataması
+    if not model or model.strip() == "":
+        model = "openai_gpt_4o_mini"
+        log_upload(f"⚠️ Model parametresi boş veya gelmedi, varsayılan model kullanılıyor: {model}", "warning")
+    else:
+        log_upload(f"✅ Model parametresi alındı: {model}")
+    
     originalname = normalize_file_name(originalname)
     log_upload(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
     log_upload(f"⚙️ Upload config - Model: {model}, Generate Embedding: {generate_embedding}")
@@ -1970,7 +1977,7 @@ def upload_file(
                 # Continue without chunk creation
         
         # Source node'u veritabanına kaydet (temizlik zaten yapıldı)
-        graphDb_data_Access.create_source_node(obj_source_node)
+        graphDb_data_Access.create_source_node(obj_source_node, model=model)
         log_upload(f"Source node successfully created in database for: {originalname}")
         logging.info(f"📋 Source node created in database for: {originalname}")
         

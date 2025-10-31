@@ -2456,6 +2456,12 @@ async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber
         logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
         logging.info(f"🔧 Upload parameters - Model: {model}, GenerateEmbedding: {generateEmbedding}")
         
+        # Model parametresi kontrolü
+        if not model or model.strip() == "":
+            logging.warning(f"⚠️ Model parametresi boş veya gelmedi - upload_file fonksiyonunda varsayılan değer atanacak")
+        else:
+            logging.info(f"✅ Model parametresi upload endpoint'inde alındı: {model}")
+        
         graph = create_graph_database_connection(uri, userName, password, database)
         result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR, generateEmbedding)
         
