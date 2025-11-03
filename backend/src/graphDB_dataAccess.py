@@ -120,6 +120,7 @@ class graphDBdataAccess:
                 merge_query = """
                     MERGE(d:Document {fileName: $file_name}) 
                     ON CREATE SET 
+                        d.id = $file_name,
                         d.status = 'New',
                         d.fileSource = 'local file',
                         d.fileType = $file_type,
@@ -141,6 +142,7 @@ class graphDBdataAccess:
                         d.errorMessage = '',
                         d.model = 'unknown'
                     ON MATCH SET 
+                        d.id = $file_name,
                         d.updatedAt = datetime(),
                         d.fileType = $file_type,
                         d.fileSize = $file_size
@@ -171,7 +173,7 @@ class graphDBdataAccess:
             
             job_status = "New"
             logging.info(f"Tam Document node oluşturuluyor: {obj_source_node.file_name}")
-            self.graph.query("""MERGE(d:Document {fileName :$fn}) SET d.fileSize = $fs, d.fileType = $ft ,
+            self.graph.query("""MERGE(d:Document {fileName :$fn}) SET d.id = $fn, d.fileSize = $fs, d.fileType = $ft ,
                             d.status = $st, d.url = $url, d.awsAccessKeyId = $awsacc_key_id, 
                             d.fileSource = $f_source, d.createdAt = $c_at, d.updatedAt = $u_at, 
                             d.processingTime = $pt, d.errorMessage = $e_message, d.nodeCount= $n_count, 
