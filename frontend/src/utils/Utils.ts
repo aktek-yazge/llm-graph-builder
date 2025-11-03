@@ -34,7 +34,7 @@ const IMPORTER_URL_REGEX = new RegExp('^https://console-preview\\.neo4j\\.io/too
 
 // Get the Url
 export const url = () => {
-  let url = window.location.href.replace('5173', '8000').replace('8080', '8000');
+  let url = window.location.href.replace('5173', '8000').replace('8080', '8001');
   console.log("process.env.VITE_BACKEND_API_URL", process.env.VITE_BACKEND_API_URL)
   if (process.env.VITE_BACKEND_API_URL) {
     url = process.env.VITE_BACKEND_API_URL;
