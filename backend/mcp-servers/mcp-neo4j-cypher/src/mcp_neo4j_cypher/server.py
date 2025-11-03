@@ -39,10 +39,19 @@ def _create_direct_schema_format(nodes_result, rels_result):
     
     # Node'ları işle
     nodes_section = []
+    if not nodes_result:
+        logger.debug("_create_direct_schema_format: nodes_result empty or None")
+        nodes_result = []
+
     for node_data in nodes_result:
-        node_name = node_data["nodeType"]
-        node_count = node_data["nodeCount"]
-        properties = node_data.get("properties", [])
+        # Güvenlik: boş/None kayıtları atla
+        if not node_data:
+            logger.debug("_create_direct_schema_format: skipping empty node_data entry")
+            continue
+
+        node_name = node_data.get("nodeType") if isinstance(node_data, dict) else None
+        node_count = node_data.get("nodeCount") if isinstance(node_data, dict) else None
+        properties = node_data.get("properties", []) if isinstance(node_data, dict) else []
         
         # İlk 6 property'yi kısa tip bilgisiyle al
         props_with_types = []
@@ -67,11 +76,19 @@ def _create_direct_schema_format(nodes_result, rels_result):
     
     # Relationship'leri işle
     relationships_section = []
+    if not rels_result:
+        logger.debug("_create_direct_schema_format: rels_result empty or None")
+        rels_result = []
+
     for rel_data in rels_result:
-        rel_name = rel_data["relationshipType"]
-        from_node = rel_data["from_node"]
-        to_node = rel_data["to_node"]
-        rel_props = rel_data.get("rel_props", [])
+        if not rel_data:
+            logger.debug("_create_direct_schema_format: skipping empty rel_data entry")
+            continue
+
+        rel_name = rel_data.get("relationshipType") if isinstance(rel_data, dict) else None
+        from_node = rel_data.get("from_node") if isinstance(rel_data, dict) else None
+        to_node = rel_data.get("to_node") if isinstance(rel_data, dict) else None
+        rel_props = rel_data.get("rel_props", []) if isinstance(rel_data, dict) else []
         
         # Relationship properties (varsa ilk 3'ü)
         rel_props_with_types = []
@@ -410,6 +427,15 @@ def create_mcp_server(
                 database_=database,
                 result_transformer_=lambda r: r.data(),
             )
+
+            # Validate results
+            if nodes_result is None:
+                logger.error("get_neo4j_schema: neo4j_driver.execute_query returned None for nodes_result")
+                raise ToolError("Neo4j driver returned no nodes result (None)")
+
+            if rels_result is None:
+                logger.error("get_neo4j_schema: neo4j_driver.execute_query returned None for rels_result")
+                raise ToolError("Neo4j driver returned no relationships result (None)")
 
             logger.debug(f"Found {len(nodes_result)} nodes and {len(rels_result)} relationship types")
 

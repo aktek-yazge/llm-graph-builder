@@ -1,26 +1,26 @@
-import { createContext, useContext, useState, FC, useEffect } from 'react';
+import { createContext, FC, useContext, useEffect, useState } from 'react';
 import {
   CustomFile,
+  dataImporterSchemaDialogType,
+  EntityRelationshipRule,
   FileContextProviderProps,
   FileContextType,
   OptionType,
-  showTextFromSchemaDialogType,
-  schemaLoadDialogType,
   predefinedSchemaDialogType,
-  dataImporterSchemaDialogType,
-  EntityRelationshipRule,
+  schemaLoadDialogType,
+  showTextFromSchemaDialogType,
 } from '../types';
 import {
   chatModeLables,
+  chunkOverlap,
+  chunksToCombine,
   getStoredSchema,
   llms,
   PRODMODLES,
-  chunkOverlap,
-  chunksToCombine,
   tokenchunkSize,
 } from '../utils/Constants';
-import { useCredentials } from './UserCredentials';
 import Queue from '../utils/Queue';
+import { useCredentials } from './UserCredentials';
 
 const FileContext = createContext<FileContextType | undefined>(undefined);
 
@@ -49,7 +49,7 @@ const FileContextProvider: FC<FileContextProviderProps> = ({ children }) => {
   const [selectedChunk_overlap, setSelectedChunk_overlap] = useState<number>(chunkOverlap);
   const [selectedChunks_to_combine, setSelectedChunks_to_combine] = useState<number>(chunksToCombine);
   const [selectedMaxPages, setSelectedMaxPages] = useState<number | undefined>(undefined);
-  const [generateEmbedding, setGenerateEmbedding] = useState<boolean>(true);
+  const [generateEmbedding, setGenerateEmbedding] = useState<boolean>(false);
   const [selectedSchemas, setSelectedSchemas] = useState<readonly OptionType[]>(getStoredSchema);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [selectedRows, setSelectedRows] = useState<string[]>([]);

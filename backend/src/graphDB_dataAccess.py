@@ -349,7 +349,12 @@ class graphDBdataAccess:
     def update_KNN_graph(self):
         """
         Update the graph node with SIMILAR relationship where embedding scrore match
+        🚫 DEVRE DIŞI BIRAKILDI - SIMILAR ilişkiler oluşturulmuyor
         """
+        logging.info("🚫 KNN graph update devre dışı - SIMILAR ilişkileri oluşturulmuyor")
+        return  # Fonksiyonu erken sonlandır
+        
+        # Aşağıdaki kod artık çalışmayacak
         index = self.graph.query("""show indexes yield * where type = 'VECTOR' and name = 'vector'""",session_params={"database":self.graph._database})
         # logging.info(f'show index vector: {index}')
         knn_min_score = os.environ.get('KNN_MIN_SCORE')
@@ -1300,9 +1305,9 @@ class graphDBdataAccess:
                     create_chunk_vector_index(self.graph)
                     logging.info(f"✅ Vector index checked/updated")
                     
-                    # KNN graph ilişkilerini güncelle
-                    self.update_KNN_graph()
-                    logging.info(f"✅ KNN graph relationships updated")
+                    # KNN graph ilişkilerini güncelle - DEVRE DIŞI BIRAKTI
+                    # self.update_KNN_graph()
+                    # logging.info(f"✅ KNN graph relationships updated")
                     
                 except Exception as index_error:
                     logging.warning(f"⚠️ Vector index/KNN update warning: {index_error}")
@@ -1356,6 +1361,295 @@ class graphDBdataAccess:
         except Exception as e:
             logging.error(f"❌ Batch embedding update hatası: {e}")
             return 0
+
+    def create_entity_embeddings(self, node_types: list):
+        """
+        Belirtilen entity node türleri için embedding'ler oluşturur
+        
+        Bu fonksiyon:
+        1. Belirtilen node türlerini bulur
+        2. Text/name/description özelliklerinden embedding oluşturur
+        3. Entity embedding'lerini node'lara ekler
+        
+        Args:
+            node_types: Embedding oluşturulacak node türleri listesi
+                      (örn: ["Customer", "Policy", "CoverageType", "all"])
+        
+        Returns:
+            dict: İşlem sonuç raporu
+        """
+        try:
+            from src.shared.common_fn import load_embedding_model
+            
+            logging.info(f"🔄 {len(node_types)} node türü için entity embedding oluşturma başlatılıyor: {node_types}")
+            
+            # Embedding model yükle
+            embedding_model = os.getenv('EMBEDDING_MODEL', 'openai_text_embedding_3_small')
+            embeddings, dimension = load_embedding_model(embedding_model)
+            logging.info(f"🤖 Entity embedding model loaded: {embedding_model} (dimension: {dimension})")
+            
+            # Mevcut entity node türlerini al
+            available_node_types = self._get_available_entity_node_types()
+            logging.info(f"📋 Mevcut entity node türleri: {list(available_node_types.keys())}")
+            
+            # İşlenecek node türlerini belirle
+            if "all" in node_types:
+                target_node_types = list(available_node_types.keys())
+            else:
+                target_node_types = [nt for nt in node_types if nt in available_node_types]
+            
+            if not target_node_types:
+                return {
+                    "total_node_types": 0,
+                    "total_entities_processed": 0,
+                    "total_embeddings_created": 0,
+                    "error": "Geçerli node türü bulunamadı",
+                    "available_types": list(available_node_types.keys())
+                }
+            
+            logging.info(f"🎯 İşlenecek node türleri: {target_node_types}")
+            
+            total_processed = 0
+            total_updated = 0
+            results = {}
+            
+            for node_type in target_node_types:
+                try:
+                    logging.info(f"📊 {node_type} node'ları için embedding oluşturuluyor...")
+                    
+                    # Node'ları ve text özelliklerini al
+                    entities_query = f"""
+                        MATCH (n:{node_type})
+                        WHERE n.embedding IS NULL
+                        RETURN 
+                            elementId(n) as node_id,
+                            n.name as name,
+                            n.description as description,
+                            n.id as entity_id,
+                            coalesce(n.name, n.description, n.id, '') as text_content
+                        ORDER BY n.name, n.id
+                        LIMIT 1000
+                    """
+                    
+                    entities_result = self.execute_query(entities_query)
+                    
+                    if not entities_result:
+                        logging.info(f"✅ {node_type}: Tüm entity'ler zaten embedding'e sahip veya entity bulunamadı")
+                        results[node_type] = {
+                            "status": "skipped",
+                            "message": "Tüm entity'ler zaten embedding'e sahip",
+                            "entities_processed": 0,
+                            "entities_updated": 0
+                        }
+                        continue
+                    
+                    logging.info(f"📊 {node_type}: {len(entities_result)} entity için embedding oluşturulacak")
+                    
+                    # Batch halinde embedding oluştur
+                    batch_data = []
+                    entities_processed = 0
+                    
+                    for entity_info in entities_result:
+                        try:
+                            node_id = entity_info['node_id']
+                            text_content = entity_info['text_content'] or ""
+                            
+                            if not text_content.strip():
+                                logging.warning(f"⚠️ Boş text content atlandı: {node_id}")
+                                continue
+                            
+                            # Text normalization
+                            from src.utf8_utils import normalize_unicode_text
+                            normalized_text = normalize_unicode_text(text_content)
+                            
+                            # Embedding oluştur
+                            embedding_vector = embeddings.embed_query(normalized_text)
+                            
+                            batch_data.append({
+                                "node_id": node_id,
+                                "embedding": embedding_vector
+                            })
+                            
+                            entities_processed += 1
+                            
+                            # Her 50 entity'de bir batch işle
+                            if len(batch_data) >= 50:
+                                updated_count = self._update_entity_embeddings_batch(batch_data)
+                                total_updated += updated_count
+                                logging.info(f"📦 {node_type} batch işlendi: {len(batch_data)} entity, {updated_count} güncellendi")
+                                batch_data = []
+                                
+                        except Exception as entity_error:
+                            logging.error(f"❌ Entity embedding hatası ({node_id}): {entity_error}")
+                            continue
+                    
+                    # Kalan batch'i işle
+                    if batch_data:
+                        updated_count = self._update_entity_embeddings_batch(batch_data)
+                        total_updated += updated_count
+                        logging.info(f"📦 {node_type} son batch işlendi: {len(batch_data)} entity, {updated_count} güncellendi")
+                    
+                    total_processed += entities_processed
+                    
+                    results[node_type] = {
+                        "status": "success",
+                        "message": f"{entities_processed} entity işlendi, {len(entities_result)} embedding oluşturuldu",
+                        "entities_processed": entities_processed,
+                        "entities_updated": len(entities_result)
+                    }
+                    
+                    logging.info(f"✅ {node_type}: {entities_processed} entity için embedding oluşturuldu")
+                    
+                except Exception as type_error:
+                    logging.error(f"❌ {node_type} için entity embedding hatası: {type_error}")
+                    results[node_type] = {
+                        "status": "error",
+                        "message": str(type_error),
+                        "entities_processed": 0,
+                        "entities_updated": 0
+                    }
+            
+            # Entity embedding'leri için vector index oluştur/kontrol et
+            if total_updated > 0:
+                try:
+                    self._create_entity_vector_indexes(target_node_types, dimension)
+                    logging.info(f"✅ Entity vector indexes checked/created for {len(target_node_types)} node types")
+                except Exception as index_error:
+                    logging.warning(f"⚠️ Entity vector index creation warning: {index_error}")
+            
+            # Genel sonuç raporu
+            summary = {
+                "total_node_types": len(target_node_types),
+                "total_entities_processed": total_processed,
+                "total_embeddings_created": total_updated,
+                "node_types": results,
+                "embedding_model": embedding_model,
+                "embedding_dimension": dimension,
+                "available_types": list(available_node_types.keys())
+            }
+            
+            logging.info(f"🎉 Entity embedding oluşturma tamamlandı: {total_processed} entity işlendi, {total_updated} embedding oluşturuldu")
+            
+            return summary
+            
+        except Exception as e:
+            error_msg = f"Entity embedding oluşturma hatası: {e}"
+            logging.error(f"❌ {error_msg}")
+            return {
+                "total_node_types": len(node_types) if node_types else 0,
+                "total_entities_processed": 0,
+                "total_embeddings_created": 0,
+                "error": error_msg,
+                "node_types": {}
+            }
+
+    def _get_available_entity_node_types(self):
+        """
+        Veritabanındaki entity node türlerini ve sayılarını al
+        """
+        try:
+            query = """
+                MATCH (n)
+                WHERE NOT n:Chunk AND NOT n:Document AND NOT n:`__Community__` AND NOT n:Session
+                RETURN DISTINCT labels(n) as node_labels, count(*) as count
+                ORDER BY count DESC
+            """
+            
+            result = self.execute_query(query)
+            node_types = {}
+            
+            for row in result:
+                labels = row['node_labels']
+                count = row['count']
+                if labels and len(labels) > 0:
+                    # İlk label'ı al (çoğunlukla tek label olur)
+                    main_label = labels[0]
+                    node_types[main_label] = count
+            
+            return node_types
+            
+        except Exception as e:
+            logging.error(f"Available node types alınırken hata: {e}")
+            return {}
+
+    def _update_entity_embeddings_batch(self, batch_data):
+        """
+        Entity embedding'lerini batch halinde güncelle
+        
+        Args:
+            batch_data: [{"node_id": "...", "embedding": [...]}] formatında liste
+            
+        Returns:
+            int: Güncellenen entity sayısı
+        """
+        try:
+            update_query = """
+                UNWIND $batch_data AS row
+                MATCH (n) WHERE elementId(n) = row.node_id
+                SET n.embedding = row.embedding
+                RETURN count(n) as updated_count
+            """
+            
+            result = self.execute_query(update_query, {"batch_data": batch_data})
+            return result[0]['updated_count'] if result else 0
+            
+        except Exception as e:
+            logging.error(f"❌ Entity batch embedding update hatası: {e}")
+            return 0
+
+    def _create_entity_vector_indexes(self, node_types: list, dimension: int):
+        """
+        Entity node türleri için vector index'leri oluştur
+        
+        Args:
+            node_types: Vector index oluşturulacak node türleri listesi
+            dimension: Embedding vektörlerinin boyutu
+        """
+        try:
+            logging.info(f"🔍 {len(node_types)} node türü için vector index kontrolü başlıyor...")
+            
+            for node_type in node_types:
+                try:
+                    index_name = f"entity_{node_type.lower()}_embedding_vector"
+                    
+                    # Index'in var olup olmadığını kontrol et
+                    check_query = """
+                        SHOW INDEXES 
+                        YIELD name, type, labelsOrTypes, properties
+                        WHERE name = $index_name AND type = 'VECTOR'
+                        RETURN name
+                    """
+                    
+                    existing_index = self.execute_query(check_query, {"index_name": index_name})
+                    
+                    if existing_index:
+                        logging.info(f"✅ Vector index zaten mevcut: {index_name}")
+                        continue
+                    
+                    # Vector index oluştur
+                    create_index_query = f"""
+                        CREATE VECTOR INDEX `{index_name}` IF NOT EXISTS
+                        FOR (n:`{node_type}`) ON (n.embedding)
+                        OPTIONS {{
+                            indexConfig: {{
+                                `vector.dimensions`: $dimensions,
+                                `vector.similarity_function`: 'cosine'
+                            }}
+                        }}
+                    """
+                    
+                    self.execute_query(create_index_query, {"dimensions": dimension})
+                    logging.info(f"✅ Vector index oluşturuldu: {index_name} ({node_type}, {dimension}D)")
+                    
+                except Exception as node_error:
+                    logging.error(f"❌ {node_type} için vector index oluşturma hatası: {node_error}")
+                    continue
+            
+            logging.info(f"🎉 Entity vector index oluşturma işlemi tamamlandı")
+            
+        except Exception as e:
+            logging.error(f"❌ Entity vector index oluşturma genel hatası: {e}")
+            raise e
 
     def _create_policy_related_nodes(self, policy_info: dict, policy_id: str, file_name: str):
         """
@@ -2410,6 +2704,9 @@ Belge İçeriği:
       * KONUT/DASK POLİÇELERİ İÇİN: buildingType, floorNumber, totalFloors, squareMeters, buildingAge, hasElevator, constructionType
       * İŞVEREN SORUMLULUK İÇİN: employeeCount, workType, riskLevel, hasFood, workHours
       * SAĞLIK POLİÇELERİ İÇİN: inpatientLimit, outpatientLimit, internationalCoverage, maternityBenefit, dentalCoverage
+      * GENERIC CLAIM PROPERTIES: hasClaimHistory, claimCount, claimFreeYears (tüm poliçe türleri için)
+      * GENERIC FINANCIAL PROPERTIES: annualBudget, hasMortgage, mortgageBank (finansal bilgiler için)
+      * GENERIC ASSET PROPERTIES: assetLength, assetAge, hasServiceAsset, assetType, assetSpecification (esnek asset bilgileri için)
     - ÖNEMLİ: Bu alan ZORUNLU! Policy türü varsa mutlaka ilişki tipi dön!
 
 14. DEDUCTIBLE_INFO (Muafiyet Bilgileri):
@@ -2492,7 +2789,18 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             "inpatientLimit": null,
             "buildingType": "...",
             "workType": "...",
-            "outpatientLimit": null
+            "outpatientLimit": null,
+            "hasClaimHistory": null,
+            "claimCount": null,
+            "claimFreeYears": null,
+            "annualBudget": null,
+            "hasMortgage": null,
+            "mortgageBank": "...",
+            "assetLength": null,
+            "assetAge": null,
+            "hasServiceAsset": null,
+            "assetType": "...",
+            "assetSpecification": "..."
         }}
     }},
     "deductible_info": {{

@@ -3017,6 +3017,143 @@ async def create_embeddings(
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
+
+@app.post("/create_entity_embeddings")
+async def create_entity_embeddings(
+    uri=Form(None),
+    userName=Form(None), 
+    password=Form(None),
+    database=Form(None),
+    node_types=Form(...),
+    email=Form(None)
+):
+    """
+    Belirtilen entity node türleri için embedding'ler oluşturur.
+    
+    Args:
+        node_types: Embedding oluşturulacak node türleri (JSON string formatında liste)
+                   Örn: ["Customer", "Policy"] veya ["all"]
+    """
+    try:
+        start = time.time()
+        
+        # Eğer userName, password, database boşsa environment'tan al
+        if not userName:
+            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+        if not password:
+            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+        if not database:
+            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
+        
+        # node_types parametresini işle
+        if isinstance(node_types, str):
+            if node_types.startswith('[') and node_types.endswith(']'):
+                # JSON string formatında geldiyse parse et
+                import json
+                node_types = json.loads(node_types)
+            else:
+                # Tek string geldiyse liste yap
+                node_types = [node_types]
+        
+        if not node_types or len(node_types) == 0:
+            return create_api_response(
+                'Failed',
+                message="En az bir node türü belirtilmelidir",
+                error="No node types provided"
+            )
+        
+        logging.info(f"🔄 {len(node_types)} node türü için entity embedding oluşturma başlatılıyor: {node_types}")
+        
+        graph = create_graph_database_connection(uri, userName, password, database)
+        graphDb_data_Access = graphDBdataAccess(graph)
+        
+        # Entity embedding oluşturma işlemini çalıştır
+        result = graphDb_data_Access.create_entity_embeddings(node_types)
+        
+        end = time.time()
+        elapsed_time = end - start
+        
+        # Logging
+        json_obj = {
+            'api_name': 'create_entity_embeddings',
+            'db_url': uri, 
+            'userName': userName, 
+            'database': database,
+            'node_types': node_types,
+            'embedding_results': {
+                'total_node_types': result.get('total_node_types', 0),
+                'total_entities_processed': result.get('total_entities_processed', 0),
+                'total_embeddings_created': result.get('total_embeddings_created', 0),
+                'embedding_model': result.get('embedding_model', ''),
+                'embedding_dimension': result.get('embedding_dimension', 0)
+            },
+            'logging_time': formatted_time(datetime.now(timezone.utc)), 
+            'elapsed_api_time': f'{elapsed_time:.2f}',
+            'email': email
+        }
+        logger.log_struct(json_obj, "INFO")
+        
+        # Response mesajını oluştur
+        if result.get('error'):
+            return create_api_response(
+                'Failed', 
+                message="Entity embedding oluşturma işlemi sırasında hata oluştu",
+                error=result['error']
+            )
+        
+        total_types = result.get('total_node_types', 0)
+        total_embeddings = result.get('total_embeddings_created', 0)
+        embedding_model = result.get('embedding_model', 'Unknown')
+        available_types = result.get('available_types', [])
+        
+        # Node türü bazında sonuçları özetle
+        success_types = []
+        failed_types = []
+        skipped_types = []
+        
+        for node_type, type_result in result.get('node_types', {}).items():
+            status = type_result.get('status', 'unknown')
+            if status == 'success':
+                success_types.append(f"{node_type} ({type_result.get('entities_updated', 0)} entity)")
+            elif status == 'error':
+                failed_types.append(f"{node_type} ({type_result.get('message', 'Bilinmeyen hata')})")
+            elif status == 'skipped':
+                skipped_types.append(f"{node_type} (zaten embedding'e sahip)")
+        
+        # Sonuç mesajını oluştur
+        message_parts = []
+        if success_types:
+            message_parts.append(f"✅ Başarılı: {', '.join(success_types)}")
+        if skipped_types:
+            message_parts.append(f"⏭️ Atlandı: {', '.join(skipped_types)}")
+        if failed_types:
+            message_parts.append(f"❌ Başarısız: {', '.join(failed_types)}")
+        
+        if total_embeddings > 0:
+            main_message = f"Entity embedding oluşturma tamamlandı. Toplam {total_embeddings} entity için embedding oluşturuldu ({embedding_model})"
+        else:
+            main_message = "Hiçbir entity için yeni embedding oluşturulmadı"
+        
+        if message_parts:
+            main_message += f" - {'. '.join(message_parts)}"
+        
+        if available_types:
+            main_message += f". Mevcut node türleri: {', '.join(available_types)}"
+        
+        return create_api_response(
+            'Success',
+            data=result,
+            message=main_message
+        )
+        
+    except Exception as e:
+        job_status = "Failed"
+        message = "Entity embedding oluşturma işlemi başarısız"
+        error_message = str(e)
+        logging.exception(f'Exception in create entity embeddings: {error_message}')
+        return create_api_response(job_status, message=message, error=error_message)
+    finally:
+        gc.collect()
         
 @app.post("/drop_create_vector_index")
 async def drop_create_vector_index(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), isVectorIndexExist=Form(),email=Form(None)):
@@ -3333,6 +3470,53 @@ async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), 
         return create_api_response("Failed", message=message, error=error_message)
     finally:
         gc.collect()
+
+
+@app.delete("/delete_similar_relationships")
+async def delete_similar_relationships(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)):
+    """
+    Tüm SIMILAR ilişkilerini veritabanından siler
+    """
+    try:
+        logging.info("🗑️ SIMILAR ilişkileri silme işlemi başlatıldı")
+        
+        # Neo4j bağlantısı oluştur
+        graph = create_graph_database_connection(uri, userName, password, database)
+        
+        # SIMILAR ilişkilerini say
+        count_query = "MATCH ()-[r:SIMILAR]-() RETURN count(r) as similar_count"
+        count_result = graph.query(count_query, session_params={"database": database})
+        similar_count = count_result[0]['similar_count'] if count_result else 0
+        
+        logging.info(f"📊 Silinecek SIMILAR ilişki sayısı: {similar_count}")
+        
+        if similar_count == 0:
+            return create_api_response("Success", 
+                                     message="Silinecek SIMILAR ilişkisi bulunamadı",
+                                     data={"deleted_relationships": 0})
+        
+        # SIMILAR ilişkilerini sil
+        delete_query = """
+            MATCH ()-[r:SIMILAR]-()
+            DELETE r
+            RETURN count(r) as deleted_count
+        """
+        
+        delete_result = graph.query(delete_query, session_params={"database": database})
+        deleted_count = similar_count  # Neo4j DELETE count döndürmez, önceki sayımı kullan
+        
+        logging.info(f"✅ {deleted_count} SIMILAR ilişkisi silindi")
+        
+        return create_api_response("Success", 
+                                 message=f"{deleted_count} SIMILAR ilişkisi başarıyla silindi",
+                                 data={"deleted_relationships": deleted_count})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ SIMILAR ilişkileri silme hatası: {error_message}")
+        return create_api_response("Failed", 
+                                 message="SIMILAR ilişkileri silme işlemi başarısız",
+                                 error=error_message)
 
 
 if __name__ == "__main__":

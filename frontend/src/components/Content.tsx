@@ -56,6 +56,7 @@ import { isExpired, isFileReadyToProcess } from '../utils/Utils';
 import DropdownComponent from './Dropdown';
 import FileTable from './FileTable';
 import CreateEmbeddingsModal from './Graph/CreateEmbeddingsModal';
+import CreateEntityEmbeddingsModal from './Graph/CreateEntityEmbeddingsModal';
 import GraphViewModal from './Graph/GraphViewModal';
 import MergeDuplicateEntitiesModal from './Graph/MergeDuplicateEntitiesModal';
 import ChunkPopUp from './Popups/ChunkPopUp';
@@ -104,6 +105,7 @@ const Content: React.FC<ContentProps> = ({
   const [isGraphBtnMenuOpen, setIsGraphBtnMenuOpen] = useState<boolean>(false);
   const [openMergeDuplicateModal, setOpenMergeDuplicateModal] = useState<boolean>(false);
   const [openCreateEmbeddingsModal, setOpenCreateEmbeddingsModal] = useState<boolean>(false);
+  const [openCreateEntityEmbeddingsModal, setOpenCreateEntityEmbeddingsModal] = useState<boolean>(false);
   const graphbtnRef = useRef<HTMLDivElement>(null);
   const chunksTextAbortController = useRef<AbortController>();
   const { colorMode } = useContext(ThemeWrapperContext);
@@ -619,6 +621,14 @@ const Content: React.FC<ContentProps> = ({
     setOpenCreateEmbeddingsModal(true);
   };
 
+  const handleCreateEntityEmbeddings = () => {
+    if (!connectionStatus) {
+      showErrorToast('Lütfen önce Neo4j veritabanına bağlanın');
+      return;
+    }
+    setOpenCreateEntityEmbeddingsModal(true);
+  };
+
   const disconnect = () => {
     queue.clear();
     const date = new Date();
@@ -955,6 +965,10 @@ const Content: React.FC<ContentProps> = ({
       />
       <MergeDuplicateEntitiesModal open={openMergeDuplicateModal} onClose={() => setOpenMergeDuplicateModal(false)} />
       <CreateEmbeddingsModal open={openCreateEmbeddingsModal} onClose={() => setOpenCreateEmbeddingsModal(false)} />
+      <CreateEntityEmbeddingsModal
+        open={openCreateEntityEmbeddingsModal}
+        onClose={() => setOpenCreateEntityEmbeddingsModal(false)}
+      />
       <div className={`n-bg-palette-neutral-bg-default main-content-wrapper`}>
         <Flex
           className='w-full absolute top-0'
@@ -1170,6 +1184,11 @@ const Content: React.FC<ContentProps> = ({
                   title='Create Embeddings'
                   onClick={handleCreateEmbeddings}
                   isDisabled={!connectionStatus || filesData.length === 0}
+                />
+                <Menu.Item
+                  title='Create Entity Embeddings'
+                  onClick={handleCreateEntityEmbeddings}
+                  isDisabled={!connectionStatus}
                 />
               </Menu.Items>
             </Menu>
