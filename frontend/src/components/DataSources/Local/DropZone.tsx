@@ -1,6 +1,6 @@
 import { Dropzone, Flex, SpotlightTarget, Typography } from '@neo4j-ndl/react';
 import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
-import { FunctionComponent, useEffect, useState, useCallback } from 'react';
+import { FunctionComponent, useCallback, useEffect, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useCredentials } from '../../../context/UserCredentials';
 import { useFileContext } from '../../../context/UsersFiles';
@@ -17,14 +17,14 @@ const DropZone: FunctionComponent = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const { userCredentials } = useCredentials();
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  
+
   // Batch upload state
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [currentBatch, setCurrentBatch] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
-  
+
   const BATCH_SIZE = 10;
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
@@ -135,7 +135,7 @@ const DropZone: FunctionComponent = () => {
       const batch = uploadQueue.slice(i, i + BATCH_SIZE);
       const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
       const totalBatches = Math.ceil(totalFiles / BATCH_SIZE);
-      
+
       console.log(`📦 Processing batch ${batchNumber}/${totalBatches} with ${batch.length} files`);
       setBatchProgress({ current: batchNumber, total: totalBatches });
       setCurrentBatch(batch);
@@ -148,7 +148,7 @@ const DropZone: FunctionComponent = () => {
           return { file, success: true };
         } catch (error) {
           console.error(`❌ Failed to upload: ${file.name}`, error);
-          setFailedFiles(prev => [...prev, file.name]);
+          setFailedFiles((prev) => [...prev, file.name]);
           return { file, success: false, error };
         }
       });
@@ -156,13 +156,13 @@ const DropZone: FunctionComponent = () => {
       // Wait for all files in batch to complete
       const batchResults = await Promise.allSettled(batchPromises);
       processedFiles += batch.length;
-      
+
       console.log(`📊 Batch ${batchNumber}/${totalBatches} completed. Processed: ${processedFiles}/${totalFiles}`);
 
       // Add delay between batches to prevent resource exhaustion
       if (i + BATCH_SIZE < uploadQueue.length) {
         console.log(`⏱️ Waiting 2 seconds before next batch...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
 
@@ -171,7 +171,7 @@ const DropZone: FunctionComponent = () => {
     setUploadQueue([]);
     setCurrentBatch([]);
     setBatchProgress({ current: 0, total: 0 });
-    
+
     if (failedFiles.length > 0) {
       showErrorToast(`Upload completed with ${failedFiles.length} failed files. Check console for details.`);
     } else {
@@ -377,12 +377,12 @@ const DropZone: FunctionComponent = () => {
         <Dropzone
           loadingComponent={
             (isLoading || isUploading) && (
-              <Loader 
+              <Loader
                 title={
-                  isUploading 
-                    ? `Batch Upload: ${batchProgress.current}/${batchProgress.total} batches (${currentBatch.length} files in progress)` 
+                  isUploading
+                    ? `Batch Upload: ${batchProgress.current}/${batchProgress.total} batches (${currentBatch.length} files in progress)`
                     : 'Uploading'
-                } 
+                }
               />
             )
           }
