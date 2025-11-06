@@ -57,7 +57,7 @@ class graphDBdataAccess:
             logging.error(f"Error in updating document node status as failed: {error_message}")
             raise Exception(error_message)
         
-    def create_source_node(self, obj_source_node_or_filename, document_type: str = "auto", text_content: str = None, model: str = 'openai_gpt_4o_mini'):
+    def create_source_node(self, obj_source_node_or_filename, document_type: str = "auto", text_content: str = None, model: str = 'openai_gpt_4o_mini', skip_entity_extraction: bool = False):
         """
         Document node oluşturur. sourceNode objesi veya sadece file_name string'i alabilir.
         
@@ -67,6 +67,9 @@ class graphDBdataAccess:
             obj_source_node_or_filename: sourceNode objesi veya file_name string'i
             document_type: 'policy' veya 'auto' (otomatik tespit) - CV extraction kaldırıldı
             text_content: Kullanılmıyor (CV extraction kaldırıldı)
+            model: LLM model adı (entity extraction için)
+            skip_entity_extraction: True ise entity extraction atlanır (sadece Document ve Chunk node'ları oluşturulur)
+                                   False (varsayılan) ise eski davranış korunur (entity extraction yapılır)
         """
         try:
             # Eğer string ise, minimal Document node oluştur
@@ -162,7 +165,12 @@ class graphDBdataAccess:
                     logging.info(f"Document node oluşturuldu: {file_name}")
                 
                 # Document yaratıldıktan sonra belge tipine göre node'unu yarat ve bağla
-                self._create_document_related_nodes(file_name, document_type, text_content)
+                # skip_entity_extraction=True ise entity extraction atlanır (sadece chunking için)
+                if not skip_entity_extraction:
+                    logging.info(f"📋 Entity extraction başlatılıyor: {file_name}")
+                    self._create_document_related_nodes(file_name, document_type, text_content)
+                else:
+                    logging.info(f"⏭️ Entity extraction atlandı (skip_entity_extraction=True): {file_name}")
                 return
             
             # sourceNode objesi ise, orijinal işlemi yap
@@ -205,7 +213,12 @@ class graphDBdataAccess:
             logging.info(f"Tam Document node oluşturuldu: {obj_source_node.file_name}")
             
             # Document yaratıldıktan sonra belge tipine göre node'unu yarat ve bağla
-            self._create_document_related_nodes(obj_source_node.file_name, document_type, text_content, model)
+            # skip_entity_extraction=True ise entity extraction atlanır (sadece chunking için)
+            if not skip_entity_extraction:
+                logging.info(f"📋 Entity extraction başlatılıyor: {obj_source_node.file_name}")
+                self._create_document_related_nodes(obj_source_node.file_name, document_type, text_content, model)
+            else:
+                logging.info(f"⏭️ Entity extraction atlandı (skip_entity_extraction=True): {obj_source_node.file_name}")
             
         except Exception as e:
             error_message = str(e)

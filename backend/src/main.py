@@ -1208,6 +1208,184 @@ async def processing_source(
         raise LLMGraphBuilderException(error_message)
 
 
+async def processing_source_v2(
+    uri,
+    userName,
+    password,
+    database,
+    model,
+    file_name,
+    pages,
+    allowedNodes,
+    allowedRelationship,
+    additional_instructions=None,
+    max_pages=None,
+):
+    """
+    V2 Processing: Policy-specific entity extraction (simplified)
+    
+    Pages'ten Policy-specific entity'leri çıkarır (chunk işlemleri YOK):
+    - ❌ Chunk oluşturma yok
+    - ❌ Chunk embeddings yok  
+    - ❌ Chunk-Entity linking yok
+    - ❌ Rastgele entity extraction yok (Person, Organization, etc.)
+    - ✅ Policy-specific entities (Policy, Customer, InsuranceCompany, Agent, Coverage)
+    - ✅ LLM extraction (_create_document_related_nodes)
+    - ✅ Neo4j'ye kaydetme
+    - ✅ Policy-Entity relationships (HAS_ENTITY)
+    - ❌ Duplicate merge yok (manuel olarak /merge_duplicate_entities endpoint'i ile yapılır)
+    
+    Not: Sadece 1 LLM çağrısı yapılır (_create_document_related_nodes içinde)
+    """
+    uri_latency = {}
+    response = {}
+    start_time = datetime.now()
+    
+    try:
+        # Graph connection
+        start_create_connection = time.time()
+        graph = create_graph_database_connection(uri, userName, password, database)
+        elapsed_create_connection = time.time() - start_create_connection
+        logging.info(f"⏱️ Database connection: {elapsed_create_connection:.2f}s")
+        uri_latency["create_connection"] = f"{elapsed_create_connection:.2f}"
+        
+        graphDb_data_Access = graphDBdataAccess(graph)
+        
+        # Document status kontrolü (node zaten chunking'de oluşturuldu)
+        start_status_check = time.time()
+        result = graphDb_data_Access.get_current_status_document_node(file_name)
+        elapsed_status_check = time.time() - start_status_check
+        uri_latency["status_check"] = f"{elapsed_status_check:.2f}"
+        
+        if not result or len(result) == 0:
+            raise LLMGraphBuilderException(f"Unable to get document status for: {file_name}")
+        
+        # Eğer zaten Processing durumunda ise, işleme devam etme
+        if result[0]["Status"] == "Processing":
+            logging.warning(f"⚠️ File already in Processing status: {file_name}")
+            return uri_latency, {"status": "Already Processing", "fileName": file_name}
+        
+        # Status'u Processing olarak güncelle
+        obj_source_node = sourceNode()
+        obj_source_node.file_name = normalize_file_name(file_name)
+        obj_source_node.status = "Processing"
+        obj_source_node.model = model
+        obj_source_node.processed_chunk = 0
+        obj_source_node.total_chunks = len(pages)  # Page sayısı
+        
+        start_update_status = time.time()
+        graphDb_data_Access.update_source_node(obj_source_node)
+        elapsed_update_status = time.time() - start_update_status
+        uri_latency["update_status_to_processing"] = f"{elapsed_update_status:.2f}"
+        
+        logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
+        
+        # Policy-specific Entity Extraction (LLM çağrısı - tek LLM call)
+        start_extraction = time.time()
+        logging.info(f"🚀 Policy-specific entity extraction başlıyor...")
+        
+        try:
+            # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
+            # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
+            graphDb_data_Access._create_document_related_nodes(file_name, "auto", None, model)
+            
+            elapsed_extraction = time.time() - start_extraction
+            uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
+            logging.info(f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s")
+            
+        except Exception as extraction_error:
+            elapsed_extraction = time.time() - start_extraction
+            uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
+            logging.error(f"❌ Policy entity extraction hatası: {extraction_error}")
+        
+        # Policy-Entity Relationships
+        start_policy_rel = time.time()
+        try:
+            create_policy_entity_relationships(graph, file_name)
+            elapsed_policy_rel = time.time() - start_policy_rel
+            uri_latency["policy_entity_rel"] = f"{elapsed_policy_rel:.2f}"
+            logging.info(f"✅ Policy-Entity relationships created - {elapsed_policy_rel:.2f}s")
+        except Exception as policy_error:
+            elapsed_policy_rel = time.time() - start_policy_rel
+            uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
+            logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
+        
+        # Final counts update
+        start_count_update = time.time()
+        try:
+            counts = graphDb_data_Access.update_node_relationship_count(file_name)
+            node_count = counts[file_name].get("nodeCount", 0)
+            rel_count = counts[file_name].get("relationshipCount", 0)
+            elapsed_count_update = time.time() - start_count_update
+            uri_latency["count_update"] = f"{elapsed_count_update:.2f}"
+            logging.info(f"✅ Final counts: {node_count} nodes, {rel_count} relationships")
+        except Exception as count_error:
+            elapsed_count_update = time.time() - start_count_update
+            uri_latency["count_update"] = f"FAILED - {elapsed_count_update:.2f}"
+            logging.error(f"❌ Count update hatası: {count_error}")
+            node_count = 0
+            rel_count = 0
+        
+        # Status'u Completed olarak güncelle
+        end_time = datetime.now()
+        processed_time = end_time - start_time
+        
+        obj_source_node = sourceNode()
+        obj_source_node.file_name = normalize_file_name(file_name)
+        obj_source_node.status = "Completed"
+        obj_source_node.processing_time = processed_time
+        obj_source_node.updated_at = end_time
+        obj_source_node.node_count = node_count
+        obj_source_node.relationship_count = rel_count
+        obj_source_node.processed_chunk = len(pages)  # Tüm pages işlendi
+        
+        graphDb_data_Access.update_source_node(obj_source_node)
+        
+        total_processing_time = time.time() - start_time.timestamp()
+        uri_latency["total_processing_time"] = f"{total_processing_time:.2f}"
+        
+        logging.info(f"✅ V2 Processing completed for: {file_name}")
+        logging.info(f"📊 Results: {node_count} nodes, {rel_count} relationships in {total_processing_time:.2f}s")
+        
+        # Response
+        response = {
+            "fileName": file_name,
+            "nodeCount": node_count,
+            "relationshipCount": rel_count,
+            "total_processing_time": round(processed_time.total_seconds(), 2),
+            "status": "Completed",
+            "model": model,
+            "success_count": 1,
+            "processing_version": "V2"
+        }
+        
+        return uri_latency, response
+        
+    except Exception as e:
+        logging.error(f"❌ processing_source_v2 failed for {file_name}: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Status'u Failed olarak güncelle
+        try:
+            obj_source_node = sourceNode()
+            obj_source_node.file_name = normalize_file_name(file_name)
+            obj_source_node.status = "Failed"
+            obj_source_node.processing_error = str(e)[:500]
+            graphDb_data_Access.update_source_node(obj_source_node)
+        except:
+            pass
+        
+        response = {
+            "fileName": file_name,
+            "status": "Failed",
+            "error": str(e),
+            "processing_version": "V2"
+        }
+        
+        return uri_latency, response
+
+
 async def processing_chunks(
   chunkId_chunkDoc_list,
   graph,

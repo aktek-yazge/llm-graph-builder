@@ -1,18 +1,19 @@
-import React, { useMemo, Suspense, lazy } from 'react';
-import { Drawer, Flex, StatusIndicator, Typography, useMediaQuery } from '@neo4j-ndl/react';
-import DropZone from '../DataSources/Local/DropZone';
-import S3Component from '../DataSources/AWS/S3Bucket';
-import GCSButton from '../DataSources/GCS/GCSButton';
-import CustomAlert from '../UI/Alert';
-import FallBackDialog from '../UI/FallBackDialog';
+import { useAuth0 } from '@auth0/auth0-react';
+import { Button, Drawer, Flex, StatusIndicator, Typography, useMediaQuery } from '@neo4j-ndl/react';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
 import { useAlertContext } from '../../context/Alert';
 import { useCredentials } from '../../context/UserCredentials';
+import { useFileContext } from '../../context/UsersFiles';
+import { DrawerProps } from '../../types';
 import { APP_SOURCES } from '../../utils/Constants';
+import S3Component from '../DataSources/AWS/S3Bucket';
+import GCSButton from '../DataSources/GCS/GCSButton';
+import DropZone from '../DataSources/Local/DropZone';
+import DropZoneV2 from '../DataSources/Local/DropZoneV2';
+import CustomAlert from '../UI/Alert';
+import FallBackDialog from '../UI/FallBackDialog';
 import GenericButton from '../WebSources/GenericSourceButton';
 import GenericModal from '../WebSources/GenericSourceModal';
-import { DrawerProps } from '../../types';
-import { useAuth0 } from '@auth0/auth0-react';
-import { useFileContext } from '../../context/UsersFiles';
 const S3Modal = lazy(() => import('../DataSources/AWS/S3Modal'));
 const GCSModal = lazy(() => import('../DataSources/GCS/GCSModal'));
 const DrawerDropzone: React.FC<DrawerProps> = ({
@@ -29,6 +30,9 @@ const DrawerDropzone: React.FC<DrawerProps> = ({
   const { loginWithRedirect } = useAuth0();
   const isLargeDesktop = useMediaQuery('(min-width:1440px)');
   const { filesData } = useFileContext();
+
+  // V2 Upload System Toggle
+  const [useV2Upload, setUseV2Upload] = useState(true); // Default to V2
   const isYoutubeOnly = useMemo(
     () => APP_SOURCES.includes('youtube') && !APP_SOURCES.includes('wiki') && !APP_SOURCES.includes('web'),
     []
@@ -86,7 +90,18 @@ const DrawerDropzone: React.FC<DrawerProps> = ({
                     <Flex gap='6' className='h-full source-container'>
                       {APP_SOURCES.includes('local') && (
                         <div className='px-6 outline-dashed outline-2 outline-offset-2 outline-gray-100 mt-3 imageBg'>
-                          <DropZone />
+                          {/* V1/V2 Upload Toggle */}
+                          <div className='mb-3 flex items-center justify-between'>
+                            <Typography variant='body-medium'>
+                              Upload System: {useV2Upload ? 'Queue (V2)' : 'Direct (V1)'}
+                            </Typography>
+                            <Button size='small' onClick={() => setUseV2Upload(!useV2Upload)}>
+                              Switch to {useV2Upload ? 'V1' : 'V2'}
+                            </Button>
+                          </div>
+
+                          {/* Conditional DropZone Rendering */}
+                          {useV2Upload ? <DropZoneV2 /> : <DropZone />}
                         </div>
                       )}
                       {APP_SOURCES.some((source) => ['youtube', 'wiki', 'web'].includes(source)) && (

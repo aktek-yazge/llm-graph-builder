@@ -1,0 +1,408 @@
+/* eslint-disable no-console */
+import { Button, Checkbox, Flex, IconButton, ProgressBar, StatusIndicator, Typography } from '@neo4j-ndl/react';
+import { ArrowPathIconSolid, PlayIconSolid, SparklesIconSolid, TrashIconOutline } from '@neo4j-ndl/react/icons';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useCredentials } from '../../context/UserCredentials';
+import {
+  deleteFileFromQueueAPI,
+  getQueuedFilesAPI,
+  resetFileStageAPI,
+  startChunkingAPI,
+  startGraphCreationAPI,
+} from '../../utils/FileAPI';
+import { showErrorToast, showSuccessToast } from '../../utils/Toasts';
+
+interface V2File {
+  id: number;
+  filename: string;
+  original_name: string;
+  file_size: number;
+  upload_date: string;
+  upload_status: 'uploaded' | 'uploading' | 'failed';
+  chunking_status: 'pending' | 'chunking' | 'chunked' | 'failed';
+  graph_status: 'pending' | 'processing' | 'completed' | 'failed';
+}
+
+const V2FileQueue: React.FC = () => {
+  const [files, setFiles] = useState<V2File[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<number>>(new Set());
+  const { userCredentials } = useCredentials();
+
+  // Fetch V2 files
+  const fetchV2Files = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const response = await getQueuedFilesAPI();
+      if (response?.status === 'Success' && response?.data?.files) {
+        setFiles(response.data.files);
+      }
+    } catch (error) {
+      showErrorToast('Failed to fetch queue files');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchV2Files();
+    // Poll every 3 seconds for status updates
+    const interval = setInterval(fetchV2Files, 3000);
+    return () => clearInterval(interval);
+  }, [fetchV2Files]);
+
+  const handleSelectFile = (fileId: number) => {
+    const newSelected = new Set(selectedFileIds);
+    if (newSelected.has(fileId)) {
+      newSelected.delete(fileId);
+    } else {
+      newSelected.add(fileId);
+    }
+    setSelectedFileIds(newSelected);
+  };
+
+  const handleSelectAll = () => {
+    if (selectedFileIds.size === files.length) {
+      setSelectedFileIds(new Set());
+    } else {
+      setSelectedFileIds(new Set(files.map((f) => f.id)));
+    }
+  };
+
+  const handleStartChunking = async () => {
+    if (selectedFileIds.size === 0) {
+      showErrorToast('Please select at least one file');
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      const fileIds = Array.from(selectedFileIds);
+      console.log(`🔄 Starting chunking for ${fileIds.length} files`);
+
+      // Call backend API for each selected file
+      for (const fileId of fileIds) {
+        const response = await startChunkingAPI(fileId);
+
+        // Immediately update local state if API returns chunking_status
+        if (response?.status === 'Success' && response?.data?.chunking_status) {
+          setFiles((prevFiles) =>
+            prevFiles.map((file) => {
+              if (file.id === fileId) {
+                return { ...file, chunking_status: response.data.chunking_status };
+              }
+              return file;
+            })
+          );
+        }
+      }
+
+      showSuccessToast(`Started chunking for ${fileIds.length} file(s)`);
+      setSelectedFileIds(new Set());
+      await fetchV2Files(); // Refresh file list
+    } catch (error) {
+      showErrorToast('Failed to start chunking');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCreateGraph = async () => {
+    if (selectedFileIds.size === 0) {
+      showErrorToast('Please select at least one file');
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      const fileIds = Array.from(selectedFileIds);
+      console.log(`✨ Starting graph creation for ${fileIds.length} files`);
+
+      // Call backend API for each selected file
+      for (const fileId of fileIds) {
+        const response = await startGraphCreationAPI(fileId, 'gpt-4o-mini', false);
+
+        // Immediately update local state if API returns graph_status
+        if (response?.status === 'Success' && response?.data?.graph_status) {
+          setFiles((prevFiles) =>
+            prevFiles.map((file) => {
+              if (file.id === fileId) {
+                return { ...file, graph_status: response.data.graph_status };
+              }
+              return file;
+            })
+          );
+        }
+      }
+
+      showSuccessToast(`Started graph creation for ${fileIds.length} file(s)`);
+      setSelectedFileIds(new Set());
+      await fetchV2Files(); // Refresh file list
+    } catch (error) {
+      console.error('❌ Graph creation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to start graph creation';
+      showErrorToast(errorMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResetStage = async (fileId: number, stage: 'upload' | 'chunking' | 'graph') => {
+    if (!confirm(`Reset ${stage} stage for this file?`)) {
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      console.log(`🔄 Resetting ${stage} stage for file ${fileId}`);
+
+      // Call backend API
+      await resetFileStageAPI(fileId, stage);
+
+      showSuccessToast(`${stage} stage reset`);
+      await fetchV2Files(); // Refresh file list
+    } catch (error) {
+      showErrorToast(`Failed to reset ${stage} stage`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteFile = async (fileId: number, filename: string) => {
+    if (!confirm(`Delete "${filename}"?`)) {
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      console.log(`🗑️ Deleting file ${fileId}`);
+
+      // Call backend API
+      await deleteFileFromQueueAPI(fileId);
+
+      showSuccessToast('File deleted');
+      await fetchV2Files(); // Refresh file list
+    } catch (error) {
+      showErrorToast('Failed to delete file');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const getStageColor = (status: string) => {
+    switch (status) {
+      case 'pending':
+        return 'unknown';
+      case 'uploading':
+      case 'chunking':
+      case 'processing':
+        return 'info';
+      case 'chunked':
+      case 'completed':
+        return 'success';
+      case 'failed':
+        return 'danger';
+      default:
+        return 'unknown';
+    }
+  };
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) {
+      return '0 Bytes';
+    }
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+  };
+
+  return (
+    <div className='w-full p-4'>
+      {/* Header with Controls */}
+      <Flex justifyContent='space-between' alignItems='center' className='mb-4'>
+        <Typography variant='h5'>📋 V2 File Queue Management</Typography>
+        <Flex className='gap-2'>
+          <Button onClick={handleStartChunking} isDisabled={isLoading || selectedFileIds.size === 0} size='small'>
+            <PlayIconSolid className='w-4 h-4 mr-1' />
+            Start Chunking ({selectedFileIds.size})
+          </Button>
+          <Button onClick={handleCreateGraph} isDisabled={isLoading || selectedFileIds.size === 0} size='small'>
+            <SparklesIconSolid className='w-4 h-4 mr-1' />
+            Create Graph ({selectedFileIds.size})
+          </Button>
+        </Flex>
+      </Flex>
+
+      {/* Files Table */}
+      <div className='border rounded-lg overflow-hidden'>
+        {/* Header */}
+        <div className='bg-gray-50 border-b p-4'>
+          <div className='grid grid-cols-12 gap-3 items-center'>
+            <div className='col-span-1'>
+              <Checkbox
+                isChecked={selectedFileIds.size === files.length && files.length > 0}
+                onChange={handleSelectAll}
+              />
+            </div>
+            <Typography variant='body-medium' className='col-span-2 font-semibold'>
+              Filename
+            </Typography>
+            <Typography variant='body-medium' className='col-span-1 font-semibold'>
+              Size
+            </Typography>
+            <Typography variant='body-medium' className='col-span-2 font-semibold'>
+              Upload
+            </Typography>
+            <Typography variant='body-medium' className='col-span-2 font-semibold'>
+              Chunking
+            </Typography>
+            <Typography variant='body-medium' className='col-span-2 font-semibold'>
+              Graph
+            </Typography>
+            <Typography variant='body-medium' className='col-span-2 font-semibold'>
+              Actions
+            </Typography>
+          </div>
+        </div>
+
+        {/* Rows */}
+        <div className='divide-y'>
+          {files.length === 0 ? (
+            <div className='p-8 text-center'>
+              <Typography variant='body-large' className='text-gray-500'>
+                No files in queue
+              </Typography>
+            </div>
+          ) : (
+            files.map((file) => (
+              <div key={file.id} className='p-4 hover:bg-gray-50 transition-colors'>
+                <div className='grid grid-cols-12 gap-3 items-center'>
+                  {/* Checkbox */}
+                  <div className='col-span-1'>
+                    <Checkbox isChecked={selectedFileIds.has(file.id)} onChange={() => handleSelectFile(file.id)} />
+                  </div>
+
+                  {/* Filename */}
+                  <div className='col-span-2'>
+                    <Typography variant='body-medium' className='font-medium truncate'>
+                      {file.original_name}
+                    </Typography>
+                    <Typography variant='body-small' className='text-gray-500'>
+                      {formatFileSize(file.file_size)}
+                    </Typography>
+                  </div>
+
+                  {/* Size */}
+                  <Typography variant='body-small' className='col-span-1'>
+                    {formatFileSize(file.file_size)}
+                  </Typography>
+
+                  {/* Upload Stage */}
+                  <div className='col-span-2'>
+                    <Flex alignItems='center' className='gap-2'>
+                      <StatusIndicator type={getStageColor(file.upload_status)} />
+                      <div className='flex-1'>
+                        <Typography variant='body-small' className='capitalize'>
+                          {file.upload_status}
+                        </Typography>
+                        <ProgressBar size='small' value={file.upload_status === 'uploaded' ? 100 : 50} />
+                      </div>
+                    </Flex>
+                  </div>
+
+                  {/* Chunking Stage */}
+                  <div className='col-span-2'>
+                    <Flex alignItems='center' className='gap-2'>
+                      <StatusIndicator type={getStageColor(file.chunking_status)} />
+                      <div className='flex-1'>
+                        <Typography variant='body-small' className='capitalize'>
+                          {file.chunking_status}
+                        </Typography>
+                        {file.chunking_status === 'chunking' && <ProgressBar size='small' value={50} />}
+                      </div>
+                    </Flex>
+                  </div>
+
+                  {/* Graph Stage */}
+                  <div className='col-span-2'>
+                    <Flex alignItems='center' className='gap-2'>
+                      <StatusIndicator type={getStageColor(file.graph_status)} />
+                      <div className='flex-1'>
+                        <Typography variant='body-small' className='capitalize'>
+                          {file.graph_status}
+                        </Typography>
+                        {file.graph_status === 'processing' && <ProgressBar size='small' value={50} />}
+                      </div>
+                    </Flex>
+                  </div>
+
+                  {/* Actions */}
+                  <Flex className='col-span-2 gap-1 justify-end'>
+                    {file.upload_status === 'uploaded' && (
+                      <IconButton
+                        size='small'
+                        ariaLabel='Reset upload'
+                        onClick={() => handleResetStage(file.id, 'upload')}
+                        isDisabled={isLoading}
+                      >
+                        <ArrowPathIconSolid className='w-4 h-4' />
+                      </IconButton>
+                    )}
+                    {file.chunking_status === 'chunked' && (
+                      <IconButton
+                        size='small'
+                        ariaLabel='Reset chunking'
+                        onClick={() => handleResetStage(file.id, 'chunking')}
+                        isDisabled={isLoading}
+                      >
+                        <ArrowPathIconSolid className='w-4 h-4' />
+                      </IconButton>
+                    )}
+                    {file.graph_status === 'completed' && (
+                      <IconButton
+                        size='small'
+                        ariaLabel='Reset graph'
+                        onClick={() => handleResetStage(file.id, 'graph')}
+                        isDisabled={isLoading}
+                      >
+                        <ArrowPathIconSolid className='w-4 h-4' />
+                      </IconButton>
+                    )}
+                    <IconButton
+                      size='small'
+                      ariaLabel='Delete file'
+                      onClick={() => handleDeleteFile(file.id, file.original_name)}
+                      isDisabled={isLoading}
+                    >
+                      <TrashIconOutline className='w-4 h-4' />
+                    </IconButton>
+                  </Flex>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Info */}
+      <div className='mt-6 p-4 bg-blue-50 rounded-lg'>
+        <Typography variant='h6' className='text-blue-800 mb-2'>
+          📖 V2 Queue Workflow
+        </Typography>
+        <Typography variant='body-medium' className='text-blue-700'>
+          <strong>Stage 1 - Upload:</strong> Files uploaded to queue
+          <br />
+          <strong>Stage 2 - Chunking:</strong> Files split into chunks for processing
+          <br />
+          <strong>Stage 3 - Graph:</strong> Graph nodes and relationships created in Neo4j
+          <br />
+          <br />
+          💡 You can reset any stage. Resetting a stage will also reset all subsequent stages.
+        </Typography>
+      </div>
+    </div>
+  );
+};
+
+export default V2FileQueue;

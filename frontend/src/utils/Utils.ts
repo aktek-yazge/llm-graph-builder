@@ -81,6 +81,13 @@ export const statusCheck = (status: string) => {
       return 'danger';
     case 'Ready to Reprocess':
       return 'info';
+    // V2 Queue statuses
+    case 'pending':
+      return 'info';
+    case 'chunking':
+      return 'warning';
+    case 'chunked':
+      return 'success';
     default:
       return 'unknown';
   }

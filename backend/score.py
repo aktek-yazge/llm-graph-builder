@@ -1,12 +1,28 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
+import logging
+import importlib.util
 
 # Ensure UTF-8 encoding for Turkish characters
 if sys.stdout.encoding != 'utf-8':
     import codecs
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
+# STARTUP DEBUG: Show exactly which Python is running and where packages are
+print(f"🔍 [STARTUP] Python Executable: {sys.executable}")
+print(f"🔍 [STARTUP] Python Version: {sys.version}")
+print(f"🔍 [STARTUP] sys.prefix: {sys.prefix}")
+print(f"🔍 [STARTUP] sys.path (first 5): {sys.path[:5]}")
+
+# Check google.genai location (NEW SDK)
+genai_spec = importlib.util.find_spec('google.genai')
+if genai_spec and genai_spec.origin:
+    print(f"✅ [STARTUP] google.genai found at: {genai_spec.origin}")
+else:
+    print(f"❌ [STARTUP] google.genai NOT FOUND in sys.path")
+    print(f"🔍 [STARTUP] Full sys.path: {sys.path}")
 
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +59,13 @@ import re
 from urllib.parse import unquote
 from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
+
+# Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
+try:
+    from google import genai as genai_sdk
+    GEMINI_AVAILABLE = True
+except ImportError:
+    genai = None
 from src.device_utils import get_optimal_device, print_device_info, optimize_for_apple_silicon
 from datetime import datetime, timezone
 import time
@@ -61,6 +84,7 @@ from pathlib import Path
 import time
 import json
 import logging
+import shutil
 
 # HTTP Request Logging Middleware for OpenTelemetry
 class HTTPLoggingMiddleware:
@@ -3518,6 +3542,1339 @@ async def delete_similar_relationships(uri=Form(None), userName=Form(None), pass
                                  message="SIMILAR ilişkileri silme işlemi başarısız",
                                  error=error_message)
 
+
+# ==========================================
+# V2 FILE UPLOAD QUEUE API ENDPOINTS
+# ==========================================
+
+from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
+from src.utf8_utils import normalize_file_name
+from typing import List, Dict, Any
+from pydantic import BaseModel
+import shutil
+from pathlib import Path
+
+# Pydantic models for API responses
+class FileResponse(BaseModel):
+    id: int
+    filename: str
+    original_name: str
+    file_path: str
+    upload_date: str
+    file_size: int
+    file_hash: str
+    status: str
+    created_at: str
+    updated_at: str
+
+class QueueStatsResponse(BaseModel):
+    uploaded: int
+    queued: int
+    processing: int
+    completed: int
+    error: int
+    total: int
+
+class ProcessFileRequest(BaseModel):
+    model: str = "openai_gpt_4o_mini"
+    uri: str
+    userName: str  
+    password: str
+    database: str
+    generateEmbedding: str = "false"
+
+# Upload directory
+UPLOAD_DIR = Path(__file__).parent / "upload"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+@app.post("/api/v2/files/upload")
+async def upload_file_to_queue(
+    file: UploadFile = File(...), 
+    chunkNumber: int = Form(None), 
+    totalChunks: int = Form(None), 
+    originalname: str = Form(None)
+):
+    """
+    Upload files to queue system (no processing)
+    Similar to existing /upload but only saves file + metadata to SQLite
+    """
+    try:
+        start = time.time()
+        
+        # Normalize filename  
+        normalized_filename = normalize_file_name(originalname) if originalname else file.filename
+        logging.info(f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}, Chunk: {chunkNumber}/{totalChunks}")
+        
+        # Create chunk directory for this file
+        chunk_dir = UPLOAD_DIR / "chunks" 
+        chunk_dir.mkdir(exist_ok=True)
+        
+        # Save chunk
+        if not chunkNumber or not totalChunks:
+            # Single file upload
+            file_path = UPLOAD_DIR / normalized_filename
+            with open(file_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
+            
+            file_size = len(content)
+            logging.info(f"✅ Single file saved: {file_path} ({file_size} bytes)")
+            
+        else:
+            # Multi-chunk upload
+            chunk_file_path = chunk_dir / f"{normalized_filename}_part_{chunkNumber}"
+            with open(chunk_file_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
+            
+            logging.info(f"💾 Chunk {chunkNumber}/{totalChunks} saved: {chunk_file_path}")
+            
+            # If this is the last chunk, merge all chunks
+            if int(chunkNumber) == int(totalChunks):
+                file_path = UPLOAD_DIR / normalized_filename
+                file_size = 0
+                
+                with open(file_path, "wb") as merged_file:
+                    for i in range(1, int(totalChunks) + 1):
+                        chunk_path = chunk_dir / f"{normalized_filename}_part_{i}"
+                        if chunk_path.exists():
+                            with open(chunk_path, "rb") as chunk_file:
+                                chunk_content = chunk_file.read()
+                                merged_file.write(chunk_content)
+                                file_size += len(chunk_content)
+                            
+                            # Remove chunk file
+                            chunk_path.unlink()
+                
+                logging.info(f"🔗 File merged successfully: {file_path} ({file_size} bytes)")
+            else:
+                # Not the final chunk, return success
+                return create_api_response("Success", message=f"Chunk {chunkNumber}/{totalChunks} uploaded")
+        
+        # Add to database (only for complete files)
+        if 'file_path' in locals():
+            db = get_file_queue_db()
+            
+            # Check for existing file by hash to prevent duplicates
+            file_hash = UploadedFile.calculate_file_hash(str(file_path))
+            existing_file = db.get_file_by_hash(file_hash) if file_hash else None
+            
+            if existing_file:
+                logging.info(f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})")
+                return create_api_response("Success", 
+                                         message="File already exists in queue", 
+                                         data={
+                                             "file_id": existing_file.id,
+                                             "filename": existing_file.filename,
+                                             "original_name": existing_file.original_name,
+                                             "upload_status": existing_file.upload_status,
+                                             "chunking_status": existing_file.chunking_status,
+                                             "graph_status": existing_file.graph_status,
+                                             "file_size": existing_file.file_size,
+                                             "duplicate": True
+                                         })
+            
+            # Add new file to queue
+            uploaded_file = db.add_file(
+                filename=normalized_filename,
+                original_name=originalname or file.filename,
+                file_path=str(file_path),
+                file_size=file_size
+            )
+            
+            elapsed_time = time.time() - start
+            logging.info(f"✅ File added to queue: ID={uploaded_file.id}, Status={uploaded_file.status} ({elapsed_time:.2f}s)")
+            
+            return create_api_response("Success", 
+                                     message="File uploaded successfully to queue",
+                                     data={
+                                         "file_id": uploaded_file.id,
+                                         "filename": uploaded_file.filename,
+                                         "original_name": uploaded_file.original_name,
+                                         "upload_status": uploaded_file.upload_status,
+                                         "chunking_status": uploaded_file.chunking_status,
+                                         "graph_status": uploaded_file.graph_status,
+                                         "file_size": uploaded_file.file_size,
+                                         "duplicate": False
+                                     })
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ V2 Upload failed for {originalname}: {error_message}")
+        return create_api_response("Failed", 
+                                 message="File upload failed", 
+                                 error=error_message)
+
+@app.get("/api/v2/files/list")
+async def list_queued_files(limit: int = 100, offset: int = 0):
+    """Get list of all files in queue with their status"""
+    try:
+        db = get_file_queue_db()
+        files = db.get_all_files(limit=limit, offset=offset)
+        
+        files_data = []
+        for f in files:
+            files_data.append({
+                "id": f.id,
+                "filename": f.filename,
+                "original_name": f.original_name,
+                "file_path": f.file_path,
+                "upload_date": f.upload_date.isoformat(),
+                "file_size": f.file_size,
+                "file_hash": f.file_hash,
+                "status": f.status,
+                "upload_status": f.upload_status,
+                "chunking_status": f.chunking_status,
+                "graph_status": f.graph_status,
+                "created_at": f.created_at.isoformat(),
+                "updated_at": f.updated_at.isoformat(),
+                "chunking_started_at": f.chunking_started_at.isoformat() if f.chunking_started_at else None,
+                "chunking_completed_at": f.chunking_completed_at.isoformat() if f.chunking_completed_at else None,
+                "graph_started_at": f.graph_started_at.isoformat() if f.graph_started_at else None,
+                "graph_completed_at": f.graph_completed_at.isoformat() if f.graph_completed_at else None,
+                "processing_started_at": f.processing_started_at.isoformat() if f.processing_started_at else None,
+                "processing_completed_at": f.processing_completed_at.isoformat() if f.processing_completed_at else None,
+                "processing_error": f.processing_error
+            })
+        
+        return create_api_response("Success", data={"files": files_data, "count": len(files_data)})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to list files: {error_message}")
+        return create_api_response("Failed", message="Failed to retrieve file list", error=error_message)
+
+@app.post("/api/v2/files/{file_id}/chunk")
+async def start_chunking(file_id: int):
+    """Start chunking process for a file (OCR + Image Extraction + Markdown)"""
+    try:
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+        
+        # Check if already chunked
+        if file_record.chunking_status == "chunked":
+            return create_api_response("Success", 
+                                     message="File already chunked",
+                                     data={"file_id": file_id, "chunking_status": "chunked"})
+        
+        # Update status to chunking
+        file_record.chunking_status = "chunking"
+        file_record.chunking_started_at = datetime.now(timezone.utc)
+        db_session.commit()
+        
+        logging.info(f"🔄 Started chunking for file {file_id}: {file_record.original_name}")
+        
+        # Database'den dosya yolunu al
+        file_path = file_record.file_path
+        
+        if not os.path.exists(file_path):
+            file_record.chunking_status = "failed"
+            db_session.commit()
+            return create_api_response("Failed", message=f"File not found at: {file_path}")
+        
+        # Chunking işlemini background'da çalıştır
+        asyncio.create_task(process_chunking_v2(file_id, file_record.original_name, file_path))
+        
+
+        return create_api_response("Success", 
+                                 message="Chunking started",
+                                 data={
+                                     "file_id": file_id,
+                                     "chunking_status": "chunking"
+                                 })
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to start chunking for file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to start chunking", error=error_message)
+    finally:
+        db_session.close()
+
+@app.get("/api/v2/files/{file_id}/status")
+async def get_file_status(file_id: int):
+    """Get status of a single V2 file (for polling)"""
+    try:
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+        
+        return create_api_response("Success", data={
+            "id": file_record.id,
+            "original_name": file_record.original_name,
+            "upload_status": file_record.upload_status,
+            "chunking_status": file_record.chunking_status,
+            "graph_status": file_record.graph_status,
+            "file_size": file_record.file_size,
+            "markdown_path": file_record.markdown_path
+        })
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to get file status: {error_message}")
+        return create_api_response("Failed", message="Failed to get file status", error=error_message)
+    finally:
+        db_session.close()
+
+@app.post("/api/v2/files/{file_id}/graph-create")
+async def start_graph_creation(
+    file_id: int, 
+    model: str = Form("gpt-4o-mini"),
+    generate_embedding: bool = Form(False)
+):
+    """Start graph creation process for a file"""
+    db_session = None  # Initialize outside try block
+    try:
+        # Get Neo4j credentials from environment
+        uri = os.environ.get("NEO4J_URI")
+        userName = os.environ.get("NEO4J_USERNAME")
+        password = os.environ.get("NEO4J_PASSWORD")
+        database = os.environ.get("NEO4J_DATABASE", "neo4j")
+        
+        if not all([uri, userName, password]):
+            return create_api_response("Failed", message="Neo4j credentials not configured in backend .env")
+        
+        logging.info(f"🚀 Graph creation request for file {file_id}: model={model}, database={database}")
+        
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+        
+        # Check if chunking is completed
+        if file_record.chunking_status != "chunked":
+            return create_api_response("Failed", 
+                                     message=f"File must be chunked first (current status: {file_record.chunking_status})")
+        
+        # Check if markdown file exists
+        if not file_record.markdown_path or not os.path.exists(file_record.markdown_path):
+            return create_api_response("Failed", message="Markdown file not found. Please run chunking first.")
+        
+        # Update status to processing
+        file_record.graph_status = "processing"
+        file_record.graph_started_at = datetime.now(timezone.utc)
+        file_record.model_used = model
+        file_record.generate_embedding = str(generate_embedding)
+        file_record.neo4j_uri = uri
+        file_record.neo4j_database = database
+        db_session.commit()
+        
+        logging.info(f"✨ Started graph creation for file {file_id}: {file_record.original_name}, Model: {model}")
+        
+        # Graph creation işlemini background'da çalıştır
+        asyncio.create_task(process_graph_creation_v2(
+            file_id=file_id,
+            original_name=file_record.original_name,
+            markdown_path=file_record.markdown_path,
+            file_path=file_record.file_path,
+            model=model,
+            uri=uri,
+            userName=userName,
+            password=password,
+            database=database,
+            generate_embedding=generate_embedding
+        ))
+        
+        return create_api_response("Success", 
+                                 message="Graph creation started",
+                                 data={
+                                     "file_id": file_id,
+                                     "graph_status": "processing"
+                                 })
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to start graph creation for file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to start graph creation", error=error_message)
+    finally:
+        if db_session:
+            db_session.close()
+
+@app.post("/api/v2/files/{file_id}/reset")
+async def reset_file_stage(file_id: int, stage: str = "upload"):
+    """Reset file to a specific stage (cascading: upload→chunking→graph)"""
+    try:
+        if stage not in ["upload", "chunking", "graph"]:
+            return create_api_response("Failed", message="Invalid stage parameter")
+        
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+        
+        # Reset logic with cascading
+        if stage == "upload":
+            # Reset everything
+            file_record.upload_status = "uploading"
+            file_record.chunking_status = "pending"
+            file_record.graph_status = "pending"
+            file_record.chunking_started_at = None
+            file_record.chunking_completed_at = None
+            file_record.graph_started_at = None
+            file_record.graph_completed_at = None
+            logging.info(f"🔄 Reset UPLOAD stage for file {file_id} (cascaded to all stages)")
+        
+        elif stage == "chunking":
+            # Reset chunking and graph (cascade)
+            file_record.chunking_status = "pending"
+            file_record.graph_status = "pending"
+            file_record.chunking_started_at = None
+            file_record.chunking_completed_at = None
+            file_record.graph_started_at = None
+            file_record.graph_completed_at = None
+            logging.info(f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph)")
+        
+        elif stage == "graph":
+            # Reset only graph
+            file_record.graph_status = "pending"
+            file_record.graph_started_at = None
+            file_record.graph_completed_at = None
+            logging.info(f"🔄 Reset GRAPH stage for file {file_id}")
+        
+        db_session.commit()
+        
+        return create_api_response("Success", 
+                                 message=f"{stage.capitalize()} stage reset",
+                                 data={
+                                     "file_id": file_id,
+                                     "upload_status": file_record.upload_status,
+                                     "chunking_status": file_record.chunking_status,
+                                     "graph_status": file_record.graph_status
+                                 })
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to reset file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to reset file", error=error_message)
+    finally:
+        db_session.close()
+
+@app.post("/api/v2/files/{file_id}/process")
+async def queue_file_for_processing(file_id: int, request: ProcessFileRequest):
+    """Queue a file for background processing"""
+    try:
+        db = get_file_queue_db()
+        
+        # Get file from database
+        file_record = db.get_file_by_id(file_id)
+        if not file_record:
+            return create_api_response("Failed", message="File not found", error="File ID not in database")
+        
+        # Check if file is in correct status
+        if file_record.status not in [FileStatus.UPLOADED, FileStatus.ERROR]:
+            return create_api_response("Failed", 
+                                     message=f"File cannot be processed in current status: {file_record.status}",
+                                     error="Invalid file status")
+        
+        # Update file metadata with processing parameters
+        db_session = db.get_db_session()
+        try:
+            file_record.neo4j_uri = request.uri
+            file_record.neo4j_database = request.database
+            file_record.model_used = request.model
+            file_record.generate_embedding = request.generateEmbedding
+            file_record.update_status(FileStatus.QUEUED)
+            
+            db_session.commit()
+            db_session.refresh(file_record)
+            
+            logging.info(f"✅ File queued for processing: ID={file_id}, Model={request.model}")
+            
+            return create_api_response("Success", 
+                                     message="File queued for processing successfully",
+                                     data={
+                                         "file_id": file_id,
+                                         "status": file_record.status,
+                                         "model": request.model
+                                     })
+            
+        except Exception as e:
+            db_session.rollback()
+            raise e
+        finally:
+            db_session.close()
+            
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to queue file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to queue file for processing", error=error_message)
+
+@app.get("/api/v2/files/status") 
+async def get_queue_status():
+    """Get current queue statistics"""
+    try:
+        db = get_file_queue_db()
+        stats = db.get_queue_stats()
+        
+        return create_api_response("Success", data={"queue_stats": stats})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to get queue status: {error_message}")
+        return create_api_response("Failed", message="Failed to retrieve queue status", error=error_message)
+
+@app.delete("/api/v2/files/{file_id}")
+async def delete_queued_file(file_id: int):
+    """Delete a file from queue and filesystem"""
+    try:
+        db = get_file_queue_db()
+        
+        # Get file info before deletion
+        file_record = db.get_file_by_id(file_id)
+        if not file_record:
+            return create_api_response("Failed", message="File not found", error="File ID not in database")
+        
+        file_path = Path(file_record.file_path)
+        
+        # Delete file from filesystem if exists
+        if file_path.exists():
+            file_path.unlink()
+            logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
+        
+        # Delete from database
+        success = db.delete_file(file_id)
+        if success:
+            logging.info(f"✅ File deleted from queue: ID={file_id}")
+            return create_api_response("Success", 
+                                     message="File deleted successfully",
+                                     data={"file_id": file_id})
+        else:
+            return create_api_response("Failed", message="Failed to delete file from database")
+            
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to delete file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to delete file", error=error_message)
+
+# ==========================================
+# BACKGROUND PROCESSING ENDPOINTS
+# ==========================================
+
+from src.background_processor import get_background_processor, start_processing_loop, process_file_immediately
+
+# Global background task
+background_task = None
+
+@app.post("/api/v2/processing/start")
+async def start_background_processing():
+    """Start background file processing"""
+    global background_task
+    
+    try:
+        processor = get_background_processor()
+        
+        if processor.is_processing:
+            return create_api_response("Success", 
+                                     message="Background processing already running",
+                                     data={"status": "already_running"})
+        
+        # Start background task
+        background_task = asyncio.create_task(start_processing_loop())
+        
+        logging.info("🚀 Background processing started via API")
+        
+        return create_api_response("Success", 
+                                 message="Background processing started successfully",
+                                 data={"status": "started"})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to start background processing: {error_message}")
+        return create_api_response("Failed", 
+                                 message="Failed to start background processing", 
+                                 error=error_message)
+
+@app.post("/api/v2/processing/stop")
+async def stop_background_processing():
+    """Stop background file processing"""
+    global background_task
+    
+    try:
+        processor = get_background_processor()
+        
+        if not processor.is_processing:
+            return create_api_response("Success", 
+                                     message="Background processing not running",
+                                     data={"status": "not_running"})
+        
+        # Stop processor
+        processor.stop_background_processing()
+        
+        # Cancel background task if exists
+        if background_task and not background_task.done():
+            background_task.cancel()
+            try:
+                await background_task
+            except asyncio.CancelledError:
+                pass
+            background_task = None
+        
+        logging.info("⏹️ Background processing stopped via API")
+        
+        return create_api_response("Success", 
+                                 message="Background processing stopped successfully",
+                                 data={"status": "stopped"})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to stop background processing: {error_message}")
+        return create_api_response("Failed", 
+                                 message="Failed to stop background processing", 
+                                 error=error_message)
+
+@app.get("/api/v2/processing/status")
+async def get_processing_status():
+    """Get background processing status"""
+    try:
+        processor = get_background_processor()
+        status = processor.get_processing_status()
+        
+        return create_api_response("Success", data={"processing_status": status})
+        
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to get processing status: {error_message}")
+        return create_api_response("Failed", 
+                                 message="Failed to get processing status", 
+                                 error=error_message)
+
+async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
+    """
+    V2 Chunking Process: OCR + Image Extraction + Markdown
+    Aynı V1'deki upload_file içindeki mantık kullanılıyor
+    """
+    db = None
+    db_session = None
+    loop = asyncio.get_event_loop()
+    executor = None
+    
+    try:
+        # Thread pool executor'ı oluştur (heavy işlemler için)
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=2)
+        
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            logging.error(f"❌ File record not found for ID: {file_id}")
+            return
+        
+        logging.info(f"📖 Starting V2 chunking for: {original_name}")
+        
+        # Normalize filename
+        from src.utf8_utils import normalize_file_name
+        normalized_filename = normalize_file_name(original_name)
+        
+        # Output klasör yapısını oluştur
+        from src.document_sources.s3_upload_utils import create_document_output_structure
+        document_dir, pdf_dir, images_dir = create_document_output_structure(
+            normalized_filename, "output"
+        )
+        
+        # Dosya tipini kontrol et
+        file_extension = normalized_filename.split(".")[-1].lower()
+        docling_supported_formats = ["pdf", "docx", "pptx", "html", "csv", "md"]
+        
+        doc_link = None
+        page_images = []
+        pages = []
+        
+        if file_extension in docling_supported_formats and os.path.exists(merged_file_path):
+            try:
+                # ✨ Markdown dosyası zaten var mı kontrol et
+                markdown_filename = f"{normalized_filename}.md"
+                markdown_path = os.path.join(document_dir, markdown_filename)
+                
+                if os.path.exists(markdown_path):
+                    logging.info(f"✅ Markdown file already exists, skipping extraction: {markdown_path}")
+                    
+                    # Mevcut markdown'ı oku
+                    with open(markdown_path, "r", encoding="utf-8") as md_file:
+                        markdown_content = md_file.read()
+                    
+                    logging.info(f"📄 Markdown content length: {len(markdown_content)} chars")
+                    
+                    # Pages'e dönüştür
+                    from langchain_core.documents import Document
+                    page_texts = markdown_content.split("[PAGE BREAK]")
+                    pages = [Document(page_content=text.strip(), metadata={"page": idx}) 
+                            for idx, text in enumerate(page_texts, 1) if text.strip()]
+                    
+                    logging.info(f"📊 Split result: {len(page_texts)} parts, {len(pages)} non-empty pages")
+                    
+                    # Eğer pages boşsa, markdown dosyasını sil ve yeniden extraction yap
+                    if not pages or len(pages) == 0:
+                        logging.warning(f"⚠️ Markdown file is empty or invalid, deleting and re-extracting: {markdown_path}")
+                        os.remove(markdown_path)
+                        # Markdown olmadığı için aşağıda yeniden oluşturulacak
+                    else:
+                        # Metadata'yı file_record'dan al
+                        if file_record.doc_link:
+                            doc_link = file_record.doc_link
+                        if file_record.page_images:
+                            try:
+                                import json
+                                page_images = json.loads(file_record.page_images) if isinstance(file_record.page_images, str) else file_record.page_images
+                            except:
+                                page_images = []
+                        
+                        logging.info(f"� Loaded existing markdown: {len(pages)} pages, {len(page_images)} images")
+                        file_record.markdown_path = markdown_path
+                    
+                    logging.info(f"� Loaded existing markdown: {len(pages)} pages, {len(page_images)} images")
+                    file_record.markdown_path = markdown_path
+                    
+                else:
+                    # Markdown yok, extraction gerekli
+                    logging.info(f"�🖼️ Starting combined content & image extraction for {file_extension.upper()}: {normalized_filename}")
+                    
+                    # Belgeyi ilgili klasöre kopyala
+                    doc_copy_path = os.path.join(pdf_dir, normalized_filename)
+                    if not os.path.exists(doc_copy_path):
+                        shutil.copy2(merged_file_path, doc_copy_path)
+                        logging.info(f"📄 Document copied to: {doc_copy_path}")
+                    
+                    # S3 yapılandırması
+                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                    doc_name = Path(normalized_filename).stem
+                    
+                    # ✨ Local images_dir'de PNG dosyaları var mı kontrol et
+                    local_images = [f for f in os.listdir(images_dir) if f.endswith('.png')] if os.path.exists(images_dir) else []
+                    
+                    if local_images:
+                        # Local images_dir'de images var, Gemini Flash ile markdown çıkart
+                        logging.info(f"📸 Found {len(local_images)} page images in local output dir for {doc_name}, reusing existing images")
+                        
+                        if file_extension == "pdf":
+                            # Local images ile Gemini markdown çıkart (NON-BLOCKING)
+                            from langchain_core.documents import Document
+                            
+                            # Gemini processing'i executor'da çalıştır
+                            def process_with_gemini():
+                                markdown_text = ""
+                                if not GEMINI_AVAILABLE:
+                                    logging.warning("❌ google.genai not available")
+                                    return markdown_text
+                                
+                                try:
+                                    api_key = os.environ.get("GEMINI_API_KEY")
+                                    if not api_key:
+                                        logging.warning("❌ GEMINI_API_KEY not found")
+                                        return markdown_text
+                                    
+                                    # Create client with new google-genai SDK
+                                    client = genai_sdk.Client(api_key=api_key)
+                                    logging.info("✅ Gemini client initialized successfully")
+                                    
+                                    from google.genai import types
+                                    for idx, img_name in enumerate(sorted(local_images), start=1):
+                                        try:
+                                            img_path = os.path.join(images_dir, img_name)
+                                            
+                                            # Read image as bytes
+                                            with open(img_path, "rb") as img_file:
+                                                image_bytes = img_file.read()
+                                            
+                                            # Send to Gemini with new SDK
+                                            response = client.models.generate_content(
+                                                model='models/gemini-2.0-flash',
+                                                contents=[
+                                                    types.Part.from_text(text="Convert this document page to clean markdown format. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."),
+                                                    types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+                                                ]
+                                            )
+                                            
+                                            if response.text:
+                                                # Son sayfa değilse PAGE BREAK ekle
+                                                if idx < len(local_images):
+                                                    markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
+                                                else:
+                                                    # Son sayfa - PAGE BREAK ekleme
+                                                    markdown_text += response.text
+                                                logging.info(f"✅ Gemini 2.0 Flash processed local image: {img_name} ({len(response.text)} chars)")
+                                            else:
+                                                logging.warning(f"Gemini returned empty response for {img_name}")
+                                        except Exception as e:
+                                            logging.warning(f"Gemini processing failed for {img_name}: {e}")
+                                    
+                                    if markdown_text:
+                                        logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(local_images)} local images")
+                                    else:
+                                        logging.warning("Gemini generated empty markdown")
+                                    
+                                except Exception as e:
+                                    logging.error(f"Gemini processing error: {e}")
+                                
+                                return markdown_text
+                            
+                            # Executor'da Gemini'yi çalıştır (NON-BLOCKING)
+                            markdown_text = await loop.run_in_executor(executor, process_with_gemini)
+                            
+                            # PyMuPDF fallback
+                            if not markdown_text:
+                                logging.info("Trying PyMuPDF fallback for markdown extraction")
+                                def pymupdf_fallback():
+                                    try:
+                                        import fitz
+                                        doc = fitz.open(merged_file_path)
+                                        text = ""
+                                        total_pages = len(doc)
+                                        for page_num, page in enumerate(doc, start=1):
+                                            page_markdown = page.get_text("markdown")
+                                            # Son sayfa değilse PAGE BREAK ekle
+                                            if page_num < total_pages:
+                                                text += page_markdown + "\n\n[PAGE BREAK]\n\n"
+                                            else:
+                                                # Son sayfa - PAGE BREAK ekleme
+                                                text += page_markdown
+                                        doc.close()
+                                        logging.info(f"📖 PDF processed: PyMuPDF fallback ({len(text)} chars)")
+                                        return text
+                                    except Exception as e:
+                                        logging.error(f"PyMuPDF fallback failed: {e}")
+                                        return ""
+                                
+                                markdown_text = await loop.run_in_executor(executor, pymupdf_fallback)
+                            
+                            pages = [Document(page_content=markdown_text)]
+                            page_images = local_images
+                            logging.info(f"📖 PDF processed: Markdown extraction completed")
+                        else:
+                            # Diğer formatlar: DoclingLoader
+                            from langchain_core.documents import Document
+                            from src.document_sources.local_file import load_document_content
+                            
+                            def load_doc_text():
+                                loader, _, _ = load_document_content(merged_file_path, generate_images=False)
+                                return loader.load()
+                            
+                            pages = await loop.run_in_executor(executor, load_doc_text)
+                            page_images = local_images
+                            logging.info(f"📖 {file_extension.upper()} processed: Text only (local images found)")
+                    
+                    else:
+                        # Local images_dir'de image yok, generate et
+                        logging.info(f"📸 No page images found in local output dir for {doc_name}, generating new images")
+                        
+                        if file_extension == "pdf":
+                            # PDF için: PyMuPDF image generation + Gemini 2.0 Flash markdown (NON-BLOCKING)
+                            from src.document_sources.local_file import generate_page_images_with_pymupdf
+                            from langchain_core.documents import Document
+                            
+                            # Executor'da resimleri generate et (heavy I/O)
+                            def gen_images():
+                                return generate_page_images_with_pymupdf(merged_file_path, images_dir)
+                            
+                            generated_images = await loop.run_in_executor(executor, gen_images)
+                            
+                            # Gemini processing'i de executor'da çalıştır (NON-BLOCKING)
+                            def process_with_gemini():
+                                markdown_text = ""
+                                if not GEMINI_AVAILABLE:
+                                    logging.warning("❌ google.genai not available")
+                                    return markdown_text
+                                
+                                try:
+                                    api_key = os.environ.get("GEMINI_API_KEY")
+                                    if not api_key:
+                                        logging.warning("❌ GEMINI_API_KEY not found")
+                                        return markdown_text
+                                    
+                                    # Create client with new google-genai SDK
+                                    client = genai_sdk.Client(api_key=api_key)
+                                    logging.info("✅ Gemini client initialized successfully")
+                                    
+                                    from google.genai import types
+                                    for idx, img_path in enumerate(sorted(generated_images), start=1):
+                                        try:
+                                            # Read image as bytes
+                                            with open(img_path, "rb") as img_file:
+                                                image_bytes = img_file.read()
+                                            
+                                            # Send to Gemini with new SDK
+                                            response = client.models.generate_content(
+                                                model='models/gemini-2.0-flash',
+                                                contents=[
+                                                    types.Part.from_text(text="Convert this document page to clean markdown format. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."),
+                                                    types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+                                                ]
+                                            )
+                                            
+                                            if response.text:
+                                                # Son sayfa değilse PAGE BREAK ekle
+                                                if idx < len(generated_images):
+                                                    markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
+                                                else:
+                                                    # Son sayfa - PAGE BREAK ekleme
+                                                    markdown_text += response.text
+                                                logging.info(f"✅ Gemini 2.0 Flash processed page: {os.path.basename(img_path)} ({len(response.text)} chars)")
+                                            else:
+                                                logging.warning(f"Gemini returned empty response for {os.path.basename(img_path)}")
+                                        except Exception as e:
+                                            logging.warning(f"Gemini processing failed for {img_path}: {e}")
+                                
+                                    if markdown_text:
+                                        logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(generated_images)} generated images")
+                                    else:
+                                        logging.warning("Gemini generated empty markdown")
+                                    
+                                except Exception as e:
+                                    logging.error(f"Gemini processing error: {e}")
+                                
+                                return markdown_text
+                            
+                            # Executor'da Gemini'yi çalıştır (NON-BLOCKING)
+                            markdown_text = await loop.run_in_executor(executor, process_with_gemini)
+                        
+                        # PyMuPDF fallback
+                        if not markdown_text:
+                            logging.info("Trying PyMuPDF fallback for markdown extraction")
+                            def pymupdf_fallback():
+                                try:
+                                    import fitz
+                                    doc = fitz.open(merged_file_path)
+                                    text = ""
+                                    total_pages = len(doc)
+                                    for page_num, page in enumerate(doc, start=1):
+                                        page_markdown = page.get_text("markdown")
+                                        # Son sayfa değilse PAGE BREAK ekle
+                                        if page_num < total_pages:
+                                            text += page_markdown + "\n\n[PAGE BREAK]\n\n"
+                                        else:
+                                            # Son sayfa - PAGE BREAK ekleme
+                                            text += page_markdown
+                                    doc.close()
+                                    logging.info(f"📖 PDF processed: PyMuPDF fallback ({len(text)} chars)")
+                                    return text
+                                except Exception as e:
+                                    logging.error(f"PyMuPDF fallback failed: {e}")
+                                    return ""
+                            
+                            markdown_text = await loop.run_in_executor(executor, pymupdf_fallback)
+                        
+                            pages = [Document(page_content=markdown_text)]
+                            logging.info(f"📖 PDF processed: Markdown extraction completed")
+                        else:
+                            # Diğer formatlar için: DoclingLoader text mode (executor'da çalıştır)
+                            from src.document_sources.local_file import load_document_content
+                            from langchain_core.documents import Document
+                            
+                            def process_other_format():
+                                try:
+                                    loader, _, _ = load_document_content(
+                                        merged_file_path, generate_images=True, output_dir=images_dir
+                                    )
+                                    pgs = loader.load()
+                                except Exception as e:
+                                    logging.warning(f"Format processing failed for {file_extension}: {e}")
+                                    pgs = [Document(page_content="")]
+                                
+                                return [], pgs
+                            
+                            _, pages = await loop.run_in_executor(executor, process_other_format)
+                            logging.info(f"📖 {file_extension.upper()} processed: DoclingLoader text")
+                        
+                        if generated_images:
+                            logging.info(f"✅ Generated {len(generated_images)} page images")
+                            
+                            if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                                # S3 upload (executor'da çalıştır - heavy I/O işlem)
+                                from src.document_sources.s3_upload_utils import upload_files_to_s3, cleanup_local_files
+                                s3_prefix = f"documents/{doc_name}"
+                                all_files = [doc_copy_path] + generated_images
+                                
+                                def upload_to_s3():
+                                    urls, failed = upload_files_to_s3(
+                                        all_files,
+                                        s3_bucket,
+                                        s3_prefix,
+                                        aws_access_key_id,
+                                        aws_secret_access_key,
+                                        delete_local_after_upload=False  # Graph oluşturma için local dosyaları sakla
+                                    )
+                                    return urls, failed
+                                
+                                uploaded_urls, failed_files = await loop.run_in_executor(executor, upload_to_s3)
+                                
+                                if uploaded_urls:
+                                    logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
+                                    
+                                    # Document link ve page images - sadece dosya adları
+                                    for url in uploaded_urls:
+                                        if url.endswith(f"/{normalized_filename}"):
+                                            doc_link = os.path.basename(url)
+                                            break
+                                    
+                                    page_images = []
+                                    for url in uploaded_urls:
+                                        if url != f"s3://{s3_bucket}/{s3_prefix}/{normalized_filename}":
+                                            page_images.append(os.path.basename(url))
+                                    
+                                    logging.info(f"📄 Document file name: {doc_link}")
+                                    logging.info(f"🖼️ Page image file names: {len(page_images)} images")
+                                    
+                                    # Local dosyaları sakla (graph oluşturma için gerekli)
+                                    logging.info(f"💾 Local files preserved in: {document_dir}")
+                                
+                                if failed_files:
+                                    logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
+                            else:
+                                logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
+                        
+                        if page_images:
+                            logging.info(f"🔄 Using {len(page_images)} page images for graph building")
+                        else:
+                            logging.warning(f"⚠️ No page images generated for: {normalized_filename}")
+                
+                # Markdown dosyasını oluştur ve kaydet
+                markdown_content = ""
+                if pages:
+                    for idx, page in enumerate(pages, start=1):
+                        page_text = page.page_content if hasattr(page, 'page_content') else str(page)
+                        # Son sayfa değilse PAGE BREAK ekle
+                        if idx < len(pages):
+                            markdown_content += f"{page_text}\n\n[PAGE BREAK]\n\n"
+                        else:
+                            # Son sayfa - PAGE BREAK ekleme
+                            markdown_content += page_text
+                    
+                    # Markdown dosyasını document klasörüne kaydet
+                    markdown_filename = f"{normalized_filename}.md"
+                    markdown_path = os.path.join(document_dir, markdown_filename)
+                    
+                    with open(markdown_path, "w", encoding="utf-8") as md_file:
+                        md_file.write(markdown_content.strip())
+                    
+                    logging.info(f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)")
+                    
+                    # Markdown path'i kaydet
+                    file_record.markdown_path = markdown_path
+                    
+                    # ✨ CHUNK NODE'LARI OLUŞTUR (tıpkı upload_file gibi)
+                    try:
+                        logging.info(f"🔄 Creating chunk nodes for: {normalized_filename}")
+                        
+                        # Neo4j bağlantısı kur
+                        uri = os.environ.get("NEO4J_URI")
+                        userName = os.environ.get("NEO4J_USERNAME")
+                        password = os.environ.get("NEO4J_PASSWORD")
+                        database = os.environ.get("NEO4J_DATABASE", "neo4j")
+                        
+                        if uri and userName and password:
+                            from src.shared.common_fn import create_graph_database_connection
+                            from src.graphDB_dataAccess import graphDBdataAccess
+                            from src.entities.source_node import sourceNode
+                            
+                            graph = create_graph_database_connection(uri, userName, password, database)
+                            graphDb_data_Access = graphDBdataAccess(graph)
+                            
+                            # 🧹 ÖNCE: Upload öncesi otomatik temizlik yap (duplicate prevention)
+                            logging.info(f"🧹 Starting pre-chunking cleanup check for: {normalized_filename}")
+                            cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(normalized_filename)
+                            if cleanup_result:
+                                logging.info(f"✅ Pre-chunking cleanup completed successfully")
+                            else:
+                                logging.info(f"ℹ️ No cleanup needed or cleanup skipped")
+                            
+                            # 1️⃣ Source node objesi oluştur (henüz kaydetme - upload_file gibi)
+                            obj_source_node = sourceNode()
+                            obj_source_node.file_name = normalized_filename
+                            obj_source_node.file_type = file_extension
+                            obj_source_node.file_size = file_record.file_size if file_record.file_size else 0
+                            obj_source_node.file_source = "local file"
+                            obj_source_node.model = "openai_gpt_4o_mini"
+                            obj_source_node.created_at = datetime.now()
+                            obj_source_node.chunkNodeCount = 0
+                            obj_source_node.chunkRelCount = 0
+                            obj_source_node.entityNodeCount = 0
+                            obj_source_node.entityEntityRelCount = 0
+                            obj_source_node.communityNodeCount = 0
+                            obj_source_node.communityRelCount = 0
+                            obj_source_node.total_chunks = 0
+                            obj_source_node.processed_chunk = 0
+                            obj_source_node.node_count = 0
+                            obj_source_node.relationship_count = 0
+                            obj_source_node.processing_time = 0
+                            
+                            # Page images ve doc link'i ekle
+                            if doc_link:
+                                obj_source_node.doc_link = doc_link
+                            if page_images:
+                                obj_source_node.page_images = page_images
+                            
+                            # 2️⃣ Chunk'ları oluştur
+                            from src.create_chunks import CreateChunksofDocument
+                            create_chunks_obj = CreateChunksofDocument(pages, graph)
+                            
+                            token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
+                            chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
+                            
+                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                                chunk_size=token_chunk_size, 
+                                chunk_overlap=chunk_overlap
+                            )
+                            
+                            if chunks:
+                                # 3️⃣ Chunk node'ları veritabanına kaydet
+                                from src.make_relationships import create_chunks_for_upload
+                                
+                                chunkId_chunkDoc_list = create_chunks_for_upload(
+                                    graph=graph,
+                                    chunks=chunks, 
+                                    file_name=normalized_filename,
+                                    page_images=page_images if page_images else [],
+                                    generate_embedding=False
+                                )
+                                
+                                logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes in Neo4j")
+                                
+                                # 4️⃣ Source node'a chunk count'ları ekle (upload_file gibi)
+                                obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
+                                obj_source_node.total_chunks = len(chunks)
+                                obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)
+                                
+                                # 5️⃣ Vector index oluştur/kontrol et
+                                try:
+                                    from src.make_relationships import create_chunk_vector_index
+                                    create_chunk_vector_index(graph)
+                                    logging.info(f"✅ Vector index checked/created")
+                                except Exception as vector_error:
+                                    logging.warning(f"⚠️ Vector index warning: {vector_error}")
+                            else:
+                                logging.warning(f"⚠️ No chunks created for: {normalized_filename}")
+                            
+                            # 6️⃣ Source node'u veritabanına kaydet (chunk count'larıyla birlikte - TEK SEFERDE)
+                            # ⚠️ V2 Chunking: Entity extraction'ı atla (sadece Document ve Chunk node'ları oluştur)
+                            # Entity extraction graph-create aşamasında yapılacak
+                            graphDb_data_Access.create_source_node(
+                                obj_source_node, 
+                                model="openai_gpt_4o_mini",
+                                skip_entity_extraction=True  # V2: Entity extraction'ı atla
+                            )
+                            logging.info(f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)")
+                            
+                            # 7️⃣ Chunk'ları Document'e bağla
+                            if chunks:
+                                from src.make_relationships import link_chunks_to_document
+                                linked_count = link_chunks_to_document(graph, normalized_filename)
+                                if linked_count > 0:
+                                    logging.info(f"🔗 Linked {linked_count} chunks to Document")
+                                else:
+                                    logging.info(f"ℹ️ Chunks already linked to Document")
+                            
+                            # Graph connection'ı kapat
+                            if graph and hasattr(graph, '_driver') and not graph._driver._closed:
+                                graph._driver.close()
+                                logging.info("🔌 Neo4j connection closed")
+                        else:
+                            logging.warning("⚠️ Neo4j credentials not configured, skipping chunk node creation")
+                    
+                    except Exception as chunk_node_error:
+                        logging.error(f"❌ Failed to create chunk nodes: {chunk_node_error}")
+                        import traceback
+                        logging.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    logging.warning(f"⚠️ No pages extracted for markdown creation: {normalized_filename}")
+                
+                # Chunking tamamlandı, status güncelle
+                file_record.chunking_status = "chunked"
+                file_record.chunking_completed_at = datetime.now(timezone.utc)
+                
+                # Metadata güncelle
+                if doc_link:
+                    file_record.doc_link = doc_link
+                if page_images:
+                    file_record.page_images = json.dumps(page_images)  # JSON string olarak sakla
+                
+                db_session.commit()
+                logging.info(f"✅ V2 Chunking completed for: {original_name}")
+                
+            except Exception as chunk_error:
+                logging.error(f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}")
+                file_record.chunking_status = "failed"
+                db_session.commit()
+        else:
+            # Desteklenmeyen format
+            logging.warning(f"⚠️ Unsupported file format for chunking: {file_extension}")
+            file_record.chunking_status = "failed"
+            db_session.commit()
+            
+    except Exception as e:
+        logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {str(e)}")
+        if db_session and file_record:
+            file_record.chunking_status = "failed"
+            db_session.commit()
+    finally:
+        if db_session:
+            db_session.close()
+        # Executor'ı kapat
+        if executor:
+            executor.shutdown(wait=False)
+
+async def process_graph_creation_v2(
+    file_id: int,
+    original_name: str,
+    markdown_path: str,
+    file_path: str,
+    model: str,
+    uri: str,
+    userName: str,
+    password: str,
+    database: str,
+    generate_embedding: bool = False
+):
+    """
+    V2 Graph Creation Process: Extract entities and relationships from markdown
+    Uses processing_source_v2 for pages-based extraction (NO chunks)
+    """
+    db = None
+    db_session = None
+    
+    try:
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            logging.error(f"❌ File record not found for ID: {file_id}")
+            return
+        
+        logging.info(f"🎨 Starting V2 graph creation for: {original_name}")
+        
+        # Normalize filename
+        from src.utf8_utils import normalize_file_name
+        normalized_filename = normalize_file_name(original_name)
+        
+        # Markdown dosyasını oku
+        if not os.path.exists(markdown_path):
+            logging.error(f"❌ Markdown file not found: {markdown_path}")
+            file_record.graph_status = "failed"
+            file_record.processing_error = "Markdown file not found"
+            db_session.commit()
+            return
+        
+        # Markdown'ı pages olarak yükle
+        from langchain_core.documents import Document
+        with open(markdown_path, "r", encoding="utf-8") as md_file:
+            markdown_content = md_file.read()
+        
+        # Page break'lere göre sayfalara böl
+        page_texts = markdown_content.split("[PAGE BREAK]")
+        pages = [Document(page_content=text.strip(), metadata={"page": idx}) 
+                for idx, text in enumerate(page_texts, 1) if text.strip()]
+        
+        logging.info(f"📄 Loaded {len(pages)} pages from markdown for V2 graph extraction")
+        
+        # V2 processing_source_v2 fonksiyonunu kullan (NO chunks)
+        from src.main import processing_source_v2
+        
+        # Parametreler
+        allowedNodes = []  # Boş = tüm node'lar
+        allowedRelationship = []  # Boş = tüm relationship'ler
+        additional_instructions = None
+        max_pages = None
+        
+        logging.info(f"🔄 Calling processing_source_v2 for: {normalized_filename}")
+        logging.info(f"✨ V2 Mode: Pages-based extraction (NO chunks, NO embeddings, NO chunk-entity linking)")
+        
+        # V2 Graph extraction - pages-based, chunk'sız
+        latency, response = await processing_source_v2(
+            uri=uri,
+            userName=userName,
+            password=password,
+            database=database,
+            model=model,
+            file_name=normalized_filename,
+            pages=pages,
+            allowedNodes=allowedNodes,
+            allowedRelationship=allowedRelationship,
+            additional_instructions=additional_instructions,
+            max_pages=max_pages
+        )
+        
+        logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
+        logging.info(f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships")
+        logging.info(f"⏱️ Latency details: {latency}")
+        
+        # Embedding oluştur (eğer isteniyorsa)
+        if generate_embedding:
+            try:
+                logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
+                from src.graphDB_dataAccess import graphDBdataAccess
+                from src.shared.common_fn import create_graph_database_connection
+                graph = create_graph_database_connection(uri, userName, password, database)
+                graphDb_data_Access = graphDBdataAccess(graph)
+                
+                # Document için embedding oluştur
+                embedding_result = graphDb_data_Access.create_embeddings_for_documents([normalized_filename])
+                if embedding_result and not embedding_result.get('error'):
+                    logging.info(f"✅ Embeddings created successfully for: {normalized_filename}")
+                else:
+                    logging.warning(f"⚠️ Embedding creation warning: {embedding_result.get('error', 'Unknown error')}")
+            except Exception as emb_error:
+                logging.error(f"❌ Embedding creation failed: {emb_error}")
+                # Continue without embeddings
+        
+        # Graph creation tamamlandı, status güncelle
+        file_record.graph_status = "completed"
+        file_record.graph_completed_at = datetime.now(timezone.utc)
+        
+        # Response'tan istatistikleri al
+        if response:
+            file_record.node_count = response.get('nodeCount', 0)
+            file_record.relationship_count = response.get('relationshipCount', 0)
+            processing_time = response.get('total_processing_time', 0)
+            file_record.processing_time = processing_time
+        
+        db_session.commit()
+        logging.info(f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}")
+        
+    except Exception as e:
+        logging.error(f"❌ process_graph_creation_v2 failed for file {file_id}: {str(e)}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        
+        if db_session and file_record:
+            file_record.graph_status = "failed"
+            file_record.processing_error = str(e)[:500]  # İlk 500 karakter
+            db_session.commit()
+    finally:
+        if db_session:
+            db_session.close()
+
+
+
+@app.post("/api/v2/files/{file_id}/process-immediately") 
+async def process_file_now(file_id: int):
+    """Process a specific file immediately (bypass queue)"""
+    try:
+        success = await process_file_immediately(file_id)
+        
+        if success:
+            return create_api_response("Success", 
+                                     message="File processed successfully",
+                                     data={"file_id": file_id, "status": "completed"})
+        else:
+            return create_api_response("Failed", 
+                                     message="File processing failed",
+                                     data={"file_id": file_id, "status": "error"})
+            
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Immediate processing failed for file {file_id}: {error_message}")
+        return create_api_response("Failed", 
+                                 message="Immediate processing failed", 
+                                 error=error_message)
 
 if __name__ == "__main__":
     uvicorn.run(app)

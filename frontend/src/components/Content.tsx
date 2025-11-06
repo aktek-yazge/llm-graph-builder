@@ -49,7 +49,7 @@ import {
   tokenchunkSize,
   tooltips,
 } from '../utils/Constants';
-import { extractAPI } from '../utils/FileAPI';
+import { extractAPI, getFileStatusAPI, resetFileStageAPI, startChunkingAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
 import { normalizeFileName } from '../utils/utf8';
 import { isExpired, isFileReadyToProcess } from '../utils/Utils';
@@ -103,14 +103,26 @@ const Content: React.FC<ContentProps> = ({
   const [totalPageCount, setTotalPageCount] = useState<number | null>(null);
   const [textChunks, setTextChunks] = useState<chunkdata[]>([]);
   const [isGraphBtnMenuOpen, setIsGraphBtnMenuOpen] = useState<boolean>(false);
+  const [isChunkingBtnMenuOpen, setIsChunkingBtnMenuOpen] = useState<boolean>(false);
   const [openMergeDuplicateModal, setOpenMergeDuplicateModal] = useState<boolean>(false);
   const [openCreateEmbeddingsModal, setOpenCreateEmbeddingsModal] = useState<boolean>(false);
   const [openCreateEntityEmbeddingsModal, setOpenCreateEntityEmbeddingsModal] = useState<boolean>(false);
   const graphbtnRef = useRef<HTMLDivElement>(null);
+  const chunkingbtnRef = useRef<HTMLDivElement>(null);
   const chunksTextAbortController = useRef<AbortController>();
   const { colorMode } = useContext(ThemeWrapperContext);
   const { isAuthenticated } = useAuth0();
   const { setIsOpen } = useSpotlightContext();
+  const [v2SelectedFileCount, setV2SelectedFileCount] = useState<number>(0);
+  const [v2FilesCategorized, setV2FilesCategorized] = useState<{
+    pendingChunking: number;
+    readyForGraph: number;
+    completed: number;
+  }>({
+    pendingChunking: 0,
+    readyForGraph: 0,
+    completed: 0,
+  });
   const [alertStateForRetry, setAlertStateForRetry] = useState<BannerAlertProps>({
     showAlert: false,
     alertType: 'neutral',
@@ -213,6 +225,45 @@ const Content: React.FC<ContentProps> = ({
       setIsOpen(true);
     }
   }, [connectionStatus, isAuthenticated, isFirstTimeUser]);
+
+  // V2 Selected File Count ve kategorileri güncellemek için useEffect
+  useEffect(() => {
+    // filesData'dan seçili V2 dosyalarını al
+    const selectedV2FileIds = new Set<number>();
+
+    // FileTable'daki checkbox state'ini oku
+    const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+    v2Files.forEach((f: CustomFile) => {
+      if (f.v2FileId) {
+        selectedV2FileIds.add(f.v2FileId);
+      }
+    });
+
+    if (selectedV2FileIds.size === 0) {
+      setV2FilesCategorized({ pendingChunking: 0, readyForGraph: 0, completed: 0 });
+      setV2SelectedFileCount(0);
+      return;
+    }
+
+    // filesData'dan seçili V2 dosyalarını al ve kategorize et
+    const selectedFiles = filesData.filter(
+      (f: CustomFile) => f.fileSource === 'V2 Queue' && f.v2FileId && selectedV2FileIds.has(f.v2FileId)
+    );
+
+    const totalCount = selectedFiles.length;
+
+    const pendingChunking = selectedFiles.filter(
+      (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'pending'
+    ).length;
+
+    const readyForGraph = selectedFiles.filter((f: CustomFile) => f.chunking_status === 'chunked').length;
+
+    const completed = selectedFiles.filter((f: CustomFile) => f.graph_status === 'completed').length;
+
+    setV2SelectedFileCount(totalCount);
+    setV2FilesCategorized({ pendingChunking, readyForGraph, completed });
+  }, [filesData]);
+
   const handleDropdownChange = (selectedOption: OptionType | null | void) => {
     if (selectedOption?.value) {
       setModel(selectedOption?.value);
@@ -793,8 +844,139 @@ const Content: React.FC<ContentProps> = ({
     setShowDeletePopUp(false);
   };
 
+  // V2 dosyaları durumlarına göre kategorize et
+  const getV2FilesCategorized = () => {
+    // Seçili dosyaları al
+    const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+
+    const pendingChunking = v2Files.filter(
+      (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'pending'
+    ).length;
+
+    const readyForGraph = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked').length;
+
+    const completed = v2Files.filter((f: CustomFile) => f.graph_status === 'completed').length;
+
+    return { pendingChunking, readyForGraph, completed };
+  };
+
+  // V2 Chunking başlatma handler'ı
+  const handleStartChunkingForV2 = async () => {
+    const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+
+    if (!v2FileIds || v2FileIds.length === 0) {
+      showErrorToast('Hiçbir V2 dosyası seçilmedi');
+      return;
+    }
+
+    try {
+      setIsExtractLoading(true);
+      showNormalToast(`${v2FileIds.length} dosya için chunking başlatılıyor...`);
+
+      // Chunking başlat
+      for (const fileId of v2FileIds) {
+        try {
+          const response = await startChunkingAPI(fileId);
+          if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+            showSuccessToast(`Dosya ${fileId} chunking'e alındı`);
+
+            // Bu dosyanın durumunu polling ile kontrol et
+            const pollStatus = async () => {
+              let attempts = 0;
+              const maxAttempts = 600;
+
+              while (attempts < maxAttempts) {
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+
+                try {
+                  const statusResponse = await getFileStatusAPI(fileId);
+                  const fileStatus = statusResponse?.data?.chunking_status;
+                  const elapsedSeconds = attempts * 5;
+
+                  if (fileStatus === 'chunked') {
+                    showSuccessToast(`✓ Dosya ${fileId} chunking tamamlandı`);
+                    childRef.current?.reloadV2Files?.();
+                    break;
+                  }
+                  if (fileStatus === 'failed') {
+                    showErrorToast(`✗ Dosya ${fileId} chunking başarısız`);
+                    break;
+                  }
+                  if (elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
+                    showNormalToast(`⏱ Dosya işleniyor... (${Math.floor(elapsedSeconds / 60)} dk)`);
+                  }
+                } catch (err) {
+                  // Continue polling
+                }
+                attempts++;
+              }
+            };
+
+            // Polling'i background'da çalıştır
+            pollStatus();
+          } else {
+            showErrorToast(`Dosya ${fileId} chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
+          }
+        } catch (error: any) {
+          const errorMsg = error.response?.data?.message || error.message || 'Chunking hatası';
+          showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+        }
+      }
+    } catch (error: any) {
+      showErrorToast('Chunking işlemi başlatılamadı');
+    } finally {
+      setIsExtractLoading(false);
+    }
+  };
+
+  // V2 Chunking reset handler'ı
+  const handleResetChunkingForV2 = async () => {
+    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+
+    if (!v2FileIds || v2FileIds.length === 0) {
+      showErrorToast('Hiçbir V2 dosyası seçilmedi');
+      return;
+    }
+
+    try {
+      setIsExtractLoading(true);
+      showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
+
+      for (const fileId of v2FileIds) {
+        try {
+          const response = await resetFileStageAPI(fileId, 'chunking');
+          if (response.status === 'Success' || response.status === 'success') {
+            showSuccessToast(`Dosya ${fileId} reset edildi`);
+          } else {
+            showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
+          }
+        } catch (error: any) {
+          const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
+          showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+        }
+      }
+    } catch (error: any) {
+      showErrorToast('Reset işlemi başlatılamadı');
+    } finally {
+      setIsExtractLoading(false);
+      // File table'ı güncelle
+      setTimeout(() => {
+        childRef.current?.reloadV2Files?.();
+      }, 500);
+    }
+  };
+
   const onClickHandler = () => {
     const selectedRows = childRef.current?.getSelectedRows();
+    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+
+    // Handle V2 files separately
+    if (v2FileIds && v2FileIds.length > 0) {
+      childRef.current?.handleCreateGraph();
+      return;
+    }
+
     if (selectedRows?.length) {
       const expiredFilesExists = selectedRows.some(
         (c) => isFileReadyToProcess(c, true) && isExpired((c?.createdAt as Date) ?? new Date())
@@ -1099,18 +1281,108 @@ const Content: React.FC<ContentProps> = ({
             />
           </div>
           <Flex flexDirection='row' gap='4' className='self-end mb-2.5' flexWrap='wrap'>
+            <Flex flexDirection='row' gap='0'>
+              <Button
+                onClick={() => {
+                  const cat = getV2FilesCategorized();
+                  if (cat.pendingChunking > 0) {
+                    handleStartChunkingForV2();
+                  } else {
+                    showErrorToast('Chunking yapılacak dosya yok');
+                  }
+                }}
+                isDisabled={isReadOnlyUser || extractLoading}
+                className='px-0! flex! items-center justify-between gap-4 chunkingbtn'
+                size={isTablet ? 'small' : 'medium'}
+              >
+                <span className='mx-2'>
+                  {(() => {
+                    const cat = getV2FilesCategorized();
+                    return cat.pendingChunking > 0 ? `Chunking Başlat (${cat.pendingChunking})` : 'Chunking Başlat';
+                  })()}
+                </span>
+              </Button>
+              <div
+                className={`ndl-icon-btn ndl-clean dropdownbtn ${colorMode === 'dark' ? 'darktheme' : ''} ${
+                  isTablet ? 'small' : 'medium'
+                }`}
+                onClick={(e) => {
+                  setIsChunkingBtnMenuOpen((old) => !old);
+                  e.stopPropagation();
+                }}
+                ref={chunkingbtnRef}
+              >
+                {!isChunkingBtnMenuOpen ? (
+                  <ChevronUpIconOutline className='n-size-token-5' />
+                ) : (
+                  <ChevronDownIconOutline className='n-size-token-' />
+                )}
+              </div>
+            </Flex>
+            <Menu
+              placement='top-end-bottom-end'
+              isOpen={isChunkingBtnMenuOpen}
+              anchorRef={chunkingbtnRef}
+              onClose={() => setIsChunkingBtnMenuOpen(false)}
+            >
+              <Menu.Items
+                htmlAttributes={{
+                  id: 'chunking-menu',
+                }}
+              >
+                <Menu.Item
+                  title='Chunking Başlat'
+                  onClick={() => {
+                    const cat = getV2FilesCategorized();
+                    if (cat.pendingChunking > 0) {
+                      handleStartChunkingForV2();
+                    } else {
+                      showErrorToast('Chunking yapılacak dosya yok');
+                    }
+                  }}
+                  isDisabled={isReadOnlyUser || extractLoading || getV2FilesCategorized().pendingChunking === 0}
+                />
+                <Menu.Item
+                  title='Chunking Sıfırla'
+                  onClick={() => {
+                    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+                    if (!v2FileIds || v2FileIds.length === 0) {
+                      showErrorToast('Reset için dosya seçiniz');
+                    } else {
+                      handleResetChunkingForV2();
+                    }
+                  }}
+                  isDisabled={isReadOnlyUser || extractLoading}
+                />
+              </Menu.Items>
+            </Menu>
             <SpotlightTarget id='generategraphbtn'>
               <ButtonWithToolTip
                 text={tooltips.generateGraph}
                 placement='top'
                 label='generate graph'
-                onClick={onClickHandler}
-                disabled={disableCheck || isReadOnlyUser}
+                onClick={() => {
+                  // Direct hesapla
+                  const categorized = getV2FilesCategorized();
+                  if (categorized.readyForGraph > 0) {
+                    onClickHandler();
+                  } else {
+                    showErrorToast('Graph oluşturmak için chunked dosya seçiniz');
+                  }
+                }}
+                disabled={isReadOnlyUser}
                 className='mr-0.5'
                 size={isTablet ? 'small' : 'medium'}
               >
                 {buttonCaptions.generateGraph}{' '}
-                {selectedfileslength && !disableCheck && newFilecheck ? `(${newFilecheck})` : ''}
+                {(() => {
+                  const cat = getV2FilesCategorized();
+                  return cat.readyForGraph > 0
+                    ? `(${cat.readyForGraph})`
+                    : selectedfileslength && !disableCheck && newFilecheck
+                      ? `(${newFilecheck})`
+                      : '';
+                })()}
               </ButtonWithToolTip>
             </SpotlightTarget>
             <ButtonWithToolTip

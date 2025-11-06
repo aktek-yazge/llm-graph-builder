@@ -1,4 +1,6 @@
+import { useAuth0 } from '@auth0/auth0-react';
 import {
+  Checkbox,
   DataGrid,
   DataGridComponents,
   Flex,
@@ -8,10 +10,31 @@ import {
   TextLink,
   Typography,
   useCopyToClipboard,
-  Checkbox,
   useMediaQuery,
 } from '@neo4j-ndl/react';
 import {
+  ArrowPathIconSolid,
+  ClipboardDocumentIconSolid,
+  DocumentTextIconSolid,
+  ExploreIcon,
+  InformationCircleIconOutline,
+  XMarkIconOutline,
+} from '@neo4j-ndl/react/icons';
+import {
+  CellContext,
+  ColumnFiltersState,
+  Row,
+  Table,
+  createColumnHelper,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from '@tanstack/react-table';
+import { AxiosError } from 'axios';
+import React, {
+  ForwardRefRenderFunction,
   forwardRef,
   useContext,
   useEffect,
@@ -19,56 +42,33 @@ import {
   useMemo,
   useRef,
   useState,
-  ForwardRefRenderFunction,
 } from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  createColumnHelper,
-  ColumnFiltersState,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  CellContext,
-  Table,
-  Row,
-  getSortedRowModel,
-} from '@tanstack/react-table';
-import { useFileContext } from '../context/UsersFiles';
-import { getSourceNodes } from '../services/GetFiles';
 import { v4 as uuidv4 } from 'uuid';
-import {
-  statusCheck,
-  isFileCompleted,
-  calculateProcessedCount,
-  getFileSourceStatus,
-  isProcessingFileValid,
-  capitalizeWithUnderscore,
-  getParsedDate,
-} from '../utils/Utils';
-import { SourceNode, CustomFile, FileTableProps, UserCredentials, statusupdate, ChildRef } from '../types';
+import { ThemeWrapperContext } from '../context/ThemeWrapper';
 import { useCredentials } from '../context/UserCredentials';
-import {
-  ArrowPathIconSolid,
-  ClipboardDocumentIconSolid,
-  DocumentTextIconSolid,
-  ExploreIcon,
-} from '@neo4j-ndl/react/icons';
-import CustomProgressBar from './UI/CustomProgressBar';
+import { useFileContext } from '../context/UsersFiles';
+import useServerSideEvent from '../hooks/useSse';
+import cancelAPI from '../services/CancelAPI';
+import { getSourceNodes } from '../services/GetFiles';
 import subscribe from '../services/PollingAPI';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
-import useServerSideEvent from '../hooks/useSse';
-import { AxiosError } from 'axios';
-import { XMarkIconOutline } from '@neo4j-ndl/react/icons';
-import cancelAPI from '../services/CancelAPI';
-import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
+import { ChildRef, CustomFile, FileTableProps, SourceNode, UserCredentials, statusupdate } from '../types';
 import { batchSize, largeFileSize, llms } from '../utils/Constants';
+import { getQueuedFilesAPI, startChunkingAPI, startGraphCreationAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast } from '../utils/Toasts';
-import { ThemeWrapperContext } from '../context/ThemeWrapper';
-import BreakDownPopOver from './BreakDownPopOver';
-import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
-import { useAuth0 } from '@auth0/auth0-react';
-import React from 'react';
 import { normalizeFileName } from '../utils/utf8';
+import {
+  calculateProcessedCount,
+  capitalizeWithUnderscore,
+  getFileSourceStatus,
+  getParsedDate,
+  isFileCompleted,
+  isProcessingFileValid,
+  statusCheck,
+} from '../utils/Utils';
+import BreakDownPopOver from './BreakDownPopOver';
+import CustomProgressBar from './UI/CustomProgressBar';
+import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
 
 let onlyfortheFirstRender = true;
 
@@ -91,6 +91,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const islargeDesktop = useMediaQuery(`(min-width:1440px )`);
   const tableRef = useRef(null);
   const { isAuthenticated } = useAuth0();
+
+  // V2 Queue işlemleri için state
+  const [v2SelectedFileIds, setV2SelectedFileIds] = useState<Set<number>>(new Set());
+  const [v2ProcessingFileId, setV2ProcessingFileId] = useState<number | null>(null);
   const { updateStatusForLargeFiles } = useServerSideEvent(
     (inMinutes, time, fileName) => {
       showNormalToast(`${fileName} will take approx ${time} ${inMinutes ? 'Min' : 'Sec'}`);
@@ -132,6 +136,8 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           );
         },
         cell: ({ row }: { row: Row<CustomFile> }) => {
+          const isV2File = row.original.fileSource === 'V2 Queue';
+          const { v2FileId } = row.original;
           return (
             <div className='px-1'>
               <Checkbox
@@ -143,7 +149,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                   row.original.status === 'Processing' ||
                   row.original.status === 'Waiting'
                 }
-                onChange={row.getToggleSelectedHandler()}
+                onChange={() => {
+                  // React table'ın selection'ını kullan, ayrı state'e gerek yok
+                  row.toggleSelected();
+                }}
               />
             </div>
           );
@@ -630,7 +639,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   );
 
   const table = useReactTable({
-    data: filesData,
+    data: filesData, // Artık sadece V2 files var
     columns,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
@@ -697,7 +706,14 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const handleLargeFile = (item: SourceNode, userCredentials: UserCredentials) => {
     triggerStatusUpdateAPI(item.fileName, userCredentials, updateStatusForLargeFiles);
   };
+
   useEffect(() => {
+    // V2 dosyaları varsa, eski V1 sources_list çağrısını yapma
+    const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
+    if (hasV2Files) {
+      return;
+    }
+
     const waitingQueue: CustomFile[] = JSON.parse(
       localStorage.getItem('waitingQueue') ?? JSON.stringify({ queue: [] })
     ).queue;
@@ -786,6 +802,65 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           }
           setIsLoading(false);
           setFilesData(prefiles);
+
+          // Fetch V2 Queue files
+          try {
+            const v2Response = await getQueuedFilesAPI();
+            if (v2Response?.status === 'Success' && v2Response?.data?.files) {
+              const v2Files: CustomFile[] = v2Response.data.files.map((file: any) => {
+                // V2 Workflow: status belirleme
+                // chunking_status: pending -> "pending" (chunking bekliyor)
+                // chunking_status: chunking -> "Processing" (chunking yapılıyor)
+                // chunking_status: chunked -> "Completed" (chunking tamamlandı)
+                // graph_status: processing -> "Processing" (graph oluşturuluyor)
+                // graph_status: completed -> "Completed" (tüm iş bitti)
+                let status = 'New';
+                if (file.graph_status === 'completed') {
+                  status = 'Completed';
+                } else if (file.graph_status === 'processing') {
+                  status = 'Processing';
+                } else if (file.chunking_status === 'chunked') {
+                  status = 'Completed'; // Chunking tamamlandı, graph bekliyor
+                } else if (file.chunking_status === 'chunking') {
+                  status = 'Processing';
+                } else if (file.chunking_status === 'pending') {
+                  status = 'pending'; // Chunking bekliyor
+                }
+
+                return {
+                  id: `v2_${file.id}`,
+                  name: file.original_name,
+                  type: file.original_name.substring(file.original_name.lastIndexOf('.') + 1).toUpperCase(),
+                  size: file.file_size,
+                  uploadProgress: 100,
+                  processingProgress: 0,
+                  status,
+                  nodesCount: 0,
+                  relationshipsCount: 0,
+                  processingTotalTime: 0,
+                  model: 'openai_gpt_4o_mini',
+                  fileSource: 'V2 Queue',
+                  retryOptionStatus: false,
+                  retryOption: '',
+                  chunkNodeCount: 0,
+                  chunkRelCount: 0,
+                  entityNodeCount: 0,
+                  entityEntityRelCount: 0,
+                  communityNodeCount: 0,
+                  communityRelCount: 0,
+                  createdAt: new Date(file.upload_date),
+                  // V2 Queue specific fields
+                  v2FileId: file.id,
+                  upload_status: file.upload_status,
+                  chunking_status: file.chunking_status,
+                  graph_status: file.graph_status,
+                };
+              });
+              setFilesData([...prefiles, ...v2Files]);
+            }
+          } catch (v2Error) {
+            // Continue with just V1 files if V2 fetch fails
+          }
         } else {
           throw new Error(res?.data?.error);
         }
@@ -830,6 +905,11 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       onlyfortheFirstRender = false;
     }
   }, [connectionStatus, filesData.length, isReadOnlyUser]);
+
+  // V2 Queue dosyalarını ilk render'da yükle
+  useEffect(() => {
+    reloadV2Files();
+  }, []);
 
   const cancelHandler = async (fileName: string, id: string, fileSource: string) => {
     setFilesData((prevfiles) =>
@@ -994,18 +1074,137 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     ref,
     () => ({
       getSelectedRows: () => table.getSelectedRowModel().rows.map((r) => r.original),
+      getV2SelectedFileIds: () => {
+        // React table selection'dan doğrudan al
+        return table
+          .getSelectedRowModel()
+          .rows.map((r) => r.original)
+          .filter((f: CustomFile) => f.fileSource === 'V2 Queue' && f.v2FileId)
+          .map((f: CustomFile) => f.v2FileId as number);
+      },
+      getV2SelectedFiles: () => {
+        // React table selection'dan doğrudan al (row model'den)
+        const selectedRows = table.getSelectedRowModel().rows;
+        const result = selectedRows
+          .map((r) => r.original)
+          .filter((f: CustomFile) => f.fileSource === 'V2 Queue') as CustomFile[];
+        return result;
+      },
+      handleStartChunking: async () => {
+        // React table selection'dan al
+        const selected = table
+          .getSelectedRowModel()
+          .rows.map((r) => r.original)
+          .filter((f: CustomFile) => f.fileSource === 'V2 Queue' && f.v2FileId)
+          .map((f: CustomFile) => f.v2FileId as number);
+
+        if (selected.length === 0) {
+          showErrorToast('Please select V2 files first');
+          return;
+        }
+        try {
+          for (const fileId of selected) {
+            await startChunkingAPI(fileId);
+          }
+          showNormalToast(`✓ Chunking started for ${selected.length} file(s)`);
+          setV2SelectedFileIds(new Set());
+          await reloadV2Files();
+        } catch (error) {
+          showErrorToast('Failed to start chunking');
+        }
+      },
+      handleCreateGraph: async () => {
+        // React table selection'dan al
+        const selectedV2Files = table
+          .getSelectedRowModel()
+          .rows.map((r) => r.original)
+          .filter((f: CustomFile) => f.fileSource === 'V2 Queue' && f.v2FileId) as CustomFile[];
+
+        if (selectedV2Files.length === 0) {
+          showErrorToast('Please select V2 files first');
+          return;
+        }
+        try {
+          // Chunked olanları filtrele
+          const chunkedFiles = selectedV2Files.filter((f) => f.chunking_status === 'chunked');
+          const notChunkedFiles = selectedV2Files.filter((f) => f.chunking_status !== 'chunked');
+
+          if (chunkedFiles.length === 0) {
+            showErrorToast(
+              'Seçilen dosyaların hiçbiri henüz chunked değildir. Lütfen chunking tamamlandıktan sonra tekrar deneyin.'
+            );
+            return;
+          }
+
+          // Uyar varsa göster
+          if (notChunkedFiles.length > 0) {
+            showNormalToast(
+              `⚠️ ${notChunkedFiles.length} dosya henüz chunked değil, sadece ${chunkedFiles.length} dosya için graph oluşturulacak`
+            );
+          }
+
+          // Sadece chunked olanlar için graph oluştur
+          for (const file of chunkedFiles) {
+            if (file.v2FileId) {
+              await startGraphCreationAPI(file.v2FileId, 'gpt-4o-mini', false);
+            }
+          }
+          showNormalToast(`✓ Graph creation started for ${chunkedFiles.length} file(s)`);
+          setV2SelectedFileIds(new Set());
+          await reloadV2Files();
+        } catch (error) {
+          showErrorToast('Failed to start graph creation');
+        }
+      },
+      reloadV2Files: () => reloadV2Files(),
     }),
-    [table]
+    [table, v2SelectedFileIds]
   );
 
   useEffect(() => {
     setSelectedRows(table.getSelectedRowModel().rows.map((i) => i.id));
   }, [table.getSelectedRowModel()]);
 
+  // V2 Queue dosyalarını yeniden yükle
+  const reloadV2Files = async () => {
+    try {
+      const response = await getQueuedFilesAPI();
+      if (response?.status === 'Success' && response?.data?.files) {
+        const v2Files = response.data.files.map((file: any) => ({
+          id: `v2_${file.id}`, // Unique ID for V2 files
+          name: file.original_name,
+          size: file.file_size || 0, // File size in bytes
+          status: file.chunking_status || 'pending', // Chunking durumunu göster
+          fileSource: 'V2 Queue',
+          sourceUrl: '',
+          fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
+          nodesCount: 0,
+          relationshipsCount: 0,
+          processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
+          model: file.model_used || 'Not set',
+          processingTotalTime: '0',
+          chunkNodeCount: 0,
+          chunkRelCount: 0,
+          // V2 stage info
+          v2FileId: file.id,
+          upload_status: file.upload_status,
+          chunking_status: file.chunking_status,
+          graph_status: file.graph_status,
+        }));
+
+        // Sadece V2 dosyalarını set et (V1'leri gizle)
+        setFilesData(v2Files);
+      }
+    } catch (error) {
+      // Failed silently
+    }
+  };
+
   return (
     <>
       {filesData ? (
         <>
+          {/* V2 Queue işlemleri artık Content.tsx'teki bottom buttonlarla yapılıyor */}
           <DataGrid
             ref={tableRef}
             isResizable={true}

@@ -1,12 +1,11 @@
 import { AlertColor, AlertPropsColorOverrides } from '@mui/material';
-import { AxiosResponse } from 'axios';
-import React, { Dispatch, ReactNode, SetStateAction } from 'react';
 import { OverridableStringUnion } from '@mui/types';
+import { BannerType } from '@neo4j-ndl/react';
 import type { Node, Relationship } from '@neo4j-nvl/base';
 import { NonOAuthError } from '@react-oauth/google';
-import { BannerType } from '@neo4j-ndl/react';
+import { AxiosResponse } from 'axios';
+import React, { Dispatch, ReactNode, SetStateAction } from 'react';
 import Queue from './utils/Queue';
-import FileTable from './components/FileTable';
 
 export interface CustomFileBase extends Partial<globalThis.File> {
   processingTotalTime: number | string;
@@ -36,6 +35,11 @@ export interface CustomFileBase extends Partial<globalThis.File> {
   communityNodeCount: number;
   communityRelCount: number;
   createdAt?: Date;
+  // V2 Queue fields
+  v2FileId?: number;
+  upload_status?: string;
+  chunking_status?: string;
+  graph_status?: string;
 }
 export interface CustomFile extends CustomFileBase {
   id: string;
@@ -96,6 +100,14 @@ export type UploadParams = {
   totalChunks: number;
   originalname: string;
   generateEmbedding?: boolean;
+} & { [key: string]: any };
+
+// V2 Upload params - only for file upload without processing
+export type UploadV2Params = {
+  file: Blob;
+  chunkNumber: number;
+  totalChunks: number;
+  originalname: string;
 } & { [key: string]: any };
 
 export type FormDataParams = ExtractParams | UploadParams;
@@ -766,6 +778,9 @@ export interface ReusableDropdownProps extends DropdownProps {
 }
 export interface ChildRef {
   getSelectedRows: () => CustomFile[];
+  getV2SelectedFileIds: () => number[];
+  handleStartChunking: () => Promise<void>;
+  handleCreateGraph: () => Promise<void>;
 }
 export interface IconProps {
   isFullScreen?: boolean;
@@ -1105,7 +1120,17 @@ export interface filedate {
     _Time__tzinfo: null;
   };
 }
-export type FileTableHandle = React.ElementRef<typeof FileTable>;
+
+export interface FileTableImperativeHandle {
+  getSelectedRows: () => CustomFile[];
+  getV2SelectedFileIds: () => number[];
+  getV2SelectedFiles: () => CustomFile[];
+  handleStartChunking: () => Promise<void>;
+  handleCreateGraph: () => Promise<void>;
+  reloadV2Files: () => Promise<void>;
+}
+
+export type FileTableHandle = FileTableImperativeHandle;
 
 export interface VisibilityProps {
   isVisible: boolean;

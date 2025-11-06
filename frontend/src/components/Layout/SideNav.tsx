@@ -1,30 +1,31 @@
-import React, { useRef, useState } from 'react';
 import { Dialog, SideNavigation, SpotlightTarget, TextLink, Tooltip, useMediaQuery } from '@neo4j-ndl/react';
 import {
-  ArrowRightIconOutline,
+  ArrowDownTrayIconOutline,
   ArrowLeftIconOutline,
+  ArrowRightIconOutline,
   ArrowsPointingOutIconOutline,
   ChatBubbleOvalLeftEllipsisIconOutline,
   CloudArrowUpIconSolid,
-  ArrowDownTrayIconOutline,
   TrashIconOutline,
 } from '@neo4j-ndl/react/icons';
+import React, { useRef, useState } from 'react';
 
-import { SideNavProps } from '../../types';
-import Chatbot from '../ChatBot/Chatbot';
 import { createPortal } from 'react-dom';
-import { useMessageContext } from '../../context/UserMessages';
-import { downloadClickHandler, getIsLoading } from '../../utils/Utils';
-import ExpandedChatButtonContainer from '../ChatBot/ExpandedChatButtonContainer';
-import { APP_SOURCES, tooltips } from '../../utils/Constants';
-import ChatModeToggle from '../ChatBot/ChatModeToggle';
 import { RiChatSettingsLine } from 'react-icons/ri';
-import { IconButtonWithToolTip } from '../UI/IconButtonToolTip';
-import GCSButton from '../DataSources/GCS/GCSButton';
-import S3Component from '../DataSources/AWS/S3Bucket';
-import WebButton from '../DataSources/Web/WebButton';
-import DropZoneForSmallLayouts from '../DataSources/Local/DropZoneForSmallLayouts';
 import { useCredentials } from '../../context/UserCredentials';
+import { useMessageContext } from '../../context/UserMessages';
+import { SideNavProps } from '../../types';
+import { APP_SOURCES, tooltips } from '../../utils/Constants';
+import { downloadClickHandler, getIsLoading } from '../../utils/Utils';
+import Chatbot from '../ChatBot/Chatbot';
+import ChatModeToggle from '../ChatBot/ChatModeToggle';
+import ExpandedChatButtonContainer from '../ChatBot/ExpandedChatButtonContainer';
+import S3Component from '../DataSources/AWS/S3Bucket';
+import GCSButton from '../DataSources/GCS/GCSButton';
+import DropZoneForSmallLayouts from '../DataSources/Local/DropZoneForSmallLayouts';
+import DropZoneV2ForSmallLayouts from '../DataSources/Local/DropZoneV2ForSmallLayouts';
+import WebButton from '../DataSources/Web/WebButton';
+import { IconButtonWithToolTip } from '../UI/IconButtonToolTip';
 import TooltipWrapper from '../UI/TipWrapper';
 
 const SideNav: React.FC<SideNavProps> = ({
@@ -47,6 +48,9 @@ const SideNav: React.FC<SideNavProps> = ({
   const [showChatMode, setShowChatMode] = useState<boolean>(false);
   const isLargeDesktop = useMediaQuery(`(min-width:1440px )`);
   const { connectionStatus } = useCredentials();
+
+  // V2 Upload System Toggle for Small Layouts
+  const [useV2UploadSmall, setUseV2UploadSmall] = useState(true); // Default to V2
   const downloadLinkRef = useRef<HTMLAnchorElement>(null);
   const anchorMenuRef = useRef<HTMLAnchorElement>(null);
 
@@ -86,9 +90,21 @@ const SideNav: React.FC<SideNavProps> = ({
           <SideNavigation.Item
             key='local'
             icon={
-              <TooltipWrapper tooltip='Local Files' placement='right'>
-                <DropZoneForSmallLayouts />
-              </TooltipWrapper>
+              <div className='flex items-center space-x-1'>
+                <TooltipWrapper
+                  tooltip={`Local Files ${useV2UploadSmall ? '(Queue V2)' : '(Direct V1)'}`}
+                  placement='right'
+                >
+                  {useV2UploadSmall ? <DropZoneV2ForSmallLayouts /> : <DropZoneForSmallLayouts />}
+                </TooltipWrapper>
+                <button
+                  onClick={() => setUseV2UploadSmall(!useV2UploadSmall)}
+                  className='text-xs px-1 py-0.5 rounded bg-gray-200 hover:bg-gray-300'
+                  title={`Switch to ${useV2UploadSmall ? 'V1' : 'V2'}`}
+                >
+                  {useV2UploadSmall ? 'V2' : 'V1'}
+                </button>
+              </div>
             }
           />
         </SpotlightTarget>
