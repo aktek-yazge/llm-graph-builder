@@ -1,16 +1,16 @@
 /* eslint-disable no-console */
-import { Button, Flex, SpotlightTarget, Typography } from '@neo4j-ndl/react';
-import { ArrowRightIconOutline, InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
+import { Dropzone, Flex, SpotlightTarget, Typography } from '@neo4j-ndl/react';
+import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
 import { FunctionComponent, useCallback, useEffect, useState } from 'react';
-import Dropzone from 'react-dropzone';
 import { useCredentials } from '../../../context/UserCredentials';
 import { useFileContext } from '../../../context/UsersFiles';
 import { CustomFile } from '../../../types';
-import { chunkSize } from '../../../utils/Constants';
+import { buttonCaptions, chunkSize } from '../../../utils/Constants';
 import { uploadFileToQueueAPI } from '../../../utils/FileAPI';
 import Loader from '../../../utils/Loader';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
 import { normalizeFileName } from '../../../utils/utf8';
+import { IconButtonWithToolTip } from '../../UI/IconButtonToolTip';
 
 interface UploadedFileInfo {
   id: number;
@@ -101,7 +101,7 @@ const DropZoneV2: FunctionComponent = () => {
 
         console.log(`📤 Uploading chunk ${chunkNumber}/${totalChunks}: ${start}-${end} (${chunkSizeBytes} bytes)`);
 
-        const response = await uploadFileToQueueAPI(chunk, chunkNumber, totalChunks, file.name);
+        const response = await uploadFileToQueueAPI(chunk, chunkNumber, totalChunks, file.name, true);
 
         uploadedSize += chunkSizeBytes;
 
@@ -289,16 +289,55 @@ const DropZoneV2: FunctionComponent = () => {
   };
 
   return (
-    <div className='w-full'>
-      <Flex flexDirection='column' className='w-full h-full'>
-        <Typography variant='h6' className='mb-4'>
-          📁 File Upload Queue (V2)
-        </Typography>
-
-        <SpotlightTarget id='upload-v2'>
-          <Dropzone
-            onDrop={onDropHandler}
-            accept={{
+    <>
+      <SpotlightTarget
+        id='dropzone-v2'
+        hasPulse={true}
+        indicatorVariant='border'
+        hasAnchorPortal={false}
+        borderRadius={11}
+      >
+        <Dropzone
+          loadingComponent={
+            (isLoading || isUploading) && (
+              <Loader
+                title={
+                  isUploading
+                    ? `V2 Batch Upload: ${batchProgress.current}/${batchProgress.total} files`
+                    : 'Uploading V2'
+                }
+              />
+            )
+          }
+          isTesting={true}
+          className='bg-none! dropzoneContainer'
+          supportedFilesDescription={
+            <Typography variant='body-small'>
+              <Flex>
+                <span>{buttonCaptions.dropzoneSpan}</span>
+                <div className='align-self-center'>
+                  <IconButtonWithToolTip
+                    label='V2 Queue Source info'
+                    clean
+                    text={
+                      <Typography variant='body-small'>
+                        <Flex gap='3' alignItems='flex-start'>
+                          <span>Microsoft Office (.docx, .xlsx)</span>
+                          <span>PDF (.pdf)</span>
+                          <span>Text (.txt, .csv)</span>
+                          <span>V2 Queue System - Upload to process later</span>
+                        </Flex>
+                      </Typography>
+                    }
+                  >
+                    <InformationCircleIconOutline className='w-[22px] h-[22px]' />
+                  </IconButtonWithToolTip>
+                </div>
+              </Flex>
+            </Typography>
+          }
+          dropZoneOptions={{
+            accept: {
               'application/pdf': ['.pdf'],
               'text/plain': ['.txt'],
               'application/msword': ['.doc'],
@@ -306,147 +345,21 @@ const DropZoneV2: FunctionComponent = () => {
               'text/csv': ['.csv'],
               'application/vnd.ms-excel': ['.xls'],
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-            }}
-            multiple={true}
-            disabled={isUploading}
-          >
-            {({ getRootProps, getInputProps, isDragActive }) => (
-              <div
-                {...getRootProps()}
-                className={`w-full min-h-48 border-2 border-dashed rounded-lg p-8 cursor-pointer transition-colors
-                  ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}
-                  ${isUploading ? 'opacity-50 cursor-not-allowed' : ''}
-                `}
-              >
-                <input {...getInputProps()} />
-                <Flex flexDirection='column' justifyContent='center' alignItems='center'>
-                  <Typography variant='h4' className='mb-2'>
-                    {isUploading ? '⏳ Uploading Files...' : isDragActive ? '📥 Drop files now!' : '📤 Drop Files Here'}
-                  </Typography>
-                  <Typography variant='body-large' className='mb-4 text-center'>
-                    {isUploading
-                      ? `Uploading ${batchProgress.current}/${batchProgress.total} files`
-                      : 'Drag and drop files or click to browse'}
-                  </Typography>
-                  <Typography variant='body-medium' className='text-center opacity-70'>
-                    Supported formats: PDF, TXT, DOC, DOCX, CSV, XLS, XLSX
-                    <br />
-                    Maximum file size: 100MB
-                  </Typography>
-                </Flex>
-              </div>
-            )}
-          </Dropzone>
-        </SpotlightTarget>
-
-        {/* Upload Progress */}
-        {isUploading && (
-          <div className='mt-4 p-4 bg-blue-50 rounded-lg'>
-            <Typography variant='body-large' className='mb-2'>
-              📊 Upload Progress: {batchProgress.current}/{batchProgress.total} files
-            </Typography>
-            <div className='w-full bg-gray-200 rounded-full h-2'>
-              <div
-                className='bg-blue-600 h-2 rounded-full transition-all duration-300'
-                style={{
-                  width: `${batchProgress.total > 0 ? (batchProgress.current / batchProgress.total) * 100 : 0}%`,
-                }}
-              ></div>
-            </div>
-          </div>
-        )}
-
-        {/* Upload Queue Status */}
-        {(uploadQueue.length > 0 || uploadedFiles.length > 0) && (
-          <div className='mt-4 p-4 border rounded-lg'>
-            <Flex justifyContent='space-between' alignItems='center' className='mb-3'>
-              <Typography variant='h6'>📋 Upload Status</Typography>
-              <Button size='small' fill='outlined' onClick={clearQueue} isDisabled={isUploading}>
-                Clear All
-              </Button>
-            </Flex>
-
-            {uploadQueue.length > 0 && (
-              <Typography variant='body-medium' className='mb-2'>
-                ⏳ Queued: {uploadQueue.length} files
-              </Typography>
-            )}
-
-            {uploadedFiles.length > 0 && (
-              <div>
-                <Typography variant='body-medium' className='mb-2'>
-                  ✅ Uploaded: {uploadedFiles.length} files
-                </Typography>
-                <div className='max-h-32 overflow-y-auto'>
-                  {uploadedFiles.map((file) => (
-                    <div key={file.id} className='text-sm p-1 border-l-2 border-green-400 pl-2 mb-1'>
-                      <span className={file.duplicate ? 'text-orange-600' : 'text-green-600'}>
-                        {file.duplicate ? '📋' : '✅'} {file.original_name}
-                        {file.duplicate && ' (already exists)'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {failedFiles.length > 0 && (
-              <div className='mt-2'>
-                <Typography variant='body-medium' className='mb-2 text-red-600'>
-                  ❌ Failed: {failedFiles.length} files
-                </Typography>
-                <div className='max-h-24 overflow-y-auto'>
-                  {failedFiles.map((fileName) => (
-                    <div key={fileName} className='text-sm text-red-600 p-1 border-l-2 border-red-400 pl-2 mb-1'>
-                      ❌ {fileName}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Navigate to Queue Management */}
-            {uploadedFiles.length > 0 && (
-              <div className='mt-3 pt-3 border-t'>
-                <Flex alignItems='center' className='gap-2'>
-                  <Typography variant='body-medium'>
-                    Files uploaded successfully! Go to Queue Management to process them.
-                  </Typography>
-                  <Button
-                    size='small'
-                    fill='filled'
-                    // onClick={() => navigate('/queue-management')} // You'll need to implement routing
-                  >
-                    Manage Queue <ArrowRightIconOutline className='w-4 h-4 ml-1' />
-                  </Button>
-                </Flex>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Information */}
-        <div className='mt-4 p-4 bg-blue-50 rounded-lg'>
-          <Flex alignItems='center' className='gap-2 mb-2'>
-            <InformationCircleIconOutline className='w-5 h-5 text-blue-600' />
-            <Typography variant='body-large' className='text-blue-800'>
-              How V2 Upload Works
-            </Typography>
-          </Flex>
-          <Typography variant='body-medium' className='text-blue-700'>
-            1. Files are uploaded to a queue without processing
-            <br />
-            2. Use Queue Management to select files and start processing
-            <br />
-            3. Processing runs in the background and can be monitored
-            <br />
-            4. Duplicate files are automatically detected and skipped
-          </Typography>
-        </div>
-
-        {isLoading && <Loader title='Loading...' />}
-      </Flex>
-    </div>
+            },
+            onDrop: (f: Partial<globalThis.File>[]) => {
+              onDropHandler(f);
+            },
+            onDropRejected: (e) => {
+              if (e.length) {
+                showErrorToast('Failed To Upload, Unsupported file extension');
+              }
+            },
+            multiple: true,
+            disabled: isUploading,
+          }}
+        />
+      </SpotlightTarget>
+    </>
   );
 };
 

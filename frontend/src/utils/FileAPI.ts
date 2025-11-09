@@ -176,7 +176,8 @@ export const uploadFileToQueueAPI = async (
   file: Blob,
   chunkNumber: number,
   totalChunks: number,
-  originalname: string
+  originalname: string,
+  generateEmbedding: boolean = true
 ): Promise<any> => {
   const urlUpload = `${url()}/api/v2/files/upload`;
   const method: Method = 'post';
@@ -185,6 +186,7 @@ export const uploadFileToQueueAPI = async (
     chunkNumber,
     totalChunks,
     originalname: normalizeFileName(originalname) || originalname,
+    generateEmbedding,
   };
   const response = await apiCall(urlUpload, method, additionalParams);
   return response;
@@ -293,7 +295,7 @@ export const getFileStatusAPI = async (fileId: number): Promise<any> => {
 // Start graph creation for a file
 export const startGraphCreationAPI = async (
   fileId: number,
-  model: string = 'gpt-4o-mini',
+  model: string = 'openai_gpt_4o_mini',
   generateEmbedding: boolean = false
 ): Promise<any> => {
   const urlGraphCreate = `${url()}/api/v2/files/${fileId}/graph-create`;
@@ -303,6 +305,16 @@ export const startGraphCreationAPI = async (
     generate_embedding: generateEmbedding,
   };
   const response = await apiCall(urlGraphCreate, method, additionalParams);
+  return response;
+};
+
+// Start embedding creation for file chunks
+export const startEmbeddingAPI = async (
+  fileId: number
+): Promise<any> => {
+  const urlEmbedding = `${url()}/api/v2/files/${fileId}/create-embeddings`;
+  const method: Method = 'post';
+  const response = await apiCall(urlEmbedding, method, {});
   return response;
 };
 

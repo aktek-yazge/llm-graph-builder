@@ -1,10 +1,10 @@
 import { Banner, Dialog, Flex, Radio } from '@neo4j-ndl/react';
-import { RETRY_OPIONS } from '../../../utils/Constants';
-import { useFileContext } from '../../../context/UsersFiles';
-import { capitalize } from '../../../utils/Utils';
-import { BannerAlertProps } from '../../../types';
-import ButtonWithToolTip from '../../UI/ButtonWithToolTip';
 import { memo } from 'react';
+import { useFileContext } from '../../../context/UsersFiles';
+import { BannerAlertProps } from '../../../types';
+import { RETRY_OPIONS } from '../../../utils/Constants';
+import { capitalize } from '../../../utils/Utils';
+import ButtonWithToolTip from '../../UI/ButtonWithToolTip';
 
 function RetryConfirmationDialog({
   open,
@@ -30,8 +30,8 @@ function RetryConfirmationDialog({
     <Dialog isOpen={open} onClose={onClose}>
       <Dialog.Header>Reprocess Options</Dialog.Header>
       <Dialog.Description>
-        Clicking "Continue" will mark these files as "Ready to Reprocess." To proceed, click “Generate Graph” to start
-        the reprocessing process.
+        Clicking "Continue" will reset these files to "Chunked" status. This will allow graph creation to run again
+        automatically.
       </Dialog.Description>
       <Dialog.Content>
         {alertStatus.showAlert && (
@@ -73,11 +73,9 @@ function RetryConfirmationDialog({
             <ButtonWithToolTip
               placement='left'
               label='Retry action button'
-              text={
-                !file?.retryOption.length ? `Please Select One Of The Option` : 'Reset The Status To Ready to Reprocess'
-              }
+              text={!file?.retryOption?.length ? `Please Select One Of The Option` : 'Reset Status to Chunked'}
               loading={retryLoading}
-              disabled={!file?.retryOption.length}
+              disabled={!file?.retryOption?.length}
               onClick={() => {
                 retryHandler(file?.name as string, file?.retryOption as string);
               }}

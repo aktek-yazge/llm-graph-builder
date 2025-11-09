@@ -3,12 +3,16 @@
 SQLAlchemy models for file upload queue system
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, BigInteger, Index
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, BigInteger, Index, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import StaticPool
 from datetime import datetime
 import hashlib
 import os
+import subprocess
+import platform
+import logging
 from pathlib import Path
 from typing import Optional, List
 from enum import Enum
@@ -54,6 +58,7 @@ class UploadedFile(Base):
     upload_status = Column(String(20), default="uploading", nullable=False)  # uploading, uploaded, failed
     chunking_status = Column(String(20), default="pending", nullable=False)  # pending, chunking, chunked, failed
     graph_status = Column(String(20), default="pending", nullable=False)     # pending, processing, completed, failed
+    embedding_status = Column(String(20), default="pending", nullable=False)  # pending, processing, completed, failed
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -64,6 +69,8 @@ class UploadedFile(Base):
     chunking_completed_at = Column(DateTime, nullable=True)
     graph_started_at = Column(DateTime, nullable=True)
     graph_completed_at = Column(DateTime, nullable=True)
+    embedding_started_at = Column(DateTime, nullable=True)
+    embedding_completed_at = Column(DateTime, nullable=True)
     
     # Processing details
     processing_started_at = Column(DateTime, nullable=True)
@@ -128,12 +135,17 @@ class FileQueueDatabase:
         self.engine = create_engine(
             self.db_url, 
             connect_args={"check_same_thread": False},
-            echo=False  # Set to True for SQL debugging
+            echo=False,  # Set to True for SQL debugging
+            poolclass=StaticPool
         )
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         
         # Create tables if they don't exist
         Base.metadata.create_all(bind=self.engine)
+    
+    def get_db_session(self) -> Session:
+        """Get database session"""
+        return self.SessionLocal()
     
     def get_db_session(self) -> Session:
         """Get database session"""
@@ -286,6 +298,83 @@ class FileQueueDatabase:
             stats['total'] = db.query(UploadedFile).count()
             return stats
             
+        finally:
+            db.close()
+    
+    def update_stages_and_sync_neo4j(
+        self, 
+        file_id: int,
+        graph=None,
+        database: str = None,
+        upload_status: str = None,
+        chunking_status: str = None,
+        graph_status: str = None,
+        embedding_status: str = None,
+        error_message: str = None
+    ) -> bool:
+        """
+        Update file stages in queue DB and sync status to Neo4j Document node
+        
+        Args:
+            file_id: File ID in queue DB
+            graph: Neo4j graph connection (optional, for syncing)
+            database: Neo4j database name (for syncing)
+            upload_status: New upload status
+            chunking_status: New chunking status
+            graph_status: New graph creation status
+            embedding_status: New embedding status
+            error_message: Error message if any stage failed
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        db = self.get_db_session()
+        try:
+            file_record = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+            if not file_record:
+                return False
+            
+            # Update provided stages
+            if upload_status:
+                file_record.upload_status = upload_status
+            if chunking_status:
+                file_record.chunking_status = chunking_status
+            if graph_status:
+                file_record.graph_status = graph_status
+            if embedding_status:
+                file_record.embedding_status = embedding_status
+            
+            if error_message:
+                file_record.processing_error = error_message
+            
+            file_record.updated_at = datetime.utcnow()
+            db.commit()
+            
+            # Sync to Neo4j if graph connection provided
+            if graph:
+                try:
+                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+                    
+                    sync_queue_db_status_to_neo4j(
+                        graph=graph,
+                        file_name=file_record.filename,
+                        upload_status=file_record.upload_status,
+                        chunking_status=file_record.chunking_status,
+                        graph_status=file_record.graph_status,
+                        embedding_status=file_record.embedding_status,
+                        database=database
+                    )
+                    logging.info(f"✅ Synced file {file_id} ({file_record.filename}) status to Neo4j")
+                except Exception as sync_error:
+                    logging.warning(f"⚠️ Could not sync to Neo4j: {str(sync_error)}")
+                    # Don't fail the update if Neo4j sync fails
+            
+            return True
+            
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Error updating stages and syncing: {str(e)}")
+            raise e
         finally:
             db.close()
 

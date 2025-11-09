@@ -128,25 +128,19 @@ class graphDBdataAccess:
                         d.fileSource = 'local file',
                         d.fileType = $file_type,
                         d.fileSize = $file_size,
-                        d.createdAt = datetime(),
-                        d.updatedAt = datetime(),
+                        d.processedAt = datetime(),
+                        d.lastProcessedAt = datetime(),
                         d.processingTime = 0,
                         d.nodeCount = 0,
                         d.relationshipCount = 0,
                         d.total_chunks = 0,
                         d.processed_chunk = 0,
-                        d.chunkNodeCount = 0,
-                        d.chunkRelCount = 0,
-                        d.entityNodeCount = 0,
-                        d.entityEntityRelCount = 0,
-                        d.communityNodeCount = 0,
-                        d.communityRelCount = 0,
                         d.is_cancelled = false,
                         d.errorMessage = '',
                         d.model = 'unknown'
                     ON MATCH SET 
                         d.id = $file_name,
-                        d.updatedAt = datetime(),
+                        d.lastProcessedAt = datetime(),
                         d.fileType = $file_type,
                         d.fileSize = $file_size
                     RETURN d.fileName as fileName, d.status as status
@@ -183,15 +177,12 @@ class graphDBdataAccess:
             logging.info(f"Tam Document node oluşturuluyor: {obj_source_node.file_name}")
             self.graph.query("""MERGE(d:Document {fileName :$fn}) SET d.id = $fn, d.fileSize = $fs, d.fileType = $ft ,
                             d.status = $st, d.url = $url, d.awsAccessKeyId = $awsacc_key_id, 
-                            d.fileSource = $f_source, d.createdAt = $c_at, d.updatedAt = $u_at, 
+                            d.fileSource = $f_source, d.processedAt = $c_at, d.lastProcessedAt = $u_at, 
                             d.processingTime = $pt, d.errorMessage = $e_message, d.nodeCount= $n_count, 
                             d.relationshipCount = $r_count, d.model= $model, d.gcsBucket=$gcs_bucket, 
                             d.gcsBucketFolder= $gcs_bucket_folder, d.language= $language,d.gcsProjectId= $gcs_project_id,
                             d.is_cancelled=False, d.total_chunks=$total_chunks, d.processed_chunk=$processed_chunk,
-                            d.access_token=$access_token, d.doc_link=$doc_link, d.page_images=$page_images,
-                            d.chunkNodeCount=$chunkNodeCount,d.chunkRelCount=$chunkRelCount,
-                            d.entityNodeCount=$entityNodeCount,d.entityEntityRelCount=$entityEntityRelCount,
-                            d.communityNodeCount=$communityNodeCount,d.communityRelCount=$communityRelCount""",
+                            d.access_token=$access_token, d.doc_link=$doc_link, d.page_images=$page_images""",
                             {"fn":obj_source_node.file_name, "fs":obj_source_node.file_size, "ft":obj_source_node.file_type, "st":job_status, 
                             "url":getattr(obj_source_node, 'url', ''),
                             "awsacc_key_id":getattr(obj_source_node, 'awsAccessKeyId', ''), "f_source":obj_source_node.file_source, "c_at":obj_source_node.created_at,
@@ -201,13 +192,7 @@ class graphDBdataAccess:
                             "language":getattr(obj_source_node, 'language', ''), "gcs_project_id":getattr(obj_source_node, 'gcsProjectId', ''),
                             "access_token":getattr(obj_source_node, 'access_token', ''), "doc_link":getattr(obj_source_node, 'doc_link', ''), 
                             "page_images":getattr(obj_source_node, 'page_images', []),
-                            "total_chunks":getattr(obj_source_node, 'total_chunks', 0), "processed_chunk":getattr(obj_source_node, 'processed_chunk', 0),
-                            "chunkNodeCount":obj_source_node.chunkNodeCount,
-                            "chunkRelCount":obj_source_node.chunkRelCount,
-                            "entityNodeCount":obj_source_node.entityNodeCount,
-                            "entityEntityRelCount":obj_source_node.entityEntityRelCount,
-                            "communityNodeCount":obj_source_node.communityNodeCount,
-                            "communityRelCount":obj_source_node.communityRelCount
+                            "total_chunks":getattr(obj_source_node, 'total_chunks', 0), "processed_chunk":getattr(obj_source_node, 'processed_chunk', 0)
                             },session_params={"database":self.graph._database})
             
             logging.info(f"Tam Document node oluşturuldu: {obj_source_node.file_name}")
@@ -247,6 +232,7 @@ class graphDBdataAccess:
                 
         except Exception as e:
             logging.error(f"Document related nodes oluşturma hatası ({file_name}): {e}")
+            raise e
 
     def _detect_document_type(self, file_name: str) -> str:
         """
@@ -294,10 +280,10 @@ class graphDBdataAccess:
                 params['status'] = obj_source_node.status
 
             if obj_source_node.created_at is not None:
-                params['createdAt'] = obj_source_node.created_at
+                params['processedAt'] = obj_source_node.created_at
 
             if obj_source_node.updated_at is not None:
-                params['updatedAt'] = obj_source_node.updated_at
+                params['lastProcessedAt'] = obj_source_node.updated_at
 
             if obj_source_node.processing_time is not None and obj_source_node.processing_time != 0:
                 params['processingTime'] = round(obj_source_node.processing_time.total_seconds(),2)
@@ -356,7 +342,7 @@ class graphDBdataAccess:
         sorting the list by the last updated date. 
         """
         logging.info("Get existing files list from graph")
-        query = "MATCH(d:Document) WHERE d.fileName IS NOT NULL RETURN d ORDER BY d.updatedAt DESC"
+        query = "MATCH(d:Document) WHERE d.fileName IS NOT NULL RETURN d ORDER BY d.lastProcessedAt DESC"
         result = self.graph.query(query,session_params={"database":self.graph._database})
         list_of_json_objects = [entry['d'] for entry in result]
         return list_of_json_objects
@@ -530,13 +516,7 @@ class graphDBdataAccess:
                 d.nodeCount AS nodeCount, d.model as model, d.relationshipCount as relationshipCount,
                 d.total_chunks AS total_chunks , d.fileSize as fileSize, 
                 d.is_cancelled as is_cancelled, d.processed_chunk as processed_chunk, d.fileSource as fileSource,
-                d.chunkNodeCount AS chunkNodeCount,
-                d.chunkRelCount AS chunkRelCount,
-                d.entityNodeCount AS entityNodeCount,
-                d.entityEntityRelCount AS entityEntityRelCount,
-                d.communityNodeCount AS communityNodeCount,
-                d.communityRelCount AS communityRelCount,
-                d.createdAt AS created_time
+                d.processedAt AS processed_time
                 """
         param = {"file_name" : file_name}
         result = self.execute_query(query, param)
@@ -583,22 +563,16 @@ class graphDBdataAccess:
                         d.fileSource = 'local file',
                         d.fileType = $file_type,
                         d.fileSize = $file_size,
-                        d.createdAt = datetime(),
-                        d.updatedAt = datetime(),
+                        d.processedAt = datetime(),
+                        d.lastProcessedAt = datetime(),
                         d.processingTime = 0,
                         d.nodeCount = 0,
                         d.relationshipCount = 0,
                         d.total_chunks = 0,
                         d.processed_chunk = 0,
-                        d.chunkNodeCount = 0,
-                        d.chunkRelCount = 0,
-                        d.entityNodeCount = 0,
-                        d.entityEntityRelCount = 0,
-                        d.communityNodeCount = 0,
-                        d.communityRelCount = 0,
                         d.is_cancelled = false
                     ON MATCH SET 
-                        d.updatedAt = datetime(),
+                        d.lastProcessedAt = datetime(),
                         d.fileType = $file_type,
                         d.fileSize = $file_size
                 """
@@ -1051,37 +1025,21 @@ class graphDBdataAccess:
                 else:
                     communityNodeCount = 0
                     communityRelCount = 0
-                nodeCount = int(chunkNodeCount) + int(entityNodeCount) + int(communityNodeCount)
-                relationshipCount = int(chunkRelCount) + int(entityEntityRelCount) + int(communityRelCount)
+                # Sadece toplamları hesapla, ayrıntıları Document'a kaydetme
+                nodeCount = chunkNodeCount + entityNodeCount + communityNodeCount
+                relationshipCount = chunkRelCount + entityEntityRelCount + communityRelCount
                 update_query = """
                 MATCH (d:Document {fileName: $filename})
-                SET d.chunkNodeCount = $chunkNodeCount,
-                    d.chunkRelCount = $chunkRelCount,
-                    d.entityNodeCount = $entityNodeCount,
-                    d.entityEntityRelCount = $entityEntityRelCount,
-                    d.communityNodeCount = $communityNodeCount,
-                    d.communityRelCount = $communityRelCount,
-                    d.nodeCount = $nodeCount,
+                SET d.nodeCount = $nodeCount,
                     d.relationshipCount = $relationshipCount
                 """
                 self.execute_query(update_query,{
                     "filename": filename,
-                    "chunkNodeCount": chunkNodeCount,
-                    "chunkRelCount": chunkRelCount,
-                    "entityNodeCount": entityNodeCount,
-                    "entityEntityRelCount": entityEntityRelCount,
-                    "communityNodeCount": communityNodeCount,
-                    "communityRelCount": communityRelCount,
                     "nodeCount" : nodeCount,
                     "relationshipCount" : relationshipCount
                     })
                 
-                response[filename] = {"chunkNodeCount": chunkNodeCount,
-                    "chunkRelCount": chunkRelCount,
-                    "entityNodeCount": entityNodeCount,
-                    "entityEntityRelCount": entityEntityRelCount,
-                    "communityNodeCount": communityNodeCount,
-                    "communityRelCount": communityRelCount,
+                response[filename] = {
                     "nodeCount" : nodeCount,
                     "relationshipCount" : relationshipCount
                     }
@@ -1135,8 +1093,9 @@ class graphDBdataAccess:
             entities_data = self.extract_comprehensive_policy_entities_with_llm(file_name, document_content, model)
             
             if not entities_data:
-                logging.warning(f"⚠️ {file_name} için varlık çıkarımı başarısız. Atlanıyor.")
-                return
+                error_msg = f"⚠️ {file_name} için varlık çıkarımı başarısız. LLM extraction hatası."
+                logging.error(error_msg)
+                raise Exception(error_msg)
             
             # Document type'ı kontrol et
             document_type = entities_data.get('document_type', 'MAIN_POLICY')
@@ -1161,7 +1120,7 @@ class graphDBdataAccess:
                     d.year = $policy_year,
                     d.hasExtractedEntities = true,
                     d.entityExtractionMethod = 'LLM_comprehensive',
-                    d.updatedAt = datetime()
+                    d.lastProcessedAt = datetime()
                 RETURN d.fileName as updated_file
             """
             
@@ -1184,6 +1143,7 @@ class graphDBdataAccess:
             
         except Exception as e:
             logging.error(f"Policy/Endorsement node oluşturma hatası ({file_name}): {e}")
+            raise e
 
     def create_embeddings_for_documents(self, file_names: list):
         """

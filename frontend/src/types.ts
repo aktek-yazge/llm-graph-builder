@@ -40,6 +40,7 @@ export interface CustomFileBase extends Partial<globalThis.File> {
   upload_status?: string;
   chunking_status?: string;
   graph_status?: string;
+  embedding_status?: string;
 }
 export interface CustomFile extends CustomFileBase {
   id: string;
@@ -108,6 +109,7 @@ export type UploadV2Params = {
   chunkNumber: number;
   totalChunks: number;
   originalname: string;
+  generateEmbedding?: boolean;
 } & { [key: string]: any };
 
 export type FormDataParams = ExtractParams | UploadParams;

@@ -450,3 +450,37 @@ def check_document_images_exist_in_s3(
     except Exception as e:
         logging.error(f"❌ Error checking document images in S3 for {document_name}: {e}")
         return False, []
+
+
+def upload_files_to_s3_with_structure(
+    file_paths: List[str], 
+    bucket_name: str, 
+    s3_prefix: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None,
+    delete_local_after_upload: bool = True
+) -> Tuple[List[str], List[str]]:
+    """
+    Multiple files'ı organized S3 structure ile upload eder.
+    Original upload_files_to_s3 ile aynı ama sadece isim farklı.
+    
+    Args:
+        file_paths: Upload edilecek dosyaların local path'leri
+        bucket_name: S3 bucket name
+        s3_prefix: S3'te dosyaların konumlandırılacağı prefix (örn: "documents/doc1/images/")
+        aws_access_key_id: AWS access key (None ise environment variable kullanılır)
+        aws_secret_access_key: AWS secret key (None ise environment variable kullanılır)  
+        delete_local_after_upload: Upload sonrası local dosyaları sil
+    
+    Returns:
+        Tuple[List[str], List[str]]: (uploaded_s3_urls, failed_files)
+    """
+    # Bu fonksiyon upload_files_to_s3 ile tamamen aynı - sadece organized structure için alias
+    return upload_files_to_s3(
+        file_paths=file_paths,
+        bucket_name=bucket_name,
+        s3_prefix=s3_prefix,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        delete_local_after_upload=delete_local_after_upload
+    )

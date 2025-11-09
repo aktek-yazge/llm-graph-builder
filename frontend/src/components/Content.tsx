@@ -49,7 +49,7 @@ import {
   tokenchunkSize,
   tooltips,
 } from '../utils/Constants';
-import { extractAPI, getFileStatusAPI, resetFileStageAPI, startChunkingAPI } from '../utils/FileAPI';
+import { extractAPI, getFileStatusAPI, resetFileStageAPI, startChunkingAPI, startEmbeddingAPI, deleteFileFromQueueAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
 import { normalizeFileName } from '../utils/utf8';
 import { isExpired, isFileReadyToProcess } from '../utils/Utils';
@@ -151,6 +151,7 @@ const Content: React.FC<ContentProps> = ({
     setGenerateEmbedding,
     setSelectedNodes,
     setAllPatterns,
+    rowSelection,
     setRowSelection,
     setSelectedRels,
     setSelectedTokenChunkSize,
@@ -256,13 +257,14 @@ const Content: React.FC<ContentProps> = ({
       (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'pending'
     ).length;
 
-    const readyForGraph = selectedFiles.filter((f: CustomFile) => f.chunking_status === 'chunked').length;
-
-    const completed = selectedFiles.filter((f: CustomFile) => f.graph_status === 'completed').length;
+    const readyForGraph = selectedFiles.filter(
+      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
+    ).length;
 
     setV2SelectedFileCount(totalCount);
-    setV2FilesCategorized({ pendingChunking, readyForGraph, completed });
-  }, [filesData]);
+
+    setV2FilesCategorized({ pendingChunking, readyForGraph, completed: 0 });
+  }, [filesData, rowSelection]);
 
   const handleDropdownChange = (selectedOption: OptionType | null | void) => {
     if (selectedOption?.value) {
@@ -273,9 +275,7 @@ const Content: React.FC<ContentProps> = ({
         return {
           ...curfile,
           model:
-            curfile.status === 'New' || curfile.status === 'Ready to Reprocess'
-              ? (selectedOption?.value ?? '')
-              : curfile.model,
+            curfile.status === 'New' || curfile.status === 'Chunked' ? (selectedOption?.value ?? '') : curfile.model,
         };
       });
     });
@@ -664,6 +664,90 @@ const Content: React.FC<ContentProps> = ({
     setOpenMergeDuplicateModal(true);
   };
 
+  const handleCreateEmbeddingsForV2 = async () => {
+    const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+    const completedFiles = v2Files.filter((f: CustomFile) => f.status === 'Completed');
+
+    if (!completedFiles || completedFiles.length === 0) {
+      showErrorToast('Embedding oluşturmak için completed dosya seçiniz');
+      return;
+    }
+
+    try {
+      setIsExtractLoading(true);
+      showNormalToast(`${completedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
+
+      // Seçili completed dosyalar için embedding oluştur
+      const processFile = async (file: CustomFile) => {
+        if (!file.v2FileId) {
+          return;
+        }
+        try {
+          const response = await startEmbeddingAPI(file.v2FileId);
+          if (response.status === 'Success' || response.status === 'success') {
+            showSuccessToast(`Dosya ${file.name} embedding oluşturmaya alındı`);
+
+            // Hemen status'u güncelle
+            await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 saniye bekle
+            childRef.current?.reloadV2Files?.();
+
+            // Bu dosyanın durumunu polling ile kontrol et
+            const pollStatus = async () => {
+              let attempts = 0;
+              const maxAttempts = 600;
+
+              while (attempts < maxAttempts) {
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+
+                try {
+                  const statusResponse = await getFileStatusAPI(file.v2FileId!);
+                  const fileStatus = statusResponse?.data?.embedding_status;
+                  const elapsedSeconds = attempts * 5;
+
+                  if (fileStatus === 'completed') {
+                    showSuccessToast(`✓ Dosya ${file.name} embedding oluşturma tamamlandı`);
+                    childRef.current?.reloadV2Files?.();
+                    break;
+                  }
+                  if (fileStatus === 'failed') {
+                    showErrorToast(`✗ Dosya ${file.name} embedding oluşturma başarısız`);
+                    break;
+                  }
+                  if (elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
+                    showNormalToast(`⏱ Embedding oluşturuluyor... (${Math.floor(elapsedSeconds / 60)} dk)`);
+                  }
+                } catch (err) {
+                  // Continue polling
+                }
+                attempts++;
+              }
+            };
+
+            // Polling'i background'da çalıştır
+            pollStatus();
+          } else {
+            showErrorToast(
+              `Dosya ${file.name} embedding oluşturma başarısız: ${response.message || 'Bilinmeyen hata'}`
+            );
+          }
+        } catch (error: any) {
+          const errorMsg = error.response?.data?.message || error.message || 'Embedding hatası';
+          showErrorToast(`Dosya ${file.name}: ${errorMsg}`);
+        }
+      };
+
+      for (const file of completedFiles) {
+        await processFile(file);
+      }
+
+      showNormalToast(`✓ ${completedFiles.length} dosya için embedding oluşturma başlatıldı`);
+    } catch (error) {
+      showErrorToast('Embedding oluşturma işlemi başlatılamadı');
+    } finally {
+      setIsExtractLoading(false);
+    }
+  };
+
   const handleCreateEmbeddings = () => {
     if (!connectionStatus) {
       showErrorToast('Lütfen önce Neo4j veritabanına bağlanın');
@@ -795,6 +879,17 @@ const Content: React.FC<ContentProps> = ({
     [selectedfileslength, completedfileNo]
   );
 
+  const shouldDisableChunkingButton = useMemo(() => {
+    const hasV2FilesForChunking = v2FilesCategorized.pendingChunking > 0;
+    const hasRegularFilesForChunking = newFilecheck && newFilecheck > 0;
+    return !hasV2FilesForChunking && !hasRegularFilesForChunking;
+  }, [newFilecheck, isReadOnlyUser, v2FilesCategorized.pendingChunking]);
+
+  const shouldDisableGenerateGraphButton = useMemo(() => {
+    const hasV2FilesForGraph = v2FilesCategorized.readyForGraph > 0;
+    return !hasV2FilesForGraph;
+  }, [isReadOnlyUser, v2FilesCategorized.readyForGraph]);
+
   const filesForProcessing = useMemo(() => {
     let newstatusfiles: CustomFile[] = [];
     const selectedRows = childRef.current?.getSelectedRows();
@@ -811,37 +906,97 @@ const Content: React.FC<ContentProps> = ({
     return newstatusfiles;
   }, [filesData, childRef.current?.getSelectedRows()]);
 
+  const deleteV2Files = async (v2Files: CustomFile[]): Promise<number> => {
+    let successCount = 0;
+    showNormalToast(`${v2Files.length} V2 dosyası siliniyor...`);
+    
+    for (const file of v2Files) {
+      try {
+        const response = await deleteFileFromQueueAPI(file.v2FileId!);
+        const isSuccess = response.status === 'Success' || response.status === 'success';
+        
+        if (isSuccess) {
+          successCount++;
+          showSuccessToast(`✓ ${file.name} silindi`);
+        } else {
+          showErrorToast(`✗ ${file.name} silinemedi: ${response.message || 'Bilinmeyen hata'}`);
+        }
+      } catch (error: any) {
+        const errorMsg = error.response?.data?.message || error.message || 'Silme hatası';
+        showErrorToast(`✗ ${file.name}: ${errorMsg}`);
+      }
+    }
+    return successCount;
+  };
+
+  const deleteV1Files = async (v1Files: CustomFile[], deleteEntities: boolean): Promise<number> => {
+    showNormalToast(`${v1Files.length} V1 dosyası siliniyor...`);
+    
+    const response = await deleteAPI(v1Files, deleteEntities);
+    if (response.data.status === 'Success') {
+      showSuccessToast(response.data.message);
+      return v1Files.length;
+    }
+    
+    let errorobj = { error: response.data.error, message: response.data.message };
+    throw new Error(JSON.stringify(errorobj));
+  };
+
   const handleDeleteFiles = async (deleteEntities: boolean) => {
     try {
       setIsDeleteLoading(true);
-      const response = await deleteAPI(childRef.current?.getSelectedRows() as CustomFile[], deleteEntities);
+      const selectedRows = childRef.current?.getSelectedRows() as CustomFile[];
+      
+      // V2 ve V1 dosyalarını ayır
+      const v2Files = selectedRows.filter(f => f.fileSource === 'V2 Queue' && f.v2FileId);
+      const v1Files = selectedRows.filter(f => f.fileSource !== 'V2 Queue');
+
+      let successCount = 0;
+      const totalCount = selectedRows.length;
+
+      // V2 dosyalarını sil
+      if (v2Files.length > 0) {
+        successCount += await deleteV2Files(v2Files);
+      }
+
+      // V1 dosyalarını sil
+      if (v1Files.length > 0) {
+        successCount += await deleteV1Files(v1Files, deleteEntities);
+      }
+
+      // Başarılı silinen dosyaları UI'dan kaldır
+      if (successCount > 0) {
+        const filenames = selectedRows.map((str) => str.name);
+        filenames.forEach(name => {
+          setFilesData((prev) => prev.filter((f) => f.name !== name));
+        });
+        
+        showSuccessToast(`${successCount}/${totalCount} dosya başarıyla silindi`);
+        
+        // V2 dosya listesini yenile
+        if (v2Files.length > 0) {
+          setTimeout(() => {
+            childRef.current?.reloadV2Files?.();
+          }, 500);
+        }
+      }
+
       queue.clear();
       setProcessedCount(0);
       setRowSelection({});
-      setIsDeleteLoading(false);
-      if (response.data.status == 'Success') {
-        showSuccessToast(response.data.message);
-        const filenames = childRef.current?.getSelectedRows().map((str) => str.name);
-        if (filenames?.length) {
-          for (let index = 0; index < filenames.length; index++) {
-            const name = filenames[index];
-            setFilesData((prev) => prev.filter((f) => f.name != name));
-          }
-        }
-      } else {
-        let errorobj = { error: response.data.error, message: response.data.message };
-        throw new Error(JSON.stringify(errorobj));
-      }
-      setShowDeletePopUp(false);
     } catch (err) {
-      setIsDeleteLoading(false);
       if (err instanceof Error) {
-        const error = JSON.parse(err.message);
-        const { message } = error;
-        showErrorToast(message);
+        try {
+          const error = JSON.parse(err.message);
+          showErrorToast(error.message);
+        } catch {
+          showErrorToast(err.message);
+        }
       }
+    } finally {
+      setIsDeleteLoading(false);
+      setShowDeletePopUp(false);
     }
-    setShowDeletePopUp(false);
   };
 
   // V2 dosyaları durumlarına göre kategorize et
@@ -853,11 +1008,13 @@ const Content: React.FC<ContentProps> = ({
       (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'pending'
     ).length;
 
-    const readyForGraph = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked').length;
+    const readyForGraph = v2Files.filter(
+      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
+    ).length;
 
-    const completed = v2Files.filter((f: CustomFile) => f.graph_status === 'completed').length;
+    const readyForEmbedding = v2Files.filter((f: CustomFile) => f.graph_status === 'completed').length;
 
-    return { pendingChunking, readyForGraph, completed };
+    return { pendingChunking, readyForGraph, readyForEmbedding, completed: 0 };
   };
 
   // V2 Chunking başlatma handler'ı
@@ -880,6 +1037,10 @@ const Content: React.FC<ContentProps> = ({
           const response = await startChunkingAPI(fileId);
           if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
             showSuccessToast(`Dosya ${fileId} chunking'e alındı`);
+
+            // Hemen status'u güncelle
+            await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 saniye bekle
+            childRef.current?.reloadV2Files?.(); // Status'u hemen güncelle
 
             // Bu dosyanın durumunu polling ile kontrol et
             const pollStatus = async () => {
@@ -1273,52 +1434,56 @@ const Content: React.FC<ContentProps> = ({
               }}
               className='w-48'
               size={isTablet ? 'small' : 'medium'}
+              style={{ display: 'none' }}
             />
             <Checkbox
               label='Upload sırasında embedding oluştur'
               isChecked={generateEmbedding}
               onChange={(e) => setGenerateEmbedding(e.target.checked)}
+              style={{ display: 'none' }}
             />
           </div>
           <Flex flexDirection='row' gap='4' className='self-end mb-2.5' flexWrap='wrap'>
-            <Flex flexDirection='row' gap='0'>
-              <Button
-                onClick={() => {
-                  const cat = getV2FilesCategorized();
-                  if (cat.pendingChunking > 0) {
-                    handleStartChunkingForV2();
-                  } else {
-                    showErrorToast('Chunking yapılacak dosya yok');
-                  }
-                }}
-                isDisabled={isReadOnlyUser || extractLoading}
-                className='px-0! flex! items-center justify-between gap-4 chunkingbtn'
-                size={isTablet ? 'small' : 'medium'}
-              >
-                <span className='mx-2'>
-                  {(() => {
+            <SpotlightTarget id='chunkingbtn' borderRadius={0}>
+              <Flex flexDirection='row' gap='0'>
+                <Button
+                  onClick={() => {
                     const cat = getV2FilesCategorized();
-                    return cat.pendingChunking > 0 ? `Chunking Başlat (${cat.pendingChunking})` : 'Chunking Başlat';
-                  })()}
-                </span>
-              </Button>
-              <div
-                className={`ndl-icon-btn ndl-clean dropdownbtn ${colorMode === 'dark' ? 'darktheme' : ''} ${
-                  isTablet ? 'small' : 'medium'
-                }`}
-                onClick={(e) => {
-                  setIsChunkingBtnMenuOpen((old) => !old);
-                  e.stopPropagation();
-                }}
-                ref={chunkingbtnRef}
-              >
-                {!isChunkingBtnMenuOpen ? (
-                  <ChevronUpIconOutline className='n-size-token-5' />
-                ) : (
-                  <ChevronDownIconOutline className='n-size-token-' />
-                )}
-              </div>
-            </Flex>
+                    if (cat.pendingChunking > 0) {
+                      handleStartChunkingForV2();
+                    } else {
+                      showErrorToast('Chunking yapılacak dosya yok');
+                    }
+                  }}
+                  isDisabled={shouldDisableChunkingButton}
+                  className='px-0! flex! items-center justify-between gap-4 graphbtn chunkingbtn'
+                  size={isTablet ? 'small' : 'medium'}
+                >
+                  <span className='mx-2'>
+                    {(() => {
+                      const cat = getV2FilesCategorized();
+                      return cat.pendingChunking > 0 ? `Chunking Başlat (${cat.pendingChunking})` : 'Chunking Başlat';
+                    })()}
+                  </span>
+                </Button>
+                <div
+                  className={`ndl-icon-btn ndl-clean dropdownbtn ${colorMode === 'dark' ? 'darktheme' : ''} ${
+                    isTablet ? 'small' : 'medium'
+                  }`}
+                  onClick={(e) => {
+                    setIsChunkingBtnMenuOpen((old) => !old);
+                    e.stopPropagation();
+                  }}
+                  ref={chunkingbtnRef}
+                >
+                  {!isChunkingBtnMenuOpen ? (
+                    <ChevronUpIconOutline className='n-size-token-5' />
+                  ) : (
+                    <ChevronDownIconOutline className='n-size-token-' />
+                  )}
+                </div>
+              </Flex>
+            </SpotlightTarget>
             <Menu
               placement='top-end-bottom-end'
               isOpen={isChunkingBtnMenuOpen}
@@ -1370,7 +1535,7 @@ const Content: React.FC<ContentProps> = ({
                     showErrorToast('Graph oluşturmak için chunked dosya seçiniz');
                   }
                 }}
-                disabled={isReadOnlyUser}
+                disabled={shouldDisableGenerateGraphButton}
                 className='mr-0.5'
                 size={isTablet ? 'small' : 'medium'}
               >
@@ -1398,6 +1563,21 @@ const Content: React.FC<ContentProps> = ({
             >
               {buttonCaptions.deleteFiles}
               {selectedfileslength != undefined && selectedfileslength > 0 && `(${selectedfileslength})`}
+            </ButtonWithToolTip>
+            <ButtonWithToolTip
+              text='Seçili completed dosyaları embedding oluştur'
+              placement='top'
+              onClick={handleCreateEmbeddingsForV2}
+              disabled={!getV2FilesCategorized().readyForEmbedding || isReadOnlyUser || extractLoading}
+              className='ml-0.5'
+              label='Create Embeddings'
+              size={isTablet ? 'small' : 'medium'}
+            >
+              Create Embeddings{' '}
+              {(() => {
+                const cat = getV2FilesCategorized();
+                return cat.readyForEmbedding > 0 ? `(${cat.readyForEmbedding})` : '';
+              })()}
             </ButtonWithToolTip>
             <SpotlightTarget id='visualizegraphbtn'>
               <Flex flexDirection='row' gap='0'>
@@ -1452,11 +1632,11 @@ const Content: React.FC<ContentProps> = ({
                   onClick={handleMergeDuplicateEntities}
                   isDisabled={!connectionStatus}
                 />
-                <Menu.Item
+                {/* <Menu.Item
                   title='Create Embeddings'
                   onClick={handleCreateEmbeddings}
                   isDisabled={!connectionStatus || filesData.length === 0}
-                />
+                /> */}
                 <Menu.Item
                   title='Create Entity Embeddings'
                   onClick={handleCreateEntityEmbeddings}

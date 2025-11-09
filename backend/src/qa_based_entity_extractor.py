@@ -20,7 +20,7 @@ class QABasedEntityExtractor:
     Soru-cevap tabanlı entity çıkarma sınıfı
     """
     
-    def __init__(self, model_name: str = "gpt-4o-mini"):
+    def __init__(self, model_name: str = "openai_gpt_4o_mini"):
         self.model_name = model_name
         self.llm, _ = get_llm(model_name)
         

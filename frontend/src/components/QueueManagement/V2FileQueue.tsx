@@ -120,7 +120,7 @@ const V2FileQueue: React.FC = () => {
 
       // Call backend API for each selected file
       for (const fileId of fileIds) {
-        const response = await startGraphCreationAPI(fileId, 'gpt-4o-mini', false);
+        const response = await startGraphCreationAPI(fileId, 'openai_gpt_4o_mini', false);
 
         // Immediately update local state if API returns graph_status
         if (response?.status === 'Success' && response?.data?.graph_status) {

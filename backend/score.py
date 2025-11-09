@@ -10,20 +10,6 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
 
-# STARTUP DEBUG: Show exactly which Python is running and where packages are
-print(f"🔍 [STARTUP] Python Executable: {sys.executable}")
-print(f"🔍 [STARTUP] Python Version: {sys.version}")
-print(f"🔍 [STARTUP] sys.prefix: {sys.prefix}")
-print(f"🔍 [STARTUP] sys.path (first 5): {sys.path[:5]}")
-
-# Check google.genai location (NEW SDK)
-genai_spec = importlib.util.find_spec('google.genai')
-if genai_spec and genai_spec.origin:
-    print(f"✅ [STARTUP] google.genai found at: {genai_spec.origin}")
-else:
-    print(f"❌ [STARTUP] google.genai NOT FOUND in sys.path")
-    print(f"🔍 [STARTUP] Full sys.path: {sys.path}")
-
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
@@ -1965,7 +1951,7 @@ async def chat_bot_stream(
 @app.post("/test_fast_agent")
 async def test_fast_agent(
     question: str = Form("Amasyalı soy adı olan sigortalımız var mı?"),
-    model: str = Form("gpt-4o-mini"),
+    model: str = Form("openai_gpt_4o_mini"),
     session_id: str = Form("test_session")
 ):
     """FastAgent'i test etmek için basit endpoint"""
@@ -3216,7 +3202,7 @@ async def retry_processing(uri=Form(None), userName=Form(None), password=Form(No
             return create_api_response('Success',message=f"Chunks are not created for the file{file_name}. Please upload again the file to re-process.",data=chunks)
         else:
             await asyncio.to_thread(set_status_retry, graph,file_name,retry_condition)
-            return create_api_response('Success',message=f"Status set to Ready to Reprocess for filename : {file_name}")
+            return create_api_response('Success',message=f"Status set to Chunked for filename : {file_name}")
     except Exception as e:
         job_status = "Failed"
         message="Unable to set status to Retry"
@@ -3590,113 +3576,224 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 @app.post("/api/v2/files/upload")
 async def upload_file_to_queue(
     file: UploadFile = File(...), 
-    chunkNumber: int = Form(None), 
-    totalChunks: int = Form(None), 
     originalname: str = Form(None)
 ):
     """
-    Upload files to queue system (no processing)
-    Similar to existing /upload but only saves file + metadata to SQLite
+    V2 Upload: Saves file to output structure + Image Extraction + S3 Upload
+    Creates output/document_name/ structure with PDF, images, and uploads to S3
     """
+    from concurrent.futures import ThreadPoolExecutor
+    import json
+    import shutil
+    
     try:
         start = time.time()
         
         # Normalize filename  
         normalized_filename = normalize_file_name(originalname) if originalname else file.filename
-        logging.info(f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}, Chunk: {chunkNumber}/{totalChunks}")
+        logging.info(f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}")
         
-        # Create chunk directory for this file
-        chunk_dir = UPLOAD_DIR / "chunks" 
-        chunk_dir.mkdir(exist_ok=True)
+        # Create output directory structure
+        from src.document_sources.s3_upload_utils import create_document_output_structure
+        document_dir, pdf_dir, images_dir = create_document_output_structure(
+            normalized_filename, "output"
+        )
         
-        # Save chunk
-        if not chunkNumber or not totalChunks:
-            # Single file upload
-            file_path = UPLOAD_DIR / normalized_filename
-            with open(file_path, "wb") as f:
-                content = await file.read()
-                f.write(content)
-            
-            file_size = len(content)
-            logging.info(f"✅ Single file saved: {file_path} ({file_size} bytes)")
-            
-        else:
-            # Multi-chunk upload
-            chunk_file_path = chunk_dir / f"{normalized_filename}_part_{chunkNumber}"
-            with open(chunk_file_path, "wb") as f:
-                content = await file.read()
-                f.write(content)
-            
-            logging.info(f"💾 Chunk {chunkNumber}/{totalChunks} saved: {chunk_file_path}")
-            
-            # If this is the last chunk, merge all chunks
-            if int(chunkNumber) == int(totalChunks):
-                file_path = UPLOAD_DIR / normalized_filename
-                file_size = 0
+        # Save file to document directory structure
+        file_path = os.path.join(pdf_dir, normalized_filename)
+        content = await file.read()
+        
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        file_size = len(content)
+        logging.info(f"✅ File saved to output structure: {file_path} ({file_size} bytes)")
+        
+        # Check file extension for image extraction
+        file_extension = normalized_filename.split(".")[-1].lower()
+        doc_link = None
+        page_images = []
+        
+        # Image extraction for PDF files
+        if file_extension == "pdf":
+            try:
+                logging.info(f"🖼️ Starting image extraction for PDF: {normalized_filename}")
                 
-                with open(file_path, "wb") as merged_file:
-                    for i in range(1, int(totalChunks) + 1):
-                        chunk_path = chunk_dir / f"{normalized_filename}_part_{i}"
-                        if chunk_path.exists():
-                            with open(chunk_path, "rb") as chunk_file:
-                                chunk_content = chunk_file.read()
-                                merged_file.write(chunk_content)
-                                file_size += len(chunk_content)
+                # Generate page images with PyMuPDF in executor (async)
+                loop = asyncio.get_event_loop()
+                
+                # 1️⃣ Image Generation
+                with ThreadPoolExecutor(max_workers=1) as image_executor:
+                    from src.document_sources.local_file import generate_page_images_with_pymupdf
+                    
+                    def gen_images():
+                        return generate_page_images_with_pymupdf(file_path, images_dir)
+                    
+                    generated_images = await loop.run_in_executor(image_executor, gen_images)
+                
+                if generated_images:
+                    logging.info(f"✅ Generated {len(generated_images)} page images")
+                    
+                    # S3 upload configuration
+                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                    
+                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        logging.info(f"☁️ Starting S3 upload for document and {len(generated_images)} images")
+                        
+                        # 2️⃣ S3 Upload - NEW EXECUTOR with organized structure
+                        with ThreadPoolExecutor(max_workers=1) as s3_executor:
+                            from src.document_sources.s3_upload_utils import upload_files_to_s3_with_structure
+                            doc_name = Path(normalized_filename).stem
+                            base_s3_prefix = f"documents/{doc_name}"
                             
-                            # Remove chunk file
-                            chunk_path.unlink()
-                
-                logging.info(f"🔗 File merged successfully: {file_path} ({file_size} bytes)")
-            else:
-                # Not the final chunk, return success
-                return create_api_response("Success", message=f"Chunk {chunkNumber}/{totalChunks} uploaded")
+                            def upload_to_s3():
+                                # Upload PDF to root of document folder
+                                pdf_urls, pdf_failed = upload_files_to_s3_with_structure(
+                                    [file_path],
+                                    s3_bucket,
+                                    f"{base_s3_prefix}",  # documents/{doc_name}/
+                                    aws_access_key_id,
+                                    aws_secret_access_key,
+                                    delete_local_after_upload=False
+                                )
+                                
+                                # Upload images to images/ subfolder
+                                img_urls, img_failed = upload_files_to_s3_with_structure(
+                                    generated_images,
+                                    s3_bucket,
+                                    f"{base_s3_prefix}/images",  # documents/{doc_name}/images/
+                                    aws_access_key_id,
+                                    aws_secret_access_key,
+                                    delete_local_after_upload=False
+                                )
+                                
+                                all_urls = pdf_urls + img_urls
+                                all_failed = pdf_failed + img_failed
+                                return all_urls, all_failed
+                            
+                            uploaded_urls, failed_files = await loop.run_in_executor(s3_executor, upload_to_s3)
+                        
+                        if uploaded_urls:
+                            logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
+                            
+                            # Extract document link and page images (file names only)
+                            for url in uploaded_urls:
+                                if url.endswith(f"/{normalized_filename}"):
+                                    doc_link = os.path.basename(url)
+                                    break
+                            
+                            page_images = []
+                            for url in uploaded_urls:
+                                # Skip the main document, only collect image file names
+                                if url != f"s3://{s3_bucket}/{base_s3_prefix}/{normalized_filename}":
+                                    page_images.append(os.path.basename(url))
+                            
+                            logging.info(f"📄 Document link: {doc_link}")
+                            logging.info(f"🖼️ Page images: {len(page_images)} files")
+                        
+                        if failed_files:
+                            logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
+                    else:
+                        logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
+                        # Keep local file names for page images
+                        page_images = [os.path.basename(img) for img in generated_images]
+                else:
+                    logging.warning(f"⚠️ No images generated for PDF: {normalized_filename}")
+            
+            except Exception as img_error:
+                logging.error(f"❌ Image extraction failed for {normalized_filename}: {img_error}")
+                # Continue without images
+        else:
+            logging.info(f"ℹ️ Skipping image extraction for {file_extension.upper()} file")
         
-        # Add to database (only for complete files)
-        if 'file_path' in locals():
-            db = get_file_queue_db()
-            
-            # Check for existing file by hash to prevent duplicates
-            file_hash = UploadedFile.calculate_file_hash(str(file_path))
-            existing_file = db.get_file_by_hash(file_hash) if file_hash else None
-            
-            if existing_file:
-                logging.info(f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})")
-                return create_api_response("Success", 
-                                         message="File already exists in queue", 
-                                         data={
-                                             "file_id": existing_file.id,
-                                             "filename": existing_file.filename,
-                                             "original_name": existing_file.original_name,
-                                             "upload_status": existing_file.upload_status,
-                                             "chunking_status": existing_file.chunking_status,
-                                             "graph_status": existing_file.graph_status,
-                                             "file_size": existing_file.file_size,
-                                             "duplicate": True
-                                         })
-            
-            # Add new file to queue
-            uploaded_file = db.add_file(
-                filename=normalized_filename,
-                original_name=originalname or file.filename,
-                file_path=str(file_path),
-                file_size=file_size
-            )
-            
-            elapsed_time = time.time() - start
-            logging.info(f"✅ File added to queue: ID={uploaded_file.id}, Status={uploaded_file.status} ({elapsed_time:.2f}s)")
-            
+        # Add to database
+        db = get_file_queue_db()
+        
+        # Check for existing file by hash to prevent duplicates
+        file_hash = UploadedFile.calculate_file_hash(str(file_path))
+        existing_file = db.get_file_by_hash(file_hash) if file_hash else None
+        
+        if existing_file:
+            logging.info(f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})")
             return create_api_response("Success", 
-                                     message="File uploaded successfully to queue",
+                                     message="File already exists in queue", 
                                      data={
-                                         "file_id": uploaded_file.id,
-                                         "filename": uploaded_file.filename,
-                                         "original_name": uploaded_file.original_name,
-                                         "upload_status": uploaded_file.upload_status,
-                                         "chunking_status": uploaded_file.chunking_status,
-                                         "graph_status": uploaded_file.graph_status,
-                                         "file_size": uploaded_file.file_size,
-                                         "duplicate": False
+                                         "file_id": existing_file.id,
+                                         "filename": existing_file.filename,
+                                         "original_name": existing_file.original_name,
+                                         "upload_status": existing_file.upload_status,
+                                         "chunking_status": existing_file.chunking_status,
+                                         "graph_status": existing_file.graph_status,
+                                         "file_size": existing_file.file_size,
+                                         "duplicate": True
                                      })
+        
+        # Add new file to queue
+        uploaded_file = db.add_file(
+            filename=normalized_filename,
+            original_name=originalname or file.filename,
+            file_path=str(file_path),
+            file_size=file_size
+        )
+        
+        # Update file record with S3 metadata if available
+        if doc_link or page_images:
+            db_session = db.get_db_session()
+            try:
+                file_record = db_session.query(UploadedFile).filter_by(id=uploaded_file.id).first()
+                if file_record:
+                    if doc_link:
+                        file_record.doc_link = doc_link
+                    if page_images:
+                        file_record.page_images = json.dumps(page_images)
+                    db_session.commit()
+                    logging.info(f"✅ Updated file record with S3 metadata")
+            except Exception as update_error:
+                logging.error(f"⚠️ Failed to update file record with S3 metadata: {update_error}")
+            finally:
+                db_session.close()
+        
+        elapsed_time = time.time() - start
+        logging.info(f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)")
+        
+        # Neo4j'ye initial sync et (upload başarılı)
+        try:
+            from src.models.status_sync import sync_queue_db_status_to_neo4j
+            graph_connection = create_graph_database_connection(
+                os.environ.get('NEO4J_URI'),
+                os.environ.get('NEO4J_USERNAME'),
+                os.environ.get('NEO4J_PASSWORD'),
+                os.environ.get('NEO4J_DATABASE', 'neo4j')
+            )
+            sync_queue_db_status_to_neo4j(
+                graph=graph_connection,
+                file_name=uploaded_file.filename,
+                upload_status=uploaded_file.upload_status,
+                chunking_status=uploaded_file.chunking_status,
+                graph_status=uploaded_file.graph_status,
+                embedding_status=uploaded_file.embedding_status,
+                database=os.environ.get('NEO4J_DATABASE', 'neo4j')
+            )
+            logging.info(f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}")
+        except Exception as sync_error:
+            logging.warning(f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}")
+        
+        return create_api_response("Success", 
+                                 message="File uploaded with image extraction and S3 upload completed",
+                                 data={
+                                     "file_id": uploaded_file.id,
+                                     "filename": uploaded_file.filename,
+                                     "original_name": uploaded_file.original_name,
+                                     "upload_status": uploaded_file.upload_status,
+                                     "chunking_status": uploaded_file.chunking_status,
+                                     "graph_status": uploaded_file.graph_status,
+                                     "file_size": uploaded_file.file_size,
+                                     "doc_link": doc_link,
+                                     "page_images_count": len(page_images) if page_images else 0,
+                                     "duplicate": False
+                                 })
         
     except Exception as e:
         error_message = str(e)
@@ -3726,12 +3823,15 @@ async def list_queued_files(limit: int = 100, offset: int = 0):
                 "upload_status": f.upload_status,
                 "chunking_status": f.chunking_status,
                 "graph_status": f.graph_status,
+                "embedding_status": f.embedding_status,
                 "created_at": f.created_at.isoformat(),
                 "updated_at": f.updated_at.isoformat(),
                 "chunking_started_at": f.chunking_started_at.isoformat() if f.chunking_started_at else None,
                 "chunking_completed_at": f.chunking_completed_at.isoformat() if f.chunking_completed_at else None,
                 "graph_started_at": f.graph_started_at.isoformat() if f.graph_started_at else None,
                 "graph_completed_at": f.graph_completed_at.isoformat() if f.graph_completed_at else None,
+                "embedding_started_at": f.embedding_started_at.isoformat() if f.embedding_started_at else None,
+                "embedding_completed_at": f.embedding_completed_at.isoformat() if f.embedding_completed_at else None,
                 "processing_started_at": f.processing_started_at.isoformat() if f.processing_started_at else None,
                 "processing_completed_at": f.processing_completed_at.isoformat() if f.processing_completed_at else None,
                 "processing_error": f.processing_error
@@ -3810,6 +3910,7 @@ async def get_file_status(file_id: int):
             "upload_status": file_record.upload_status,
             "chunking_status": file_record.chunking_status,
             "graph_status": file_record.graph_status,
+            "embedding_status": file_record.embedding_status,
             "file_size": file_record.file_size,
             "markdown_path": file_record.markdown_path
         })
@@ -3823,7 +3924,7 @@ async def get_file_status(file_id: int):
 @app.post("/api/v2/files/{file_id}/graph-create")
 async def start_graph_creation(
     file_id: int, 
-    model: str = Form("gpt-4o-mini"),
+    model: str = Form("openai_gpt_4o_mini"),
     generate_embedding: bool = Form(False)
 ):
     """Start graph creation process for a file"""
@@ -3895,6 +3996,65 @@ async def start_graph_creation(
         if db_session:
             db_session.close()
 
+@app.post("/api/v2/files/{file_id}/create-embeddings")
+async def create_embeddings_for_file(file_id: int):
+    """Create embeddings for chunks of a completed file"""
+    db_session = None
+    try:
+        # Get Neo4j credentials from environment
+        uri = os.environ.get("NEO4J_URI")
+        userName = os.environ.get("NEO4J_USERNAME")
+        password = os.environ.get("NEO4J_PASSWORD")
+        database = os.environ.get("NEO4J_DATABASE", "neo4j")
+        
+        if not all([uri, userName, password]):
+            return create_api_response("Failed", message="Neo4j credentials not configured in backend .env")
+        
+        logging.info(f"📊 Embedding creation request for file {file_id}, database={database}")
+        
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+        
+        # Check if graph is completed
+        if file_record.graph_status != "completed":
+            return create_api_response("Failed", 
+                                     message=f"Graph must be completed first (current status: {file_record.graph_status})")
+        
+        # Update status to processing
+        file_record.embedding_status = "processing"
+        file_record.embedding_started_at = datetime.now(timezone.utc)
+        db_session.commit()
+        
+        logging.info(f"🔄 Started embedding creation for file {file_id}: {file_record.original_name}")
+        
+        # Embedding işlemini background'da çalıştır
+        asyncio.create_task(process_embedding_creation(
+            file_id=file_id,
+            original_name=file_record.original_name,
+            uri=uri,
+            userName=userName,
+            password=password,
+            database=database
+        ))
+        
+        return create_api_response("Success", 
+                                 message="Embedding creation started",
+                                 data={
+                                     "file_id": file_id,
+                                     "embedding_status": "processing"
+                                 })
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to start embedding creation for file {file_id}: {error_message}")
+        return create_api_response("Failed", message="Failed to start embedding creation", error=error_message)
+    finally:
+        if db_session:
+            db_session.close()
+
 @app.post("/api/v2/files/{file_id}/reset")
 async def reset_file_stage(file_id: int, stage: str = "upload"):
     """Reset file to a specific stage (cascading: upload→chunking→graph)"""
@@ -3939,6 +4099,44 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
             logging.info(f"🔄 Reset GRAPH stage for file {file_id}")
         
         db_session.commit()
+        
+        # Neo4j'ye sync et (reset sonrası status güncelle)
+        try:
+            logging.info(f"📤 Syncing reset status to Neo4j: file_name={file_record.filename}, "
+                        f"upload_status={file_record.upload_status}, "
+                        f"chunking_status={file_record.chunking_status}, "
+                        f"graph_status={file_record.graph_status}, "
+                        f"embedding_status={file_record.embedding_status}")
+            
+            from src.models.status_sync import sync_queue_db_status_to_neo4j
+            from src.shared.common_fn import create_graph_database_connection
+            
+            # Neo4j bağlantı bilgileri
+            neo4j_uri = file_record.neo4j_uri or os.environ.get('NEO4J_URI')
+            neo4j_database = file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+            
+            if neo4j_uri:
+                graph_connection = create_graph_database_connection(
+                    neo4j_uri,
+                    os.environ.get('NEO4J_USERNAME'),
+                    os.environ.get('NEO4J_PASSWORD'),
+                    neo4j_database
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=file_record.filename,
+                    upload_status=file_record.upload_status,
+                    chunking_status=file_record.chunking_status,
+                    graph_status=file_record.graph_status,
+                    embedding_status=file_record.embedding_status,
+                    database=neo4j_database
+                )
+                logging.info(f"✅ Successfully synced reset status to Neo4j for: {file_record.filename}")
+            else:
+                logging.warning("⚠️ Neo4j URI not configured, skipping status sync")
+                
+        except Exception as sync_error:
+            logging.warning(f"⚠️ Could not sync reset status to Neo4j: {str(sync_error)}")
         
         return create_api_response("Success", 
                                  message=f"{stage.capitalize()} stage reset",
@@ -4021,7 +4219,7 @@ async def get_queue_status():
 
 @app.delete("/api/v2/files/{file_id}")
 async def delete_queued_file(file_id: int):
-    """Delete a file from queue and filesystem"""
+    """Delete a file from queue, filesystem, and Neo4j database"""
     try:
         db = get_file_queue_db()
         
@@ -4031,19 +4229,121 @@ async def delete_queued_file(file_id: int):
             return create_api_response("Failed", message="File not found", error="File ID not in database")
         
         file_path = Path(file_record.file_path)
+        original_name = file_record.original_name
+        filename = file_record.filename
+        
+        # Neo4j'den Document ve ilişkili node'ları sil
+        neo4j_deleted = False
+        try:
+            if file_record.neo4j_uri:
+                from src.shared.common_fn import create_graph_database_connection
+                
+                logging.info(f"🗑️ Deleting Neo4j nodes for file: {original_name}")
+                
+                graph_connection = create_graph_database_connection(
+                    uri=file_record.neo4j_uri,
+                    userName=os.environ.get('NEO4J_USERNAME'),
+                    password=os.environ.get('NEO4J_PASSWORD'),
+                    database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                )
+                
+                # V2 Document deletion query
+                delete_query = """
+                    MATCH (d:Document {fileName: $filename})
+                    
+                    // 1. Document'a bağlı Chunk node'ları topla
+                    OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                    
+                    // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
+                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
+                    
+                    // 3. Policy'den -> yönünde bağlı tüm node'ları topla
+                    OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
+                    WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
+                          relatedNodes:PolicyType OR relatedNodes:Customer OR
+                          relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
+                          relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
+                    
+                    // 4. Sadece başka Document'larda kullanılmayan node'ları sil
+                    WITH d, 
+                         COLLECT(DISTINCT c) AS chunks,
+                         COLLECT(DISTINCT p) AS policies,
+                         COLLECT(DISTINCT relatedNodes) AS relatedNodesList
+                    
+                    // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
+                    WITH d, chunks,
+                         [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
+                             MATCH (d2:Document)
+                             WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
+                         }] AS safePolicies,
+                         [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
+                             MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
+                             WHERE d2 <> d AND (
+                                 (p2)-[*1..2]->(node) OR
+                                 (p2)<-[:HAS_DOC]-(node) OR
+                                 (p2)<-[:DOCUMENTED_IN]-(node)
+                             )
+                         }] AS safeRelatedNodes
+                    
+                    // 5. Silme işlemi
+                    FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                    FOREACH (policy IN safePolicies | 
+                        FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
+                    )
+                    FOREACH (policy IN safePolicies | DETACH DELETE policy)
+                    DETACH DELETE d
+                    
+                    RETURN count(d) AS deletedDocuments
+                """
+                
+                session_params = {}
+                if file_record.neo4j_database:
+                    session_params["database"] = file_record.neo4j_database
+                
+                result = graph_connection.query(
+                    delete_query,
+                    {"filename": filename},
+                    session_params=session_params
+                )
+                
+                if result and len(result) > 0:
+                    deleted_count = result[0]["deletedDocuments"]
+                    logging.info(f"✅ Deleted {deleted_count} Document nodes from Neo4j for: {original_name}")
+                    neo4j_deleted = True
+                else:
+                    logging.warning(f"⚠️ No Document nodes found in Neo4j for: {original_name}")
+                    neo4j_deleted = True  # Not an error if document doesn't exist
+                    
+            else:
+                logging.info(f"ℹ️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}")
+                neo4j_deleted = True
+                
+        except Exception as neo4j_error:
+            logging.error(f"❌ Failed to delete from Neo4j: {str(neo4j_error)}")
+            # Continue with filesystem/database deletion even if Neo4j fails
         
         # Delete file from filesystem if exists
         if file_path.exists():
             file_path.unlink()
             logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
         
-        # Delete from database
+        # Delete from SQLite database
         success = db.delete_file(file_id)
         if success:
             logging.info(f"✅ File deleted from queue: ID={file_id}")
+            
+            result_message = "File deleted successfully"
+            if neo4j_deleted:
+                result_message += " (including Neo4j nodes)"
+            else:
+                result_message += " (Neo4j deletion failed, check logs)"
+            
             return create_api_response("Success", 
-                                     message="File deleted successfully",
-                                     data={"file_id": file_id})
+                                     message=result_message,
+                                     data={
+                                         "file_id": file_id,
+                                         "neo4j_deleted": neo4j_deleted
+                                     })
         else:
             return create_api_response("Failed", message="Failed to delete file from database")
             
@@ -4144,20 +4444,98 @@ async def get_processing_status():
                                  message="Failed to get processing status", 
                                  error=error_message)
 
+def process_gemini_ocr(image_list: list, image_source: str = "generated"):
+    """
+    Gemini 2.0 Flash ile image'ları markdown'a çevirme (sync function for executor)
+    
+    Args:
+        image_list: Image path'leri veya filename'leri
+        image_source: "local" (filename) veya "generated" (full path)
+    
+    Returns:
+        str: Markdown content with [PAGE BREAK] separators
+    """
+    markdown_text = ""
+    if not GEMINI_AVAILABLE:
+        logging.warning("❌ google.genai not available")
+        return markdown_text
+    
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logging.warning("❌ GEMINI_API_KEY not found")
+            return markdown_text
+        
+        # Create client with new google-genai SDK
+        client = genai_sdk.Client(api_key=api_key)
+        logging.info("✅ Gemini client initialized successfully")
+        
+        from google.genai import types
+        for idx, img_ref in enumerate(sorted(image_list), start=1):
+            try:
+                # Determine if img_ref is path or filename
+                if image_source == "local":
+                    # img_ref is filename, construct path
+                    img_path = os.path.join(os.environ.get("OUTPUT_IMAGES_DIR", "output/images"), img_ref)
+                else:
+                    # img_ref is full path
+                    img_path = img_ref
+                
+                # Read image as bytes
+                with open(img_path, "rb") as img_file:
+                    image_bytes = img_file.read()
+                
+                # Send to Gemini with new SDK
+                prompt_text = "Convert this document page to clean markdown format. Don't use ```markdown tags```. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."
+                
+                response = client.models.generate_content(
+                    model='models/gemini-2.0-flash',
+                    contents=[
+                        types.Part.from_text(text=prompt_text),
+                        types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+                    ]
+                )
+                
+                if response.text:
+                    # Son sayfa değilse PAGE BREAK ekle
+                    if idx < len(image_list):
+                        markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
+                    else:
+                        # Son sayfa - PAGE BREAK ekleme
+                        markdown_text += response.text
+                    
+                    source_name = os.path.basename(img_path)
+                    logging.info(f"✅ Gemini 2.0 Flash processed page: {source_name} ({len(response.text)} chars)")
+                else:
+                    logging.warning(f"Gemini returned empty response for {os.path.basename(img_path)}")
+            except Exception as e:
+                logging.warning(f"Gemini processing failed for {img_ref}: {e}")
+        
+        if markdown_text:
+            logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images")
+        else:
+            logging.warning("Gemini generated empty markdown")
+        
+    except Exception as e:
+        logging.error(f"Gemini processing error: {e}")
+    
+    return markdown_text
+
 async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
     """
-    V2 Chunking Process: OCR + Image Extraction + Markdown
-    Aynı V1'deki upload_file içindeki mantık kullanılıyor
+    V2 Chunking Process: Uses pre-extracted images to create markdown with Gemini OCR + Creates Chunk Nodes
+    Image extraction and S3 upload are already done in upload endpoint
     """
+    import json
     db = None
     db_session = None
     loop = asyncio.get_event_loop()
     executor = None
     
     try:
-        # Thread pool executor'ı oluştur (heavy işlemler için)
+        # Thread pool executor'ı oluştur (Gemini OCR için)
         from concurrent.futures import ThreadPoolExecutor
-        executor = ThreadPoolExecutor(max_workers=2)
+        executor = ThreadPoolExecutor(max_workers=1)
         
         db = get_file_queue_db()
         db_session = db.get_db_session()
@@ -4167,374 +4545,71 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
             logging.error(f"❌ File record not found for ID: {file_id}")
             return
         
-        logging.info(f"📖 Starting V2 chunking for: {original_name}")
+        logging.info(f"📖 Starting V2 chunking (Gemini OCR + Chunking) for: {original_name}")
         
         # Normalize filename
         from src.utf8_utils import normalize_file_name
         normalized_filename = normalize_file_name(original_name)
         
-        # Output klasör yapısını oluştur
+        # Output klasör yapısını oluştur (local dosya yolları için)
         from src.document_sources.s3_upload_utils import create_document_output_structure
         document_dir, pdf_dir, images_dir = create_document_output_structure(
             normalized_filename, "output"
         )
         
-        # Dosya tipini kontrol et
-        file_extension = normalized_filename.split(".")[-1].lower()
-        docling_supported_formats = ["pdf", "docx", "pptx", "html", "csv", "md"]
-        
-        doc_link = None
+        # Database'den page images ve doc link bilgisini al (upload sırasında kaydedildi)
         page_images = []
+        doc_link = file_record.doc_link if hasattr(file_record, 'doc_link') and file_record.doc_link else None
+        
+        if file_record.page_images:
+            try:
+                page_images = json.loads(file_record.page_images)
+                logging.info(f"📸 Using {len(page_images)} page images from upload step")
+            except:
+                logging.warning("⚠️ Failed to parse page_images from database")
+        
         pages = []
         
-        if file_extension in docling_supported_formats and os.path.exists(merged_file_path):
-            try:
+        # V2 Chunking: Sadece pre-extracted images ile Gemini OCR
+        try:
                 # ✨ Markdown dosyası zaten var mı kontrol et
                 markdown_filename = f"{normalized_filename}.md"
                 markdown_path = os.path.join(document_dir, markdown_filename)
                 
+                # ⚠️ Her chunking başlatıldığında markdown'ı yeniden oluştur
                 if os.path.exists(markdown_path):
-                    logging.info(f"✅ Markdown file already exists, skipping extraction: {markdown_path}")
-                    
-                    # Mevcut markdown'ı oku
-                    with open(markdown_path, "r", encoding="utf-8") as md_file:
-                        markdown_content = md_file.read()
-                    
-                    logging.info(f"📄 Markdown content length: {len(markdown_content)} chars")
-                    
-                    # Pages'e dönüştür
-                    from langchain_core.documents import Document
-                    page_texts = markdown_content.split("[PAGE BREAK]")
-                    pages = [Document(page_content=text.strip(), metadata={"page": idx}) 
-                            for idx, text in enumerate(page_texts, 1) if text.strip()]
-                    
-                    logging.info(f"📊 Split result: {len(page_texts)} parts, {len(pages)} non-empty pages")
-                    
-                    # Eğer pages boşsa, markdown dosyasını sil ve yeniden extraction yap
-                    if not pages or len(pages) == 0:
-                        logging.warning(f"⚠️ Markdown file is empty or invalid, deleting and re-extracting: {markdown_path}")
-                        os.remove(markdown_path)
-                        # Markdown olmadığı için aşağıda yeniden oluşturulacak
-                    else:
-                        # Metadata'yı file_record'dan al
-                        if file_record.doc_link:
-                            doc_link = file_record.doc_link
-                        if file_record.page_images:
-                            try:
-                                import json
-                                page_images = json.loads(file_record.page_images) if isinstance(file_record.page_images, str) else file_record.page_images
-                            except:
-                                page_images = []
-                        
-                        logging.info(f"� Loaded existing markdown: {len(pages)} pages, {len(page_images)} images")
-                        file_record.markdown_path = markdown_path
-                    
-                    logging.info(f"� Loaded existing markdown: {len(pages)} pages, {len(page_images)} images")
-                    file_record.markdown_path = markdown_path
-                    
-                else:
-                    # Markdown yok, extraction gerekli
-                    logging.info(f"�🖼️ Starting combined content & image extraction for {file_extension.upper()}: {normalized_filename}")
-                    
-                    # Belgeyi ilgili klasöre kopyala
-                    doc_copy_path = os.path.join(pdf_dir, normalized_filename)
-                    if not os.path.exists(doc_copy_path):
-                        shutil.copy2(merged_file_path, doc_copy_path)
-                        logging.info(f"📄 Document copied to: {doc_copy_path}")
-                    
-                    # S3 yapılandırması
-                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
-                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-                    doc_name = Path(normalized_filename).stem
-                    
-                    # ✨ Local images_dir'de PNG dosyaları var mı kontrol et
-                    local_images = [f for f in os.listdir(images_dir) if f.endswith('.png')] if os.path.exists(images_dir) else []
-                    
-                    if local_images:
-                        # Local images_dir'de images var, Gemini Flash ile markdown çıkart
-                        logging.info(f"📸 Found {len(local_images)} page images in local output dir for {doc_name}, reusing existing images")
-                        
-                        if file_extension == "pdf":
-                            # Local images ile Gemini markdown çıkart (NON-BLOCKING)
-                            from langchain_core.documents import Document
-                            
-                            # Gemini processing'i executor'da çalıştır
-                            def process_with_gemini():
-                                markdown_text = ""
-                                if not GEMINI_AVAILABLE:
-                                    logging.warning("❌ google.genai not available")
-                                    return markdown_text
-                                
-                                try:
-                                    api_key = os.environ.get("GEMINI_API_KEY")
-                                    if not api_key:
-                                        logging.warning("❌ GEMINI_API_KEY not found")
-                                        return markdown_text
-                                    
-                                    # Create client with new google-genai SDK
-                                    client = genai_sdk.Client(api_key=api_key)
-                                    logging.info("✅ Gemini client initialized successfully")
-                                    
-                                    from google.genai import types
-                                    for idx, img_name in enumerate(sorted(local_images), start=1):
-                                        try:
-                                            img_path = os.path.join(images_dir, img_name)
-                                            
-                                            # Read image as bytes
-                                            with open(img_path, "rb") as img_file:
-                                                image_bytes = img_file.read()
-                                            
-                                            # Send to Gemini with new SDK
-                                            response = client.models.generate_content(
-                                                model='models/gemini-2.0-flash',
-                                                contents=[
-                                                    types.Part.from_text(text="Convert this document page to clean markdown format. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."),
-                                                    types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-                                                ]
-                                            )
-                                            
-                                            if response.text:
-                                                # Son sayfa değilse PAGE BREAK ekle
-                                                if idx < len(local_images):
-                                                    markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
-                                                else:
-                                                    # Son sayfa - PAGE BREAK ekleme
-                                                    markdown_text += response.text
-                                                logging.info(f"✅ Gemini 2.0 Flash processed local image: {img_name} ({len(response.text)} chars)")
-                                            else:
-                                                logging.warning(f"Gemini returned empty response for {img_name}")
-                                        except Exception as e:
-                                            logging.warning(f"Gemini processing failed for {img_name}: {e}")
-                                    
-                                    if markdown_text:
-                                        logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(local_images)} local images")
-                                    else:
-                                        logging.warning("Gemini generated empty markdown")
-                                    
-                                except Exception as e:
-                                    logging.error(f"Gemini processing error: {e}")
-                                
-                                return markdown_text
-                            
-                            # Executor'da Gemini'yi çalıştır (NON-BLOCKING)
-                            markdown_text = await loop.run_in_executor(executor, process_with_gemini)
-                            
-                            # PyMuPDF fallback
-                            if not markdown_text:
-                                logging.info("Trying PyMuPDF fallback for markdown extraction")
-                                def pymupdf_fallback():
-                                    try:
-                                        import fitz
-                                        doc = fitz.open(merged_file_path)
-                                        text = ""
-                                        total_pages = len(doc)
-                                        for page_num, page in enumerate(doc, start=1):
-                                            page_markdown = page.get_text("markdown")
-                                            # Son sayfa değilse PAGE BREAK ekle
-                                            if page_num < total_pages:
-                                                text += page_markdown + "\n\n[PAGE BREAK]\n\n"
-                                            else:
-                                                # Son sayfa - PAGE BREAK ekleme
-                                                text += page_markdown
-                                        doc.close()
-                                        logging.info(f"📖 PDF processed: PyMuPDF fallback ({len(text)} chars)")
-                                        return text
-                                    except Exception as e:
-                                        logging.error(f"PyMuPDF fallback failed: {e}")
-                                        return ""
-                                
-                                markdown_text = await loop.run_in_executor(executor, pymupdf_fallback)
-                            
-                            pages = [Document(page_content=markdown_text)]
-                            page_images = local_images
-                            logging.info(f"📖 PDF processed: Markdown extraction completed")
-                        else:
-                            # Diğer formatlar: DoclingLoader
-                            from langchain_core.documents import Document
-                            from src.document_sources.local_file import load_document_content
-                            
-                            def load_doc_text():
-                                loader, _, _ = load_document_content(merged_file_path, generate_images=False)
-                                return loader.load()
-                            
-                            pages = await loop.run_in_executor(executor, load_doc_text)
-                            page_images = local_images
-                            logging.info(f"📖 {file_extension.upper()} processed: Text only (local images found)")
-                    
-                    else:
-                        # Local images_dir'de image yok, generate et
-                        logging.info(f"📸 No page images found in local output dir for {doc_name}, generating new images")
-                        
-                        if file_extension == "pdf":
-                            # PDF için: PyMuPDF image generation + Gemini 2.0 Flash markdown (NON-BLOCKING)
-                            from src.document_sources.local_file import generate_page_images_with_pymupdf
-                            from langchain_core.documents import Document
-                            
-                            # Executor'da resimleri generate et (heavy I/O)
-                            def gen_images():
-                                return generate_page_images_with_pymupdf(merged_file_path, images_dir)
-                            
-                            generated_images = await loop.run_in_executor(executor, gen_images)
-                            
-                            # Gemini processing'i de executor'da çalıştır (NON-BLOCKING)
-                            def process_with_gemini():
-                                markdown_text = ""
-                                if not GEMINI_AVAILABLE:
-                                    logging.warning("❌ google.genai not available")
-                                    return markdown_text
-                                
-                                try:
-                                    api_key = os.environ.get("GEMINI_API_KEY")
-                                    if not api_key:
-                                        logging.warning("❌ GEMINI_API_KEY not found")
-                                        return markdown_text
-                                    
-                                    # Create client with new google-genai SDK
-                                    client = genai_sdk.Client(api_key=api_key)
-                                    logging.info("✅ Gemini client initialized successfully")
-                                    
-                                    from google.genai import types
-                                    for idx, img_path in enumerate(sorted(generated_images), start=1):
-                                        try:
-                                            # Read image as bytes
-                                            with open(img_path, "rb") as img_file:
-                                                image_bytes = img_file.read()
-                                            
-                                            # Send to Gemini with new SDK
-                                            response = client.models.generate_content(
-                                                model='models/gemini-2.0-flash',
-                                                contents=[
-                                                    types.Part.from_text(text="Convert this document page to clean markdown format. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."),
-                                                    types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-                                                ]
-                                            )
-                                            
-                                            if response.text:
-                                                # Son sayfa değilse PAGE BREAK ekle
-                                                if idx < len(generated_images):
-                                                    markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
-                                                else:
-                                                    # Son sayfa - PAGE BREAK ekleme
-                                                    markdown_text += response.text
-                                                logging.info(f"✅ Gemini 2.0 Flash processed page: {os.path.basename(img_path)} ({len(response.text)} chars)")
-                                            else:
-                                                logging.warning(f"Gemini returned empty response for {os.path.basename(img_path)}")
-                                        except Exception as e:
-                                            logging.warning(f"Gemini processing failed for {img_path}: {e}")
-                                
-                                    if markdown_text:
-                                        logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(generated_images)} generated images")
-                                    else:
-                                        logging.warning("Gemini generated empty markdown")
-                                    
-                                except Exception as e:
-                                    logging.error(f"Gemini processing error: {e}")
-                                
-                                return markdown_text
-                            
-                            # Executor'da Gemini'yi çalıştır (NON-BLOCKING)
-                            markdown_text = await loop.run_in_executor(executor, process_with_gemini)
-                        
-                        # PyMuPDF fallback
-                        if not markdown_text:
-                            logging.info("Trying PyMuPDF fallback for markdown extraction")
-                            def pymupdf_fallback():
-                                try:
-                                    import fitz
-                                    doc = fitz.open(merged_file_path)
-                                    text = ""
-                                    total_pages = len(doc)
-                                    for page_num, page in enumerate(doc, start=1):
-                                        page_markdown = page.get_text("markdown")
-                                        # Son sayfa değilse PAGE BREAK ekle
-                                        if page_num < total_pages:
-                                            text += page_markdown + "\n\n[PAGE BREAK]\n\n"
-                                        else:
-                                            # Son sayfa - PAGE BREAK ekleme
-                                            text += page_markdown
-                                    doc.close()
-                                    logging.info(f"📖 PDF processed: PyMuPDF fallback ({len(text)} chars)")
-                                    return text
-                                except Exception as e:
-                                    logging.error(f"PyMuPDF fallback failed: {e}")
-                                    return ""
-                            
-                            markdown_text = await loop.run_in_executor(executor, pymupdf_fallback)
-                        
-                            pages = [Document(page_content=markdown_text)]
-                            logging.info(f"📖 PDF processed: Markdown extraction completed")
-                        else:
-                            # Diğer formatlar için: DoclingLoader text mode (executor'da çalıştır)
-                            from src.document_sources.local_file import load_document_content
-                            from langchain_core.documents import Document
-                            
-                            def process_other_format():
-                                try:
-                                    loader, _, _ = load_document_content(
-                                        merged_file_path, generate_images=True, output_dir=images_dir
-                                    )
-                                    pgs = loader.load()
-                                except Exception as e:
-                                    logging.warning(f"Format processing failed for {file_extension}: {e}")
-                                    pgs = [Document(page_content="")]
-                                
-                                return [], pgs
-                            
-                            _, pages = await loop.run_in_executor(executor, process_other_format)
-                            logging.info(f"📖 {file_extension.upper()} processed: DoclingLoader text")
-                        
-                        if generated_images:
-                            logging.info(f"✅ Generated {len(generated_images)} page images")
-                            
-                            if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                                # S3 upload (executor'da çalıştır - heavy I/O işlem)
-                                from src.document_sources.s3_upload_utils import upload_files_to_s3, cleanup_local_files
-                                s3_prefix = f"documents/{doc_name}"
-                                all_files = [doc_copy_path] + generated_images
-                                
-                                def upload_to_s3():
-                                    urls, failed = upload_files_to_s3(
-                                        all_files,
-                                        s3_bucket,
-                                        s3_prefix,
-                                        aws_access_key_id,
-                                        aws_secret_access_key,
-                                        delete_local_after_upload=False  # Graph oluşturma için local dosyaları sakla
-                                    )
-                                    return urls, failed
-                                
-                                uploaded_urls, failed_files = await loop.run_in_executor(executor, upload_to_s3)
-                                
-                                if uploaded_urls:
-                                    logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
-                                    
-                                    # Document link ve page images - sadece dosya adları
-                                    for url in uploaded_urls:
-                                        if url.endswith(f"/{normalized_filename}"):
-                                            doc_link = os.path.basename(url)
-                                            break
-                                    
-                                    page_images = []
-                                    for url in uploaded_urls:
-                                        if url != f"s3://{s3_bucket}/{s3_prefix}/{normalized_filename}":
-                                            page_images.append(os.path.basename(url))
-                                    
-                                    logging.info(f"📄 Document file name: {doc_link}")
-                                    logging.info(f"🖼️ Page image file names: {len(page_images)} images")
-                                    
-                                    # Local dosyaları sakla (graph oluşturma için gerekli)
-                                    logging.info(f"💾 Local files preserved in: {document_dir}")
-                                
-                                if failed_files:
-                                    logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
-                            else:
-                                logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
-                        
-                        if page_images:
-                            logging.info(f"🔄 Using {len(page_images)} page images for graph building")
-                        else:
-                            logging.warning(f"⚠️ No page images generated for: {normalized_filename}")
+                    logging.info(f"� Deleting existing markdown for re-extraction: {markdown_path}")
+                    os.remove(markdown_path)
+                
+                # ✅ SADECE PRE-EXTRACTED IMAGES İLE GEMİNİ OCR YAPACAK
+                logging.info(f"📝 Creating markdown using pre-extracted images for: {normalized_filename}")
+                
+                # Local images_dir'de PNG dosyaları kontrol et (upload'da oluşturulan)
+                local_images = []
+                if os.path.exists(images_dir):
+                    local_images = [os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.endswith('.png')]
+                    local_images.sort()  # Sayfa sırasını koru
+                
+                # Pre-extracted images kontrolü - YOK İSE HATA FIRLAT
+                if not local_images:
+                    error_msg = f"❌ No pre-extracted images found in {images_dir}. Cannot proceed with chunking without images."
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
+                
+                logging.info(f"📸 Found {len(local_images)} pre-extracted images for Gemini OCR")
+                
+                # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR
+                from langchain_core.documents import Document
+                markdown_text = await loop.run_in_executor(executor, lambda: process_gemini_ocr(local_images, "generated"))
+                
+                # Gemini başarısız olduysa hata fırlat
+                if not markdown_text or not markdown_text.strip():
+                    error_msg = f"❌ Gemini OCR failed to generate markdown from {len(local_images)} pre-extracted images"
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
+                
+                pages = [Document(page_content=markdown_text)]
+                logging.info(f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images")
                 
                 # Markdown dosyasını oluştur ve kaydet
                 markdown_content = ""
@@ -4559,6 +4634,51 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                     
                     # Markdown path'i kaydet
                     file_record.markdown_path = markdown_path
+                    
+                    # ☁️ MARKDOWN DOSYASINI S3'E UPLOAD ET
+                    try:
+                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                        
+                        if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                            logging.info(f"☁️ Uploading markdown file to S3: {markdown_filename}")
+                            
+                            # S3 upload - markdown dosyası için ayrı executor (organized structure)
+                            with ThreadPoolExecutor(max_workers=1) as md_executor:
+                                from src.document_sources.s3_upload_utils import upload_files_to_s3_with_structure
+                                doc_name = Path(normalized_filename).stem
+                                md_s3_prefix = f"documents/{doc_name}/md"  # documents/{doc_name}/md/
+                                
+                                def upload_markdown_to_s3():
+                                    urls, failed = upload_files_to_s3_with_structure(
+                                        [markdown_path],  # Sadece markdown dosyası
+                                        s3_bucket,
+                                        md_s3_prefix,
+                                        aws_access_key_id,
+                                        aws_secret_access_key,
+                                        delete_local_after_upload=False  # Local dosyayı sakla
+                                    )
+                                    return urls, failed
+                                
+                                md_urls, md_failed = await loop.run_in_executor(md_executor, upload_markdown_to_s3)
+                            
+                            if md_urls:
+                                logging.info(f"✅ Markdown uploaded to S3: {len(md_urls)} file")
+                                # Markdown S3 URL'ini database'e kaydet (opsiyonel)
+                                for url in md_urls:
+                                    if url.endswith(f"/{markdown_filename}"):
+                                        file_record.markdown_s3_url = url
+                                        logging.info(f"📄 Markdown S3 URL: {url}")
+                                        break
+                            else:
+                                logging.warning(f"⚠️ Failed to upload markdown to S3")
+                        else:
+                            logging.info(f"ℹ️ S3 credentials not configured, markdown saved locally only")
+                    
+                    except Exception as s3_error:
+                        logging.warning(f"⚠️ S3 upload failed for markdown: {s3_error}")
+                        # Continue with processing even if S3 upload fails
                     
                     # ✨ CHUNK NODE'LARI OLUŞTUR (tıpkı upload_file gibi)
                     try:
@@ -4589,7 +4709,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                             # 1️⃣ Source node objesi oluştur (henüz kaydetme - upload_file gibi)
                             obj_source_node = sourceNode()
                             obj_source_node.file_name = normalized_filename
-                            obj_source_node.file_type = file_extension
+                            obj_source_node.file_type = normalized_filename.split(".")[-1].lower()
                             obj_source_node.file_size = file_record.file_size if file_record.file_size else 0
                             obj_source_node.file_source = "local file"
                             obj_source_node.model = "openai_gpt_4o_mini"
@@ -4690,24 +4810,64 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                 file_record.chunking_status = "chunked"
                 file_record.chunking_completed_at = datetime.now(timezone.utc)
                 
-                # Metadata güncelle
-                if doc_link:
-                    file_record.doc_link = doc_link
-                if page_images:
-                    file_record.page_images = json.dumps(page_images)  # JSON string olarak sakla
+                # Metadata zaten upload sırasında kaydedildi, sadece markdown path ekle
+                # doc_link ve page_images zaten database'de mevcut
                 
                 db_session.commit()
+                
+                # Neo4j'ye sync et (Neo4j bağlantısı varsa)
+                try:
+                    logging.info(f"📤 Attempting Neo4j sync: file_name={normalized_filename}, "
+                                f"upload_status={file_record.upload_status}, "
+                                f"chunking_status={file_record.chunking_status}, "
+                                f"graph_status={file_record.graph_status}, "
+                                f"embedding_status={file_record.embedding_status}")
+                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+                    graph_connection = create_graph_database_connection(
+                        file_record.neo4j_uri or os.environ.get('NEO4J_URI'),
+                        os.environ.get('NEO4J_USERNAME'),
+                        os.environ.get('NEO4J_PASSWORD'),
+                        file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    )
+                    sync_queue_db_status_to_neo4j(
+                        graph=graph_connection,
+                        file_name=normalized_filename,
+                        upload_status=file_record.upload_status,
+                        chunking_status=file_record.chunking_status,
+                        graph_status=file_record.graph_status,
+                        embedding_status=file_record.embedding_status,
+                        database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    )
+                except Exception as sync_error:
+                    logging.warning(f"⚠️ Could not sync chunking status to Neo4j: {str(sync_error)}")
+                
                 logging.info(f"✅ V2 Chunking completed for: {original_name}")
                 
-            except Exception as chunk_error:
-                logging.error(f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}")
-                file_record.chunking_status = "failed"
-                db_session.commit()
-        else:
-            # Desteklenmeyen format
-            logging.warning(f"⚠️ Unsupported file format for chunking: {file_extension}")
+        except Exception as chunk_error:
+            logging.error(f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}")
             file_record.chunking_status = "failed"
             db_session.commit()
+            
+            # Neo4j'ye failed status sync et
+            try:
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+                graph_connection = create_graph_database_connection(
+                    file_record.neo4j_uri or os.environ.get('NEO4J_URI'),
+                    os.environ.get('NEO4J_USERNAME'),
+                    os.environ.get('NEO4J_PASSWORD'),
+                    file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=normalized_filename,
+                    upload_status=file_record.upload_status,
+                    chunking_status="failed",
+                    graph_status=file_record.graph_status,
+                    embedding_status=file_record.embedding_status,
+                    database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                )
+            except Exception as sync_error:
+                logging.warning(f"⚠️ Could not sync chunking failure to Neo4j: {str(sync_error)}")
             
     except Exception as e:
         logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {str(e)}")
@@ -4737,6 +4897,10 @@ async def process_graph_creation_v2(
     V2 Graph Creation Process: Extract entities and relationships from markdown
     Uses processing_source_v2 for pages-based extraction (NO chunks)
     """
+    # Import'ları fonksiyonun başında yap
+    from src.shared.common_fn import create_graph_database_connection
+    from src.models.status_sync import sync_queue_db_status_to_neo4j
+    
     db = None
     db_session = None
     
@@ -4811,7 +4975,6 @@ async def process_graph_creation_v2(
             try:
                 logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
                 from src.graphDB_dataAccess import graphDBdataAccess
-                from src.shared.common_fn import create_graph_database_connection
                 graph = create_graph_database_connection(uri, userName, password, database)
                 graphDb_data_Access = graphDBdataAccess(graph)
                 
@@ -4837,6 +5000,32 @@ async def process_graph_creation_v2(
             file_record.processing_time = processing_time
         
         db_session.commit()
+        
+        # Neo4j'ye sync et
+        try:
+            logging.info(f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
+                        f"upload_status={file_record.upload_status}, "
+                        f"chunking_status={file_record.chunking_status}, "
+                        f"graph_status={file_record.graph_status}, "
+                        f"embedding_status={file_record.embedding_status}")
+            graph_connection = create_graph_database_connection(
+                uri=uri,
+                userName=userName,
+                password=password,
+                database=database
+            )
+            sync_queue_db_status_to_neo4j(
+                graph=graph_connection,
+                file_name=original_name,
+                upload_status=file_record.upload_status,
+                chunking_status=file_record.chunking_status,
+                graph_status=file_record.graph_status,
+                embedding_status=file_record.embedding_status,
+                database=database
+            )
+        except Exception as sync_error:
+            logging.warning(f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}")
+        
         logging.info(f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}")
         
     except Exception as e:
@@ -4848,10 +5037,183 @@ async def process_graph_creation_v2(
             file_record.graph_status = "failed"
             file_record.processing_error = str(e)[:500]  # İlk 500 karakter
             db_session.commit()
+            
+            # Neo4j'ye failed status sync et
+            try:
+                logging.info(f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
+                            f"upload_status={file_record.upload_status}, "
+                            f"chunking_status={file_record.chunking_status}, "
+                            f"graph_status=failed, "
+                            f"embedding_status={file_record.embedding_status}")
+                graph_connection = create_graph_database_connection(
+                    uri=uri,
+                    userName=userName,
+                    password=password,
+                    database=database
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=original_name,
+                    upload_status=file_record.upload_status,
+                    chunking_status=file_record.chunking_status,
+                    graph_status="failed",
+                    embedding_status=file_record.embedding_status,
+                    database=database
+                )
+            except Exception as sync_error:
+                logging.warning(f"⚠️ Could not sync graph failure to Neo4j: {str(sync_error)}")
     finally:
         if db_session:
             db_session.close()
 
+
+
+
+
+
+async def process_embedding_creation(
+    file_id: int,
+    original_name: str,
+    uri: str,
+    userName: str,
+    password: str,
+    database: str
+):
+    """
+    V2 Embedding Creation Process - Background Task
+    Creates embeddings for chunks of a completed file
+    """
+    db = None
+    db_session = None
+    
+    try:
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            logging.error(f"❌ File record not found for ID: {file_id}")
+            return
+        
+        logging.info(f"📊 Starting embedding creation for: {original_name}")
+        
+        try:
+            # Get graph connection
+            graph = create_graph_database_connection(uri, userName, password, database)
+            graphDb_data_Access = graphDBdataAccess(graph)
+            
+            # Create embeddings for chunks of this file
+            result = graphDb_data_Access.create_embeddings_for_documents([original_name])
+            
+            if result.get('error'):
+                error_msg = f"Embedding creation failed: {result['error']}"
+                logging.error(f"❌ {error_msg}")
+                
+                # Update status to failed
+                file_record.embedding_status = "failed"
+                file_record.embedding_completed_at = datetime.now(timezone.utc)
+                db_session.commit()
+                
+                # Neo4j'ye failed status sync et
+                try:
+                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+                    graph_connection = create_graph_database_connection(
+                        uri=uri,
+                        userName=userName,
+                        password=password,
+                        database=database
+                    )
+                    sync_queue_db_status_to_neo4j(
+                        graph=graph_connection,
+                        file_name=original_name,
+                        upload_status=file_record.upload_status,
+                        chunking_status=file_record.chunking_status,
+                        graph_status=file_record.graph_status,
+                        embedding_status="failed",
+                        database=database
+                    )
+                except Exception as sync_error:
+                    logging.warning(f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}")
+                return
+            
+            total_chunks = result.get('total_chunks_updated', 0)
+            embedding_model = result.get('embedding_model', 'Unknown')
+            
+            # Update status to completed
+            file_record.embedding_status = "completed"
+            file_record.embedding_completed_at = datetime.now(timezone.utc)
+            db_session.commit()
+            
+            # Neo4j'ye completed status sync et
+            try:
+                logging.info(f"📤 Attempting Neo4j sync for embedding completion: file_name={original_name}, "
+                            f"upload_status={file_record.upload_status}, "
+                            f"chunking_status={file_record.chunking_status}, "
+                            f"graph_status={file_record.graph_status}, "
+                            f"embedding_status={file_record.embedding_status}")
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+                graph_connection = create_graph_database_connection(
+                    uri=uri,
+                    userName=userName,
+                    password=password,
+                    database=database
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=original_name,
+                    upload_status=file_record.upload_status,
+                    chunking_status=file_record.chunking_status,
+                    graph_status=file_record.graph_status,
+                    embedding_status=file_record.embedding_status,
+                    database=database
+                )
+            except Exception as sync_error:
+                logging.warning(f"⚠️ Could not sync embedding status to Neo4j: {str(sync_error)}")
+            
+            logging.info(f"✅ Embedding creation completed for: {original_name}")
+            logging.info(f"📊 Updated {total_chunks} chunks with {embedding_model} embeddings")
+            
+        except Exception as process_error:
+            error_msg = str(process_error)
+            logging.error(f"❌ Embedding creation error: {error_msg}")
+            
+            # Update status to failed
+            file_record.embedding_status = "failed"
+            file_record.embedding_completed_at = datetime.now(timezone.utc)
+            db_session.commit()
+            
+            # Neo4j'ye failed status sync et
+            try:
+                logging.info(f"📤 Attempting Neo4j sync for embedding FAILURE: file_name={original_name}, "
+                            f"upload_status={file_record.upload_status}, "
+                            f"chunking_status={file_record.chunking_status}, "
+                            f"graph_status={file_record.graph_status}, "
+                            f"embedding_status=failed")
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+                graph_connection = create_graph_database_connection(
+                    uri=uri,
+                    userName=userName,
+                    password=password,
+                    database=database
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=original_name,
+                    upload_status=file_record.upload_status,
+                    chunking_status=file_record.chunking_status,
+                    graph_status=file_record.graph_status,
+                    embedding_status="failed",
+                    database=database
+                )
+            except Exception as sync_error:
+                logging.warning(f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}")
+            
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Background embedding creation failed for file {file_id}: {error_message}")
+    finally:
+        if db_session:
+            db_session.close()
 
 
 @app.post("/api/v2/files/{file_id}/process-immediately") 

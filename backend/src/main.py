@@ -830,7 +830,10 @@ async def processing_source(
         graphDb_data_Access.create_source_node(file_name, model=model)
         logging.info(f"Document node garantilendi: {file_name}")
     except Exception as e:
-        logging.warning(f"Document node oluşturma sırasında uyarı: {e}")
+        logging.error(f"Document node oluşturma hatası: {e}")
+        # Document durumunu Failed yap
+        graphDb_data_Access.update_exception_db(file_name, str(e))
+        raise e
     
     create_chunk_vector_index(graph)
     start_get_chunkId_chunkDoc_list = time.time()
@@ -1260,10 +1263,17 @@ async def processing_source_v2(
         if not result or len(result) == 0:
             raise LLMGraphBuilderException(f"Unable to get document status for: {file_name}")
         
-        # Eğer zaten Processing durumunda ise, işleme devam etme
-        if result[0]["Status"] == "Processing":
+        # Eğer zaten Processing durumunda ise (ama Chunked değilse), işleme devam etme
+        current_status = result[0]["Status"]
+        if current_status == "Processing":
             logging.warning(f"⚠️ File already in Processing status: {file_name}")
             return uri_latency, {"status": "Already Processing", "fileName": file_name}
+        
+        # Chunked status'u graph creation için uygun
+        if current_status == "Chunked":
+            logging.info(f"✅ File is Chunked and ready for graph creation: {file_name}")
+        else:
+            logging.info(f"📋 Current file status: {current_status} for {file_name}")
         
         # Status'u Processing olarak güncelle
         obj_source_node = sourceNode()
@@ -1297,18 +1307,21 @@ async def processing_source_v2(
             elapsed_extraction = time.time() - start_extraction
             uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
             logging.error(f"❌ Policy entity extraction hatası: {extraction_error}")
+            # Dosya durumunu Failed yap ve işlemi sonlandır
+            graphDb_data_Access.update_exception_db(file_name, str(extraction_error))
+            raise extraction_error
         
         # Policy-Entity Relationships
-        start_policy_rel = time.time()
-        try:
-            create_policy_entity_relationships(graph, file_name)
-            elapsed_policy_rel = time.time() - start_policy_rel
-            uri_latency["policy_entity_rel"] = f"{elapsed_policy_rel:.2f}"
-            logging.info(f"✅ Policy-Entity relationships created - {elapsed_policy_rel:.2f}s")
-        except Exception as policy_error:
-            elapsed_policy_rel = time.time() - start_policy_rel
-            uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
-            logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
+        # start_policy_rel = time.time()
+        # try:
+        #     create_policy_entity_relationships(graph, file_name)
+        #     elapsed_policy_rel = time.time() - start_policy_rel
+        #     uri_latency["policy_entity_rel"] = f"{elapsed_policy_rel:.2f}"
+        #     logging.info(f"✅ Policy-Entity relationships created - {elapsed_policy_rel:.2f}s")
+        # except Exception as policy_error:
+        #     elapsed_policy_rel = time.time() - start_policy_rel
+        #     uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
+        #     logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
         
         # Final counts update
         start_count_update = time.time()
@@ -2304,7 +2317,7 @@ def populate_graph_schema_from_text(
 def set_status_retry(graph, file_name, retry_condition):
     graphDb_data_Access = graphDBdataAccess(graph)
     obj_source_node = sourceNode()
-    status = "Ready to Reprocess"
+    status = "Chunked"
     obj_source_node.file_name = normalize_file_name(
         file_name.strip() if isinstance(file_name, str) else file_name
     )
