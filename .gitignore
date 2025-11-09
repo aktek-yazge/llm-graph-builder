@@ -194,3 +194,4 @@ gen-lang-client-*.json
 .vscode/mcp.json
 backend/src/workflow/fastagent.jsonl
 backend/fastagent.jsonl
+backend/fastagent.config.yaml
