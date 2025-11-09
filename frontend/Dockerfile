@@ -14,6 +14,6 @@ RUN if [ "$DEPLOYMENT_ENV" = "staging" ] && [ -f ".staging.env" ]; then \
 
 COPY . ./
 
-EXPOSE 8080
+EXPOSE 5173
 # Run dev server instead of build (temporary workaround)
-CMD ["yarn", "dev", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["yarn", "dev", "--host", "0.0.0.0", "--port", "5173"]
