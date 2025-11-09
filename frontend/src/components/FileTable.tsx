@@ -97,10 +97,16 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const [v2ProcessingFileId, setV2ProcessingFileId] = useState<number | null>(null);
 
   // V2 Reset fonksiyonu - process'te takılan dosyaları pending'e çeker
-  const resetV2FileStage = async (fileId: number, fileName: string, chunking_status?: string, graph_status?: string, embedding_status?: string) => {
+  const resetV2FileStage = async (
+    fileId: number,
+    fileName: string,
+    chunking_status?: string,
+    graph_status?: string,
+    embedding_status?: string
+  ) => {
     try {
       let resetStage = '';
-      
+
       // Hangi aşamada takılmışsa o aşamayı reset et
       if (chunking_status === 'chunking') {
         resetStage = 'chunking';
@@ -116,7 +122,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       // Mevcut resetFileStageAPI'yi kullan
       const { resetFileStageAPI } = await import('../utils/FileAPI');
       const response = await resetFileStageAPI(fileId, resetStage as 'upload' | 'chunking' | 'graph');
-      
+
       if (response.status === 'Success' || response.status === 'success') {
         showNormalToast(`${fileName} ${resetStage} aşaması pending durumuna çekildi`);
         // Dosya listesini yenile
@@ -964,20 +970,20 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     // V2 Queue dosyası mı kontrol et
     const isV2File = fileSource === 'V2 Queue';
     const currentFile = filesData.find((f) => f.id === id);
-    
+
     if (isV2File && currentFile?.v2FileId) {
       try {
         // Önce background processing'i durdur
         const stopResponse = await fetch('/api/v2/processing/stop', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json' },
         });
-        
+
         if (stopResponse.ok) {
           const stopResult = await stopResponse.json();
           showNormalToast('Background processing stopped');
         }
-        
+
         // Sonra V2 dosyası için reset işlemi yap
         await resetV2FileStage(
           currentFile.v2FileId,

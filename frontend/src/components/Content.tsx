@@ -49,7 +49,14 @@ import {
   tokenchunkSize,
   tooltips,
 } from '../utils/Constants';
-import { extractAPI, getFileStatusAPI, resetFileStageAPI, startChunkingAPI, startEmbeddingAPI, deleteFileFromQueueAPI } from '../utils/FileAPI';
+import {
+  deleteFileFromQueueAPI,
+  extractAPI,
+  getFileStatusAPI,
+  resetFileStageAPI,
+  startChunkingAPI,
+  startEmbeddingAPI,
+} from '../utils/FileAPI';
 import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
 import { normalizeFileName } from '../utils/utf8';
 import { isExpired, isFileReadyToProcess } from '../utils/Utils';
@@ -909,12 +916,12 @@ const Content: React.FC<ContentProps> = ({
   const deleteV2Files = async (v2Files: CustomFile[]): Promise<number> => {
     let successCount = 0;
     showNormalToast(`${v2Files.length} V2 dosyası siliniyor...`);
-    
+
     for (const file of v2Files) {
       try {
         const response = await deleteFileFromQueueAPI(file.v2FileId!);
         const isSuccess = response.status === 'Success' || response.status === 'success';
-        
+
         if (isSuccess) {
           successCount++;
           showSuccessToast(`✓ ${file.name} silindi`);
@@ -931,13 +938,13 @@ const Content: React.FC<ContentProps> = ({
 
   const deleteV1Files = async (v1Files: CustomFile[], deleteEntities: boolean): Promise<number> => {
     showNormalToast(`${v1Files.length} V1 dosyası siliniyor...`);
-    
+
     const response = await deleteAPI(v1Files, deleteEntities);
     if (response.data.status === 'Success') {
       showSuccessToast(response.data.message);
       return v1Files.length;
     }
-    
+
     let errorobj = { error: response.data.error, message: response.data.message };
     throw new Error(JSON.stringify(errorobj));
   };
@@ -946,10 +953,10 @@ const Content: React.FC<ContentProps> = ({
     try {
       setIsDeleteLoading(true);
       const selectedRows = childRef.current?.getSelectedRows() as CustomFile[];
-      
+
       // V2 ve V1 dosyalarını ayır
-      const v2Files = selectedRows.filter(f => f.fileSource === 'V2 Queue' && f.v2FileId);
-      const v1Files = selectedRows.filter(f => f.fileSource !== 'V2 Queue');
+      const v2Files = selectedRows.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+      const v1Files = selectedRows.filter((f) => f.fileSource !== 'V2 Queue');
 
       let successCount = 0;
       const totalCount = selectedRows.length;
@@ -967,12 +974,12 @@ const Content: React.FC<ContentProps> = ({
       // Başarılı silinen dosyaları UI'dan kaldır
       if (successCount > 0) {
         const filenames = selectedRows.map((str) => str.name);
-        filenames.forEach(name => {
+        filenames.forEach((name) => {
           setFilesData((prev) => prev.filter((f) => f.name !== name));
         });
-        
+
         showSuccessToast(`${successCount}/${totalCount} dosya başarıyla silindi`);
-        
+
         // V2 dosya listesini yenile
         if (v2Files.length > 0) {
           setTimeout(() => {
