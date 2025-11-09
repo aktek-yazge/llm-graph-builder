@@ -1,6 +1,8 @@
 import logging
 import os
 import time
+import re
+import difflib
 from neo4j.exceptions import TransientError
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import create_gcs_bucket_folder_name_hashed, delete_uploaded_local_file, load_embedding_model
@@ -10,6 +12,7 @@ from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
+from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
 
@@ -58,10 +61,12 @@ class graphDBdataAccess:
         """
         Document node oluşturur. sourceNode objesi veya sadece file_name string'i alabilir.
         
+        Upload işleminde aynı dosya zaten veritabanında varsa otomatik olarak temizler.
+        
         Args:
             obj_source_node_or_filename: sourceNode objesi veya file_name string'i
-            document_type: 'policy', 'cv', veya 'auto' (otomatik tespit)
-            text_content: PDF'den extract edilen text content (CV extraction için)
+            document_type: 'policy' veya 'auto' (otomatik tespit) - CV extraction kaldırıldı
+            text_content: Kullanılmıyor (CV extraction kaldırıldı)
         """
         try:
             # Eğer string ise, minimal Document node oluştur
@@ -209,28 +214,21 @@ class graphDBdataAccess:
 
     def _create_document_related_nodes(self, file_name: str, document_type: str = "auto", text_content: str = None):
         """
-        Belge tipine göre uygun node'ları oluşturur (Policy veya CV)
+        Belge tipine göre uygun node'ları oluşturur (sadece Policy)
         
         Args:
             file_name: Dosya adı
-            document_type: 'policy', 'cv', veya 'auto' (otomatik tespit)
-            text_content: PDF'den extract edilen text content (CV extraction için)
+            document_type: 'policy' veya 'auto' (otomatik tespit)
+            text_content: Kullanılmıyor (CV extraction kaldırıldı)
         """
         try:
-            # Otomatik tespit
+            # Otomatik tespit (artık sadece policy döndürür)
             if document_type == "auto":
                 document_type = self._detect_document_type(file_name)
             
-            # Belge tipine göre uygun node'u oluştur
-            if document_type == "policy":
-                logging.info(f"📋 Policy node oluşturuluyor: {file_name}")
-                self.create_policy_node_from_document(file_name)
-            elif document_type == "cv":
-                logging.info(f"👤 CV node oluşturuluyor: {file_name}")
-                self.create_cv_node_from_document(file_name, text_content)
-            else:
-                logging.info(f"ℹ️ Bilinmeyen belge tipi, varsayılan olarak policy node oluşturuluyor: {file_name}")
-                self.create_policy_node_from_document(file_name)
+            # Policy node oluştur (CV seçeneği kaldırıldı)
+            logging.info(f"📋 Policy node oluşturuluyor: {file_name}")
+            self.create_policy_node_from_document(file_name)
                 
         except Exception as e:
             logging.error(f"Document related nodes oluşturma hatası ({file_name}): {e}")
@@ -243,16 +241,10 @@ class graphDBdataAccess:
             file_name: Dosya adı
             
         Returns:
-            'policy' veya 'cv'
+            'policy' (CV detection kaldırıldı, sadece policy)
         """
         try:
             file_name_lower = file_name.lower()
-            
-            # CV anahtar kelimeleri
-            cv_keywords = [
-                'cv', 'resume', 'özgeçmiş', 'ozgecmis', 'curriculum', 'vitae',
-                'biography', 'biografi', 'experience', 'deneyim', 'kariyer', 'career'
-            ]
             
             # Policy anahtar kelimeleri
             policy_keywords = [
@@ -261,12 +253,6 @@ class graphDBdataAccess:
                 'sağlık', 'saglik', 'health', 'seyahat', 'travel', 'konut', 'home',
                 'işyeri', 'isyeri', 'workplace', 'ferdi', 'individual', 'kaza', 'accident'
             ]
-            
-            # CV kontrolü
-            for keyword in cv_keywords:
-                if keyword in file_name_lower:
-                    logging.info(f"🔍 CV belgesi tespit edildi ('{keyword}' anahtar kelimesi): {file_name}")
-                    return "cv"
             
             # Policy kontrolü
             for keyword in policy_keywords:
@@ -726,6 +712,164 @@ class graphDBdataAccess:
             logging.info(f"Deleting {len(filename_list)} documents = '{filename_list}' from '{source_types_list}' with their entities from database")
         return len(filename_list)
     
+    def auto_clean_existing_file_data(self, file_name: str):
+        """
+        Upload işlemi öncesi aynı dosya varsa otomatik olarak o dosyaya ait 
+        tüm node'ları ve ilişkileri dinamik şekilde temizler.
+        
+        Bu fonksiyon:
+        1. Dosya ile ilişkili Document node'u bulur
+        2. O Document'e bağlı tüm node tiplerini dinamik olarak keşfeder
+        3. Sadece o Document'e özel olan node'ları güvenli şekilde siler
+        4. Başka Document'lerde de kullanılan node'ları korur
+        
+        Args:
+            file_name: Temizlenecek dosya adı
+        """
+        try:
+            logging.info(f"🧹 Otomatik temizlik başlıyor: {file_name}")
+            
+            # 1. Dosyanın var olup olmadığını kontrol et
+            check_query = """
+                MATCH (d:Document {fileName: $file_name})
+                RETURN d.fileName as fileName, labels(d) as labels
+            """
+            
+            result = self.execute_query(check_query, {"file_name": file_name})
+            
+            if not result:
+                logging.info(f"📄 Dosya veritabanında bulunamadı, temizlik gerekmez: {file_name}")
+                return True
+            
+            logging.info(f"🔍 Mevcut dosya bulundu, temizlik başlatılıyor: {file_name}")
+            
+            # 2. Bu Document'e bağlı tüm node'ları ve ilişki tiplerini dinamik olarak keşfet
+            discovery_query = """
+                MATCH (d:Document {fileName: $file_name})
+                
+                // Chunk'ları bul
+                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)
+                
+                // Chunk'lardan bağlı entity'leri bul
+                OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(chunkEntity)
+                
+                // Document'a direkt bağlı tüm node'ları bul (1 seviye derinlik)
+                OPTIONAL MATCH (d)-[r1]-(directConnected)
+                WHERE NOT directConnected:Chunk
+                
+                // Document'a 2 seviye derinlikteki node'ları bul (Policy->Customer gibi)
+                OPTIONAL MATCH (d)-[*1..2]-(indirectConnected)
+                WHERE NOT indirectConnected:Chunk 
+                  AND NOT indirectConnected:Document
+                  AND NOT indirectConnected:`__Community__`
+                
+                RETURN 
+                    collect(DISTINCT chunk) as chunks,
+                    collect(DISTINCT chunkEntity) as chunkEntities,
+                    collect(DISTINCT directConnected) as directNodes,
+                    collect(DISTINCT indirectConnected) as indirectNodes,
+                    collect(DISTINCT type(r1)) as relationshipTypes
+            """
+            
+            discovery_result = self.execute_query(discovery_query, {"file_name": file_name})
+            
+            if not discovery_result:
+                logging.warning(f"⚠️ Dosya bağlantıları keşfedilemedi: {file_name}")
+                return False
+            
+            discovery_data = discovery_result[0]
+            chunks = discovery_data.get('chunks', [])
+            chunk_entities = discovery_data.get('chunkEntities', [])
+            direct_nodes = discovery_data.get('directNodes', [])
+            indirect_nodes = discovery_data.get('indirectNodes', [])
+            
+            total_connected_nodes = len(chunks) + len(chunk_entities) + len(direct_nodes) + len(indirect_nodes)
+            logging.info(f"📊 Keşfedilen bağlantı istatistikleri:")
+            logging.info(f"   - Chunk'lar: {len(chunks)}")
+            logging.info(f"   - Chunk Entity'leri: {len(chunk_entities)}")
+            logging.info(f"   - Direkt bağlı node'lar: {len(direct_nodes)}")
+            logging.info(f"   - Dolaylı bağlı node'lar: {len(indirect_nodes)}")
+            logging.info(f"   - Toplam ilişkili node: {total_connected_nodes}")
+            
+            # 3. Güvenli silme işlemi - sadece bu Document'e özel olan node'ları sil
+            safe_deletion_query = """
+                MATCH (d:Document {fileName: $file_name})
+                
+                // 1. Chunk'ları ve onlara bağlı entity'leri sil
+                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)
+                OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(chunkEntity)
+                
+                // Chunk entity'leri için güvenlik kontrolü
+                WITH d, collect(DISTINCT chunk) AS chunksToDelete,
+                     [entity IN collect(DISTINCT chunkEntity) WHERE entity IS NOT NULL 
+                      AND NOT EXISTS {
+                        MATCH (entity)<-[:HAS_ENTITY]-(otherChunk:Chunk)-[:PART_OF]->(otherDoc:Document)
+                        WHERE otherDoc.fileName <> $file_name
+                      }] AS safeChunkEntities
+                
+                // 2. Document'a direkt bağlı node'ları bul ve güvenlik kontrolü yap
+                OPTIONAL MATCH (d)-[directRel]-(directNode)
+                WHERE NOT directNode:Chunk 
+                  AND NOT directNode:Document 
+                  AND NOT directNode:`__Community__`
+                
+                WITH d, chunksToDelete, safeChunkEntities,
+                     [node IN collect(DISTINCT directNode) WHERE node IS NOT NULL
+                      AND (
+                        // Endorsement node'ları için özel mantık: aynı dosyadan geliyorsa sil
+                        (node:Endorsement AND node.id CONTAINS replace($file_name, '.pdf', '_pdf'))
+                        OR
+                        // Diğer node'lar için normal güvenlik kontrolü
+                        (NOT node:Endorsement AND NOT EXISTS {
+                          MATCH (otherDoc:Document) 
+                          WHERE otherDoc.fileName <> $file_name 
+                            AND (
+                              (otherDoc)-[*1..2]-(node) OR
+                              (node)-[*1..2]-(otherDoc)
+                            )
+                        })
+                      )] AS safeDirectNodes
+                
+                // 3. Silme işlemini gerçekleştir
+                FOREACH (chunk IN chunksToDelete | DETACH DELETE chunk)
+                FOREACH (entity IN safeChunkEntities | DETACH DELETE entity)
+                FOREACH (node IN safeDirectNodes | DETACH DELETE node)
+                
+                // 4. Son olarak Document node'unu sil
+                DETACH DELETE d
+                
+                RETURN 
+                    size(chunksToDelete) as deletedChunks,
+                    size(safeChunkEntities) as deletedChunkEntities,  
+                    size(safeDirectNodes) as deletedDirectNodes
+            """
+            
+            deletion_result = self.execute_query(safe_deletion_query, {"file_name": file_name})
+            
+            if deletion_result:
+                deleted_chunks = deletion_result[0].get('deletedChunks', 0)
+                deleted_chunk_entities = deletion_result[0].get('deletedChunkEntities', 0)
+                deleted_direct_nodes = deletion_result[0].get('deletedDirectNodes', 0)
+                
+                total_deleted = deleted_chunks + deleted_chunk_entities + deleted_direct_nodes
+                
+                logging.info(f"✅ Otomatik temizlik tamamlandı: {file_name}")
+                logging.info(f"📊 Silinen node istatistikleri:")
+                logging.info(f"   - Silinen Chunk'lar: {deleted_chunks}")
+                logging.info(f"   - Silinen Chunk Entity'leri: {deleted_chunk_entities}")
+                logging.info(f"   - Silinen Direkt Node'lar: {deleted_direct_nodes}")
+                logging.info(f"   - Toplam silinen: {total_deleted}")
+                logging.info(f"   - Document node da silindi: {file_name}")
+                
+                return True
+            else:
+                logging.error(f"❌ Otomatik temizlik başarısız oldu: {file_name}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Otomatik temizlik hatası ({file_name}): {e}")
+            return False
+    
     def list_unconnected_nodes(self):
         query = """
         MATCH (e:!Chunk&!Document&!`__Community__`) 
@@ -952,148 +1096,82 @@ class graphDBdataAccess:
 
     def create_policy_node_from_document(self, file_name: str):
         """
-        Document file isminden Policy node oluşturur ve Policy ile Document arasında DOCUMENTED_IN ilişkisi kurar.
-        ENDORSEMENT (zeyilname) belgeleri için ana poliçeyi bulup HAS_ENDORSEMENT ile bağlar.
+        Belge içeriğinden LLM kullanarak kapsamlı poliçe/zeyilname bilgilerini çıkarır ve tüm ilgili node'ları oluşturur.
+        
+        Bu metod:
+        1. Veritabanından belgenin Chunk'larını almır
+        2. Chunk içeriğini birleştirerek belge metnini oluşturur
+        3. LLM ile kapsamlı varlık çıkarımı yapar (document_type dahil)
+        4. Document type'a göre Policy veya Endorsement node'u oluşturur
+        5. Tüm ilgili entity'leri oluşturur ve ilişkiler kurar
         """
         try:
-            # Dosya isminden poliçe bilgilerini çıkar
-            policy_info = self.extract_policy_info_from_filename(file_name)
+            logging.info(f"🔍 {file_name} için kapsamlı LLM extraction başlatılıyor...")
             
-            if not policy_info:
-                logging.info(f"Dosya isminden poliçe bilgisi çıkarılamadı: {file_name}")
+            # Belgenin tüm Chunk'larını veritabanından al
+            document_content = self._get_document_content_from_chunks(file_name)
+            
+            # LLM ile kapsamlı varlık çıkarımı yap (belge içeriğini geçir)
+            entities_data = self.extract_comprehensive_policy_entities_with_llm(file_name, document_content)
+            
+            if not entities_data:
+                logging.warning(f"⚠️ {file_name} için varlık çıkarımı başarısız. Atlanıyor.")
                 return
             
-            doc_type = policy_info.get('document_type', 'MAIN_POLICY')
+            # Document type'ı kontrol et
+            document_type = entities_data.get('document_type', 'MAIN_POLICY')
             
-            # Document'a docType ve year ekle
+            if document_type in ['ENDORSEMENT', 'CANCELLATION', 'RENEWAL']:
+                # Zeyilname/iptal/yenileme olarak işle
+                logging.info(f"📋 {file_name} → {document_type} olarak işleniyor...")
+                self.create_endorsement_entity(entities_data, file_name, document_type)
+            else:
+                # Ana poliçe olarak işle
+                logging.info(f"📋 {file_name} → MAIN_POLICY olarak işleniyor...")
+                self.create_comprehensive_policy_entities(entities_data, file_name)
+            
+            # Document'a docType ve metadata ekle
+            policy_data = entities_data.get('policy', {})
+            dates_data = entities_data.get('dates', {})
+            
             update_document_query = """
                 MATCH (d:Document {fileName: $file_name})
                 SET d.docType = $doc_type,
+                    d.document_type = $document_type,
                     d.year = $policy_year,
+                    d.hasExtractedEntities = true,
+                    d.entityExtractionMethod = 'LLM_comprehensive',
                     d.updatedAt = datetime()
                 RETURN d.fileName as updated_file
             """
             
+            # Year'ı dates'ten veya policy'den al
+            policy_year = dates_data.get('start_date', '')[:4] if dates_data.get('start_date') else policy_data.get('year', '')
+            
             self.graph.query(update_document_query, {
                 "file_name": file_name,
-                "doc_type": doc_type,
-                "policy_year": policy_info.get('year', '')
+                "doc_type": 'policy' if document_type == 'MAIN_POLICY' else 'endorsement',
+                "document_type": document_type,
+                "policy_year": policy_year
             }, session_params={"database": self.graph._database})
             
-            # ENDORSEMENT (zeyilname) ise ana poliçeyi bul ve bağla, kendi Policy node'u oluşturma
-            if doc_type == 'ENDORSEMENT':
-                logging.info(f"🔗 Zeyilname tespit edildi, ana poliçe aranıyor: {file_name}")
-                success = self._link_endorsement_to_main_policy(file_name, policy_info)
-                if success:
-                    logging.info(f"✅ Zeyilname ana poliçeye başarıyla bağlandı: {file_name}")
-                else:
-                    logging.warning(f"⚠️ Zeyilname ana poliçeye bağlanamadı: {file_name}")
-                return  # Zeyilname için Policy node oluşturma, sadece bağlantı yap
+            # Duplicate customer'ları ve insurance company'leri birleştir (her dosya işleme sonrası)
+            self.merge_existing_duplicate_customers()
+            self.merge_existing_duplicate_insurance_companies()
             
-            # Ana poliçe, yenileme, iptal vs. için kendi Policy node'unu oluştur
-            policy_id = policy_info['policy_id']
-            
-            # Policy node'unu oluştur
-            create_policy_query = """
-                MERGE (p:Policy {id: $policy_id})
-                ON CREATE SET 
-                    p.name = $policy_name,
-                    p.type = $policy_type,
-                    p.policyNumber = $policy_number,
-                    p.customer = $customer_name,
-                    p.year = $year,
-                    p.insuredItem = $insured_item,
-                    p.createdAt = datetime(),
-                    p.source_file = $filename,
-                    p.extraction_method = $extraction_method
-                ON MATCH SET 
-                    p.updatedAt = datetime(),
-                    p.source_file = $filename,
-                    p.year = $year,
-                    p.insuredItem = $insured_item,
-                    p.extraction_method = $extraction_method,
-                    p.policyNumber = $policy_number
-                RETURN p.id as policy_id
-            """
-            
-            result = self.graph.query(create_policy_query, {
-                "policy_id": policy_id,
-                "policy_name": policy_info.get('policy_name', policy_id),
-                "policy_type": policy_info.get('policy_type', 'Insurance Policy'),
-                "policy_number": policy_info.get('policy_number', ''),
-                "customer_name": policy_info.get('customer_name', ''),
-                "year": policy_info.get('year', ''),
-                "insured_item": policy_info.get('insured_item', ''),
-                "filename": file_name,
-                "extraction_method": "LLM"
-            }, session_params={"database": self.graph._database})
-            
-            if result:
-                logging.info(f"Policy node oluşturuldu: {policy_id}")
-                
-                # Belge türüne göre farklı ilişkiler kur
-                if doc_type == 'MAIN_POLICY':
-                    link_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (p)-[r:DOCUMENTED_IN]->(d)
-                        SET r.created_at = datetime(),
-                            r.source = 'filename_extraction'
-                        RETURN count(r) as links_created
-                    """
-                    relationship_type = "DOCUMENTED_IN"
-                elif doc_type == 'RENEWAL':
-                    link_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (p)-[r:HAS_RENEWAL]->(d)
-                        SET r.created_at = datetime(),
-                            r.source = 'filename_extraction'
-                        RETURN count(r) as links_created
-                    """
-                    relationship_type = "HAS_RENEWAL"
-                elif doc_type == 'CANCELLATION':
-                    link_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (p)-[r:HAS_CANCELLATION]->(d)
-                        SET r.created_at = datetime(),
-                            r.source = 'filename_extraction'
-                        RETURN count(r) as links_created
-                    """
-                    relationship_type = "HAS_CANCELLATION"
-                else:
-                    # Fallback: varsayılan DOCUMENTED_IN
-                    link_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (p)-[r:DOCUMENTED_IN]->(d)
-                        SET r.created_at = datetime(),
-                            r.source = 'filename_extraction'
-                        RETURN count(r) as links_created
-                    """
-                    relationship_type = "DOCUMENTED_IN"
-                
-                link_result = self.graph.query(link_query, {
-                    "file_name": file_name,
-                    "policy_id": policy_id
-                }, session_params={"database": self.graph._database})
-                
-                if link_result and link_result[0]['links_created'] > 0:
-                    logging.info(f"Policy-Document {relationship_type} ilişkisi oluşturuldu: {policy_id} -> {file_name}")
-                else:
-                    logging.warning(f"Policy-Document {relationship_type} ilişkisi oluşturulamadı: {policy_id} -> {file_name}")
-                
-                # Customer, PolicyYear, InsuredItem ve PolicyType node'larını oluştur
-                self._create_policy_related_nodes(policy_info, policy_id, file_name)
+            logging.info(f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})")
             
         except Exception as e:
-            logging.error(f"Policy node oluşturma hatası ({file_name}): {e}")
+            logging.error(f"Policy/Endorsement node oluşturma hatası ({file_name}): {e}")
 
     def _create_policy_related_nodes(self, policy_info: dict, policy_id: str, file_name: str):
         """
+        ⚠️ DEPRECATED: Bu metod artık kullanılmamaktadır.
+        Bunun yerine create_comprehensive_policy_entities() kullanın.
+        
         Policy bilgilerinden Customer, PolicyYear, InsuredItem ve PolicyType node'larını oluşturur
         """
+        logging.warning(f"⚠️ DEPRECATED: _create_policy_related_nodes() çağrısı. Bunun yerine comprehensive extraction kullanın.")
         try:
             # Customer node oluştur
             customer_name = policy_info.get('customer_name', '').strip()
@@ -1121,16 +1199,65 @@ class graphDBdataAccess:
     def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
         """Customer node oluşturur ve ilişkilendirir"""
         try:
-            # Customer node oluştur veya güncelle
+            # Entity resolution kontrolü
+            new_entity = {
+                'id': customer_name,
+                'name': customer_name,
+                'entity_type': 'Customer'
+            }
+            
+            existing_entity_id = resolve_entity_before_creation(new_entity, self.graph, "Customer")
+            if existing_entity_id:
+                logging.info(f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}")
+                
+                # Mevcut entity ile ilişkileri oluştur
+                link_queries = [
+                    # Customer -> Document HAS_DOC ilişkisi
+                    """
+                        MATCH (c) WHERE elementId(c) = $entity_id
+                        MATCH (d:Document {fileName: $file_name})
+                        MERGE (c)-[r:HAS_DOC]->(d)
+                        SET r.created_at = datetime()
+                        SET c.updatedAt = datetime()
+                        RETURN count(r) as links_created
+                    """,
+                    # Customer -> Policy HAS_POLICY ilişkisi
+                    """
+                        MATCH (c) WHERE elementId(c) = $entity_id
+                        MATCH (p:Policy {id: $policy_id})
+                        MERGE (c)-[r:HAS_POLICY]->(p)
+                        SET r.created_at = datetime()
+                        RETURN count(r) as links_created
+                    """
+                ]
+                
+                for query in link_queries:
+                    self.graph.query(query, {
+                        "entity_id": existing_entity_id,
+                        "file_name": file_name,
+                        "policy_id": policy_id
+                    }, session_params={"database": self.graph._database})
+                
+                logging.info(f"Mevcut Customer ile ilişkiler oluşturuldu: {customer_name}")
+                return
+            
+            # Customer node oluştur veya güncelle - case insensitive normalization ile
             create_customer_query = """
-                MERGE (c:Customer {name: $customer_name})
+                // Önce normalize edilmiş isimle eşleşen customer ara
+                OPTIONAL MATCH (existing:Customer)
+                WHERE apoc.text.clean(existing.name) = apoc.text.clean($customer_name)
+                
+                WITH existing, 
+                     CASE WHEN existing IS NULL THEN $customer_name ELSE existing.name END as final_name
+                
+                MERGE (c:Customer {name: final_name})
                 ON CREATE SET 
                     c.createdAt = datetime(),
-                    c.fullName = $customer_name,
-                    c.policyCount = 1
+                    c.fullName = final_name,
+                    c.normalizedName = apoc.text.clean($customer_name)
                 ON MATCH SET 
                     c.updatedAt = datetime(),
-                    c.policyCount = c.policyCount + 1
+                    c.normalizedName = apoc.text.clean($customer_name)
                 RETURN c.name as customer_name
             """
             
@@ -1141,9 +1268,10 @@ class graphDBdataAccess:
             if result:
                 logging.info(f"Customer node oluşturuldu/güncellendi: {customer_name}")
                 
-                # Customer -> Document HAS_DOC ilişkisi
+                # Customer -> Document HAS_DOC ilişkisi - apoc.text.clean ile güvenli arama
                 customer_doc_query = """
-                    MATCH (c:Customer {name: $customer_name})
+                    MATCH (c:Customer)
+                    WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
                     MATCH (d:Document {fileName: $file_name})
                     MERGE (c)-[r:HAS_DOC]->(d)
                     SET r.created_at = datetime()
@@ -1155,9 +1283,10 @@ class graphDBdataAccess:
                     "file_name": file_name
                 }, session_params={"database": self.graph._database})
                 
-                # Customer -> Policy HAS_POLICY ilişkisi
+                # Customer -> Policy HAS_POLICY ilişkisi - apoc.text.clean ile güvenli arama
                 customer_policy_query = """
-                    MATCH (c:Customer {name: $customer_name})
+                    MATCH (c:Customer)
+                    WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
                     MATCH (p:Policy {id: $policy_id})
                     MERGE (c)-[r:HAS_POLICY]->(p)
                     SET r.created_at = datetime()
@@ -1182,11 +1311,9 @@ class graphDBdataAccess:
                 MERGE (py:PolicyYear {name: $year})
                 ON CREATE SET 
                     py.year = toInteger($year),
-                    py.createdAt = datetime(),
-                    py.policyCount = 1
+                    py.createdAt = datetime()
                 ON MATCH SET 
-                    py.updatedAt = datetime(),
-                    py.policyCount = py.policyCount + 1
+                    py.updatedAt = datetime()
                 RETURN py.name as year_name
             """
             
@@ -1224,11 +1351,9 @@ class graphDBdataAccess:
                 MERGE (ii:InsuredItem {name: $insured_item})
                 ON CREATE SET 
                     ii.description = $insured_item,
-                    ii.createdAt = datetime(),
-                    ii.policyCount = 1
+                    ii.createdAt = datetime()
                 ON MATCH SET 
-                    ii.updatedAt = datetime(),
-                    ii.policyCount = ii.policyCount + 1
+                    ii.updatedAt = datetime()
                 RETURN ii.name as item_name
             """
             
@@ -1266,11 +1391,9 @@ class graphDBdataAccess:
                 MERGE (pt:PolicyType {name: $policy_type})
                 ON CREATE SET 
                     pt.typeName = $policy_type,
-                    pt.createdAt = datetime(),
-                    pt.policyCount = 1
+                    pt.createdAt = datetime()
                 ON MATCH SET 
-                    pt.updatedAt = datetime(),
-                    pt.policyCount = pt.policyCount + 1
+                    pt.updatedAt = datetime()
                 RETURN pt.name as type_name
             """
             
@@ -1302,10 +1425,14 @@ class graphDBdataAccess:
 
     def extract_policy_info_from_filename(self, file_name: str) -> dict:
         """
+        ⚠️ DEPRECATED: Bu metod artık kullanılmamaktadır.
+        Bunun yerine extract_comprehensive_policy_entities_with_llm() kullanın.
+        
         LLM kullanarak önce dosya isminden, başarısız olursa poliçe görselinden bilgileri çıkarır.
         
         Örnek: "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf"
         """
+        logging.warning(f"⚠️ DEPRECATED: extract_policy_info_from_filename() çağrısı. Bunun yerine extract_comprehensive_policy_entities_with_llm() kullanın.")
         import os
         import json
         
@@ -1822,11 +1949,13 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             policy_number = policy_info.get('policy_number', '').strip()
             renewal_number = policy_info.get('renewal_number', '').strip()
             customer_name = policy_info.get('customer_name', '').strip()
+            policy_type = policy_info.get('policy_type', '').strip()
             
             logging.info(f"🔗 Zeyilname ana poliçe bağlantısı aranıyor: {file_name}")
             logging.info(f"   Policy Number: {policy_number}")
             logging.info(f"   Renewal Number: {renewal_number}")
             logging.info(f"   Customer: {customer_name}")
+            logging.info(f"   Policy Type: {policy_type}")
             
             # Ana poliçeyi bulma stratejileri (öncelik sırasıyla)
             main_policy = None
@@ -1863,647 +1992,2131 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
                     main_policy = result[0]
                     logging.info(f"✅ Renewal Number ile ana poliçe bulundu: {main_policy['policy_id']}")
             
-            # 3. Customer name ve benzer policy pattern ile ara (son çare)
+            # 3. Customer name ve policy type ile ara (son çare) - apoc.text.clean ile güvenli arama
             if not main_policy and customer_name:
-                find_policy_query = """
-                    MATCH (c:Customer {name: $customer_name})-[:HAS_POLICY]->(p:Policy)
-                    WHERE NOT EXISTS {
-                        (p)-[:HAS_ENDORSEMENT]->(:Document)
-                    }
-                    RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number
-                    ORDER BY p.createdAt DESC
-                    LIMIT 1
-                """
-                result = self.graph.query(find_policy_query, {
-                    "customer_name": customer_name
-                }, session_params={"database": self.graph._database})
+                policy_type = policy_info.get('policy_type', '').strip()
                 
-                if result:
-                    main_policy = result[0]
-                    logging.info(f"✅ Customer pattern ile ana poliçe bulundu: {main_policy['policy_id']}")
-            
-            if main_policy:
-                # Ana poliçe bulundu, zeyilnameyi bağla
-                link_endorsement_query = """
-                    MATCH (d:Document {fileName: $file_name})
-                    MATCH (p:Policy {id: $main_policy_id})
-                    MERGE (p)-[r:HAS_ENDORSEMENT]->(d)
-                    SET r.created_at = datetime(),
-                        r.source = 'endorsement_linking',
-                        r.endorsement_type = 'automatic_link'
-                    RETURN count(r) as links_created
-                """
-                
-                link_result = self.graph.query(link_endorsement_query, {
-                    "file_name": file_name,
-                    "main_policy_id": main_policy['policy_id']
-                }, session_params={"database": self.graph._database})
-                
-                if link_result and link_result[0]['links_created'] > 0:
-                    logging.info(f"✅ Zeyilname ana poliçeye bağlandı: {main_policy['policy_id']} -> {file_name}")
+                # Önce policy type ile dene
+                if policy_type:
+                    policy_type_condition = """
+                      AND (
+                        EXISTS {
+                          (p)-[:HAS_POLICY_TYPE]->(pt:PolicyType)
+                          WHERE apoc.text.clean(pt.typeName) CONTAINS apoc.text.clean($policy_type)
+                             OR apoc.text.clean(pt.name) CONTAINS apoc.text.clean($policy_type)
+                        }
+                        OR apoc.text.clean(coalesce(p.type, '')) CONTAINS apoc.text.clean($policy_type)
+                        OR apoc.text.clean($policy_type) CONTAINS apoc.text.clean(coalesce(p.type, ''))
+                      )"""
                     
-                    # Document'a endorsement bilgisi ve year ekle
-                    update_document_query = """
-                        MATCH (d:Document {fileName: $file_name})
-                        SET d.docType = 'ENDORSEMENT',
-                            d.linkedMainPolicy = $main_policy_id,
-                            d.year = $policy_year,
-                            d.updatedAt = datetime()
-                        RETURN d.fileName as updated_file
+                    find_policy_query = f"""
+                        MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)
+                        WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
+                        {policy_type_condition}
+                        RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number
+                        ORDER BY p.createdAt DESC
+                        LIMIT 1
                     """
                     
-                    self.graph.query(update_document_query, {
-                        "file_name": file_name,
-                        "main_policy_id": main_policy['policy_id'],
-                        "policy_year": policy_info.get('year', '')
+                    result = self.graph.query(find_policy_query, {
+                        "customer_name": customer_name,
+                        "policy_type": policy_type
                     }, session_params={"database": self.graph._database})
                     
-                    return True
-                else:
-                    logging.warning(f"⚠️ Zeyilname bağlantısı oluşturulamadı: {file_name}")
-                    return False
+                    if result:
+                        main_policy = result[0]
+                        logging.info(f"✅ Customer + Policy Type pattern ile ana poliçe bulundu: {main_policy['policy_id']} (Policy Type: {policy_type})")
+                
+                # Eğer policy type ile bulamazsa, sadece customer ile dene (zeyilname farklı poliçe tipine ait olabilir)
+                if not main_policy:
+                    logging.info(f"ℹ️ Policy type ile bulunamadı, sadece customer pattern deneniyor...")
+                    
+                    find_policy_query = """
+                        MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)
+                        WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
+                        RETURN p.id as policy_id, p.name as policy_name, p.policyNumber as policy_number, p.type as policy_type
+                        ORDER BY p.createdAt DESC
+                        LIMIT 1
+                    """
+                    
+                    result = self.graph.query(find_policy_query, {
+                        "customer_name": customer_name
+                    }, session_params={"database": self.graph._database})
+                    
+                    if result:
+                        main_policy = result[0]
+                        found_policy_type = main_policy.get('policy_type', 'N/A')
+                        logging.info(f"✅ Customer-only pattern ile ana poliçe bulundu: {main_policy['policy_id']} (Actual Policy Type: {found_policy_type})")
+                        logging.info(f"ℹ️ Zeyilname policy type '{policy_type}' ≠ Ana poliçe type '{found_policy_type}' - Bu normal olabilir (aksesuar zeyli vs.)")
+            
+            if main_policy:
+                # Ana poliçe bulundu, sadece Document'a metadata ekle (HAS_ENDORSEMENT kullanmayacağız)
+                logging.info(f"✅ Ana poliçe bulundu, kronolojik zincir için: {main_policy['policy_id']}")
+                
+                # Document'a endorsement bilgisi ve year ekle
+                update_document_query = """
+                    MATCH (d:Document {fileName: $file_name})
+                    SET d.docType = 'ENDORSEMENT',
+                        d.linkedMainPolicy = $main_policy_id,
+                        d.year = $policy_year,
+                        d.updatedAt = datetime()
+                    RETURN d.fileName as updated_file
+                """
+                
+                self.graph.query(update_document_query, {
+                    "file_name": file_name,
+                    "main_policy_id": main_policy['policy_id'],
+                    "policy_year": policy_info.get('year', '')
+                }, session_params={"database": self.graph._database})
+                
+                # Bulunan policy bilgilerini döndür
+                return {
+                    'success': True,
+                    'policy_id': main_policy['policy_id'],
+                    'policy_number': main_policy.get('policy_number', ''),
+                    'policy_name': main_policy.get('policy_name', '')
+                }
             else:
                 logging.warning(f"⚠️ Ana poliçe bulunamadı. Zeyilname bağımsız kalacak: {file_name}")
-                logging.warning(f"   Aranan kriteler - Policy Number: {policy_number}, Renewal: {renewal_number}, Customer: {customer_name}")
-                return False
+                logging.warning(f"   Aranan kriteler - Policy Number: {policy_number}, Renewal: {renewal_number}, Customer: {customer_name}, Policy Type: {policy_type}")
+                return {'success': False}
                 
         except Exception as e:
             logging.error(f"❌ Zeyilname ana poliçe bağlantı hatası ({file_name}): {e}")
             return False
 
-    async def extract_cv_info_from_document(self, file_path: str, model_name: str = "openai_gpt_4o_mini", text_content: str = None) -> dict:
+    def extract_comprehensive_policy_entities_with_llm(self, file_name: str, document_content: str = "") -> dict:
         """
-        LLM kullanarak yerel dosyadan veya verilen text content'den CV bilgilerini çıkarır.
-
+        LLM kullanarak poliçe belgesinden kapsamlı varlık bilgilerini çıkarır.
+        
+        Çıkarılan varlıklar:
+        - Customer (Müşteri)
+        - Policy (Poliçe)
+        - InsuranceCompany (Sigorta Şirketi)
+        - Premium (Prim)
+        - Date (Başlangıç/Bitiş tarihleri)
+        - Coverage (Teminat)
+        - CoverageType (Teminat Türü)
+        - Endorsement (Zeyilname)
+        - Guarantee (Garanti)
+        - Clause (Hüküm/Kloz)
+        - Payment (Ödeme)
+        - Address (Adres/Risk Adresi)
+        
         Args:
-            file_path: CV dosyasının tam yolu
-            model_name: Kullanılacak LLM modeli
-            text_content: Önceden extract edilmiş text content (opsiyonel)
-
+            file_name: Belge adı
+            document_content: Belgenin metin içeriği (Chunk'lardan alınan)
+        
         Returns:
-            CV metadatalarını içeren dict
+            dict: Tüm çıkarılan varlıkları içeren dictionary
         """
-        import json
-        import os
-        from pathlib import Path
-        from PyPDF2 import PdfReader
-        from src.llm import get_llm
-
         try:
-            logging.info(f"📄 CV extraction başlıyor: {file_path}")
-
-            # Eğer text_content verilmişse direkt kullan
-            if text_content:
-                logging.info(f"📝 Önceden extract edilmiş text content kullanılıyor: {len(text_content)} karakter")
-                return await self.extract_cv_info_from_text(text_content, os.path.basename(file_path), model_name)
-
-            # text_content yoksa dosya varlığını kontrol et
-            logging.info(f"📁 text_content verilmedi, dosyadan okuma yapılacak: {file_path}")
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"CV dosyası bulunamadı: {file_path}")
-
-            # Dosya uzantısını kontrol et
-            file_extension = Path(file_path).suffix.lower()
-            if file_extension != '.pdf':
-                raise ValueError(f"Sadece PDF dosyaları desteklenir. Dosya: {file_path}")
-
-            # PDF içeriğini oku
-            extracted_text_content = ""
-            try:
-                reader = PdfReader(file_path)
-                for page in reader.pages:
-                    extracted_text_content += page.extract_text() + "\n"
-            except Exception as e:
-                logging.error(f"PDF okuma hatası: {e}")
-                raise Exception(f"PDF içeriği okunamadı: {e}")
-
-            if not extracted_text_content.strip():
-                raise Exception("PDF'den metin çıkarılamadı")
-
-            logging.info(f"📝 PDF metni çıkarıldı: {len(extracted_text_content)} karakter")
-
-            # Text content'i extract_cv_info_from_text fonksiyonuna gönder
-            return await self.extract_cv_info_from_text(extracted_text_content, os.path.basename(file_path), model_name)
-
-        except Exception as e:
-            error_msg = f"CV bilgi çıkarma hatası: {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
-
-    async def extract_cv_info_from_text(self, text_content: str, file_name: str = "unknown", model_name: str = "openai_gpt_4o_mini") -> dict:
-        """
-        LLM kullanarak verilen text içeriğinden CV bilgilerini çıkarır.
-        Domain-agnostic hibrit yaklaşım kullanır.
-
-        Args:
-            text_content: CV'nin text içeriği
-            file_name: Dosya adı (logging için)
-            model_name: Kullanılacak LLM modeli
-
-        Returns:
-            CV metadatalarını içeren dict
-        """
-        import json
-        import time
-        from src.llm import get_llm
-
-        try:
-            logging.info(f"📄 CV extraction başlıyor (domain-agnostic hibrit): {file_name}")
-
-            if not text_content.strip():
-                raise Exception("Text içeriği boş")
-
-            logging.info(f"📝 Text içeriği alındı: {len(text_content)} karakter")
-
-            # LLM ile CV bilgilerini çıkar - Domain Agnostic Prompt
-            llm, _ = get_llm(model_name)
-
+            from src.llm import get_llm
+            
+            # LLM'yi al
+            llm, _ = get_llm('openai_gpt_4o_mini')
+            
+            # Belge içeriğini kullan (Chunk'lardan alınan tüm metni, optimize ediliyor)
+            # Eğer çok uzunsa, otomatik olarak önemli bölümleri seçer
+            document_content_for_llm = document_content if document_content else ""
+            
+            # Kapsamlı extraction prompt'u
             prompt = f"""
-Aşağıdaki belge metninden kişi ve ilişkili entity'leri çıkar. Domain-agnostic hibrit yaklaşım kullan.
+Verilen sigorta poliçesi belgesinden aşağıdaki bilgileri çıkar ve JSON formatında döndür.
 
-METIN:
-{text_content}
+Belge adı: "{file_name}"
 
-ÇIKTI FORMATRI (JSON):
+Belge İçeriği:
+---
+{document_content_for_llm}
+---
+
+Çıkarılacak bilgiler (tüm alanlar opsiyonel, varsa doldur):
+
+1. CUSTOMER (Müşteri):
+   - name: Müşteri adı (kişi adı veya şirket adı)
+   - type: "Individual" veya "Corporate"
+   - responsible_person: Sorumlu kişi (şirketi ise)
+
+2. INSURANCE_COMPANY (Sigorta Şirketi):
+   - name: Şirket adı
+   - responsible_person: Temsilci/Sorumlu kişi adı
+
+3. POLICY (Poliçe):
+   - policyNumber: Poliçe numarası
+   - currency: Para birimi (TRY, USD, EUR, vb.)
+   - status: Durum (Aktif, İptal, Yenilendi, Geçmiş, vb.)
+   - type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, KOBİ/Ticari, Ortak Alan, Yangın, Sorumluluk, Hayat, Ferdi Kaza, vb.)
+
+4. DOCUMENT_TYPE (Belge Türü) - ÖNEMLİ:
+   - document_type: "MAIN_POLICY" (ana poliçe), "ENDORSEMENT" (zeyilname), "CANCELLATION" (iptal), "RENEWAL" (yenileme)
+   - Belirleme kuralları:
+     * Dosya isminde veya belgede "zeyilname", "zeyli", "zeyl" → ENDORSEMENT
+     * Dosya isminde veya belgede "iptal", "fesih" → CANCELLATION
+     * Dosya isminde veya belgede "yenileme" → RENEWAL
+     * Hiçbiri yoksa → MAIN_POLICY
+   - ÖNEMLİ: Bu alan ZORUNLU! Mutlaka bir değer dön!
+
+5. DATE (Tarihler):
+   - start_date: Başlangıç tarihi (YYYY-MM-DD formatında)
+   - end_date: Bitiş tarihi (YYYY-MM-DD formatında)
+   - renewal_date: Yenileme tarihi (varsa)
+
+5. PREMIUM (Prim):
+   - amount: Prim tutarı (sayı)
+   - currency: Para birimi
+   - commission_rate: Komisyon oranı (varsa)
+
+6. COVERAGE (Teminat):
+   - limit_value: Teminat limiti (sayı)
+   - limit_unit: Birim (TL, USD, Gün, Adet, vb.)
+   - limit_count: Adet/Seans sayısı (varsa)
+   - scope: Coğrafi kapsam ("Türkiye", "Yurtdışı", "Global", vb.)
+
+7. COVERAGE_TYPES (Teminat Türleri - liste):
+   - name: Teminat türü ("Deprem", "Yangın", "Sorumluluk", "Sağlık", vb.)
+
+8. GUARANTEE (Garantiler - liste):
+   - name: Garanti adı ("Ömür boyu yenileme", "Hasarsızlık indirimi", vb.)
+   - value: Değeri ("true", "%10", "2 yıl", vb.)
+
+9. CLAUSE (Hükümler/Klozlar - liste):
+   - name: Kloz adı ("Muafiyet", "İstisna", "Özel Hüküm", vb.)
+   - text: Kloz/Wording metni
+
+10. ENDORSEMENT (Zeyilnameler - liste):
+    - name: Zeyil tipi ("İptal", "Yenileme", "Teminat Ek", vb.)
+    - description: Açıklama
+
+11. PAYMENT (Ödeme):
+    - amount: Ödeme tutarı
+    - dueDate: Ödeme vadesi (YYYY-MM-DD formatında)
+    - method: Ödeme şekli (Nakit, Çek, Havale, vb.)
+
+12. ADDRESS (Risk Adresi):
+    - address: Tam adres
+    - city: İl
+    - district: İlçe
+
+13. POLICY_RELATIONSHIP (Poliçe İlişki Tipi) - ÖNEMLİ:
+    - relationship_type: Müşteri ile poliçe arasında kullanılacak ilişki tipi adı
+    - Kurallar:
+      * Poliçe türüne göre anlam taşıyan bir ilişki adı oluştur
+      * Format: "IS_[POLİÇE_TÜRÜ]_POLICY" şeklinde olsun
+      * Örnek: "Kasko" → "IS_KASKO_POLICY"
+      * Örnek: "Konut Sigortası" → "IS_KONUT_POLICY"
+      * Örnek: "DASK" → "IS_DASK_POLICY"
+      * Örnek: "KOBİ/Ticari" → "IS_KOBI_TICARI_POLICY"
+      * Türkçe karakterleri İngilizceye çevir (İ→I, Ğ→G, Ü→U, Ö→O, Ş→S, Ç→C)
+      * Boşluk ve özel karakterleri alt çizgi (_) ile değiştir
+      * Büyük harfle yaz
+    - properties: İlişkide taşınacak poliçe türüne özel property'ler
+      * KASKO/TRAFİK POLİÇELERİ İÇİN: plateNumber, vehicleBrand, vehicleModel, modelYear, engineSize, vehicleValue, chassisNumber
+      * KONUT/DASK POLİÇELERİ İÇİN: buildingType, floorNumber, totalFloors, squareMeters, buildingAge, hasElevator, constructionType
+      * İŞVEREN SORUMLULUK İÇİN: employeeCount, workType, riskLevel, hasFood, workHours
+      * SAĞLIK POLİÇELERİ İÇİN: inpatientLimit, outpatientLimit, internationalCoverage, maternityBenefit, dentalCoverage
+    - ÖNEMLİ: Bu alan ZORUNLU! Policy türü varsa mutlaka ilişki tipi dön!
+
+14. DEDUCTIBLE_INFO (Muafiyet Bilgileri):
+    - deductibleAmount: Muafiyet tutarı (sayı)
+    - deductibleType: Muafiyet türü (örn: "Sabit", "Oransal")
+    - deductiblePercentage: Muafiyet oranı (varsa, %)
+    - deductibleDescription: Muafiyet açıklaması
+
+Kurallar:
+- SADECE belge içeriğinde açıkça belirtilen bilgileri çıkar
+- Emin olmadığın bilgileri UYDURMA
+- Opsiyonel alanlar boş bırakılabilir
+- Listeler için [] kullan, tek öğe için de dizi içinde gönder
+
+Yanıt formatı (sadece JSON, başka açıklama ekleme):
 {{
-    "person": {{
-        "name": "Tam adı",
-        "attributes": [
-            {{"type": "contact", "key": "email", "value": "email@domain.com"}},
-            {{"type": "contact", "key": "phone", "value": "+90xxx"}},
-            {{"type": "profile", "key": "summary", "value": "Kişi özeti"}},
-            {{"type": "profile", "key": "location", "value": "Şehir, Ülke"}},
-            {{"type": "social", "key": "linkedin", "value": "linkedin_url"}},
-            {{"type": "social", "key": "github", "value": "github_url"}},
-            {{"type": "social", "key": "website", "value": "website_url"}},
-            {{"type": "career", "key": "current_position", "value": "Mevcut pozisyon"}},
-            {{"type": "career", "key": "current_company", "value": "Mevcut şirket"}},
-            {{"type": "career", "key": "experience_years", "value": "5"}}
-        ]
+    "document_type": "MAIN_POLICY",  # ÖNEMLİ: ZORUNLU ALAN!
+    "customer": {{
+        "name": "...",
+        "type": "...",
+        "responsible_person": "..."
     }},
-    "entities": [
-        {{
-            "type": "Organization",
-            "name": "Şirket Adı",
-            "attributes": [
-                {{"key": "industry", "value": "Teknoloji"}},
-                {{"key": "location", "value": "İstanbul"}}
-            ]
-        }},
-        {{
-            "type": "Position",
-            "name": "Yazılım Geliştirici",
-            "attributes": [
-                {{"key": "level", "value": "Senior"}},
-                {{"key": "department", "value": "IT"}}
-            ]
-        }},
-        {{
-            "type": "Institution",
-            "name": "Üniversite Adı",
-            "attributes": [
-                {{"key": "type", "value": "University"}},
-                {{"key": "location", "value": "Ankara"}}
-            ]
-        }},
-        {{
-            "type": "Degree",
-            "name": "Lisans",
-            "attributes": [
-                {{"key": "field", "value": "Bilgisayar Mühendisliği"}},
-                {{"key": "graduation_year", "value": "2020"}}
-            ]
-        }},
-        {{
-            "type": "Skill",
-            "name": "Python",
-            "attributes": [
-                {{"key": "category", "value": "Programming Language"}},
-                {{"key": "proficiency", "value": "Expert"}}
-            ]
-        }},
-        {{
-            "type": "Language",
-            "name": "İngilizce",
-            "attributes": [
-                {{"key": "proficiency", "value": "C1"}}
-            ]
-        }}
+    "insurance_company": {{
+        "name": "...",
+        "responsible_person": "..."
+    }},
+    "policy": {{
+        "policyNumber": "...",
+        "currency": "...",
+        "status": "...",
+        "type": "..."
+    }},
+    "dates": {{
+        "start_date": "...",
+        "end_date": "...",
+        "renewal_date": "..."
+    }},
+    "premium": {{
+        "amount": null,
+        "currency": "...",
+        "commission_rate": null
+    }},
+    "coverage": {{
+        "limit_value": null,
+        "limit_unit": "...",
+        "limit_count": null,
+        "scope": "..."
+    }},
+    "coverage_types": [
+        {{"name": "..."}},
     ],
-    "relationships": [
-        {{
-            "from": "person",
-            "to": "Organization:Şirket Adı",
-            "type": "CONNECTED_TO",
-            "attributes": [
-                {{"key": "relationship_type", "value": "employment"}},
-                {{"key": "role", "value": "Yazılım Geliştirici"}},
-                {{"key": "start_date", "value": "2021-01"}},
-                {{"key": "end_date", "value": "current"}},
-                {{"key": "duration", "value": "3 yıl"}},
-                {{"key": "description", "value": "React ve Node.js projelerinde çalıştı"}}
-            ]
-        }},
-        {{
-            "from": "person",
-            "to": "Institution:Üniversite Adı",
-            "type": "CONNECTED_TO",
-            "attributes": [
-                {{"key": "relationship_type", "value": "education"}},
-                {{"key": "degree", "value": "Lisans"}},
-                {{"key": "field", "value": "Bilgisayar Mühendisliği"}},
-                {{"key": "start_date", "value": "2016"}},
-                {{"key": "end_date", "value": "2020"}}
-            ]
-        }},
-        {{
-            "from": "person",
-            "to": "Skill:Python",
-            "type": "HAS_ATTRIBUTE",
-            "attributes": [
-                {{"key": "attribute_type", "value": "skill"}},
-                {{"key": "proficiency", "value": "Expert"}},
-                {{"key": "years_experience", "value": "5"}},
-                {{"key": "context", "value": "Backend development"}}
-            ]
-        }},
-        {{
-            "from": "person",
-            "to": "Language:İngilizce",
-            "type": "HAS_ATTRIBUTE",
-            "attributes": [
-                {{"key": "attribute_type", "value": "language"}},
-                {{"key": "proficiency", "value": "C1"}},
-                {{"key": "context", "value": "Business communication"}}
-            ]
-        }}
+    "guarantees": [
+        {{"name": "...", "value": "..."}},
     ],
-    "meta": {{
-        "extraction_confidence": 0.95,
-        "detected_domain": "resume/cv",
-        "language": "turkish",
-        "document_type": "professional_profile"
+    "clauses": [
+        {{"name": "...", "text": "..."}},
+    ],
+    "endorsements": [
+        {{"name": "...", "description": "..."}},
+    ],
+    "payment": {{
+        "amount": null,
+        "dueDate": "...",
+        "method": "..."
+    }},
+    "address": {{
+        "address": "...",
+        "city": "...",
+        "district": "..."
+    }},
+    "policy_relationship": {{
+        "relationship_type": "IS_KASKO_POLICY",  # Örnek: Policy türüne göre oluşturulan ilişki
+        "properties": {{
+            "plateNumber": "...",
+            "vehicleBrand": "...",
+            "vehicleModel": "...",
+            "modelYear": null,
+            "squareMeters": null,
+            "employeeCount": null,
+            "inpatientLimit": null,
+            "buildingType": "...",
+            "workType": "...",
+            "outpatientLimit": null
+        }}
+    }},
+    "deductible_info": {{
+        "deductibleAmount": null,
+        "deductibleType": "...",
+        "deductiblePercentage": null,
+        "deductibleDescription": "..."
     }}
 }}
-
-KURALAR:
-1. Her entity için domain-agnostic type kullan (Organization, Institution, Skill, Language, Position, etc.)
-2. Spesifik bilgileri attributes array'inde sakla
-3. İlişkiler generic olmalı: CONNECTED_TO, HAS_ATTRIBUTE, RELATED_TO
-4. Tüm relationship'ler attributes ile detaylandırılmalı
-5. Meta bilgiler extraction kalitesi için ekle
-6. Sadece JSON döndür, açıklama yapma
 """
-
+            
             # LLM'den yanıt al
             response = llm.invoke(prompt)
             response_text = response.content.strip()
-
-            # JSON parse et
+            
             # JSON parse et
             try:
-                # JSON kısmını ayıkla
                 if '{' in response_text and '}' in response_text:
                     start_idx = response_text.find('{')
                     end_idx = response_text.rfind('}') + 1
                     json_text = response_text[start_idx:end_idx]
-                    cv_info = json.loads(json_text)
-
-                    # UTF-8 normalizasyon uygula - Hibrit yapı için
-                    from src.utf8_utils import normalize_unicode_text
+                    entities_data = json.loads(json_text)
                     
-                    def normalize_hybrid_structure(data):
-                        """Hibrit yapı için recursive normalization"""
-                        if isinstance(data, str):
-                            return normalize_unicode_text(data)
-                        elif isinstance(data, dict):
-                            normalized_dict = {}
-                            for key, value in data.items():
-                                normalized_dict[key] = normalize_hybrid_structure(value)
-                            return normalized_dict
-                        elif isinstance(data, list):
-                            return [normalize_hybrid_structure(item) for item in data]
-                        else:
-                            return data
+                    # OCR hatalarını düzelt ve filename'den fallback kullan
+                    entities_data = self._validate_and_fix_customer_name(entities_data, file_name)
                     
-                    normalized_cv_info = normalize_hybrid_structure(cv_info)
-
-                    # Meta bilgiler ekle - Domain agnostic
-                    normalized_cv_info['extraction_meta'] = {
-                        'timestamp': time.time(),
-                        'source_file': file_name,
-                        'extraction_method': 'llm_hybrid_domain_agnostic',
-                        'model_used': model_name,
-                        'approach': 'hybrid_schema'
-                    }
-
-                    person_name = normalized_cv_info.get('person', {}).get('name', 'İsim bulunamadı')
-                    entity_count = len(normalized_cv_info.get('entities', []))
-                    relationship_count = len(normalized_cv_info.get('relationships', []))
-                    
-                    logging.info(f"✅ Hibrit CV bilgileri çıkarıldı: {person_name}")
-                    logging.info(f"📊 Entity sayısı: {entity_count}, İlişki sayısı: {relationship_count}")
-                    
-                    return normalized_cv_info
-
+                    logging.info(f"✅ LLM başarıyla kapsamlı varlık bilgilerini çıkardı ({len(document_content_for_llm)} karakter içerikten)")
+                    return entities_data
                 else:
-                    error_msg = "LLM yanıtında JSON formatı bulunamadı"
-                    logging.error(error_msg)
-                    logging.error(f"LLM yanıtı: {response_text[:500]}...")
-                    raise ValueError(error_msg)
-
+                    logging.error("LLM yanıtında JSON formatı bulunamadı")
+                    return {}
+                    
             except json.JSONDecodeError as e:
-                error_msg = f"LLM yanıtı JSON parse edilemedi: {e}"
-                logging.error(error_msg)
-                logging.error(f"LLM yanıtı: {response_text[:500]}...")
-                raise ValueError(error_msg)
-
+                logging.error(f"LLM yanıtı JSON parse edilemedi: {e}")
+                return {}
+                
         except Exception as e:
-            error_msg = f"Hibrit CV bilgi çıkarma hatası: {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
+            logging.error(f"Kapsamlı varlık çıkarma hatası: {e}")
+            return {}
 
-    def create_cv_node_from_document(self, file_name: str, text_content: str = None):
+    def _validate_and_fix_customer_name(self, entities_data: dict, file_name: str) -> dict:
         """
-        CV dosyasından hibrit yapı kullanarak Person ve ilişkili entity'leri oluşturur.
-        Domain-agnostic yaklaşım ile generic node'lar ve attribute'lar oluşturur.
+        OCR hatalarını düzeltir ve filename'den customer name fallback'i sağlar
+        """
+        try:
+            customer_data = entities_data.get('customer', {})
+            extracted_name = customer_data.get('name', '').strip()
+            
+            # Filename'den müşteri adını çıkar
+            filename_customer = self._extract_customer_name_from_filename(file_name)
+            
+            if extracted_name and filename_customer:
+                # Benzerlik hesapla
+                similarity = self._calculate_name_similarity_simple(extracted_name, filename_customer)
+                
+                # OCR hatalarını tespit et ve düzelt
+                if self._is_likely_ocr_error(extracted_name):
+                    logging.warning(f"🔧 OCR hatası tespit edildi: '{extracted_name}' -> '{filename_customer}' (filename'den)")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_fallback'
+                    entities_data['customer'] = customer_data
+                elif similarity >= 0.7:  # %70'den yüksekse filename'deki temiz halini kullan
+                    logging.info(f"🔧 İsim eşleşiyor, filename'deki temiz hali kullanılıyor: '{extracted_name}' -> '{filename_customer}' (benzerlik: {similarity:.2f})")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_preferred_clean'
+                    entities_data['customer'] = customer_data
+                elif similarity < 0.7:  # %70'den düşükse filename'i tercih et
+                    logging.warning(f"🔧 İsim uyumsuzluğu: '{extracted_name}' vs '{filename_customer}' (benzerlik: {similarity:.2f})")
+                    customer_data['name'] = filename_customer
+                    customer_data['ocr_original'] = extracted_name
+                    customer_data['source'] = 'filename_preferred'
+                    entities_data['customer'] = customer_data
+            elif filename_customer and not extracted_name:
+                # OCR hiç isim çıkaramamışsa filename'i kullan
+                logging.info(f"📝 Müşteri ismi OCR'dan çıkarılamadı, filename kullanılıyor: '{filename_customer}'")
+                entities_data['customer'] = {
+                    'name': filename_customer,
+                    'type': customer_data.get('type', 'Individual'),
+                    'source': 'filename_only'
+                }
+                
+            return entities_data
+            
+        except Exception as e:
+            logging.error(f"Customer name validation hatası: {e}")
+            return entities_data
+    
+    def _extract_customer_name_from_filename(self, file_name: str) -> str:
+        """
+        Dosya adından müşteri adını çıkarır
+        Örnek: "Satvet Çiftçi Barclay 14 D1 Dask_2020.pdf" -> "Satvet Çiftçi"
+        """
+        try:
+            import re
+            
+            # Dosya uzantısını kaldır
+            base_name = file_name.replace('.pdf', '').replace('.PDF', '')
+            
+            # Yaygın pattern'ler - müşteri adı genelde başta
+            patterns = [
+                # "Ad Soyad Konum/Proje Bilgi_Yıl" formatı - greedy kullanarak tam ismi yakala
+                r'^([A-ZÇĞIİÖŞÜa-zçğıiöşü\s]+)\s+(?:[A-Z0-9]+\s+|[A-ZÇĞIİÖŞÜa-zçğıiöşü]+\s+)*(?:Konut|Dask|Kasko|Trafik)',
+                # "Ad Soyad SomethingElse_Year" formatı - büyük harf/rakamdan önce dur
+                r'^([A-ZÇĞIİÖŞÜa-zçğıiöşü\s]+)\s+[A-Z0-9]',
+                # "Ad Soyad" başlangıcı (en az 2 kelime) - tam isme izin ver
+                r'^([A-ZÇĞIİÖŞÜ][a-zçğıiöşü]+(?:\s+[A-ZÇĞIİÖŞÜ][a-zçğıiöşü]+)+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.match(pattern, base_name, re.IGNORECASE)
+                if match:
+                    customer_name = match.group(1).strip()
+                    # Title case uygula (Türkçe karakterler için)
+                    customer_name = ' '.join(word.capitalize() for word in customer_name.split())
+                    logging.debug(f"Filename'den çıkarılan müşteri: '{customer_name}' (pattern: {pattern})")
+                    return customer_name
+                    
+            logging.debug(f"Filename'den müşteri adı çıkarılamadı: {file_name}")
+            return ""
+            
+        except Exception as e:
+            logging.error(f"Filename parse hatası: {e}")
+            return ""
+    
+    def _is_likely_ocr_error(self, name: str) -> bool:
+        """
+        İsmin OCR hatası içerip içermediğini kontrol eder
+        """
+        try:
+            # OCR hata belirtileri
+            ocr_error_patterns = [
+                r'[A-Z]{2,}.*[a-z].*[A-Z]',  # SATVET çtFTçi gibi karışık case
+                r'.*[çtFT].*',                # çtFT gibi anlamsız harf dizileri
+                r'.*[0-9].*',                 # İsimlerde rakam
+                r'^[A-Z]+\s+[a-z]+[A-Z]',    # WORD wordWORD pattern
+                r'.*[^a-zA-ZçğıiöşüÇĞIİÖŞÜ\s].*'  # Alfabe dışı karakterler
+            ]
+            
+            for pattern in ocr_error_patterns:
+                if re.match(pattern, name):
+                    return True
+                    
+            # Çok kısa/uzun isimler
+            words = name.split()
+            if len(words) < 2 or len(words) > 5:
+                return True
+                
+            # Her kelime en az 2 harf
+            for word in words:
+                if len(word.strip()) < 2:
+                    return True
+                    
+            return False
+            
+        except Exception:
+            return False
+    
+    def _calculate_name_similarity_simple(self, name1: str, name2: str) -> float:
+        """
+        İki isim arasında basit benzerlik hesaplar
+        """
+        try:
+            import difflib
+            
+            # Normalize et
+            norm1 = name1.lower().strip()
+            norm2 = name2.lower().strip()
+            
+            # Levenshtein similarity
+            return difflib.SequenceMatcher(None, norm1, norm2).ratio()
+            
+        except Exception:
+            return 0.0
+
+    def merge_existing_duplicate_customers(self):
+        """
+        Sistemde mevcut olan normalize edilmiş isme göre duplicate Customer node'larını birleştirir
+        """
+        try:
+            logging.info("🔍 Mevcut duplicate Customer node'ları kontrol ediliyor...")
+            
+            # Duplicate customer'ları bul
+            find_duplicates_query = """
+                MATCH (c:Customer)
+                WITH apoc.text.clean(c.name) as normalized_name, collect({
+                    name: c.name,
+                    element_id: elementId(c),
+                    created_at: c.createdAt
+                }) as customers
+                WHERE size(customers) > 1
+                RETURN normalized_name, 
+                       customers,
+                       size(customers) as duplicate_count
+                ORDER BY duplicate_count DESC
+            """
+            
+            duplicates_result = self.execute_query(find_duplicates_query)
+            
+            if not duplicates_result:
+                logging.info("✅ Duplicate Customer node'u bulunamadı")
+                return
+            
+            total_merged = 0
+            
+            for duplicate_group in duplicates_result:
+                normalized_name = duplicate_group['normalized_name']
+                customers = duplicate_group['customers']
+                
+                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(customers)} node")
+                
+                # En eski (veya en çok policy'si olan) customer'ı master olarak seç
+                customers_with_info = []
+                for customer in customers:
+                    policy_count_query = """
+                        MATCH (c) WHERE elementId(c) = $element_id
+                        RETURN c.name as name, 
+                               elementId(c) as element_id,
+                               c.createdAt as created_at,
+                               count { (c)-[:HAS_POLICY]->() } as policy_count
+                    """
+                    info_result = self.execute_query(policy_count_query, {
+                        "element_id": customer['element_id']
+                    })
+                    
+                    if info_result:
+                        customers_with_info.append(info_result[0])
+                
+                # Master'ı seç (en çok policy'si olan, eşitse en eski)
+                def get_timestamp(dt):
+                    if dt is None:
+                        return 0
+                    # Neo4j DateTime objesi için
+                    if hasattr(dt, 'to_native'):
+                        return dt.to_native().timestamp()
+                    # Python datetime objesi için
+                    elif hasattr(dt, 'timestamp'):
+                        return dt.timestamp()
+                    # String veya diğer formatlar için
+                    else:
+                        return 0
+                
+                master = max(customers_with_info, 
+                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
+                
+                duplicates_to_merge = [c for c in customers_with_info if c['element_id'] != master['element_id']]
+                
+                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
+                for dup in duplicates_to_merge:
+                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                
+                # APOC ile merge et
+                for duplicate in duplicates_to_merge:
+                    merge_query = """
+                        MATCH (master) WHERE elementId(master) = $master_id
+                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                        WITH [master, duplicate] as nodes
+                        CALL apoc.refactor.mergeNodes(nodes, 
+                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                        YIELD node
+                        RETURN node.name as merged_name
+                    """
+                    
+                    result = self.execute_query(merge_query, {
+                        "master_id": master['element_id'],
+                        "duplicate_id": duplicate['element_id']
+                    })
+                    
+                    if result:
+                        total_merged += 1
+                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+            
+            logging.info(f"🎉 Toplam {total_merged} duplicate Customer node birleştirildi")
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Duplicate customer merge hatası: {e}")
+            return 0
+
+    def merge_existing_duplicate_insurance_companies(self):
+        """
+        Sistemde mevcut olan normalize edilmiş isme göre duplicate InsuranceCompany node'larını birleştirir
+        """
+        try:
+            logging.info("🔍 Mevcut duplicate InsuranceCompany node'ları kontrol ediliyor...")
+            
+            # Duplicate insurance company'leri bul
+            find_duplicates_query = """
+                MATCH (ic:InsuranceCompany)
+                WITH apoc.text.clean(ic.name) as normalized_name, collect({
+                    name: ic.name,
+                    element_id: elementId(ic),
+                    created_at: ic.createdAt
+                }) as companies
+                WHERE size(companies) > 1
+                RETURN normalized_name, 
+                       companies,
+                       size(companies) as duplicate_count
+                ORDER BY duplicate_count DESC
+            """
+            
+            duplicates_result = self.execute_query(find_duplicates_query)
+            
+            if not duplicates_result:
+                logging.info("✅ Duplicate InsuranceCompany node'u bulunamadı")
+                return 0
+            
+            total_merged = 0
+            
+            for duplicate_group in duplicates_result:
+                normalized_name = duplicate_group['normalized_name']
+                companies = duplicate_group['companies']
+                
+                logging.info(f"🔧 Birleştiriliyor: '{normalized_name}' - {len(companies)} company node")
+                
+                # En eski (veya en çok policy'si olan) company'yi master olarak seç
+                companies_with_info = []
+                for company in companies:
+                    policy_count_query = """
+                        MATCH (ic) WHERE elementId(ic) = $element_id
+                        RETURN ic.name as name, 
+                               elementId(ic) as element_id,
+                               ic.createdAt as created_at,
+                               count { ()-[:ISSUED_BY]->(ic) } as policy_count
+                    """
+                    info_result = self.execute_query(policy_count_query, {
+                        "element_id": company['element_id']
+                    })
+                    
+                    if info_result:
+                        companies_with_info.append(info_result[0])
+                
+                # Master'ı seç (en çok policy'si olan, eşitse en eski)
+                def get_timestamp(dt):
+                    if dt is None:
+                        return 0
+                    # Neo4j DateTime objesi için
+                    if hasattr(dt, 'to_native'):
+                        return dt.to_native().timestamp()
+                    # Python datetime objesi için
+                    elif hasattr(dt, 'timestamp'):
+                        return dt.timestamp()
+                    # String veya diğer formatlar için
+                    else:
+                        return 0
+                
+                master = max(companies_with_info, 
+                           key=lambda x: (x['policy_count'], -get_timestamp(x['created_at'])))
+                
+                duplicates_to_merge = [c for c in companies_with_info if c['element_id'] != master['element_id']]
+                
+                logging.info(f"  Master: {master['name']} (Policy: {master['policy_count']})")
+                for dup in duplicates_to_merge:
+                    logging.info(f"  Merge: {dup['name']} (Policy: {dup['policy_count']})")
+                
+                # APOC ile merge et
+                for duplicate in duplicates_to_merge:
+                    merge_query = """
+                        MATCH (master) WHERE elementId(master) = $master_id
+                        MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                        WITH [master, duplicate] as nodes
+                        CALL apoc.refactor.mergeNodes(nodes, 
+                            {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                             preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                        YIELD node
+                        RETURN node.name as merged_name
+                    """
+                    
+                    result = self.execute_query(merge_query, {
+                        "master_id": master['element_id'],
+                        "duplicate_id": duplicate['element_id']
+                    })
+                    
+                    if result:
+                        total_merged += 1
+                        logging.info(f"  ✅ Merged: {duplicate['name']} -> {master['name']}")
+            
+            logging.info(f"🎉 Toplam {total_merged} duplicate InsuranceCompany node birleştirildi")
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Duplicate insurance company merge hatası: {e}")
+            return 0
+
+    def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str):
+        """
+        Çıkarılan varlık bilgilerinden Neo4j'de node ve ilişkiler oluşturur.
         
         Args:
-            file_name: CV dosyasının adı
-            text_content: PDF'den önceden extract edilmiş text content (opsiyonel)
+            entities_data: extract_comprehensive_policy_entities_with_llm'den dönen dictionary
+            file_name: Belge adı
         """
         try:
-            # CV dosyasının tam yolunu oluştur (merged_files klasöründe)
-            import os
-            import asyncio
-            
-            merged_dir = os.path.join(os.path.dirname(__file__), "..", "..", "merged_files")
-            cv_file_path = os.path.join(merged_dir, file_name)
-            
-            # Debug: text_content kontrolü
-            if text_content:
-                logging.info(f"🔍 Hibrit CV extraction'a text_content geçiliyor: {len(text_content)} karakter")
-            else:
-                logging.info(f"⚠️ text_content None veya boş, dosyadan okuma yapılacak: {cv_file_path}")
-
-            # CV bilgilerini çıkar
-            cv_info = asyncio.run(self.extract_cv_info_from_document(cv_file_path, text_content=text_content))
-
-            if not cv_info:
-                logging.info(f"CV bilgileri çıkarılamadı: {file_name}")
+            if not entities_data:
+                logging.warning(f"Boş varlık verisi: {file_name}")
                 return
-
-            logging.info(f"🚀 Hibrit node creation başlıyor: {file_name}")
-
-            # Document'a docType olarak 'CV' ekle
-            update_document_query = """
-                MATCH (d:Document {fileName: $file_name})
-                SET d.docType = 'CV',
-                    d.cvExtracted = true,
-                    d.updatedAt = datetime(),
-                    d.extractionApproach = 'hybrid_domain_agnostic'
-                RETURN d.fileName as updated_file
-            """
-
-            self.graph.query(update_document_query, {
-                "file_name": file_name
-            }, session_params={"database": self.graph._database})
-
-            # Hibrit yaklaşım ile node'ları oluştur
-            self._create_hybrid_nodes_from_cv_info(cv_info, file_name)
-
+            
+            # Policy node'u bul veya oluştur
+            policy_id = f"policy_{normalize_file_name(file_name).replace('.', '_')}"
+            
+            policy_data = entities_data.get('policy', {})
+            if not policy_data.get('policyNumber'):
+                policy_data['policyNumber'] = policy_id
+            
+            # 1. Policy Node'u oluştur
+            self._create_policy_node_comprehensive(policy_id, policy_data, file_name)
+            
+            # 2. Customer Node'u ve ilişkisini oluştur (önce HAS_POLICY yaratılmalı)
+            customer_data = entities_data.get('customer', {})
+            if customer_data.get('name'):
+                self._create_customer_node_comprehensive(customer_data, policy_id, file_name)
+            
+            # 2.5. Policy İlişki Türünü Oluştur (LLM'den gelen ilişki tipi ile - Customer bağlandıktan sonra)
+            policy_relationship = entities_data.get('policy_relationship', {})
+            relationship_type = policy_relationship.get('relationship_type', '')
+            relationship_properties = policy_relationship.get('properties', {})
+            policy_type = policy_data.get('type', '')
+            if relationship_type:
+                self._create_policy_type_relationship(policy_id, relationship_type, policy_type, relationship_properties)
+            
+            # 3. InsuranceCompany Node'u ve ilişkisini oluştur
+            company_data = entities_data.get('insurance_company', {})
+            if company_data.get('name'):
+                self._create_insurance_company_node(company_data, policy_id)
+            
+            # 4. Date Node'larını (start/end) oluştur
+            dates_data = entities_data.get('dates', {})
+            if dates_data:
+                self._create_date_nodes_for_policy(dates_data, policy_id)
+            
+            # 5. Premium Node'u oluştur
+            premium_data = entities_data.get('premium', {})
+            if premium_data.get('amount') is not None:
+                self._create_premium_node(premium_data, policy_id)
+            
+            # 6. Coverage Node'u oluştur
+            coverage_data = entities_data.get('coverage', {})
+            if coverage_data:
+                self._create_coverage_node(coverage_data, policy_id)
+            
+            # 7. CoverageType Node'larını oluştur
+            coverage_types = entities_data.get('coverage_types', [])
+            if coverage_types:
+                self._create_coverage_type_nodes(coverage_types, policy_id)
+            
+            # 8. Guarantee Node'larını oluştur
+            guarantees = entities_data.get('guarantees', [])
+            if guarantees:
+                self._create_guarantee_nodes(guarantees, policy_id)
+            
+            # 9. Clause Node'larını oluştur
+            clauses = entities_data.get('clauses', [])
+            if clauses:
+                self._create_clause_nodes(clauses, policy_id)
+            
+            # 10. Endorsement Node'larını oluştur
+            endorsements = entities_data.get('endorsements', [])
+            if endorsements:
+                self._create_endorsement_nodes(endorsements, policy_id)
+            
+            # 11. Payment Node'u oluştur
+            payment_data = entities_data.get('payment', {})
+            if payment_data.get('amount') is not None:
+                self._create_payment_node(payment_data, policy_id)
+            
+            # 12. Address Node'u oluştur
+            address_data = entities_data.get('address', {})
+            if address_data.get('address') or address_data.get('city'):
+                self._create_risk_address_node(address_data, policy_id)
+            
+            logging.info(f"✅ Tüm varlık node'ları başarıyla oluşturuldu: {file_name}")
+            
         except Exception as e:
-            logging.error(f"Hibrit CV node oluşturma hatası ({file_name}): {e}")
+            logging.error(f"Varlık node'ları oluşturma hatası: {e}")
 
-    def _create_hybrid_nodes_from_cv_info(self, cv_info: dict, file_name: str):
+    def _create_policy_type_relationship(self, policy_id: str, relationship_type: str, policy_type: str, relationship_properties: dict = None):
         """
-        Hibrit yaklaşım kullanarak CV bilgilerinden node'lar ve ilişkiler oluşturur.
-        Domain-agnostic generic yapı kullanır.
+        Customer ile Policy arasında poliçe türüne özel ilişki oluşturur ve property'leri ekler
         """
         try:
-            person_data = cv_info.get('person', {})
-            entities = cv_info.get('entities', [])
-            relationships = cv_info.get('relationships', [])
-            
-            if not person_data.get('name'):
-                logging.warning(f"Person name bulunamadı: {file_name}")
+            if not relationship_type:
+                logging.warning(f"Relationship type boş, ilişki oluşturulamadı: {policy_id}")
                 return
-
-            # 1. CORE ENTITY: Person node'unu oluştur
-            person_name = person_data['name']
-            self._create_core_person_node(person_name, person_data, file_name)
             
-            # 2. GENERIC ENTITIES: Domain-agnostic entity'leri oluştur
-            created_entities = {}
-            for entity in entities:
-                entity_key = self._create_generic_entity(entity)
-                if entity_key:
-                    created_entities[f"{entity['type']}:{entity['name']}"] = entity_key
+            # Properties'i hazırla
+            properties = relationship_properties or {}
             
-            # 3. HYBRID RELATIONSHIPS: Generic relationship'ler oluştur
-            for relationship in relationships:
-                self._create_hybrid_relationship(
-                    relationship, 
-                    person_name, 
-                    created_entities, 
-                    file_name
-                )
+            # Null değerleri filtrele
+            filtered_properties = {k: v for k, v in properties.items() if v is not None and v != ""}
             
-            # 4. PERSON-DOCUMENT LINK: HAS_CV ilişkisi
-            self._link_person_to_document(person_name, file_name)
-            
-            logging.info(f"✅ Hibrit node creation tamamlandı: {person_name}")
-            logging.info(f"📊 Oluşturulan entity sayısı: {len(created_entities)}, İlişki sayısı: {len(relationships)}")
-
-        except Exception as e:
-            logging.error(f"Hibrit node oluşturma hatası: {e}")
-
-    def _create_core_person_node(self, person_name: str, person_data: dict, file_name: str):
-        """Core Person node'unu hibrit yaklaşımla oluşturur"""
-        try:
-            # Person attributes'larını generic formata çevir
-            core_attributes = {}
-            for attr in person_data.get('attributes', []):
-                key = f"{attr['type']}_{attr['key']}"
-                core_attributes[key] = attr['value']
-            
-            create_person_query = """
-                MERGE (p:Person {name: $person_name})
-                ON CREATE SET
-                    p.createdAt = datetime(),
-                    p.source_file = $filename,
-                    p.extraction_method = 'hybrid_domain_agnostic',
-                    p.entity_type = 'core_person'
-                ON MATCH SET
-                    p.updatedAt = datetime(),
-                    p.source_file = $filename,
-                    p.extraction_method = 'hybrid_domain_agnostic'
-                
-                // Dynamic attribute setting
-                SET p += $attributes
-                
-                RETURN p.name as person_name
-            """
-
-            result = self.graph.query(create_person_query, {
-                "person_name": person_name,
-                "filename": file_name,
-                "attributes": core_attributes
-            }, session_params={"database": self.graph._database})
-
-            if result:
-                logging.info(f"✅ Core Person node oluşturuldu: {person_name}")
-                
-                # Person attributes'larını HAS_ATTRIBUTE ilişkileri olarak da kaydet
-                for attr in person_data.get('attributes', []):
-                    self._create_person_attribute_relationship(person_name, attr)
-
-        except Exception as e:
-            logging.error(f"Core Person node oluşturma hatası: {e}")
-
-    def _create_generic_entity(self, entity: dict) -> str:
-        """Generic entity oluşturur - Domain agnostic"""
-        try:
-            entity_type = entity.get('type', 'Unknown')
-            entity_name = entity.get('name', 'Unknown')
-            entity_key = f"{entity_type}:{entity_name}"
-            
-            # Generic entity attributes
-            entity_attributes = {}
-            for attr in entity.get('attributes', []):
-                entity_attributes[attr['key']] = attr['value']
-            
-            create_entity_query = f"""
-                MERGE (e:Entity {{type: $entity_type, name: $entity_name}})
-                ON CREATE SET
-                    e.createdAt = datetime(),
-                    e.entity_category = 'generic',
-                    e.domain_agnostic = true
-                ON MATCH SET
-                    e.updatedAt = datetime()
-                
-                // Dynamic attribute setting
-                SET e += $attributes
-                
-                RETURN e.type + ':' + e.name as entity_key
-            """
-
-            result = self.graph.query(create_entity_query, {
-                "entity_type": entity_type,
-                "entity_name": entity_name,
-                "attributes": entity_attributes
-            }, session_params={"database": self.graph._database})
-
-            if result:
-                logging.info(f"✅ Generic entity oluşturuldu: {entity_key}")
-                return entity_key
-
-        except Exception as e:
-            logging.error(f"Generic entity oluşturma hatası: {e}")
-            return None
-
-    def _create_hybrid_relationship(self, relationship: dict, person_name: str, created_entities: dict, file_name: str):
-        """Hibrit relationship oluşturur - Generic yaklaşım"""
-        try:
-            from_node = relationship.get('from', '')
-            to_node = relationship.get('to', '')
-            rel_type = relationship.get('type', 'RELATED_TO')
-            
-            # Relationship attributes
-            rel_attributes = {}
-            for attr in relationship.get('attributes', []):
-                rel_attributes[attr['key']] = attr['value']
-            
-            # From ve To node'ları belirle
-            if from_node == 'person':
-                from_match = f"(from:Person {{name: $person_name}})"
-                from_params = {"person_name": person_name}
-            else:
-                return  # Şimdilik sadece person'dan çıkan ilişkiler
-            
-            if to_node in created_entities:
-                to_parts = to_node.split(':', 1)
-                to_match = f"(to:Entity {{type: $to_type, name: $to_name}})"
-                to_params = {"to_type": to_parts[0], "to_name": to_parts[1]}
-            else:
-                return  # Target entity bulunamazsa skip
-            
+            # Dynamic relationship oluşturma query'si
             create_relationship_query = f"""
-                MATCH {from_match}
-                MATCH {to_match}
-                MERGE (from)-[r:{rel_type}]->(to)
-                ON CREATE SET
-                    r.createdAt = datetime(),
-                    r.source_file = $file_name,
-                    r.hybrid_approach = true
-                ON MATCH SET
-                    r.updatedAt = datetime()
-                
-                // Dynamic attribute setting
-                SET r += $rel_attributes
-                
-                RETURN count(r) as relationships_created
+                MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy {{id: $policy_id}})
+                WITH c, p
+                CALL apoc.create.relationship(c, $relationship_type, $properties, p) YIELD rel
+                RETURN type(rel) as relationship_created, properties(rel) as rel_properties
             """
-
-            params = {**from_params, **to_params, "file_name": file_name, "rel_attributes": rel_attributes}
             
-            result = self.graph.query(create_relationship_query, params, 
-                                    session_params={"database": self.graph._database})
-
-            if result and result[0]['relationships_created'] > 0:
-                logging.info(f"✅ Hibrit relationship oluşturuldu: {person_name} -{rel_type}-> {to_node}")
-
-        except Exception as e:
-            logging.error(f"Hibrit relationship oluşturma hatası: {e}")
-
-    def _create_person_attribute_relationship(self, person_name: str, attribute: dict):
-        """Person için HAS_ATTRIBUTE relationship'i oluşturur"""
-        try:
-            attr_type = attribute.get('type', 'unknown')
-            attr_key = attribute.get('key', 'unknown')
-            attr_value = attribute.get('value', '')
+            result = self.execute_query(create_relationship_query, {
+                "policy_id": policy_id,
+                "relationship_type": relationship_type,
+                "properties": filtered_properties
+            })
             
-            create_attr_query = """
-                MATCH (p:Person {name: $person_name})
-                MERGE (p)-[r:HAS_ATTRIBUTE {type: $attr_type, key: $attr_key}]->(a:Attribute {value: $attr_value})
-                ON CREATE SET
-                    a.createdAt = datetime(),
-                    a.attribute_category = $attr_type,
-                    a.source = 'cv_extraction',
-                    r.createdAt = datetime()
-                RETURN count(r) as attr_created
-            """
-
-            result = self.graph.query(create_attr_query, {
-                "person_name": person_name,
-                "attr_type": attr_type,
-                "attr_key": attr_key,
-                "attr_value": attr_value
-            }, session_params={"database": self.graph._database})
-
+            if result:
+                logging.info(f"✅ Policy relationship oluşturuldu: {relationship_type}")
+                if filtered_properties:
+                    logging.info(f"   Properties: {list(filtered_properties.keys())}")
+            
         except Exception as e:
-            logging.error(f"Person attribute relationship hatası: {e}")
+            logging.error(f"Policy relationship oluşturma hatası: {e}")
 
-    def _link_person_to_document(self, person_name: str, file_name: str):
-        """Person ile Document arasında HAS_CV ilişkisi oluşturur"""
+    def create_endorsement_entity(self, entities_data: dict, file_name: str, document_type: str = 'ENDORSEMENT'):
+        """
+        Zeyilname/İptal/Yenileme belgesinden Endorsement node'u ve ilgili entity'leri oluşturur.
+        
+        Ana poliçeyi bularak zeyilname zincirinin sonuna ekler.
+        Policy node gibi aynı entity'leri çıkartır (Premium, Coverage, Clause, vb.)
+        
+        Args:
+            entities_data: LLM'den çıkartılan varlık bilgileri
+            file_name: Belge adı
+            document_type: ENDORSEMENT, CANCELLATION, RENEWAL
+        """
         try:
-            link_query = """
-                MATCH (p:Person {name: $person_name})
+            if not entities_data:
+                logging.warning(f"Boş endorsement verisi: {file_name}")
+                return
+            
+            # Endorsement node'u oluştur
+            policy_data = entities_data.get('policy', {})
+            endorsement_id = f"endorsement_{normalize_file_name(file_name).replace('.', '_')}"
+            
+            # Endorsement ismini çıkart (document_type'tan)
+            endorsement_name_map = {
+                'ENDORSEMENT': 'Zeyilname',
+                'CANCELLATION': 'İptal Zeyilnesi',
+                'RENEWAL': 'Yenileme'
+            }
+            endorsement_name = endorsement_name_map.get(document_type, 'Zeyilname')
+            
+            # 1. Endorsement Node'u oluştur
+            self._create_endorsement_node(endorsement_id, endorsement_name, document_type, policy_data, file_name)
+            
+            # 2. Premium Node'u oluştur
+            premium_data = entities_data.get('premium', {})
+            if premium_data.get('amount') is not None:
+                self._create_premium_node(premium_data, endorsement_id)
+            
+            # 3. Coverage Node'u oluştur
+            coverage_data = entities_data.get('coverage', {})
+            if coverage_data:
+                self._create_coverage_node(coverage_data, endorsement_id)
+            
+            # 4. CoverageType Node'larını oluştur
+            coverage_types = entities_data.get('coverage_types', [])
+            if coverage_types:
+                self._create_coverage_type_nodes_for_endorsement(coverage_types, endorsement_id)
+            
+            # 5. Guarantee Node'larını oluştur
+            guarantees = entities_data.get('guarantees', [])
+            if guarantees:
+                self._create_guarantee_nodes(guarantees, endorsement_id)
+            
+            # 6. Clause Node'larını oluştur
+            clauses = entities_data.get('clauses', [])
+            if clauses:
+                self._create_clause_nodes(clauses, endorsement_id)
+            
+            # 7. Date Node'larını oluştur (zeyilname tarihleri)
+            dates_data = entities_data.get('dates', {})
+            if dates_data:
+                self._create_date_nodes_for_endorsement(dates_data, endorsement_id)
+            
+            # 8. Payment Node'u oluştur
+            payment_data = entities_data.get('payment', {})
+            if payment_data.get('amount') is not None:
+                self._create_payment_node(payment_data, endorsement_id)
+            
+            # 9. Address Node'u oluştur
+            address_data = entities_data.get('address', {})
+            if address_data.get('address') or address_data.get('city'):
+                self._create_risk_address_node(address_data, endorsement_id)
+            
+            # 10. Ana poliçeye bağla (3-aşamalı strateji ile: policy_number → renewal_number → customer+policy_type)
+            
+            # Debug: LLM'den gelen policy_data'yı logla
+            logging.debug(f"🔍 LLM Policy Data: {policy_data}")
+            logging.debug(f"🔍 Full entities_data keys: {list(entities_data.keys())}")
+            
+            policy_info = {
+                'policy_number': policy_data.get('policyNumber', ''),
+                'renewal_number': policy_data.get('renewalNumber', ''),
+                'customer_name': policy_data.get('customer_name', ''),
+                'policy_type': policy_data.get('policy_type', ''),
+                'year': policy_data.get('year', '')
+            }
+            
+            # Eğer customer_name veya policy_type boşsa, file name'den parse etmeyi dene
+            if not policy_info['customer_name'] or not policy_info['policy_type']:
+                logging.info(f"🔄 LLM'den eksik bilgi, file name'den parse edilecek: {file_name}")
+                parsed_info = self._parse_info_from_filename(file_name)
+                
+                if not policy_info['customer_name'] and parsed_info.get('customer_name'):
+                    policy_info['customer_name'] = parsed_info['customer_name']
+                    logging.info(f"📝 Customer name file name'den alındı: {parsed_info['customer_name']}")
+                    
+                if not policy_info['policy_type'] and parsed_info.get('policy_type'):
+                    policy_info['policy_type'] = parsed_info['policy_type']
+                    logging.info(f"📝 Policy type file name'den alındı: {parsed_info['policy_type']}")
+            
+            logging.debug(f"🔍 Final policy_info: {policy_info}")
+            
+            # Gelişmiş 3-aşamalı policy eşleştirmeyi kullan
+            match_result = self._link_endorsement_to_main_policy(file_name, policy_info)
+            if match_result.get('success', False):
+                logging.info(f"✅ Ana poliçe eşleştirmesi başarılı: {file_name}")
+                
+                # Kronolojik zinciri kur (FIRST_ENDORSEMENT/NEXT_ENDORSEMENT) - bulunan policy bilgilerini kullan
+                found_policy_number = match_result.get('policy_number', '')
+                found_policy_id = match_result.get('policy_id', '')
+                
+                if found_policy_id:
+                    logging.info(f"🔗 Kronolojik endorsement zinciri kuruluyor: {endorsement_id} -> Policy ID: {found_policy_id}")
+                    self._link_endorsement_to_policy_chain(endorsement_id, found_policy_id, file_name)
+                    logging.info(f"✅ Endorsement kronolojik zincire eklendi: {file_name}")
+                else:
+                    logging.warning(f"⚠️ Bulunan policy ID eksik, kronolojik zincir kurulamadı: {file_name}")
+                    logging.warning(f"   Found policy_id: {found_policy_id}")
+            else:
+                logging.warning(f"⚠️ Ana poliçe bulunamadı, endorsement bağımsız kalacak: {file_name}")
+            
+            logging.info(f"✅ Endorsement entity başarıyla oluşturuldu: {file_name}")
+            
+        except Exception as e:
+            logging.error(f"Endorsement entity oluşturma hatası: {e}")
+
+    def _parse_info_from_filename(self, file_name: str) -> dict:
+        """
+        File name'den customer_name, policy_type, year gibi bilgileri parse eder
+        Örnek: "Ayça Dinçkök 34EDG047 Kasko Aksesuar Zeyli_2021.pdf"
+        """
+        try:
+            # .pdf uzantısını kaldır
+            name_without_ext = file_name.replace('.pdf', '').replace('.PDF', '')
+            
+            # Policy type keywords
+            policy_type_keywords = {
+                'kasko': 'Kasko Sigortası',
+                'trafik': 'Trafik Sigortası', 
+                'dask': 'DASK',
+                'konut': 'Konut Sigortası',
+                'seyahat': 'Seyahat Sigortası',
+                'saglik': 'Sağlık Sigortası',
+                'sağlık': 'Sağlık Sigortası',
+                'hayat': 'Hayat Sigortası'
+            }
+            
+            parsed_info = {}
+            
+            # Policy type'ı tespit et
+            name_lower = name_without_ext.lower()
+            for keyword, full_name in policy_type_keywords.items():
+                if keyword in name_lower:
+                    parsed_info['policy_type'] = full_name
+                    break
+            
+            # Year'ı tespit et (4 basamaklı sayı)
+            import re
+            year_match = re.search(r'[_\s](\d{4})', name_without_ext)
+            if year_match:
+                parsed_info['year'] = year_match.group(1)
+            
+            # Customer name'i tespit et (ilk kelimeler genellikle isim)
+            # Format genellikle: "İsim Soyisim [PolicyNumber] [PolicyType] [Zeyilname/Zeyli] [Year]"
+            parts = name_without_ext.split()
+            if len(parts) >= 2:
+                # İlk 2 kelime genellikle isim soyisim
+                potential_customer = f"{parts[0]} {parts[1]}"
+                # Eğer policy number gibi görünmüyorsa customer name olarak al
+                if not re.match(r'^\d+[A-Z]*\d*$', potential_customer):
+                    parsed_info['customer_name'] = potential_customer
+            
+            logging.debug(f"🔍 File name parsing result: {parsed_info}")
+            return parsed_info
+            
+        except Exception as e:
+            logging.warning(f"⚠️ File name parsing hatası ({file_name}): {e}")
+            return {}
+
+    def _create_endorsement_node(self, endorsement_id: str, endorsement_name: str, document_type: str, policy_data: dict, file_name: str):
+        """Endorsement node'u oluşturur ve Document'a bağlar"""
+        try:
+            dates_data = policy_data.get('dates', {})
+            effective_date = dates_data.get('start_date', '') if isinstance(dates_data, dict) else ''
+            
+            query = """
+                MERGE (e:Endorsement {id: $endorsement_id})
+                ON CREATE SET 
+                    e.name = $name,
+                    e.document_type = $document_type,
+                    e.endorsement_type = $document_type,
+                    e.effective_date = $effective_date,
+                    e.extraction_method = 'LLM_comprehensive',
+                    e.createdAt = datetime()
+                ON MATCH SET 
+                    e.updatedAt = datetime()
+                WITH e
                 MATCH (d:Document {fileName: $file_name})
-                MERGE (p)-[r:HAS_CV]->(d)
+                MERGE (e)-[r:DOCUMENTED_IN]->(d)
                 SET r.created_at = datetime(),
-                    r.source = 'hybrid_cv_extraction',
-                    r.approach = 'domain_agnostic'
-                RETURN count(r) as links_created
+                    r.source = 'llm_extraction'
+                RETURN e.id as endorsement_id
             """
-
-            result = self.graph.query(link_query, {
-                "person_name": person_name,
+            
+            self.graph.query(query, {
+                "endorsement_id": endorsement_id,
+                "name": endorsement_name,
+                "document_type": document_type,
+                "effective_date": effective_date,
                 "file_name": file_name
             }, session_params={"database": self.graph._database})
-
-            if result and result[0]['links_created'] > 0:
-                logging.info(f"✅ Person-Document HAS_CV ilişkisi oluşturuldu: {person_name} -> {file_name}")
-
+            
+            logging.info(f"✅ Endorsement node oluşturuldu: {endorsement_id}")
+            
         except Exception as e:
-            logging.error(f"Person-Document link hatası: {e}")
+            logging.error(f"Endorsement node oluşturma hatası: {e}")
+
+    def _get_endorsement_start_date(self, endorsement_id: str) -> str:
+        """
+        Endorsement'ın HAS_START_DATE ile bağlı Date node'unun değerini alır
+        """
+        try:
+            query = """
+                MATCH (e:Endorsement {id: $endorsement_id})-[:HAS_START_DATE]->(d:Date)
+                RETURN d.value as date_value
+            """
+            
+            result = self.graph.query(query, {
+                "endorsement_id": endorsement_id
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                return result[0]['date_value']
+            else:
+                logging.warning(f"⚠️ Endorsement için start_date bulunamadı: {endorsement_id}")
+                return ""
+                
+        except Exception as e:
+            logging.error(f"Endorsement date alma hatası: {e}")
+            return ""
+
+    def _get_policy_endorsements_with_dates(self, policy_id: str) -> list:
+        """
+        Policy'nin tüm endorsement'larını tarihleriyle birlikte döndürür (sıralı)
+        """
+        try:
+            query = """
+                MATCH (p:Policy {id: $policy_id})-[:FIRST_ENDORSEMENT*0..]->(e:Endorsement)
+                OPTIONAL MATCH (e)-[:HAS_START_DATE]->(d:Date)
+                RETURN e.id as endorsement_id, 
+                       d.value as start_date,
+                       d.year as year,
+                       d.month as month
+                ORDER BY CASE 
+                    WHEN d.value IS NOT NULL THEN d.value 
+                    ELSE '9999-12-31' 
+                END ASC
+            """
+            
+            result = self.graph.query(query, {
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            return result if result else []
+            
+        except Exception as e:
+            logging.error(f"Policy endorsement'ları alma hatası: {e}")
+            return []
+
+    def _clear_endorsement_chain(self, policy_id: str):
+        """
+        Mevcut tüm FIRST_ENDORSEMENT ve NEXT_ENDORSEMENT ilişkilerini temizler
+        """
+        try:
+            clear_query = """
+                MATCH (p:Policy {id: $policy_id})-[r:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT]-()
+                DELETE r
+            """
+            
+            self.graph.query(clear_query, {
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"🧹 Policy endorsement zinciri temizlendi: {policy_id}")
+            
+        except Exception as e:
+            logging.error(f"Endorsement zinciri temizleme hatası: {e}")
+
+    def _rebuild_endorsement_chain_chronological(self, policy_id: str, endorsements_with_dates: list):
+        """
+        Endorsement'ları tarih sırasına göre yeni zincir kurar
+        """
+        try:
+            if not endorsements_with_dates:
+                return
+                
+            # İlk endorsement (en eski tarihli) - FIRST_ENDORSEMENT
+            first_endorsement = endorsements_with_dates[0]
+            first_query = """
+                MATCH (p:Policy {id: $policy_id})
+                MATCH (e:Endorsement {id: $endorsement_id})
+                MERGE (p)-[r:FIRST_ENDORSEMENT]->(e)
+                SET r.sequence = 0,
+                    r.created_at = datetime(),
+                    r.source = 'chronological_rebuild'
+                RETURN type(r) as rel_type
+            """
+            
+            self.graph.query(first_query, {
+                "policy_id": policy_id,
+                "endorsement_id": first_endorsement['endorsement_id']
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ FIRST_ENDORSEMENT (kronolojik): {policy_id} → {first_endorsement['endorsement_id']} ({first_endorsement.get('start_date', 'tarihsiz')})")
+            
+            # Sonraki endorsement'lar - NEXT_ENDORSEMENT zinciri
+            for i in range(1, len(endorsements_with_dates)):
+                prev_endorsement = endorsements_with_dates[i-1]
+                current_endorsement = endorsements_with_dates[i]
+                
+                next_query = """
+                    MATCH (prev:Endorsement {id: $prev_id})
+                    MATCH (curr:Endorsement {id: $curr_id})
+                    MERGE (prev)-[r:NEXT_ENDORSEMENT]->(curr)
+                    SET r.sequence = $sequence,
+                        r.created_at = datetime(),
+                        r.source = 'chronological_rebuild'
+                    RETURN type(r) as rel_type
+                """
+                
+                self.graph.query(next_query, {
+                    "prev_id": prev_endorsement['endorsement_id'],
+                    "curr_id": current_endorsement['endorsement_id'],
+                    "sequence": i
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ NEXT_ENDORSEMENT (kronolojik): {prev_endorsement['endorsement_id']} → {current_endorsement['endorsement_id']} ({current_endorsement.get('start_date', 'tarihsiz')})")
+            
+        except Exception as e:
+            logging.error(f"Kronolojik zincir kurma hatası: {e}")
+
+    def _link_endorsement_to_policy_chain(self, endorsement_id: str, policy_id: str, file_name: str):
+        """
+        Endorsement'ı ana poliçeye tarih sırasına göre kronolojik olarak bağlar.
+        FIRST_ENDORSEMENT veya NEXT_ENDORSEMENT zincirini oluşturur.
+        
+        Args:
+            endorsement_id: Endorsement node'unun ID'si
+            policy_id: Ana Policy node'unun ID'si (artık policy_number değil)
+            file_name: Dosya adı (log için)
+        """
+        try:
+            # Policy_id doğrudan kullanılır (artık arama yapmaya gerek yok)
+            logging.info(f"🔗 Kronolojik zincir kurulacak - Policy ID: {policy_id}")
+            
+            # Policy'nin var olduğunu kontrol et
+            check_policy_query = """
+                MATCH (p:Policy {id: $policy_id})
+                RETURN p.id as policy_id, p.policyNumber as policy_number LIMIT 1
+            """
+            
+            result = self.graph.query(check_policy_query, {
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            if not result:
+                logging.warning(f"⚠️ Policy ID bulunamadı: {policy_id}")
+                return
+            
+            policy_number = result[0]['policy_number']
+            logging.info(f"✅ Ana poliçe doğrulandı - ID: {policy_id}, Number: {policy_number}")
+            
+            # Yeni endorsement'ın tarihini al
+            new_endorsement_date = self._get_endorsement_start_date(endorsement_id)
+            logging.info(f"📅 Yeni endorsement tarihi: {new_endorsement_date}")
+            
+            # Mevcut endorsement'ları tarihleriyle al
+            existing_endorsements = self._get_policy_endorsements_with_dates(policy_id)
+            
+            if not existing_endorsements:
+                # İlk endorsement: FIRST_ENDORSEMENT
+                link_query = """
+                    MATCH (p:Policy {id: $policy_id})
+                    MATCH (e:Endorsement {id: $endorsement_id})
+                    MERGE (p)-[r:FIRST_ENDORSEMENT]->(e)
+                    SET r.sequence = 0,
+                        r.created_at = datetime(),
+                        r.source = 'chronological_first'
+                    RETURN type(r) as rel_type
+                """
+                
+                self.graph.query(link_query, {
+                    "policy_id": policy_id,
+                    "endorsement_id": endorsement_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ FIRST_ENDORSEMENT (ilk) oluşturuldu: {policy_id} → {endorsement_id}")
+            else:
+                # Mevcut endorsement'lar var - kronolojik yeniden düzenleme
+                logging.info(f"🔄 Mevcut {len(existing_endorsements)} endorsement var, kronolojik yeniden düzenleme başlıyor...")
+                
+                # Yeni endorsement'ı listeye ekle
+                all_endorsements = existing_endorsements + [{
+                    'endorsement_id': endorsement_id,
+                    'start_date': new_endorsement_date,
+                    'year': new_endorsement_date[:4] if new_endorsement_date else None,
+                    'month': new_endorsement_date[5:7] if len(new_endorsement_date) >= 7 else None
+                }]
+                
+                # Tarihe göre sırala
+                def sort_key(item):
+                    date_str = item.get('start_date', '')
+                    if not date_str:
+                        return '9999-12-31'  # Tarihsiz olanlar en sona
+                    return date_str
+                
+                all_endorsements_sorted = sorted(all_endorsements, key=sort_key)
+                
+                # Log ile sıralamayı göster
+                logging.info("📊 Kronolojik sıralama:")
+                for i, end in enumerate(all_endorsements_sorted):
+                    logging.info(f"  {i+1}. {end['endorsement_id']} → {end.get('start_date', 'tarihsiz')}")
+                
+                # Mevcut zinciri temizle
+                self._clear_endorsement_chain(policy_id)
+                
+                # Yeni kronolojik zinciri kur
+                self._rebuild_endorsement_chain_chronological(policy_id, all_endorsements_sorted)
+                
+                logging.info(f"✅ Kronolojik endorsement zinciri yeniden oluşturuldu: {len(all_endorsements_sorted)} endorsement")
+                
+            logging.info(f"✅ Kronolojik endorsement bağlantısı tamamlandı: {endorsement_id}")
+        
+        except Exception as e:
+            logging.error(f"Kronolojik endorsement zincirlemesi hatası: {e}")
+
+    def _create_coverage_type_nodes_for_endorsement(self, coverage_types: list, endorsement_id: str):
+        """CoverageType node'larını Endorsement'a bağlar"""
+        try:
+            for coverage_type in coverage_types:
+                name = coverage_type.get('name', '').strip()
+                if not name:
+                    continue
+                
+                normalized_name = normalize_unicode_text(name)
+                query = """
+                    MERGE (ct:CoverageType {name: $name})
+                    ON CREATE SET 
+                        ct.createdAt = datetime()
+                    ON MATCH SET 
+                        ct.updatedAt = datetime()
+                    WITH ct
+                    MATCH (e:Endorsement {id: $endorsement_id})
+                    MERGE (ct)-[r:APPLIED_TO]->(e)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN ct.name as type_name
+                """
+                
+                self.graph.query(query, {
+                    "name": normalized_name,
+                    "endorsement_id": endorsement_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ CoverageType → Endorsement: {normalized_name}")
+        
+        except Exception as e:
+            logging.error(f"CoverageType nodes oluşturma hatası: {e}")
+
+    def _create_date_nodes_for_endorsement(self, dates_data: dict, endorsement_id: str):
+        """Endorsement'ın başlangıç ve bitiş tarihlerini oluşturur"""
+        try:
+            if not dates_data:
+                return
+            
+            # Başlangıç tarihi
+            start_date_value = dates_data.get('start_date')
+            if start_date_value is None:
+                start_date_value = ''
+            start_date = str(start_date_value).strip() if start_date_value else ''
+            if start_date:
+                start_date_id = f"date_start_{endorsement_id}"
+                query_start = """
+                    MERGE (d:Date {id: $date_id})
+                    ON CREATE SET 
+                        d.value = $date_value,
+                        d.year = toInteger($year),
+                        d.month = toInteger($month),
+                        d.createdAt = datetime()
+                    ON MATCH SET 
+                        d.updatedAt = datetime(),
+                        d.value = $date_value
+                    WITH d
+                    MATCH (e:Endorsement {id: $endorsement_id})
+                    MERGE (e)-[r:HAS_START_DATE]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN d.id as date_id
+                """
+                
+                try:
+                    from datetime import datetime as dt
+                    parsed_date = dt.strptime(start_date, '%Y-%m-%d')
+                    year = str(parsed_date.year)
+                    month = str(parsed_date.month)
+                except:
+                    year = start_date[:4] if len(start_date) >= 4 else '0'
+                    month = start_date[5:7] if len(start_date) >= 7 else '0'
+                
+                self.graph.query(query_start, {
+                    "date_id": start_date_id,
+                    "date_value": start_date,
+                    "year": year,
+                    "month": month,
+                    "endorsement_id": endorsement_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Endorsement Start Date: {start_date}")
+            
+            # Bitiş tarihi
+            end_date_value = dates_data.get('end_date')
+            if end_date_value is None:
+                end_date_value = ''
+            end_date = str(end_date_value).strip() if end_date_value else ''
+            if end_date:
+                end_date_id = f"date_end_{endorsement_id}"
+                query_end = """
+                    MERGE (d:Date {id: $date_id})
+                    ON CREATE SET 
+                        d.value = $date_value,
+                        d.year = toInteger($year),
+                        d.month = toInteger($month),
+                        d.createdAt = datetime()
+                    ON MATCH SET 
+                        d.updatedAt = datetime(),
+                        d.value = $date_value
+                    WITH d
+                    MATCH (e:Endorsement {id: $endorsement_id})
+                    MERGE (e)-[r:HAS_END_DATE]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN d.id as date_id
+                """
+                
+                try:
+                    from datetime import datetime as dt
+                    parsed_date = dt.strptime(end_date, '%Y-%m-%d')
+                    year = str(parsed_date.year)
+                    month = str(parsed_date.month)
+                except:
+                    year = end_date[:4] if len(end_date) >= 4 else '0'
+                    month = end_date[5:7] if len(end_date) >= 7 else '0'
+                
+                self.graph.query(query_end, {
+                    "date_id": end_date_id,
+                    "date_value": end_date,
+                    "year": year,
+                    "month": month,
+                    "endorsement_id": endorsement_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Endorsement End Date: {end_date}")
+            
+        except Exception as e:
+            logging.error(f"Endorsement date nodes oluşturma hatası: {e}")
+
+    def _create_policy_node_comprehensive(self, policy_id: str, policy_data: dict, file_name: str):
+        """Policy node'u kapsamlı bilgilerle oluşturur ve Document'a bağlar"""
+        try:
+            query = """
+                MERGE (p:Policy {id: $policy_id})
+                ON CREATE SET 
+                    p.policyNumber = $policy_number,
+                    p.currency = $currency,
+                    p.status = $status,
+                    p.type = $policy_type,
+                    p.source_file = $file_name,
+                    p.extraction_method = 'LLM_comprehensive',
+                    p.createdAt = datetime()
+                ON MATCH SET 
+                    p.updatedAt = datetime(),
+                    p.source_file = $file_name,
+                    p.currency = $currency,
+                    p.status = $status,
+                    p.type = $policy_type
+                WITH p
+                MATCH (d:Document {fileName: $file_name})
+                MERGE (p)-[r:DOCUMENTED_IN]->(d)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN p.id as policy_id
+            """
+            
+            self.graph.query(query, {
+                "policy_id": policy_id,
+                "policy_number": policy_data.get('policyNumber', ''),
+                "currency": policy_data.get('currency', 'TRY'),
+                "status": policy_data.get('status', 'Aktif'),
+                "policy_type": policy_data.get('type', 'Sigorta Poliçesi'),
+                "file_name": file_name
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ Policy node oluşturuldu ve Document'a bağlandı: {policy_id}")
+            
+        except Exception as e:
+            logging.error(f"Policy node oluşturma hatası: {e}")
+
+    def _create_customer_node_comprehensive(self, customer_data: dict, policy_id: str, file_name: str):
+        """Customer node'u oluşturur ve Policy ile ilişkilendirir (Document ilişkisi yok)"""
+        try:
+            customer_name = customer_data.get('name', '').strip()
+            if not customer_name:
+                return
+                
+            # Entity resolution kontrolü
+            new_entity = {
+                'id': customer_name,
+                'name': customer_name,
+                'entity_type': 'Customer'
+            }
+            
+            existing_entity_id = resolve_entity_before_creation(new_entity, self.graph, "Customer")
+            if existing_entity_id:
+                logging.info(f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}")
+                # Mevcut entity ile Policy'yi ilişkilendir
+                link_query = """
+                    MATCH (c) WHERE elementId(c) = $entity_id
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (c)-[r:HAS_POLICY]->(p)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    SET c.updatedAt = datetime()
+                    RETURN c.name as customer_name
+                """
+                self.graph.query(link_query, {
+                    "entity_id": existing_entity_id,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                return
+            
+            query = """
+                MERGE (c:Customer {name: $customer_name})
+                ON CREATE SET 
+                    c.type = $customer_type,
+                    c.responsible_person = $responsible_person,
+                    c.createdAt = datetime()
+                ON MATCH SET 
+                    c.updatedAt = datetime(),
+                    c.type = $customer_type,
+                    c.responsible_person = $responsible_person
+                WITH c
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (c)-[r:HAS_POLICY]->(p)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN c.name as customer_name
+            """
+            
+            self.graph.query(query, {
+                "customer_name": customer_name,
+                "customer_type": customer_data.get('type', 'Individual'),
+                "responsible_person": customer_data.get('responsible_person', ''),
+                "policy_id": policy_id,
+                "file_name": file_name
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ Customer node oluşturuldu (Policy'ye bağlı): {customer_name}")
+            
+        except Exception as e:
+            logging.error(f"Customer node oluşturma hatası: {e}")
+
+    def _create_insurance_company_node(self, company_data: dict, policy_id: str):
+        """InsuranceCompany node'u oluşturur ve Policy ile ilişkilendirir - case insensitive normalization ile"""
+        try:
+            company_name = company_data.get('name', '').strip()
+            if not company_name:
+                return
+            
+            # Case insensitive InsuranceCompany node oluşturma - Customer'daki gibi
+            query = """
+                // Önce normalize edilmiş isimle eşleşen company ara
+                OPTIONAL MATCH (existing:InsuranceCompany)
+                WHERE apoc.text.clean(existing.name) = apoc.text.clean($company_name)
+                
+                WITH existing, 
+                     CASE WHEN existing IS NULL THEN $company_name ELSE existing.name END as final_name
+                
+                MERGE (ic:InsuranceCompany {name: final_name})
+                ON CREATE SET 
+                    ic.responsible_person = $responsible_person,
+                    ic.createdAt = datetime(),
+                    ic.fullName = final_name,
+                    ic.normalizedName = apoc.text.clean($company_name)
+                ON MATCH SET 
+                    ic.updatedAt = datetime(),
+                    ic.responsible_person = $responsible_person,
+                    ic.normalizedName = apoc.text.clean($company_name)
+                WITH ic
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (p)-[r:ISSUED_BY]->(ic)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN ic.name as company_name
+            """
+            
+            result = self.graph.query(query, {
+                "company_name": company_name,
+                "responsible_person": company_data.get('responsible_person', ''),
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            if result:
+                final_company_name = result[0]['company_name']
+                logging.info(f"✅ InsuranceCompany node oluşturuldu/güncellendi: {final_company_name}")
+            
+        except Exception as e:
+            logging.error(f"InsuranceCompany node oluşturma hatası: {e}")
+
+    def _create_date_nodes_for_policy(self, dates_data: dict, policy_id: str):
+        """Policy başlangıç ve bitiş tarihlerini oluşturur"""
+        try:
+            if not dates_data:
+                return
+            
+            # Başlangıç tarihi
+            start_date_value = dates_data.get('start_date')
+            if start_date_value is None:
+                start_date_value = ''
+            start_date = str(start_date_value).strip() if start_date_value else ''
+            if start_date:
+                start_date_id = f"date_start_{policy_id}"
+                query_start = """
+                    MERGE (d:Date {id: $date_id})
+                    ON CREATE SET 
+                        d.value = $date_value,
+                        d.year = toInteger($year),
+                        d.month = toInteger($month),
+                        d.createdAt = datetime()
+                    ON MATCH SET 
+                        d.updatedAt = datetime(),
+                        d.value = $date_value
+                    WITH d
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (p)-[r:HAS_START_DATE]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN d.id as date_id
+                """
+                
+                try:
+                    from datetime import datetime as dt
+                    parsed_date = dt.strptime(start_date, '%Y-%m-%d')
+                    year = str(parsed_date.year)
+                    month = str(parsed_date.month)
+                except:
+                    year = start_date[:4] if len(start_date) >= 4 else '0'
+                    month = start_date[5:7] if len(start_date) >= 7 else '0'
+                
+                self.graph.query(query_start, {
+                    "date_id": start_date_id,
+                    "date_value": start_date,
+                    "year": year,
+                    "month": month,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Start Date node oluşturuldu: {start_date}")
+            
+            # Bitiş tarihi
+            end_date_value = dates_data.get('end_date')
+            if end_date_value is None:
+                end_date_value = ''
+            end_date = str(end_date_value).strip() if end_date_value else ''
+            if end_date:
+                end_date_id = f"date_end_{policy_id}"
+                query_end = """
+                    MERGE (d:Date {id: $date_id})
+                    ON CREATE SET 
+                        d.value = $date_value,
+                        d.year = toInteger($year),
+                        d.month = toInteger($month),
+                        d.createdAt = datetime()
+                    ON MATCH SET 
+                        d.updatedAt = datetime(),
+                        d.value = $date_value
+                    WITH d
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (p)-[r:HAS_END_DATE]->(d)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN d.id as date_id
+                """
+                
+                try:
+                    from datetime import datetime as dt
+                    parsed_date = dt.strptime(end_date, '%Y-%m-%d')
+                    year = str(parsed_date.year)
+                    month = str(parsed_date.month)
+                except:
+                    year = end_date[:4] if len(end_date) >= 4 else '0'
+                    month = end_date[5:7] if len(end_date) >= 7 else '0'
+                
+                self.graph.query(query_end, {
+                    "date_id": end_date_id,
+                    "date_value": end_date,
+                    "year": year,
+                    "month": month,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ End Date node oluşturuldu: {end_date}")
+            
+        except Exception as e:
+            logging.error(f"Date nodes oluşturma hatası: {e}")
+
+    def _create_premium_node(self, premium_data: dict, policy_id: str):
+        """Premium node'u oluşturur"""
+        try:
+            amount = premium_data.get('amount')
+            if amount is None:
+                return
+            
+            premium_id = f"premium_{policy_id}"
+            query = """
+                MERGE (pr:Premium {id: $premium_id})
+                ON CREATE SET 
+                    pr.amount = $amount,
+                    pr.currency = $currency,
+                    pr.commissionRate = $commission_rate,
+                    pr.createdAt = datetime()
+                ON MATCH SET 
+                    pr.updatedAt = datetime(),
+                    pr.amount = $amount,
+                    pr.currency = $currency,
+                    pr.commissionRate = $commission_rate
+                WITH pr
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (p)-[r:HAS_PREMIUM]->(pr)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN pr.id as premium_id
+            """
+            
+            self.graph.query(query, {
+                "premium_id": premium_id,
+                "amount": float(amount) if amount else 0,
+                "currency": premium_data.get('currency', 'TRY'),
+                "commission_rate": float(premium_data.get('commission_rate', 0)) if premium_data.get('commission_rate') else 0,
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ Premium node oluşturuldu: {premium_id}")
+            
+        except Exception as e:
+            logging.error(f"Premium node oluşturma hatası: {e}")
+
+    def _create_coverage_node(self, coverage_data: dict, policy_id: str):
+        """Coverage node'u oluşturur"""
+        try:
+            if not coverage_data:
+                return
+            
+            coverage_id = f"coverage_{policy_id}"
+            query = """
+                MERGE (cv:Coverage {id: $coverage_id})
+                ON CREATE SET 
+                    cv.limit_value = $limit_value,
+                    cv.limit_unit = $limit_unit,
+                    cv.limit_count = $limit_count,
+                    cv.scope = $scope,
+                    cv.createdAt = datetime()
+                ON MATCH SET 
+                    cv.updatedAt = datetime(),
+                    cv.limit_value = $limit_value,
+                    cv.limit_unit = $limit_unit,
+                    cv.limit_count = $limit_count,
+                    cv.scope = $scope
+                WITH cv
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (p)-[r:HAS_COVERAGE]->(cv)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN cv.id as coverage_id
+            """
+            
+            limit_value = coverage_data.get('limit_value')
+            limit_count = coverage_data.get('limit_count')
+            
+            self.graph.query(query, {
+                "coverage_id": coverage_id,
+                "limit_value": float(limit_value) if limit_value is not None else 0,
+                "limit_unit": coverage_data.get('limit_unit', 'TL'),
+                "limit_count": int(limit_count) if limit_count is not None else 0,
+                "scope": coverage_data.get('scope', 'Türkiye'),
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ Coverage node oluşturuldu: {coverage_id}")
+            
+        except Exception as e:
+            logging.error(f"Coverage node oluşturma hatası: {e}")
+
+    def _create_coverage_type_nodes(self, coverage_types: list, policy_id: str):
+        """CoverageType node'larını oluşturur"""
+        try:
+            for coverage_type in coverage_types:
+                name = coverage_type.get('name', '').strip()
+                if not name:
+                    continue
+                
+                # Normalize name for ID
+                normalized_name = normalize_unicode_text(name)
+                query = """
+                    MERGE (ct:CoverageType {name: $name})
+                    ON CREATE SET 
+                        ct.createdAt = datetime()
+                    ON MATCH SET 
+                        ct.updatedAt = datetime()
+                    WITH ct
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (ct)-[r:APPLIED_TO]->(p)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN ct.name as type_name
+                """
+                
+                self.graph.query(query, {
+                    "name": normalized_name,
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ CoverageType node oluşturuldu: {normalized_name}")
+        
+        except Exception as e:
+            logging.error(f"CoverageType nodes oluşturma hatası: {e}")
+
+    def _create_guarantee_nodes(self, guarantees: list, policy_id: str):
+        """Guarantee node'larını oluşturur"""
+        try:
+            for guarantee in guarantees:
+                name = guarantee.get('name', '').strip()
+                if not name:
+                    continue
+                
+                normalized_name = normalize_unicode_text(name)
+                guarantee_id = f"guarantee_{policy_id}_{normalized_name.replace(' ', '_')}"
+                
+                query = """
+                    MERGE (gua:Guarantee {id: $guarantee_id})
+                    ON CREATE SET 
+                        gua.name = $name,
+                        gua.value = $value,
+                        gua.createdAt = datetime()
+                    ON MATCH SET 
+                        gua.updatedAt = datetime(),
+                        gua.name = $name,
+                        gua.value = $value
+                    WITH gua
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (p)-[r:HAS_GUARANTEE]->(gua)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN gua.id as guarantee_id
+                """
+                
+                self.graph.query(query, {
+                    "guarantee_id": guarantee_id,
+                    "name": normalized_name,
+                    "value": guarantee.get('value', ''),
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Guarantee node oluşturuldu: {normalized_name}")
+        
+        except Exception as e:
+            logging.error(f"Guarantee nodes oluşturma hatası: {e}")
+
+    def _create_clause_nodes(self, clauses: list, policy_id: str):
+        """Clause node'larını oluşturur"""
+        try:
+            for clause in clauses:
+                name = clause.get('name', '').strip()
+                if not name:
+                    continue
+                
+                normalized_name = normalize_unicode_text(name)
+                clause_id = f"clause_{policy_id}_{normalized_name.replace(' ', '_')}"
+                
+                query = """
+                    MERGE (cl:Clause {id: $clause_id})
+                    ON CREATE SET 
+                        cl.name = $name,
+                        cl.text = $text,
+                        cl.createdAt = datetime()
+                    ON MATCH SET 
+                        cl.updatedAt = datetime(),
+                        cl.name = $name,
+                        cl.text = $text
+                    WITH cl
+                    MATCH (p:Policy {id: $policy_id})
+                    MERGE (p)-[r:HAS_CLAUSE]->(cl)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    RETURN cl.id as clause_id
+                """
+                
+                self.graph.query(query, {
+                    "clause_id": clause_id,
+                    "name": normalized_name,
+                    "text": clause.get('text', ''),
+                    "policy_id": policy_id
+                }, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Clause node oluşturuldu: {normalized_name}")
+        
+        except Exception as e:
+            logging.error(f"Clause nodes oluşturma hatası: {e}")
+
+    def _create_endorsement_nodes(self, endorsements: list, policy_id: str):
+        """
+        Endorsement node'larını zincir şeklinde oluşturur.
+        FIRST_ENDORSEMENT ile başlar, sonrası NEXT_ENDORSEMENT ile bağlanır.
+        """
+        try:
+            if not endorsements:
+                return
+            
+            previous_endorsement_id = None
+            
+            for index, endorsement in enumerate(endorsements):
+                name = endorsement.get('name', '').strip()
+                if not name:
+                    continue
+                
+                normalized_name = normalize_unicode_text(name)
+                # Index ekle ki aynı isimli zeyilnameler farklı ID alabilsin
+                endorsement_id = f"endorsement_{policy_id}_{index}_{normalized_name.replace(' ', '_')}"
+                
+                query = """
+                    MERGE (end:Endorsement {id: $endorsement_id})
+                    ON CREATE SET 
+                        end.name = $name,
+                        end.description = $description,
+                        end.sequence = $sequence,
+                        end.createdAt = datetime()
+                    ON MATCH SET 
+                        end.updatedAt = datetime(),
+                        end.name = $name,
+                        end.description = $description,
+                        end.sequence = $sequence
+                    WITH end
+                    MATCH (p:Policy {id: $policy_id})
+                    """
+                
+                # İlk zeyilname: FIRST_ENDORSEMENT ilişkisi
+                if index == 0:
+                    query += """
+                    MERGE (p)-[r:FIRST_ENDORSEMENT]->(end)
+                    SET r.created_at = datetime(),
+                        r.source = 'llm_extraction'
+                    """
+                # Diğer zeyilnameler: NEXT_ENDORSEMENT zinciri ile bağla
+                elif previous_endorsement_id:
+                    query += f"""
+                    MATCH (prev:Endorsement {{id: $prev_endorsement_id}})
+                    MERGE (prev)-[r_next:NEXT_ENDORSEMENT]->(end)
+                    SET r_next.created_at = datetime(),
+                        r_next.source = 'llm_extraction'
+                    RETURN end.id as endorsement_id
+                    """
+                else:
+                    query += """
+                    RETURN end.id as endorsement_id
+                    """
+                
+                params = {
+                    "endorsement_id": endorsement_id,
+                    "name": normalized_name,
+                    "description": endorsement.get('description', ''),
+                    "policy_id": policy_id,
+                    "sequence": index,
+                }
+                
+                # İlk zeyilname değilse, önceki zeyilname ID'sini ekle
+                if index > 0 and previous_endorsement_id:
+                    params["prev_endorsement_id"] = previous_endorsement_id
+                
+                self.graph.query(query, params, session_params={"database": self.graph._database})
+                
+                logging.info(f"✅ Endorsement #{index+1} node oluşturuldu: {normalized_name}")
+                
+                # Bu zeyilnameyi sonraki iterasyon için önceki olarak kaydet
+                previous_endorsement_id = endorsement_id
+        
+        except Exception as e:
+            logging.error(f"Endorsement nodes oluşturma hatası: {e}")
+
+    def _create_payment_node(self, payment_data: dict, policy_id: str):
+        """Payment node'u oluşturur"""
+        try:
+            amount = payment_data.get('amount')
+            if amount is None:
+                return
+            
+            payment_id = f"payment_{policy_id}"
+            query = """
+                MERGE (pay:Payment {id: $payment_id})
+                ON CREATE SET 
+                    pay.amount = $amount,
+                    pay.dueDate = $due_date,
+                    pay.method = $method,
+                    pay.createdAt = datetime()
+                ON MATCH SET 
+                    pay.updatedAt = datetime(),
+                    pay.amount = $amount,
+                    pay.dueDate = $due_date,
+                    pay.method = $method
+                WITH pay
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (p)-[r:HAS_PAYMENT]->(pay)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN pay.id as payment_id
+            """
+            
+            self.graph.query(query, {
+                "payment_id": payment_id,
+                "amount": float(amount) if amount else 0,
+                "due_date": payment_data.get('dueDate', ''),
+                "method": payment_data.get('method', ''),
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ Payment node oluşturuldu: {payment_id}")
+            
+        except Exception as e:
+            logging.error(f"Payment node oluşturma hatası: {e}")
+
+    def _create_risk_address_node(self, address_data: dict, policy_id: str):
+        """Risk Address node'u oluşturur"""
+        try:
+            address = address_data.get('address', '').strip()
+            city = address_data.get('city', '').strip()
+            
+            if not (address or city):
+                return
+            
+            address_id = f"address_{policy_id}"
+            query = """
+                MERGE (addr:RiskAddress {id: $address_id})
+                ON CREATE SET 
+                    addr.address = $address,
+                    addr.city = $city,
+                    addr.district = $district,
+                    addr.createdAt = datetime()
+                ON MATCH SET 
+                    addr.updatedAt = datetime(),
+                    addr.address = $address,
+                    addr.city = $city,
+                    addr.district = $district
+                WITH addr
+                MATCH (p:Policy {id: $policy_id})
+                MERGE (p)-[r:HAS_ADDRESS]->(addr)
+                SET r.created_at = datetime(),
+                    r.source = 'llm_extraction'
+                RETURN addr.id as address_id
+            """
+            
+            self.graph.query(query, {
+                "address_id": address_id,
+                "address": address,
+                "city": city,
+                "district": address_data.get('district', ''),
+                "policy_id": policy_id
+            }, session_params={"database": self.graph._database})
+            
+            logging.info(f"✅ RiskAddress node oluşturuldu: {address_id}")
+            
+        except Exception as e:
+            logging.error(f"RiskAddress node oluşturma hatası: {e}")
+
+    def _get_document_content_from_chunks(self, file_name: str) -> str:
+        """
+        Veritabanından belgenin tüm Chunk'larını alır ve birleştirir.
+        
+        Args:
+            file_name: Belge adı
+            
+        Returns:
+            str: Belgenin birleştirilmiş metni (ilk 10 Chunk ile sınırlı)
+        """
+        try:
+            query = """
+            MATCH (c:Chunk {fileName: $file_name})
+            RETURN c.text as text, c.position as position
+            ORDER BY c.position ASC
+            LIMIT 20
+            """
+            
+            results = self.graph.query(query, {
+                "file_name": file_name
+            }, session_params={"database": self.graph._database})
+            
+            if not results:
+                logging.warning(f"⚠️ {file_name} için Chunk bulunamadı")
+                return ""
+            
+            # Chunk'ları sırasıyla birleştir
+            document_content = "\n".join([record.get('text', '') for record in results if record.get('text')])
+            
+            logging.info(f"✅ Belge içeriği alındı ({len(results)} chunk, {len(document_content)} karakter)")
+            return document_content
+            
+            
+        except Exception as e:
+            logging.error(f"Chunk'lardan belge içeriği alma hatası ({file_name}): {e}")
+            return ""
+
+    def _create_policy_type_relationship(self, policy_id: str, relationship_type: str, policy_type: str = '', policy_details: dict = None, deductible_info: dict = None):
+        """
+        LLM'den gelen ilişki tipi ile Customer-Policy arasında dinamik ilişki kurar.
+        
+        Args:
+            policy_id: Policy node ID'si
+            relationship_type: LLM'den gelen ilişki tipi (örn: "IS_KASKO_POLICY")
+            policy_type: Policy türü (logging için)
+        
+        Bu sayede Agent LLM ile sorudan "kasko poliçesi" çıkartınca doğrudan
+        MATCH (c:Customer)-[:IS_KASKO_POLICY]->(p:Policy) yazabilir.
+        """
+        try:
+            if not relationship_type:
+                logging.warning(f"Boş relationship_type, atlanıyor: {policy_type}")
+                return
+            
+            # İlişki tipini temizle ve validate et
+            relationship_name = relationship_type.strip().upper()
+            
+            # Geçerli ilişki formatı kontrolü (IS_XXX_POLICY)
+            if not relationship_name.startswith('IS_') or not relationship_name.endswith('_POLICY'):
+                logging.warning(f"⚠️ Geçersiz ilişki formatı: '{relationship_name}'. IS_XXX_POLICY formatında olmalı.")
+                # Fallback: basit format oluştur
+                if policy_type:
+                    import re
+                    clean_type = re.sub(r'[^A-Z0-9_]', '_', policy_type.upper())
+                    relationship_name = f"IS_{clean_type}_POLICY"
+                else:
+                    return
+            
+            logging.info(f"🔗 LLM İlişki Tipi: '{relationship_type}' → '{relationship_name}'")
+            
+            # Customer-Policy arasında ilişki kurmak
+            # Cypher'da dinamik ilişki adı için inline string kullanırız (parameterize edilemez)
+            # Python f-string ile sorguyu oluşturuyoruz
+            
+            # Policy-specific details ve deductible bilgilerini prepare et
+            set_properties = []
+            query_params = {
+                "policy_id": policy_id,
+                "policy_type": policy_type,
+                "relationship_type": relationship_type
+            }
+            
+            # Temel properties
+            set_properties.extend([
+                "r.created_at = datetime()",
+                "r.policy_type = $policy_type",
+                "r.source = 'llm_extraction'", 
+                "r.llm_relationship_type = $relationship_type"
+            ])
+            
+            # Policy-specific details ekle
+            if policy_details:
+                for key, value in policy_details.items():
+                    if value is not None and value != "":
+                        param_name = f"detail_{key}"
+                        set_properties.append(f"r.{key} = ${param_name}")
+                        query_params[param_name] = value
+            
+            # Deductible info ekle
+            if deductible_info:
+                for key, value in deductible_info.items():
+                    if value is not None and value != "":
+                        param_name = f"deductible_{key}"
+                        set_properties.append(f"r.{key} = ${param_name}")
+                        query_params[param_name] = value
+            
+            set_clause = "SET " + ",\n                    ".join(set_properties)
+            
+            query = f"""
+                MATCH (p:Policy {{id: $policy_id}})
+                WITH p
+                MATCH (p)<-[:HAS_POLICY]-(c:Customer)
+                MERGE (c)-[r:{relationship_name}]->(p)
+                {set_clause}
+                RETURN r, type(r) as rel_type
+            """
+            
+            logging.debug(f"📝 Cypher Query: {query[:100]}...")
+            
+            result = self.graph.query(query, query_params, session_params={"database": self.graph._database})
+            
+            if result:
+                logging.info(f"✅ LLM Policy ilişkisi oluşturuldu: {relationship_name} ({policy_type})")
+            else:
+                logging.warning(f"⚠️ Sorgu sonuç döndürmedi: {relationship_name}")
+            
+        except Exception as e:
+            logging.error(f"LLM Policy ilişkisi oluşturma hatası ({relationship_type}): {e}")

@@ -169,7 +169,7 @@ dependencies = [
     "marshmallow==3.26.1",
     "matplotlib==3.10.3",
     "matplotlib-inline==0.1.7",
-    "mcp==1.15.0",
+    "mcp==1.18.0",
     "mdurl==0.1.2",
     "ml-collections==1.1.0",
     "more-itertools==10.7.0",

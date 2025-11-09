@@ -1726,6 +1726,15 @@ def upload_file(
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
         
+        # ✨ ÖNCE: Upload öncesi otomatik temizlik yap (dosya varsa temizle)
+        log_upload(f"🧹 Starting pre-upload cleanup check for: {normalized_filename}")
+        graphDb_data_Access = graphDBdataAccess(graph)
+        cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(normalized_filename)
+        if cleanup_result:
+            log_upload(f"✅ Pre-upload cleanup completed successfully")
+        else:
+            log_upload(f"ℹ️ No cleanup needed or cleanup skipped")
+        
         # Desteklenen belge formatları için hem text hem image extraction (tek seferde)
         merged_file_path = os.path.join(merged_dir, normalized_filename)
         doc_link = None
@@ -1960,36 +1969,8 @@ def upload_file(
                 logging.error(f"❌ Failed to create chunk nodes for {originalname}: {chunk_error}")
                 # Continue without chunk creation
         
-        # Source node'u veritabanına kaydet
-        graphDb_data_Access = graphDBdataAccess(graph)
-        # PDF text content'i CV extraction için geç (pages varsa)
-        text_content = None
-        if pages:
-            logging.info(f"🔍 Pages objesi var: {len(pages)} sayfa")
-            logging.info(f"🔍 İlk page objesi tipi: {type(pages[0])}")
-            logging.info(f"🔍 İlk page objesinin attributeleri: {dir(pages[0])}")
-            
-            # Docling'den gelen Document objelerinin text content'ini topla
-            # Docling Document objeleri page_content attribute'ına sahiptir
-            if hasattr(pages[0], 'page_content'):
-                text_content = "\n".join([page.page_content for page in pages if hasattr(page, 'page_content') and page.page_content])
-                logging.info(f"🔍 PDF text content extracted via page_content: {len(text_content)} karakter")
-            elif hasattr(pages[0], 'text'):
-                text_content = "\n".join([page.text for page in pages if hasattr(page, 'text') and page.text])
-                logging.info(f"🔍 PDF text content extracted via text: {len(text_content)} karakter")
-            else:
-                logging.warning(f"⚠️ Pages objelerinde text veya page_content attribute'u bulunamadı")
-        else:
-            logging.info(f"⚠️ pages None veya boş, text_content oluşturulamadı")
-        
-        # Debug: text_content kontrolü
-        if text_content:
-            logging.info(f"📝 create_source_node'a text_content gönderiliyor: {len(text_content)} karakter")
-        else:
-            logging.info(f"⚠️ create_source_node'a text_content=None gönderiliyor")
-            
-        # Cv extraction için text_content ekle    
-        graphDb_data_Access.create_source_node(obj_source_node, "cv", text_content=text_content)
+        # Source node'u veritabanına kaydet (temizlik zaten yapıldı)
+        graphDb_data_Access.create_source_node(obj_source_node)
         log_upload(f"Source node successfully created in database for: {originalname}")
         logging.info(f"📋 Source node created in database for: {originalname}")
         

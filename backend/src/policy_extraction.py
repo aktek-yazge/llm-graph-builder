@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Optional, Any
 from src.llm import get_llm
 from src.shared.common_fn import execute_graph_query
+from src.entity_resolver import resolve_entity_before_creation
 
 class PolicyExtractionService:
     """
@@ -477,12 +478,43 @@ CEVAP:
     
     async def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
         """Customer node'unu oluşturur"""
+        # Entity resolution kontrolü
+        new_entity = {
+            'id': customer_name,
+            'name': customer_name,
+            'entity_type': 'Customer'
+        }
+        
+        existing_entity_id = resolve_entity_before_creation(new_entity, self.graph, "Customer")
+        if existing_entity_id:
+            logging.info(f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}")
+            
+            # Mevcut entity ile ilişkileri oluştur
+            link_query = """
+            MATCH (c) WHERE elementId(c) = $entity_id
+            MATCH (p:Policy {id: $policy_id})
+            MATCH (d:Document {fileName: $file_name})
+            MERGE (c)-[:HAS_POLICY]->(p)
+            MERGE (c)-[:HAS_DOC]->(d)
+            SET c.updatedAt = datetime()
+            """
+            
+            execute_graph_query(self.graph, link_query, params={
+                "entity_id": existing_entity_id,
+                "policy_id": policy_id,
+                "file_name": file_name
+            })
+            return
+        
+        # Yeni Customer node oluştur
         query = """
         MERGE (c:Customer {name: $customer_name})
         ON CREATE SET 
             c.fullName = $customer_name,
             c.createdAt = datetime(),
             c.extractedFromContent = true
+        ON MATCH SET
+            c.updatedAt = datetime()
         WITH c
         MATCH (p:Policy {id: $policy_id})
         MATCH (d:Document {fileName: $file_name})
