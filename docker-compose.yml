@@ -8,7 +8,7 @@ services:
       - ./backend/.env
     container_name: backend-prod
     ports:
-      - '8000:8000'
+      - "8000:8000"
     environment:
       - PYTHONPATH=/code
       - ENV=production
@@ -29,7 +29,7 @@ services:
       - ./frontend/.env
     container_name: frontend-prod
     ports:
-      - '8080:8080' # Production port
+      - "8080:8080" # Production port
     networks:
       - llm-graph-builder_prod
     restart: unless-stopped
@@ -37,15 +37,15 @@ services:
     image: qdrant/qdrant:latest
     container_name: qdrant-service-prod
     ports:
-      - '6333:6333'
-      - '6334:6334'
+      - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_storage_prod:/qdrant/storage
     deploy:
       resources:
         limits:
           memory: 16g
-          cpus: '4'
+          cpus: "4"
     networks:
       - llm-graph-builder_prod
 
@@ -54,8 +54,8 @@ services:
     container_name: neo4j-service-prod
     restart: always
     ports:
-      - '7474:7474'
-      - '7687:7687'
+      - "7474:7474"
+      - "7687:7687"
     environment:
       - NEO4J_AUTH=neo4j/qwerty5555
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
@@ -73,11 +73,43 @@ services:
       resources:
         limits:
           memory: 16g
-          cpus: '4'
+          cpus: "4"
     volumes:
       - neo4j_data_prod:/data
       - neo4j_plugins_prod:/plugins
       - neo4j_import_prod:/var/lib/neo4j/import
+    networks:
+      - llm-graph-builder_prod
+
+  neo4j_2:
+    image: neo4j:2025.07.1
+    container_name: neo4j-service-prod-2
+    restart: always
+    ports:
+      - "7475:7474"
+      - "7688:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/qwerty5555
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_usage__report_enabled=false
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=2G
+      - NEO4J_server_memory_pagecache_size=1G
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+          cpus: "4"
+    volumes:
+      - neo4j_data_prod_2:/data
+      - neo4j_plugins_prod_2:/plugins
+      - neo4j_import_prod_2:/var/lib/neo4j/import
     networks:
       - llm-graph-builder_prod
 
@@ -90,4 +122,6 @@ volumes:
   neo4j_data_prod:
   neo4j_plugins_prod:
   neo4j_import_prod:
-
+  neo4j_data_prod_2:
+  neo4j_plugins_prod_2:
+  neo4j_import_prod_2:
