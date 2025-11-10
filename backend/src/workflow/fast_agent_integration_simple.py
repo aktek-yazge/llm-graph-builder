@@ -627,15 +627,20 @@ class FastAgentIntegration:
                     page_link, safe="", encoding="utf-8"
                 )
 
-                # Image URL'leri
+                # Image URL
                 image_url = f"{base_url}/images/{encoded_page_link}"
-                thumbnail_url = image_url  # Thumbnail için aynı URL kullanıyoruz (frontend'de resize edilebilir)
 
-                # Markdown format: [![alt text](thumbnail_url)](full_url)]
-                # Tıklanınca orijinal resim açılacak
-                markdown_section += (
-                    f"[![Sayfa Görseli: {page_link}]({thumbnail_url})]({image_url})\n\n"
-                )
+                # Sayfa bilgilerini parse et (dosya adından sayfa numarasını çıkar)
+                page_info = "Sayfa Görseli"
+                if "_page_" in page_link:
+                    try:
+                        page_num = page_link.split("_page_")[1].split(".")[0]
+                        page_info = f"Sayfa {page_num}"
+                    except:
+                        page_info = "Sayfa Görseli"
+
+                # Markdown format: ![alt text](url) - Teams uyumlu format (önceki sürümdeki gibi)
+                markdown_section += f"![{page_info}]({image_url})\n\n"
 
             except Exception as e:
                 logging.error(
