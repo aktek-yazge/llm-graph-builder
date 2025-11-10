@@ -5,10 +5,11 @@ import logging
 import importlib.util
 
 # Ensure UTF-8 encoding for Turkish characters
-if sys.stdout.encoding != 'utf-8':
+if sys.stdout.encoding != "utf-8":
     import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer)
 
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +20,10 @@ from src.main import *
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
-from src.qa_based_entity_extractor import QABasedEntityExtractor, create_domain_specific_questions
+from src.qa_based_entity_extractor import (
+    QABasedEntityExtractor,
+    create_domain_specific_questions,
+)
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
@@ -30,10 +34,19 @@ from langserve import add_routes
 from langchain_google_vertexai import ChatVertexAI
 from src.api_response import create_api_response
 from src.graphDB_dataAccess import graphDBdataAccess
-from src.graph_query import get_graph_results,get_chunktext_results,visualize_schema
+from src.graph_query import get_graph_results, get_chunktext_results, visualize_schema
 from src.chunkid_entities import get_entities_from_chunkids
-from src.post_processing import create_vector_fulltext_indexes, create_entity_embedding, graph_schema_consolidation
-from src.document_analytics import get_person_policy_analytics, get_company_analytics, get_document_relationship_stats, search_person_documents
+from src.post_processing import (
+    create_vector_fulltext_indexes,
+    create_entity_embedding,
+    graph_schema_consolidation,
+)
+from src.document_analytics import (
+    get_person_policy_analytics,
+    get_company_analytics,
+    get_document_relationship_stats,
+    search_person_documents,
+)
 from sse_starlette.sse import EventSourceResponse
 from src.communities import create_communities
 from src.neighbours import get_neighbour_nodes
@@ -49,10 +62,15 @@ from src.logger import CustomLogger
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
     from google import genai as genai_sdk
+
     GEMINI_AVAILABLE = True
 except ImportError:
     genai = None
-from src.device_utils import get_optimal_device, print_device_info, optimize_for_apple_silicon
+from src.device_utils import (
+    get_optimal_device,
+    print_device_info,
+    optimize_for_apple_silicon,
+)
 from datetime import datetime, timezone
 import time
 import gc
@@ -72,11 +90,12 @@ import json
 import logging
 import shutil
 
+
 # HTTP Request Logging Middleware for OpenTelemetry
 class HTTPLoggingMiddleware:
     def __init__(self, app: ASGIApp):
         self.app = app
-        self.logger = logging.getLogger('http_requests')
+        self.logger = logging.getLogger("http_requests")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
@@ -85,10 +104,10 @@ class HTTPLoggingMiddleware:
 
         request = Request(scope, receive)
         start_time = time.time()
-        
+
         # Store response info
         response_status = 200
-        
+
         async def send_wrapper(message):
             nonlocal response_status
             if message["type"] == "http.response.start":
@@ -96,36 +115,43 @@ class HTTPLoggingMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
-        
+
         # Calculate duration
         duration = time.time() - start_time
-        
+
         # Log HTTP request with structured data
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
         client_ip = scope.get("client", ["unknown", 0])[0]
-        
+
         # Create log message
         log_message = f"🌐 HTTP {method} {path} - {response_status} ({duration:.3f}s)"
-        
-        self.logger.info(log_message, extra={
-            'component': 'http_server',
-            'operation': 'http_request',
-            'method': method,
-            'path': path,
-            'status_code': response_status,
-            'duration_ms': round(duration * 1000, 2),
-            'client_ip': client_ip,
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.%3fZ', time.gmtime())
-        })
+
+        self.logger.info(
+            log_message,
+            extra={
+                "component": "http_server",
+                "operation": "http_request",
+                "method": method,
+                "path": path,
+                "status_code": response_status,
+                "duration_ms": round(duration * 1000, 2),
+                "client_ip": client_ip,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%3fZ", time.gmtime()),
+            },
+        )
+
+
 try:
     from docling.document_converter import DocumentConverter
+
     DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
-    
+
 from docling_core.types.doc import ImageRefMode, DocItemLabel
-from docling_core.types.doc.document import  DEFAULT_EXPORT_LABELS
+from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+
 load_dotenv(override=True)
 
 from pathlib import Path
@@ -144,109 +170,130 @@ _agent_cache: Dict[str, IntelligentAgent] = {}
 _cache_access_times: Dict[str, float] = {}  # LRU tracking için access time'ları
 
 # 📊 CACHE CONFIGURATION PARAMETERS
-AGENT_CACHE_MAX_SIZE = int(os.environ.get("AGENT_CACHE_MAX_SIZE", "500"))  # Max session sayısı
-AGENT_CACHE_CLEANUP_COUNT = int(os.environ.get("AGENT_CACHE_CLEANUP_COUNT", "50"))  # Temizleme sırasında silinecek session sayısı
+AGENT_CACHE_MAX_SIZE = int(
+    os.environ.get("AGENT_CACHE_MAX_SIZE", "500")
+)  # Max session sayısı
+AGENT_CACHE_CLEANUP_COUNT = int(
+    os.environ.get("AGENT_CACHE_CLEANUP_COUNT", "50")
+)  # Temizleme sırasında silinecek session sayısı
 
-def get_cached_agent(session_id: str, graph: Neo4jGraph, model_name: str) -> IntelligentAgent:
+
+def get_cached_agent(
+    session_id: str, graph: Neo4jGraph, model_name: str
+) -> IntelligentAgent:
     """
     Session ID'ye göre cache'lenmiş agent'ı döndür veya yeni oluştur
     LRU (Least Recently Used) cache mantığı ile memory management
     """
     import time
-    
+
     try:
         current_time = time.time()
-        
+
         # Önce cache'te var mı diye kontrol et
         if session_id in _agent_cache:
             cached_agent = _agent_cache[session_id]
-            
+
             # LRU için access time'ını güncelle
             _cache_access_times[session_id] = current_time
-            
+
             print(f"✅ Cached agent bulundu - Session: {session_id}")
-            
+
             # Graph instance'ını güncelle (bağlantı değişmiş olabilir)
             cached_agent.graph = graph
             cached_agent.current_session_id = session_id
-            
+
             return cached_agent
-        
+
         # Cache'te yok, yeni agent oluştur
         print(f"🆕 Yeni agent oluşturuluyor - Session: {session_id}")
         new_agent = IntelligentAgent(graph, model_name=model_name)
         new_agent.current_session_id = session_id
-        
+
         # Cache'e ekle
         _agent_cache[session_id] = new_agent
         _cache_access_times[session_id] = current_time
-        
+
         # LRU Cache boyutu kontrolü (global parametrelerle)
         if len(_agent_cache) > AGENT_CACHE_MAX_SIZE:
             # En az kullanılan session'ları bul (LRU mantığı)
             sorted_sessions = sorted(
-                _cache_access_times.items(), 
-                key=lambda x: x[1]  # access time'a göre sırala
+                _cache_access_times.items(),
+                key=lambda x: x[1],  # access time'a göre sırala
             )
-            
+
             # Konfigüre edilebilir sayıda session'ı sil
             sessions_to_remove = sorted_sessions[:AGENT_CACHE_CLEANUP_COUNT]
             removed_sessions = []
-            
+
             for session_to_remove, last_access in sessions_to_remove:
                 if session_to_remove in _agent_cache:
                     del _agent_cache[session_to_remove]
                     del _cache_access_times[session_to_remove]
                     removed_sessions.append(session_to_remove)
-            
-            print(f"🧹 LRU Cache temizlendi: {len(removed_sessions)} eski session silindi")
-            print(f"   Cache limit: {AGENT_CACHE_MAX_SIZE}, cleanup size: {AGENT_CACHE_CLEANUP_COUNT}")
-            print(f"   Silinen sessions: {removed_sessions[:5]}{'...' if len(removed_sessions) > 5 else ''}")
-        
-        print(f"✅ Agent cache'lendi - Session: {session_id} | Toplam cache: {len(_agent_cache)}")
+
+            print(
+                f"🧹 LRU Cache temizlendi: {len(removed_sessions)} eski session silindi"
+            )
+            print(
+                f"   Cache limit: {AGENT_CACHE_MAX_SIZE}, cleanup size: {AGENT_CACHE_CLEANUP_COUNT}"
+            )
+            print(
+                f"   Silinen sessions: {removed_sessions[:5]}{'...' if len(removed_sessions) > 5 else ''}"
+            )
+
+        print(
+            f"✅ Agent cache'lendi - Session: {session_id} | Toplam cache: {len(_agent_cache)}"
+        )
         return new_agent
-        
+
     except Exception as e:
         print(f"❌ Agent cache hatası - Session: {session_id} | Hata: {e}")
         # Fallback: cache'siz yeni agent
         return IntelligentAgent(graph, model_name=model_name)
+
 
 def get_cache_stats() -> Dict:
     """
     Agent cache istatistiklerini döndür
     """
     import time
+
     current_time = time.time()
-    
+
     stats = {
-        'total_sessions': len(_agent_cache),
-        'max_capacity': AGENT_CACHE_MAX_SIZE,
-        'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
-        'usage_percentage': round((len(_agent_cache) / AGENT_CACHE_MAX_SIZE) * 100, 1),
-        'sessions': []
+        "total_sessions": len(_agent_cache),
+        "max_capacity": AGENT_CACHE_MAX_SIZE,
+        "cleanup_count": AGENT_CACHE_CLEANUP_COUNT,
+        "usage_percentage": round((len(_agent_cache) / AGENT_CACHE_MAX_SIZE) * 100, 1),
+        "sessions": [],
     }
-    
+
     # Session'ları son erişim zamanına göre sırala
     if _cache_access_times:
         sorted_sessions = sorted(
-            _cache_access_times.items(), 
-            key=lambda x: x[1], 
-            reverse=True  # En yeni erişim en üstte
+            _cache_access_times.items(),
+            key=lambda x: x[1],
+            reverse=True,  # En yeni erişim en üstte
         )
-        
+
         for session_id, last_access in sorted_sessions:
             minutes_ago = round((current_time - last_access) / 60, 1)
-            stats['sessions'].append({
-                'session_id': session_id,
-                'last_access_minutes_ago': minutes_ago,
-                'has_agent': session_id in _agent_cache
-            })
-    
+            stats["sessions"].append(
+                {
+                    "session_id": session_id,
+                    "last_access_minutes_ago": minutes_ago,
+                    "has_agent": session_id in _agent_cache,
+                }
+            )
+
     return stats
+
 
 CHUNK_DIR = os.path.join(os.path.dirname(__file__), "chunks")
 MERGED_DIR = os.path.join(os.path.dirname(__file__), "merged_files")
 MARKDOWN_CACHE_DIR = os.path.join(os.path.dirname(__file__), "markdown_cache")
+
 
 def sanitize_filename(filename):
     """
@@ -256,22 +303,24 @@ def sanitize_filename(filename):
     # Remove path separators and collapse redundant separators
     filename = os.path.basename(filename)
     filename = os.path.normpath(filename)
-    
+
     # Normalize UTF-8 encoding for consistency
     filename = normalize_file_name(filename)
-    
+
     return filename
+
 
 def create_markdown_cache_key(filename, file_size):
     """
     Dosya adı ve boyutundan markdown cache key oluştur
     """
     # Dosya adını güvenli hale getir (özel karakterleri _ ile değiştir)
-    safe_name = re.sub(r'[^\w\.-]', '_', filename)
+    safe_name = re.sub(r"[^\w\.-]", "_", filename)
     # Dosya uzantısını .md yap
     name_without_ext = os.path.splitext(safe_name)[0]
     cache_key = f"{name_without_ext}_{file_size}.md"
     return cache_key
+
 
 def get_cached_markdown(filename, file_size):
     """
@@ -280,14 +329,15 @@ def get_cached_markdown(filename, file_size):
     try:
         cache_key = create_markdown_cache_key(filename, file_size)
         cache_path = os.path.join(MARKDOWN_CACHE_DIR, cache_key)
-        
+
         if os.path.exists(cache_path):
-            with open(cache_path, 'r', encoding='utf-8') as f:
+            with open(cache_path, "r", encoding="utf-8") as f:
                 return f.read()
     except Exception as e:
         logging.warning(f"Cache okuma hatası: {e}")
-    
+
     return None
+
 
 def save_markdown_to_cache(filename, file_size, markdown_content):
     """
@@ -296,18 +346,19 @@ def save_markdown_to_cache(filename, file_size, markdown_content):
     try:
         # Cache klasörünü oluştur
         os.makedirs(MARKDOWN_CACHE_DIR, exist_ok=True)
-        
+
         cache_key = create_markdown_cache_key(filename, file_size)
         cache_path = os.path.join(MARKDOWN_CACHE_DIR, cache_key)
-        
-        with open(cache_path, 'w', encoding='utf-8') as f:
+
+        with open(cache_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
-            
+
         logging.info(f"Markdown cache'e kaydedildi: {cache_key}")
         return cache_path
     except Exception as e:
         logging.warning(f"Cache kaydetme hatası: {e}")
         return None
+
 
 def validate_file_path(directory, filename):
     """
@@ -321,48 +372,53 @@ def validate_file_path(directory, filename):
         raise ValueError("Invalid file path")
     return abs_file_path
 
+
 def healthy_condition():
     output = {"healthy": True}
     return output
 
+
 def healthy():
     return True
 
+
 def sick():
     return False
+
+
 class CustomGZipMiddleware:
     def __init__(
         self,
         app: ASGIApp,
         paths: List[str],
         minimum_size: int = 1000,
-        compresslevel: int = 5
+        compresslevel: int = 5,
     ):
         self.app = app
         self.paths = paths
         self.minimum_size = minimum_size
         self.compresslevel = compresslevel
-    
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
- 
+
         path = scope["path"]
         should_compress = any(path.startswith(gzip_path) for gzip_path in self.paths)
-        
+
         if not should_compress:
             return await self.app(scope, receive, send)
-        
+
         gzip_middleware = GZipMiddleware(
             app=self.app,
             minimum_size=self.minimum_size,
-            compresslevel=self.compresslevel
+            compresslevel=self.compresslevel,
         )
         await gzip_middleware(scope, receive, send)
-        
+
 
 def convert_result_to_base64(
-    result: Dict[str, List[Dict[str, str]]]
+    result: Dict[str, List[Dict[str, str]]],
 ) -> Dict[str, List[Dict[str, str]]]:
     """
     TypeScript convertResultToBase64 fonksiyonunun Python versiyonu.
@@ -387,18 +443,23 @@ def convert_result_to_base64(
             with open(path, "rb") as f:
                 file_bytes = f.read()
             encoded = base64.b64encode(file_bytes).decode("utf-8")
-            base64_result[attachment_name].append({"fileName": file_name, "base64": encoded})
+            base64_result[attachment_name].append(
+                {"fileName": file_name, "base64": encoded}
+            )
 
     return base64_result
+
 
 # Klasör ayarları
 TEMP_FOLDER = os.getenv("FILE_TEMP_FOLDER", "./temp/temp/")
 PDF_TEMP_FOLDER = os.getenv("PDF_CONVERT_TEMP_FOLDER", "./temp/pdf_temp/")
 IMAGE_OUTPUT_FOLDER = os.getenv("IMAGE_OUTPUT_FOLDER", "./temp/images/")
 
+
 def ensure_folders():
     for folder in [TEMP_FOLDER, PDF_TEMP_FOLDER, IMAGE_OUTPUT_FOLDER]:
         Path(folder).mkdir(parents=True, exist_ok=True)
+
 
 def download_file(url: str, output_path: str) -> str:
     response = requests.get(url, stream=True)
@@ -406,35 +467,49 @@ def download_file(url: str, output_path: str) -> str:
         shutil.copyfileobj(response.raw, f)
     return output_path
 
+
 def convert_to_pdf(file_path: str, filename: str) -> str:
-    """ LibreOffice kullanarak dosyayı PDF'e çevirir """
+    """LibreOffice kullanarak dosyayı PDF'e çevirir"""
     output_path = os.path.join(PDF_TEMP_FOLDER, filename + ".pdf")
-    subprocess.run([
-        "libreoffice", "--headless", "--convert-to", "pdf", 
-        "--outdir", PDF_TEMP_FOLDER, file_path
-    ], check=True)
+    subprocess.run(
+        [
+            "libreoffice",
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            PDF_TEMP_FOLDER,
+            file_path,
+        ],
+        check=True,
+    )
     return output_path
+
 
 def get_pdf_page_count(pdf_path: str) -> int:
     reader = PdfReader(pdf_path)
     return len(reader.pages)
 
+
 def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
-    """ PDF sayfalarını PNG'e çevirir """
+    """PDF sayfalarını PNG'e çevirir"""
     images = convert_from_path(
         pdf_path,
         dpi=200,
         output_folder=IMAGE_OUTPUT_FOLDER,
         output_file=output_base_name,
         fmt="png",
-        size=(1200, 1600)
+        size=(1200, 1600),
     )
     image_paths = []
     for i, img in enumerate(images, start=1):
-        output_path = os.path.join(IMAGE_OUTPUT_FOLDER, f"{output_base_name}_sayfa{i}.png")
+        output_path = os.path.join(
+            IMAGE_OUTPUT_FOLDER, f"{output_base_name}_sayfa{i}.png"
+        )
         img.save(output_path, "PNG")
         image_paths.append(output_path)
     return image_paths
+
 
 # def handle_attachments(
 #     attachments: Dict[str, List[Dict[str, str]]]
@@ -487,8 +562,9 @@ def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
 
 #     return result
 
+
 def handle_attachments(
-    attachments: Dict[str, List[Dict[str, str]]]
+    attachments: Dict[str, List[Dict[str, str]]],
 ) -> Dict[str, List[Dict[str, str]]]:
     """
     attachments: {
@@ -541,23 +617,29 @@ def handle_attachments(
 
 class UTF8JSONResponse:
     """UTF-8 JSON Response Middleware"""
+
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
+
             async def send_wrapper(message):
                 if message["type"] == "http.response.start":
                     headers = dict(message.get("headers", []))
                     # Content-Type header'ını UTF-8 ile güncelle
                     for key, value in headers.items():
-                        if key == b"content-type" and value.startswith(b"application/json"):
+                        if key == b"content-type" and value.startswith(
+                            b"application/json"
+                        ):
                             headers[key] = b"application/json; charset=utf-8"
                     message["headers"] = list(headers.items())
                 await send(message)
+
             await self.app(scope, receive, send_wrapper)
         else:
             await self.app(scope, receive, send)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -567,6 +649,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown - here you can add cleanup code if needed
 
+
 app = FastAPI(lifespan=lifespan)
 
 # Add HTTP logging middleware for OpenTelemetry integration
@@ -574,8 +657,28 @@ app.add_middleware(HTTPLoggingMiddleware)
 
 app.add_middleware(UTF8JSONResponse)
 app.add_middleware(XContentTypeOptions)
-app.add_middleware(XFrame, Option={'X-Frame-Options': 'DENY'})
-app.add_middleware(CustomGZipMiddleware, minimum_size=1000, compresslevel=5,paths=["/sources_list","/url/scan","/extract","/chat_bot","/chat_bot_stream","/chunk_entities","/get_neighbours","/graph_query","/schema","/populate_graph_schema","/get_unconnected_nodes_list","/get_duplicate_nodes","/fetch_chunktext","/schema_visualization"])
+app.add_middleware(XFrame, Option={"X-Frame-Options": "DENY"})
+app.add_middleware(
+    CustomGZipMiddleware,
+    minimum_size=1000,
+    compresslevel=5,
+    paths=[
+        "/sources_list",
+        "/url/scan",
+        "/extract",
+        "/chat_bot",
+        "/chat_bot_stream",
+        "/chunk_entities",
+        "/get_neighbours",
+        "/graph_query",
+        "/schema",
+        "/populate_graph_schema",
+        "/get_unconnected_nodes_list",
+        "/get_duplicate_nodes",
+        "/fetch_chunktext",
+        "/schema_visualization",
+    ],
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -589,9 +692,13 @@ S3_BACKUP_BUCKET = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup"
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
-is_gemini_enabled = os.environ.get("GEMINI_ENABLED", "False").lower() in ("true", "1", "yes")
+is_gemini_enabled = os.environ.get("GEMINI_ENABLED", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 if is_gemini_enabled:
-    add_routes(app,ChatVertexAI(), path="/vertexai")
+    add_routes(app, ChatVertexAI(), path="/vertexai")
 
 app.add_api_route("/health", health([healthy_condition, healthy]))
 
@@ -605,29 +712,39 @@ async def serve_document_file(file_name: str):
     try:
         # URL decode işlemi
         import urllib.parse
-        decoded_file_name = urllib.parse.unquote(file_name, encoding='utf-8')
-        
+
+        decoded_file_name = urllib.parse.unquote(file_name, encoding="utf-8")
+
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-            raise HTTPException(status_code=503, detail="S3 configuration not available")
-        
+            raise HTTPException(
+                status_code=503, detail="S3 configuration not available"
+            )
+
         # S3 key'ini tahmin et
         from pathlib import Path
+
         doc_name = Path(decoded_file_name).stem
         s3_key = f"documents/{doc_name}/{decoded_file_name}"
-        
+
         # Presigned URL oluştur
         from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+
         presigned_url = generate_s3_presigned_url(
-            S3_BACKUP_BUCKET, s3_key, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, expiration=3600
+            S3_BACKUP_BUCKET,
+            s3_key,
+            AWS_ACCESS_KEY_ID,
+            AWS_SECRET_ACCESS_KEY,
+            expiration=3600,
         )
-        
+
         if not presigned_url:
             raise HTTPException(status_code=404, detail=f"File not found: {file_name}")
-        
+
         # Redirect to presigned URL
         from fastapi.responses import RedirectResponse
+
         return RedirectResponse(url=presigned_url, status_code=302)
-        
+
     except Exception as e:
         logging.error(f"Error serving document file {file_name}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -642,34 +759,46 @@ async def serve_page_image(image_name: str):
     try:
         # URL decode işlemi
         import urllib.parse
-        decoded_image_name = urllib.parse.unquote(image_name, encoding='utf-8')
-        
+
+        decoded_image_name = urllib.parse.unquote(image_name, encoding="utf-8")
+
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-            raise HTTPException(status_code=503, detail="S3 configuration not available")
-        
+            raise HTTPException(
+                status_code=503, detail="S3 configuration not available"
+            )
+
         # S3 key'ini tahmin et (image name'den document adını çıkar)
         # Format: "doc_name_page_001.png"
         import re
-        match = re.match(r'(.+)_page_\d+\.png$', decoded_image_name)
+
+        match = re.match(r"(.+)_page_\d+\.png$", decoded_image_name)
         if not match:
             raise HTTPException(status_code=400, detail="Invalid image name format")
-        
+
         doc_name = match.group(1)
         s3_key = f"documents/{doc_name}/{decoded_image_name}"
-        
+
         # Presigned URL oluştur
         from src.document_sources.s3_upload_utils import generate_s3_presigned_url
+
         presigned_url = generate_s3_presigned_url(
-            S3_BACKUP_BUCKET, s3_key, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, expiration=3600
+            S3_BACKUP_BUCKET,
+            s3_key,
+            AWS_ACCESS_KEY_ID,
+            AWS_SECRET_ACCESS_KEY,
+            expiration=3600,
         )
-        
+
         if not presigned_url:
-            raise HTTPException(status_code=404, detail=f"Image not found: {image_name}")
-        
+            raise HTTPException(
+                status_code=404, detail=f"Image not found: {image_name}"
+            )
+
         # Redirect to presigned URL
         from fastapi.responses import RedirectResponse
+
         return RedirectResponse(url=presigned_url, status_code=302)
-        
+
     except Exception as e:
         logging.error(f"Error serving page image {image_name}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -691,61 +820,147 @@ async def create_source_knowledge_graph_url(
     source_type=Form(None),
     gcs_project_id=Form(None),
     access_token=Form(None),
-    email=Form(None)
-    ):
-    
+    email=Form(None),
+):
+
     try:
         start = time.time()
         if source_url is not None:
             source = source_url
         else:
             source = wiki_query
-            
+
         graph = create_graph_database_connection(uri, userName, password, database)
-        if source_type == 's3 bucket' and aws_access_key_id and aws_secret_access_key:
-            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_s3,graph, model, source_url, aws_access_key_id, aws_secret_access_key, source_type
+        if source_type == "s3 bucket" and aws_access_key_id and aws_secret_access_key:
+            lst_file_name, success_count, failed_count = await asyncio.to_thread(
+                create_source_node_graph_url_s3,
+                graph,
+                model,
+                source_url,
+                aws_access_key_id,
+                aws_secret_access_key,
+                source_type,
             )
-        elif source_type == 'gcs bucket':
-            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_gcs, graph, model, gcs_project_id, gcs_bucket_name, gcs_bucket_folder, source_type, Credentials(access_token)
+        elif source_type == "gcs bucket":
+            lst_file_name, success_count, failed_count = await asyncio.to_thread(
+                create_source_node_graph_url_gcs,
+                graph,
+                model,
+                gcs_project_id,
+                gcs_bucket_name,
+                gcs_bucket_folder,
+                source_type,
+                Credentials(access_token),
             )
-        elif source_type == 'web-url':
-            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_web_url,graph, model, source_url, source_type
-            )  
-        elif source_type == 'youtube':
-            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_youtube,graph, model, source_url, source_type
+        elif source_type == "web-url":
+            lst_file_name, success_count, failed_count = await asyncio.to_thread(
+                create_source_node_graph_web_url, graph, model, source_url, source_type
             )
-        elif source_type == 'Wikipedia':
-            lst_file_name,success_count,failed_count = await asyncio.to_thread(create_source_node_graph_url_wikipedia,graph, model, wiki_query, source_type
+        elif source_type == "youtube":
+            lst_file_name, success_count, failed_count = await asyncio.to_thread(
+                create_source_node_graph_url_youtube,
+                graph,
+                model,
+                source_url,
+                source_type,
+            )
+        elif source_type == "Wikipedia":
+            lst_file_name, success_count, failed_count = await asyncio.to_thread(
+                create_source_node_graph_url_wikipedia,
+                graph,
+                model,
+                wiki_query,
+                source_type,
             )
         else:
-            return create_api_response('Failed',message='source_type is other than accepted source')
+            return create_api_response(
+                "Failed", message="source_type is other than accepted source"
+            )
 
         message = f"Source Node created successfully for source type: {source_type} and source: {source}"
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'url_scan','db_url':uri,'url_scanned_file':lst_file_name, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','userName':userName, 'database':database, 'aws_access_key_id':aws_access_key_id,
-                            'model':model, 'gcs_bucket_name':gcs_bucket_name, 'gcs_bucket_folder':gcs_bucket_folder, 'source_type':source_type,
-                            'gcs_project_id':gcs_project_id, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email}
+        json_obj = {
+            "api_name": "url_scan",
+            "db_url": uri,
+            "url_scanned_file": lst_file_name,
+            "source_url": source_url,
+            "wiki_query": wiki_query,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "userName": userName,
+            "database": database,
+            "aws_access_key_id": aws_access_key_id,
+            "model": model,
+            "gcs_bucket_name": gcs_bucket_name,
+            "gcs_bucket_folder": gcs_bucket_folder,
+            "source_type": source_type,
+            "gcs_project_id": gcs_project_id,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        result ={'elapsed_api_time' : f'{elapsed_time:.2f}'}
-        return create_api_response("Success",message=message,success_count=success_count,failed_count=failed_count,file_name=lst_file_name,data=result)
+        result = {"elapsed_api_time": f"{elapsed_time:.2f}"}
+        return create_api_response(
+            "Success",
+            message=message,
+            success_count=success_count,
+            failed_count=failed_count,
+            file_name=lst_file_name,
+            data=result,
+        )
     except LLMGraphBuilderException as e:
         error_message = str(e)
         message = f" Unable to create source node for source type: {source_type} and source: {source}"
         # Set the status "Success" becuase we are treating these error already handled by application as like custom errors.
-        json_obj = {'error_message':error_message, 'status':'Success','db_url':uri, 'userName':userName, 'database':database,'success_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email}
+        json_obj = {
+            "error_message": error_message,
+            "status": "Success",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "success_count": 1,
+            "source_type": source_type,
+            "source_url": source_url,
+            "wiki_query": wiki_query,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        logging.exception(f'File Failed in upload: {e}')
-        return create_api_response('Failed',message=message + error_message[:80],error=error_message,file_source=source_type)
+        logging.exception(f"File Failed in upload: {e}")
+        return create_api_response(
+            "Failed",
+            message=message + error_message[:80],
+            error=error_message,
+            file_source=source_type,
+        )
     except Exception as e:
         error_message = str(e)
         message = f" Unable to create source node for source type: {source_type} and source: {source}"
-        json_obj = {'error_message':error_message, 'status':'Failed','db_url':uri, 'userName':userName, 'database':database,'failed_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email}
+        json_obj = {
+            "error_message": error_message,
+            "status": "Failed",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "failed_count": 1,
+            "source_type": source_type,
+            "source_url": source_url,
+            "wiki_query": wiki_query,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "email": email,
+        }
         logger.log_struct(json_obj, "ERROR")
-        logging.exception(f'Exception Stack trace upload:{e}')
-        return create_api_response('Failed',message=message + error_message[:80],error=error_message,file_source=source_type)
+        logging.exception(f"Exception Stack trace upload:{e}")
+        return create_api_response(
+            "Failed",
+            message=message + error_message[:80],
+            error=error_message,
+            file_source=source_type,
+        )
     finally:
         gc.collect()
+
 
 # @app.post("/extract")
 # async def extract_knowledge_graph_from_file(
@@ -799,7 +1014,7 @@ async def create_source_knowledge_graph_url(
 #     """
 #     try:
 #         start_time = time.time()
-        
+
 #         # max_pages validation - undefined string'i None'a çevir
 #         validated_max_pages = None
 #         if max_pages is not None and max_pages.strip() not in ['', 'undefined', 'null']:
@@ -811,27 +1026,27 @@ async def create_source_knowledge_graph_url(
 #             except (ValueError, TypeError) as e:
 #                 logging.warning(f"⚠️ max_pages değeri geçersiz '{max_pages}', None olarak ayarlandı: {e}")
 #                 validated_max_pages = None
-        
+
 #         logging.info(f"📊 max_pages validation: '{max_pages}' -> {validated_max_pages}")
-        
-#         graph = create_graph_database_connection(uri, userName, password, database)   
+
+#         graph = create_graph_database_connection(uri, userName, password, database)
 #         graphDb_data_Access = graphDBdataAccess(graph)
 #         if source_type == 'local file':
 #             file_name = sanitize_filename(file_name)
 #             merged_file_path = validate_file_path(MERGED_DIR, file_name)
-            
+
 #             # Debug loglama: Dosya yolu ve varlık kontrolü
 #             logging.info(f"🔍 DEBUG - Original file_name: {file_name}")
 #             logging.info(f"🔍 DEBUG - Sanitized file_name: {file_name}")
 #             logging.info(f"🔍 DEBUG - MERGED_DIR: {MERGED_DIR}")
 #             logging.info(f"🔍 DEBUG - Constructed merged_file_path: {merged_file_path}")
 #             logging.info(f"🔍 DEBUG - File exists check: {os.path.exists(merged_file_path)}")
-            
+
 #             # Merged files klasöründeki tüm dosyaları listele
 #             if os.path.exists(MERGED_DIR):
 #                 files_in_dir = os.listdir(MERGED_DIR)
 #                 logging.info(f"🔍 DEBUG - Files in {MERGED_DIR}: {files_in_dir}")
-                
+
 #                 # Dosya adı karşılaştırması
 #                 for existing_file in files_in_dir:
 #                     if existing_file == file_name:
@@ -839,21 +1054,21 @@ async def create_source_knowledge_graph_url(
 #                     else:
 #                         logging.info(f"❌ DEBUG - No match: '{existing_file}' != '{file_name}'")
 #                         logging.info(f"🔍 DEBUG - Bytes comparison: {existing_file.encode('utf-8')} vs {file_name.encode('utf-8')}")
-            
+
 #             # Dosya işleme başlamadan önce dosyanın varlığını kontrol et
 #             if not os.path.exists(merged_file_path):
 #                 # Unicode normalizasyon farklılıkları için alternatif dosya adlarını dene
 #                 logging.warning(f"File not found with NFC normalization, trying NFD normalization")
-                
+
 #                 import unicodedata
 #                 # NFD normalizasyonu dene (Decomposed)
 #                 file_name_nfd = unicodedata.normalize('NFD', file_name)
 #                 merged_file_path_nfd = validate_file_path(MERGED_DIR, file_name_nfd)
-                
+
 #                 logging.info(f"🔍 DEBUG - Trying NFD normalized file_name: {file_name_nfd}")
 #                 logging.info(f"🔍 DEBUG - NFD file path: {merged_file_path_nfd}")
 #                 logging.info(f"🔍 DEBUG - NFD file exists: {os.path.exists(merged_file_path_nfd)}")
-                
+
 #                 if os.path.exists(merged_file_path_nfd):
 #                     logging.info(f"✅ Found file with NFD normalization: {merged_file_path_nfd}")
 #                     merged_file_path = merged_file_path_nfd
@@ -862,12 +1077,12 @@ async def create_source_knowledge_graph_url(
 #                     # Her iki normalizasyon da başarısız, dosya gerçekten yok
 #                     logging.warning(f"File {file_name} not found at {merged_file_path} - may have been deleted")
 #                     raise LLMGraphBuilderException(f"File {file_name} is no longer available for processing")
-            
+
 #             uri_latency, result = await extract_graph_from_file_local_file(uri, userName, password, database, model, merged_file_path, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions, enable_post_processing, post_processing_rules, validated_max_pages)
 
 #         elif source_type == 's3 bucket' and source_url:
 #             uri_latency, result = await extract_graph_from_file_s3(uri, userName, password, database, model, source_url, aws_access_key_id, aws_secret_access_key, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
-        
+
 #         elif source_type == 'web-url':
 #             uri_latency, result = await extract_graph_from_web_page(uri, userName, password, database, model, source_url, file_name, allowedNodes, allowedRelationship, token_chunk_size, chunk_overlap, chunks_to_combine, retry_condition, additional_instructions)
 
@@ -885,12 +1100,12 @@ async def create_source_knowledge_graph_url(
 #         if result is not None:
 #             logging.info("Going for counting nodes and relationships in extract")
 #             count_node_time = time.time()
-#             graph = create_graph_database_connection(uri, userName, password, database)   
+#             graph = create_graph_database_connection(uri, userName, password, database)
 #             graphDb_data_Access = graphDBdataAccess(graph)
 #             # Thread'e taşı - blocking işlem
 #             count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
 #             logging.info("Nodes and Relationship Counts updated")
-            
+
 #             # Yeni yüklenen document için document-to-document ilişkilerini otomatik oluştur
 #             # try:
 #             #     from src.make_relationships import create_document_relationships
@@ -902,7 +1117,7 @@ async def create_source_knowledge_graph_url(
 #             # except Exception as doc_rel_error:
 #             #     logging.error(f"Error creating document relationships for {file_name}: {doc_rel_error}")
 #             #     result['document_relationships'] = {'error': str(doc_rel_error)}
-            
+
 #             if count_response :
 #                 result['chunkNodeCount'] = count_response[file_name].get('chunkNodeCount',"0")
 #                 result['chunkRelCount'] =  count_response[file_name].get('chunkRelCount',"0")
@@ -913,33 +1128,33 @@ async def create_source_knowledge_graph_url(
 #                 result['nodeCount'] = count_response[file_name].get('nodeCount',"0")
 #                 result['relationshipCount']  = count_response[file_name].get('relationshipCount',"0")
 #                 logging.info(f"counting completed in {(time.time()-count_node_time):.2f}")
-            
+
 #             # Otomatik post-processing (eğer istenirse)
 #             if enable_post_processing and post_processing_rules:
 #                 try:
 #                     logging.info(f"Otomatik post-processing başlıyor: {file_name}")
-                    
+
 #                     # JSON string'i parse et
 #                     if isinstance(post_processing_rules, str):
 #                         rules_list = json.loads(post_processing_rules)
 #                     else:
 #                         rules_list = post_processing_rules
-                    
+
 #                     logging.info(f"Post-processing kuralları: {rules_list}")
-                    
+
 #                     # Post-processing'i çalıştır - sadece bu dosya için
 #                     from src.llm import apply_dynamic_entity_post_processing
 #                     post_processing_start_time = time.time()
 #                     post_processing_result = await asyncio.to_thread(
-#                         apply_dynamic_entity_post_processing, 
-#                         graph, 
+#                         apply_dynamic_entity_post_processing,
+#                         graph,
 #                         rules_list,
 #                         target_file_names=[file_name]
 #                     )
 #                     post_processing_end_time = time.time()
-                    
+
 #                     logging.info(f"Otomatik post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
-                    
+
 #                     # Post-processing sonuçlarını result'a ekle
 #                     result['post_processing'] = {
 #                         'enabled': True,
@@ -949,15 +1164,15 @@ async def create_source_knowledge_graph_url(
 #                         'elapsed_time': f"{post_processing_end_time - post_processing_start_time:.2f}",
 #                         'rules': rules_list
 #                     }
-                    
+
 #                     # Node count'ları güncelle - thread'e taşı
 #                     final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
 #                     if final_count_response:
 #                         result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
 #                         result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
-                        
+
 #                     logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
-                    
+
 #                 except Exception as post_processing_error:
 #                     logging.error(f"Otomatik post-processing hatası: {post_processing_error}")
 #                     result['post_processing'] = {
@@ -967,23 +1182,23 @@ async def create_source_knowledge_graph_url(
 #                     }
 #             else:
 #                 result['post_processing'] = {'enabled': False}
-            
+
 #             # Policy Node Cleanup - DISABLED: Policy node'ları Document'e çevirmek yerine HAS_METADATA ile bağlıyoruz
 #             # try:
 #             #     logging.info(f"Policy node cleanup başlıyor: {file_name}")
-#             #     
+#             #
 #             #     from src.policy_cleanup import cleanup_policy_nodes_to_document
 #             #     policy_cleanup_start_time = time.time()
-#             #     
+#             #
 #             #     # Policy cleanup işlemi
 #             #     policy_cleanup_result = await asyncio.to_thread(
 #             #         cleanup_policy_nodes_to_document,
 #             #         graph,
 #             #         file_name
 #             #     )
-#             #     
+#             #
 #             #     policy_cleanup_end_time = time.time()
-#             #     
+#             #
 #             #     # Result'a Policy cleanup bilgilerini ekle
 #             #     result['policy_cleanup'] = {
 #             #         'status': policy_cleanup_result['status'],
@@ -993,26 +1208,25 @@ async def create_source_knowledge_graph_url(
 #             #         'elapsed_time': f"{policy_cleanup_end_time - policy_cleanup_start_time:.2f}",
 #             #         'processed_policies': policy_cleanup_result.get('processed_policies', [])
 #             #     }
-#             #     
+#             #
 #             #     # Eğer Policy node'lar bulunup temizlendiyse, node count'ları güncelle
 #             #     if policy_cleanup_result['policy_nodes_deleted'] > 0:
 #             #         final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
 #             #         if final_count_response:
 #             #             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
 #             #             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
-#             #             
+#             #
 #             #     logging.info(f"Policy cleanup tamamlandı: {policy_cleanup_result['policy_nodes_deleted']} Policy silindi, {policy_cleanup_result['relationships_moved']} relationship yönlendirildi")
-                
-            
-            
+
+
 #             # Entity Promotion - Chunk entity'lerini Document'a terfi ettir
 #             try:
 #                 if enable_entity_promotion:
 #                     logging.info(f"Entity promotion başlıyor: {file_name}")
-                    
+
 #                     # Default entity promotion kuralları (eğer param gönderilmemişse)
 #                     default_promotion_rules = ["Address", "Company", "Person", "Phone", "Email", "Agent", "InsuranceCompany"]
-                    
+
 #                     if entity_promotion_rules:
 #                         if isinstance(entity_promotion_rules, str):
 #                             promotion_rules = json.loads(entity_promotion_rules)
@@ -1020,12 +1234,12 @@ async def create_source_knowledge_graph_url(
 #                             promotion_rules = entity_promotion_rules
 #                     else:
 #                         promotion_rules = default_promotion_rules
-                    
+
 #                     logging.info(f"Entity promotion kuralları: {promotion_rules}")
-                    
+
 #                     from src.policy_cleanup import promote_chunk_entities_to_document
 #                     entity_promotion_start_time = time.time()
-                    
+
 #                     # Entity promotion işlemi
 #                     entity_promotion_result = await asyncio.to_thread(
 #                         promote_chunk_entities_to_document,
@@ -1033,9 +1247,9 @@ async def create_source_knowledge_graph_url(
 #                         file_name,
 #                         promotion_rules
 #                     )
-                    
+
 #                     entity_promotion_end_time = time.time()
-                    
+
 #                     # Result'a Entity promotion bilgilerini ekle
 #                     result['entity_promotion'] = {
 #                         'status': entity_promotion_result['status'],
@@ -1046,19 +1260,19 @@ async def create_source_knowledge_graph_url(
 #                         'promotion_rules': promotion_rules,
 #                         'promotion_details': entity_promotion_result.get('promotion_details', [])
 #                     }
-                    
+
 #                     # Eğer entity'ler terfi ettirildiyse, node count'ları güncelle - thread'e taşı
 #                     if entity_promotion_result['relationships_created'] > 0:
 #                         final_count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
 #                         if final_count_response:
 #                             result['nodeCount'] = final_count_response[file_name].get('nodeCount',"0")
 #                             result['relationshipCount'] = final_count_response[file_name].get('relationshipCount',"0")
-                            
+
 #                     logging.info(f"Entity promotion tamamlandı: {entity_promotion_result['promoted_entities']} entity terfi edildi, {entity_promotion_result['relationships_created']} Document ilişkisi oluşturuldu")
 #                 else:
 #                     result['entity_promotion'] = {'enabled': False}
 #                     logging.info("Entity promotion devre dışı")
-                
+
 #             except Exception as entity_promotion_error:
 #                 logging.error(f"Entity promotion hatası: {entity_promotion_error}")
 #                 result['entity_promotion'] = {
@@ -1067,7 +1281,7 @@ async def create_source_knowledge_graph_url(
 #                     'error': str(entity_promotion_error),
 #                     'elapsed_time': '0.00'
 #                 }
-            
+
 #             result['db_url'] = uri
 #             result['api_name'] = 'extract'
 #             result['source_url'] = source_url
@@ -1091,26 +1305,26 @@ async def create_source_knowledge_graph_url(
 #         return create_api_response('Success', data=result, file_source= source_type)
 #     except LLMGraphBuilderException as e:
 #         error_message = str(e)
-#         graph = create_graph_database_connection(uri, userName, password, database)   
+#         graph = create_graph_database_connection(uri, userName, password, database)
 #         graphDb_data_Access = graphDBdataAccess(graph)
 #         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
 #         if source_type == 'local file':
 #             failed_file_process(uri,file_name, merged_file_path)
-        
+
 #         # Document node durumunu güvenli bir şekilde al
 #         try:
 #             node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
 #         except Exception as node_error:
 #             logging.warning(f"Document node status alınamadı: {node_error}")
 #             node_detail = None
-        
+
 #         # Set the status "Completed" in logging becuase we are treating these error already handled by application as like custom errors.
 #         file_created_at = None
 #         if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
 #             file_created_at = formatted_time(node_detail[0]['created_time'])
 #         else:
 #             file_created_at = formatted_time(datetime.now(timezone.utc))
-        
+
 #         json_obj = {'api_name':'extract','message':error_message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Completed',
 #                     'db_url':uri, 'userName':userName, 'database':database,'success_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
 #                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
@@ -1120,25 +1334,25 @@ async def create_source_knowledge_graph_url(
 #     except Exception as e:
 #         message=f"Failed To Process File:{file_name} or LLM Unable To Parse Content "
 #         error_message = str(e)
-#         graph = create_graph_database_connection(uri, userName, password, database)   
+#         graph = create_graph_database_connection(uri, userName, password, database)
 #         graphDb_data_Access = graphDBdataAccess(graph)
 #         graphDb_data_Access.update_exception_db(file_name,error_message, retry_condition)
 #         if source_type == 'local file':
 #             failed_file_process(uri,file_name, merged_file_path)
-        
+
 #         # Document node durumunu güvenli bir şekilde al
 #         try:
 #             node_detail = graphDb_data_Access.get_current_status_document_node(file_name)
 #         except Exception as node_error:
 #             logging.warning(f"Document node status alınamadı: {node_error}")
 #             node_detail = None
-        
+
 #         file_created_at = None
 #         if node_detail and len(node_detail) > 0 and node_detail[0].get('created_time'):
 #             file_created_at = formatted_time(node_detail[0]['created_time'])
 #         else:
 #             file_created_at = formatted_time(datetime.now(timezone.utc))
-        
+
 #         json_obj = {'api_name':'extract','message':message,'file_created_at':file_created_at,'error_message':error_message, 'file_name': file_name,'status':'Failed',
 #                     'db_url':uri, 'userName':userName, 'database':database,'failed_count':1, 'source_type': source_type, 'source_url':source_url, 'wiki_query':wiki_query, 'logging_time': formatted_time(datetime.now(timezone.utc)),'email':email,
 #                     'allowedNodes': allowedNodes, 'allowedRelationship': allowedRelationship}
@@ -1167,11 +1381,11 @@ async def create_source_knowledge_graph_url(
 #     try:
 #         logging.info(f"QA tabanlı extraction başlıyor: {file_name}")
 #         logging.info(f"Gelen domain parametresi: {domain}")
-        
+
 #         # Parameters validate
 #         if not document_chunks or not file_name or not model:
 #             raise HTTPException(status_code=400, detail="document_chunks, file_name ve model parametreleri gerekli")
-        
+
 #         # Parse document chunks (JSON string olarak gönderilmiş olabilir)
 #         if isinstance(document_chunks, str):
 #             try:
@@ -1180,7 +1394,7 @@ async def create_source_knowledge_graph_url(
 #                 chunks_list = [document_chunks]  # Single chunk
 #         else:
 #             chunks_list = document_chunks
-        
+
 #         # Custom questions parse et (eğer varsa)
 #         questions_dict = None
 #         if custom_questions:
@@ -1188,17 +1402,17 @@ async def create_source_knowledge_graph_url(
 #                 questions_dict = json.loads(custom_questions)
 #             except:
 #                 logging.warning("Custom questions parse edilemedi, default sorular kullanılacak")
-        
+
 #         # Domain tespiti (eğer belirtilmemişse)
 #         if not domain and len(chunks_list) > 0:
 #             domain = detect_document_domain(file_name, chunks_list[0])
 #             logging.info(f"Otomatik domain tespiti: {domain}")
 #         elif domain:
 #             logging.info(f"Kullanıcı tarafından seçilen domain: {domain}")
-        
+
 #         # QA tabanlı extractor oluştur
 #         extractor = QABasedEntityExtractor(model)
-        
+
 #         # Domain'e özgü sorular al (eğer custom yoksa)
 #         if not questions_dict:
 #             if domain:
@@ -1212,7 +1426,7 @@ async def create_source_knowledge_graph_url(
 #                 logging.info("Domain belirtilmediği için genel sorular kullanılıyor")
 #         else:
 #             logging.info("Kullanıcı tarafından özel sorular sağlandı")
-        
+
 #         # Entity'leri çıkar
 #         logging.info(f"Extractor'a gönderilen sorular: {json.dumps(questions_dict, ensure_ascii=False, indent=2)}")
 #         graph_documents = await extractor.extract_entities_from_qa(
@@ -1220,75 +1434,75 @@ async def create_source_knowledge_graph_url(
 #             file_name=file_name,
 #             custom_questions=questions_dict
 #         )
-        
+
 #         # Çıkarılan entity ve relation sayılarını logla
 #         total_entities = sum(len(doc.nodes) for doc in graph_documents)
 #         total_relationships = sum(len(doc.relationships) for doc in graph_documents)
 #         logging.info(f"Toplam çıkarılan entity: {total_entities}, relationship: {total_relationships}")
-        
+
 #         # Her GraphDocument için ayrıntılı loglama
 #         for i, doc in enumerate(graph_documents):
 #             logging.info(f"GraphDocument {i}: {len(doc.nodes)} entity, {len(doc.relationships)} relationship")
 #             # İlk birkaç entity'yi de logla
 #             for j, node in enumerate(doc.nodes[:5]):  # İlk 5 entity
 #                 logging.info(f"  Entity {j}: {node.type} - {node.properties}")
-        
+
 #         # Dosya adından temiz bir isim oluştur (uzantıları kaldır, özel karakterleri temizle)
 #         clean_file_name = file_name.replace('.pdf', '').replace('.docx', '').replace('.txt', '')
 #         clean_file_name = re.sub(r'[^\w\-_\.]', '_', clean_file_name)
-        
+
 #         # Neo4j'ye kaydet (opsiyonel - mevcut extract endpoint mantığını kullanarak)
 #         if uri and userName and password:
 #             graph = create_graph_database_connection(uri, userName, password, database)
 #             graph_db = graphDBdataAccess(graph)
 #             # GraphDocument'ları Neo4j'ye kaydet
 #             # Bu kısmı mevcut save işlemiyle entegre edebiliriz
-        
+
 #         # newSchema.json formatında triplet'ler oluştur
 #         triplets = []
 #         unique_triplets = set()
-        
+
 #         for doc in graph_documents:
 #             for rel in doc.relationships:
 #                 source_type = rel.source.type if hasattr(rel.source, 'type') else 'Unknown'
 #                 target_type = rel.target.type if hasattr(rel.target, 'type') else 'Unknown'
 #                 rel_type = rel.type
-                
+
 #                 # İlişki tipini büyük harfe çevir ve alt çizgi ile ayır
 #                 formatted_rel_type = rel_type.upper().replace(' ', '_').replace('-', '_')
-                
+
 #                 # Triplet formatı: "SourceType-RELATION_TYPE->TargetType" (istenen format)
 #                 triplet = f"{source_type}-{formatted_rel_type}->{target_type}"
-                
+
 #                 # Duplicate'ları önle
 #                 if triplet not in unique_triplets:
 #                     triplets.append(triplet)
 #                     unique_triplets.add(triplet)
-        
+
 #         # Node tiplerini ve relationship type'larını çıkar (schemas.json formatı için)
 #         unique_labels = set()
 #         unique_relationship_types = set()
-        
+
 #         for doc in graph_documents:
 #             # Node tiplerini topla
 #             for node in doc.nodes:
 #                 if hasattr(node, 'type') and node.type:
 #                     unique_labels.add(node.type)
-            
+
 #             # Relationship tiplerini topla
 #             for rel in doc.relationships:
 #                 if hasattr(rel, 'type') and rel.type:
 #                     # İlişki tipini büyük harfe çevir ve format düzelt
 #                     formatted_rel_type = rel.type.upper().replace(' ', '_').replace('-', '_')
 #                     unique_relationship_types.add(formatted_rel_type)
-        
+
 #         # Frontend için schema formatında bilgiler oluştur
 #         schema = {
 #             "labels": sorted(list(unique_labels)),
 #             "relationshipTypes": sorted(list(unique_relationship_types)),
 #             "schema": clean_file_name
 #         }
-        
+
 #         # Şemayı kaydet
 #         schema_data = {
 #             'file_name': file_name,
@@ -1306,15 +1520,15 @@ async def create_source_knowledge_graph_url(
 #             'schema': schema,  # Frontend için schema format
 #             'triplets': triplets  # Triplet formatında ilişkiler
 #         }
-        
+
 #         # Ana schema dosyasına kaydet (tüm detaylı bilgiler burada)
 #         schema_file = f"qa_schemas/{clean_file_name}.json"
 #         os.makedirs("qa_schemas", exist_ok=True)
 #         with open(schema_file, 'w', encoding='utf-8') as f:
 #             json.dump(schema_data, f, ensure_ascii=False, indent=2)
-        
+
 #         logging.info(f"QA tabanlı extraction tamamlandı: {len(graph_documents)} GraphDocument oluşturuldu")
-        
+
 #         response_data = {
 #             'graph_documents_count': len(graph_documents),
 #             'total_entities': sum(len(doc.nodes) for doc in graph_documents),
@@ -1328,9 +1542,9 @@ async def create_source_knowledge_graph_url(
 #             'schema': schema,  # Frontend için schema format
 #             'triplets': triplets  # Kolay kullanım için ayrıca triplet'leri de gönder
 #         }
-        
+
 #         return create_api_response('Success', data=response_data, file_name=file_name)
-        
+
 #     except Exception as e:
 #         logging.error(f"QA tabanlı extraction hatası: {e}")
 #         return create_api_response('Failed', message=str(e), file_name=file_name)
@@ -1346,15 +1560,16 @@ async def create_source_knowledge_graph_url(
 #     try:
 #         if not os.path.exists(schema_file):
 #             raise HTTPException(status_code=404, detail="Schema dosyası bulunamadı")
-        
+
 #         with open(schema_file, 'r', encoding='utf-8') as f:
 #             schema_data = json.load(f)
-        
+
 #         return create_api_response('Success', data=schema_data)
-        
+
 #     except Exception as e:
 #         logging.error(f"Schema yükleme hatası: {e}")
 #         return create_api_response('Failed', message=str(e))
+
 
 @app.get("/list_qa_schemas")
 async def list_qa_schemas():
@@ -1364,43 +1579,52 @@ async def list_qa_schemas():
     try:
         schema_dir = "qa_schemas"
         if not os.path.exists(schema_dir):
-            return create_api_response('Success', data=[])
-        
+            return create_api_response("Success", data=[])
+
         schemas = []
         for file in os.listdir(schema_dir):
-            if file.endswith('.json'):
+            if file.endswith(".json"):
                 file_path = os.path.join(schema_dir, file)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, "r", encoding="utf-8") as f:
                         schema_info = json.load(f)
-                    
+
                     # Unique relationship types sayısını hesapla
-                    unique_rels_count = len(schema_info.get('schema', {}).get('relationshipTypes', []))
-                    
-                    schemas.append({
-                        'filename': file,
-                        'file_path': file_path,
-                        'document_name': schema_info.get('file_name'),
-                        'domain': schema_info.get('domain'),
-                        'timestamp': schema_info.get('timestamp'),
-                        'entities_count': schema_info.get('entities_count'),
-                        'relationships_count': schema_info.get('relationships_count'),  # toplam triplet sayısı
-                        'unique_relationship_types': unique_rels_count,  # unique relationship types sayısı  
-                        'triplets_count': schema_info.get('relationships_count'),  # netlik için aynı değeri tekrar
-                        'model': schema_info.get('model')
-                    })
+                    unique_rels_count = len(
+                        schema_info.get("schema", {}).get("relationshipTypes", [])
+                    )
+
+                    schemas.append(
+                        {
+                            "filename": file,
+                            "file_path": file_path,
+                            "document_name": schema_info.get("file_name"),
+                            "domain": schema_info.get("domain"),
+                            "timestamp": schema_info.get("timestamp"),
+                            "entities_count": schema_info.get("entities_count"),
+                            "relationships_count": schema_info.get(
+                                "relationships_count"
+                            ),  # toplam triplet sayısı
+                            "unique_relationship_types": unique_rels_count,  # unique relationship types sayısı
+                            "triplets_count": schema_info.get(
+                                "relationships_count"
+                            ),  # netlik için aynı değeri tekrar
+                            "model": schema_info.get("model"),
+                        }
+                    )
                 except:
                     # Bozuk dosyaları atla
                     continue
-        
+
         # Timestamp'e göre sırala (en yeni önce)
-        schemas.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-        
-        return create_api_response('Success', data=schemas)
-        
+        schemas.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        return create_api_response("Success", data=schemas)
+
     except Exception as e:
         logging.error(f"Schema listeleme hatası: {e}")
-        return create_api_response('Failed', message=str(e))
+        return create_api_response("Failed", message=str(e))
+
 
 @app.post("/convert-to-markdown")
 async def convert_to_markdown(file: UploadFile = File(...)):
@@ -1408,13 +1632,16 @@ async def convert_to_markdown(file: UploadFile = File(...)):
     Dosyayı Docling kullanarak markdown'a çevirme endpoint'i (cache destekli)
     """
     if not DOCLING_AVAILABLE:
-        raise HTTPException(status_code=500, detail="Docling kütüphanesi yüklü değil. pip install docling komutu ile yükleyin.")
-    
+        raise HTTPException(
+            status_code=500,
+            detail="Docling kütüphanesi yüklü değil. pip install docling komutu ile yükleyin.",
+        )
+
     try:
         # Dosya içeriğini oku
         content = await file.read()
         file_size = len(content)
-        
+
         # Önce cache'i kontrol et
         cached_markdown = get_cached_markdown(file.filename, file_size)
         if cached_markdown:
@@ -1425,162 +1652,220 @@ async def convert_to_markdown(file: UploadFile = File(...)):
                 "filename": file.filename,
                 "original_size": file_size,
                 "markdown_size": len(cached_markdown),
-                "from_cache": True
+                "from_cache": True,
             }
-        
+
         # Cache'de yok, Docling ile dönüştür
         logging.info(f"Docling ile markdown'a çevriliyor: {file.filename}")
-        
+
         # Geçici dosya oluştur
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=Path(file.filename).suffix
+        ) as tmp_file:
             tmp_file.write(content)
             tmp_file_path = tmp_file.name
-        
+
         try:
             labels = [
                 label
                 for label in DEFAULT_EXPORT_LABELS
                 if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
             ]
-            
+
             # Docling ile dosyayı işle
             converter = DocumentConverter()
             result = converter.convert(tmp_file_path)
-            
+
             # Markdown çıktısını al
             markdown_content = result.document.export_to_markdown(labels=labels)
-            
+
             # Cache'e kaydet
             save_markdown_to_cache(file.filename, file_size, markdown_content)
-            
+
             return {
                 "status": "success",
                 "markdown": markdown_content,
                 "filename": file.filename,
                 "original_size": file_size,
                 "markdown_size": len(markdown_content),
-                "from_cache": False
+                "from_cache": False,
             }
-            
+
         finally:
             # Geçici dosyayı sil
             os.unlink(tmp_file_path)
-            
+
     except Exception as e:
         logging.error(f"Dosya dönüştürme hatası: {e}")
-        raise HTTPException(status_code=500, detail=f"Dosya dönüştürme hatası: {str(e)}")
-            
+        raise HTTPException(
+            status_code=500, detail=f"Dosya dönüştürme hatası: {str(e)}"
+        )
+
+
 @app.post("/sources_list")
 async def get_source_list(
     uri=Form(None),
     userName=Form(None),
     password=Form(None),
     database=Form(None),
-    email=Form(None)):
+    email=Form(None),
+):
     """
     Calls 'get_source_list_from_graph' which returns list of sources which already exist in databse
     """
     try:
         start = time.time()
-        result = await asyncio.to_thread(get_source_list_from_graph,uri,userName,password,database)
+        result = await asyncio.to_thread(
+            get_source_list_from_graph, uri, userName, password, database
+        )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'sources_list','db_url':uri, 'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "sources_list",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response("Success",data=result, message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to fetch source list"
+        message = "Unable to fetch source list"
         error_message = str(e)
-        logging.exception(f'Exception:{error_message}')
+        logging.exception(f"Exception:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
 
+
 @app.post("/post_processing")
-async def post_processing(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), tasks=Form(None), email=Form(None)):
+async def post_processing(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    tasks=Form(None),
+    email=Form(None),
+):
     try:
         graph = create_graph_database_connection(uri, userName, password, database)
         tasks = set(map(str.strip, json.loads(tasks)))
-        api_name = 'post_processing'
+        api_name = "post_processing"
         count_response = []
         start = time.time()
-        
+
         # Document relationships oluştur (yeni özellik)
         if "connect_documents_by_entities" in tasks:
             from src.make_relationships import create_document_relationships
-            doc_connections = await asyncio.to_thread(create_document_relationships, graph)
-            api_name = 'post_processing/connect_documents_by_entities'
-            logging.info(f'Document connections created: {doc_connections}')
-        
+
+            doc_connections = await asyncio.to_thread(
+                create_document_relationships, graph
+            )
+            api_name = "post_processing/connect_documents_by_entities"
+            logging.info(f"Document connections created: {doc_connections}")
+
         if "materialize_text_chunk_similarities" in tasks:
             await asyncio.to_thread(update_graph, graph)
-            api_name = 'post_processing/update_similarity_graph'
-            logging.info(f'Updated KNN Graph')
+            api_name = "post_processing/update_similarity_graph"
+            logging.info(f"Updated KNN Graph")
 
         if "enable_hybrid_search_and_fulltext_search_in_bloom" in tasks:
-            await asyncio.to_thread(create_vector_fulltext_indexes, uri=uri, username=userName, password=password, database=database)
-            api_name = 'post_processing/enable_hybrid_search_and_fulltext_search_in_bloom'
-            logging.info(f'Full Text index created')
+            await asyncio.to_thread(
+                create_vector_fulltext_indexes,
+                uri=uri,
+                username=userName,
+                password=password,
+                database=database,
+            )
+            api_name = (
+                "post_processing/enable_hybrid_search_and_fulltext_search_in_bloom"
+            )
+            logging.info(f"Full Text index created")
 
-        if os.environ.get('ENTITY_EMBEDDING','False').upper()=="TRUE" and "materialize_entity_similarities" in tasks:
+        if (
+            os.environ.get("ENTITY_EMBEDDING", "False").upper() == "TRUE"
+            and "materialize_entity_similarities" in tasks
+        ):
             await asyncio.to_thread(create_entity_embedding, graph)
-            api_name = 'post_processing/create_entity_embedding'
-            logging.info(f'Entity Embeddings created')
+            api_name = "post_processing/create_entity_embedding"
+            logging.info(f"Entity Embeddings created")
 
-        if "graph_schema_consolidation" in tasks :
+        if "graph_schema_consolidation" in tasks:
             await asyncio.to_thread(graph_schema_consolidation, graph)
-            api_name = 'post_processing/graph_schema_consolidation'
-            logging.info(f'Updated nodes and relationship labels')
-            
+            api_name = "post_processing/graph_schema_consolidation"
+            logging.info(f"Updated nodes and relationship labels")
+
         if "enable_communities" in tasks:
-            api_name = 'create_communities'
-            await asyncio.to_thread(create_communities, uri, userName, password, database)  
-            
-            logging.info(f'created communities')
-        graph = create_graph_database_connection(uri, userName, password, database)   
+            api_name = "create_communities"
+            await asyncio.to_thread(
+                create_communities, uri, userName, password, database
+            )
+
+            logging.info(f"created communities")
+        graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
         document_name = ""
-        count_response = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, document_name)
+        count_response = await asyncio.to_thread(
+            graphDb_data_Access.update_node_relationship_count, document_name
+        )
         if count_response:
-            count_response = [{"filename": filename, **counts} for filename, counts in count_response.items()]
-            logging.info(f'Updated source node with community related counts')
-        
+            count_response = [
+                {"filename": filename, **counts}
+                for filename, counts in count_response.items()
+            ]
+            logging.info(f"Updated source node with community related counts")
+
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name': api_name, 'db_url': uri, 'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": api_name,
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj)
-        return create_api_response('Success', data=count_response, message='All tasks completed successfully')
-    
+        return create_api_response(
+            "Success", data=count_response, message="All tasks completed successfully"
+        )
+
     except Exception as e:
         job_status = "Failed"
         error_message = str(e)
         message = f"Unable to complete tasks"
-        logging.exception(f'Exception in post_processing tasks: {error_message}')
+        logging.exception(f"Exception in post_processing tasks: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
-    
+
     finally:
         gc.collect()
 
+
 @app.post("/entity_relationship_post_processing")
 async def entity_relationship_post_processing(
-    uri=Form(None), 
-    userName=Form(None), 
-    password=Form(None), 
-    database=Form(None), 
-    file_names=Form(None), 
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    file_names=Form(None),
     post_processing_rules=Form(None),
-    email=Form(None)
+    email=Form(None),
 ):
     """
     Dinamik entity relationship post-processing endpoint'i.
     Kullanıcının belirlediği kurallara göre entity'leri target node'lara bağlar.
-    
+
     Args:
         file_names: İşlenecek dosya isimlerinin JSON listesi
         post_processing_rules: Post-processing kurallarının JSON formatı:
         [
             {
                 "source_node_type": "Year",
-                "target_node_type": "Document", 
+                "target_node_type": "Document",
                 "relationship_types": ["OCCURS_IN", "HAS_YEAR"],
                 "target_selection": "document" // "document" veya "specific_target"
             },
@@ -1595,67 +1880,103 @@ async def entity_relationship_post_processing(
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         # Parametreleri parse et
         if post_processing_rules:
-            rules_list = json.loads(post_processing_rules) if isinstance(post_processing_rules, str) else post_processing_rules
+            rules_list = (
+                json.loads(post_processing_rules)
+                if isinstance(post_processing_rules, str)
+                else post_processing_rules
+            )
         else:
             rules_list = []
-        
+
         # file_names parametresini parse et
         target_files = None
         if file_names:
             try:
-                target_files = json.loads(file_names) if isinstance(file_names, str) else file_names
+                target_files = (
+                    json.loads(file_names)
+                    if isinstance(file_names, str)
+                    else file_names
+                )
                 if target_files:
                     logging.info(f"Hedef dosyalar: {target_files}")
             except json.JSONDecodeError:
                 logging.warning(f"file_names parse edilemedi: {file_names}")
-        
+
         # Post-processing işlemini çalıştır
         from src.llm import apply_dynamic_entity_post_processing
-        result = await asyncio.to_thread(apply_dynamic_entity_post_processing, graph, rules_list, target_files)
-        
+
+        result = await asyncio.to_thread(
+            apply_dynamic_entity_post_processing, graph, rules_list, target_files
+        )
+
         end = time.time()
         elapsed_time = end - start
-        
+
         json_obj = {
-            'api_name': 'entity_relationship_post_processing', 
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database, 
-            'post_processing_rules': post_processing_rules,
-            'processed_files': result.get('processed_files', 0),
-            'applied_rules': len(rules_list),
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'email': email
+            "api_name": "entity_relationship_post_processing",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "post_processing_rules": post_processing_rules,
+            "processed_files": result.get("processed_files", 0),
+            "applied_rules": len(rules_list),
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
-        processed_files = result.get('processed_files', 0)
-        return create_api_response('Success', data=result, message=f'Entity relationship post-processing completed across {processed_files} documents with {len(rules_list)} rules in {elapsed_time:.2f} seconds')
-    
+
+        processed_files = result.get("processed_files", 0)
+        return create_api_response(
+            "Success",
+            data=result,
+            message=f"Entity relationship post-processing completed across {processed_files} documents with {len(rules_list)} rules in {elapsed_time:.2f} seconds",
+        )
+
     except Exception as e:
         job_status = "Failed"
         error_message = str(e)
         message = f"Unable to complete entity relationship post-processing"
-        logging.exception(f'Exception in entity_relationship_post_processing: {error_message}')
+        logging.exception(
+            f"Exception in entity_relationship_post_processing: {error_message}"
+        )
         return create_api_response(job_status, message=message, error=error_message)
-    
+
     finally:
         gc.collect()
-                
+
+
 @app.post("/chat_bot")
-async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password=Form(None), database=Form(None),question=Form(None), document_names=Form(None),session_id=Form(None),mode=Form(None),email=Form(None)):
+async def chat_bot(
+    uri=Form(None),
+    model=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    question=Form(None),
+    document_names=Form(None),
+    session_id=Form(None),
+    mode=Form(None),
+    email=Form(None),
+):
     logging.info(f"QA_RAG called at {datetime.now()}")
     qa_rag_start_time = time.time()
     try:
         if mode == "graph":
-            graph = Neo4jGraph( url=uri,username=userName,password=password,database=database,sanitize = True, refresh_schema=True)
+            graph = Neo4jGraph(
+                url=uri,
+                username=userName,
+                password=password,
+                database=database,
+                sanitize=True,
+                refresh_schema=True,
+            )
         else:
             graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         graph_DB_dataAccess = graphDBdataAccess(graph)
         write_access = graph_DB_dataAccess.check_account_access(database=database)
         # Try to instantiate IntelligentAgent and pass them to QA_RAG (fallback to None on failure)
@@ -1683,20 +2004,34 @@ async def chat_bot(uri=Form(None),model=Form(None),userName=Form(None), password
         total_call_time = time.time() - qa_rag_start_time
         logging.info(f"Total Response time is  {total_call_time:.2f} seconds")
         result["info"]["response_time"] = round(total_call_time, 2)
-        
-        json_obj = {'api_name':'chat_bot','db_url':uri, 'userName':userName, 'database':database, 'question':question,'document_names':document_names,
-                             'session_id':session_id, 'mode':mode, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{total_call_time:.2f}','email':email}
+
+        json_obj = {
+            "api_name": "chat_bot",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "question": question,
+            "document_names": document_names,
+            "session_id": session_id,
+            "mode": mode,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{total_call_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success',data=result)
+
+        return create_api_response("Success", data=result)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to get chat response"
+        message = "Unable to get chat response"
         error_message = str(e)
-        logging.exception(f'Exception in chat bot:{error_message}')
-        return create_api_response(job_status, message=message, error=error_message,data=mode)
+        logging.exception(f"Exception in chat bot:{error_message}")
+        return create_api_response(
+            job_status, message=message, error=error_message, data=mode
+        )
     finally:
         gc.collect()
+
 
 @app.post("/setup_chatbot")
 async def setup_chatbot(
@@ -1706,7 +2041,7 @@ async def setup_chatbot(
     database: str = Form(None),
     session_id: str = Form(None),
     model: str = Form(None),
-    email: str = Form(None)
+    email: str = Form(None),
 ):
     """
     Belirli bir session ID için IntelligentAgent'ı önceden oluştur/cache'le
@@ -1714,55 +2049,65 @@ async def setup_chatbot(
     """
     try:
         start_time = time.time()
-        
+
         # Parametreleri kontrol et
         if not session_id:
-            return create_api_response('Failed', message="session_id parametresi gerekli")
-        
+            return create_api_response(
+                "Failed", message="session_id parametresi gerekli"
+            )
+
         if not model:
-            return create_api_response('Failed', message="model parametresi gerekli")
-        
+            return create_api_response("Failed", message="model parametresi gerekli")
+
         # Graph bağlantısını kur
         graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         # Agent'ı oluştur veya mevcut cache'den al
         agent = get_cached_agent(session_id, graph, model)
-        
+
         # Agent bilgilerini al
         agent_info = {
-            'session_id': session_id,
-            'model': model,
-            'agent_created': True,
-            'cache_hit': session_id in _agent_cache and session_id in _cache_access_times,
-            'schema_initialized': hasattr(agent, '_schema_cache') and agent._schema_cache is not None,
-            'total_cached_sessions': len(_agent_cache),
-            'initialization_time': f"{time.time() - start_time:.3f}s"
+            "session_id": session_id,
+            "model": model,
+            "agent_created": True,
+            "cache_hit": session_id in _agent_cache
+            and session_id in _cache_access_times,
+            "schema_initialized": hasattr(agent, "_schema_cache")
+            and agent._schema_cache is not None,
+            "total_cached_sessions": len(_agent_cache),
+            "initialization_time": f"{time.time() - start_time:.3f}s",
         }
-        
+
         # Loglama
         elapsed_time = time.time() - start_time
         json_obj = {
-            'api_name': 'setup_chatbot',
-            'db_url': uri,
-            'userName': userName,
-            'database': database,
-            'session_id': session_id,
-            'model': model,
-            'cache_hit': agent_info['cache_hit'],
-            'total_cached_sessions': agent_info['total_cached_sessions'],
-            'logging_time': formatted_time(datetime.now(timezone.utc)),
-            'elapsed_api_time': f'{elapsed_time:.3f}',
-            'email': email
+            "api_name": "setup_chatbot",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "session_id": session_id,
+            "model": model,
+            "cache_hit": agent_info["cache_hit"],
+            "total_cached_sessions": agent_info["total_cached_sessions"],
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.3f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success', data=agent_info, 
-                                 message=f"Chatbot setup completed for session {session_id}")
-    
+
+        return create_api_response(
+            "Success",
+            data=agent_info,
+            message=f"Chatbot setup completed for session {session_id}",
+        )
+
     except Exception as e:
         error_message = str(e)
-        logging.exception(f'Exception in setup_chatbot: {error_message}')
-        return create_api_response('Failed', message=f"Chatbot setup failed: {error_message}")
+        logging.exception(f"Exception in setup_chatbot: {error_message}")
+        return create_api_response(
+            "Failed", message=f"Chatbot setup failed: {error_message}"
+        )
+
 
 @app.post("/chat_bot_stream")
 async def chat_bot_stream(
@@ -1778,15 +2123,15 @@ async def chat_bot_stream(
     mode: str = Form(None),
     email: str = Form(None),
     files: Optional[str] = Form(None),
-    agent_type: str = Form("standard")  # "standard" veya "fast_agent"
+    agent_type: str = Form("standard"),  # "standard" veya "fast_agent"
 ):
     """
-    Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile 
+    Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile
     token-by-token chat cevapları gönderir.
     """
-    
+
     # print("chat_bot_stream files: ", files)
-    
+
     filesJson = None
     downloadedFiles = None
     if files:
@@ -1813,55 +2158,65 @@ async def chat_bot_stream(
     #         files_data = convert_result_to_base64(downloadedFiles)
     #     except json.JSONDecodeError:
     #         logging.info("files convert_result_to_base64 error.")
-            # return {"error": "Invalid JSON in 'files'"}
-    
-    
+    # return {"error": "Invalid JSON in 'files'"}
+
     async def generate_real_streaming_response():
         try:
             logging.info(f"QA_RAG Real Stream called at {datetime.now()}")
             qa_rag_start_time = time.time()
-            
+
             # İlk durum mesajı gönder
             yield f"data: {json.dumps({'type': 'status', 'message': 'Gerçek streaming başlatılıyor...', 'status': 'starting'}, ensure_ascii=False)}\n\n"
-            
+
             # Graph bağlantısını kur
             if mode == "graph":
-                graph = Neo4jGraph(url=uri, username=userName, password=password, database=database, sanitize=True, refresh_schema=True)
+                graph = Neo4jGraph(
+                    url=uri,
+                    username=userName,
+                    password=password,
+                    database=database,
+                    sanitize=True,
+                    refresh_schema=True,
+                )
             else:
-                graph = create_graph_database_connection(uri, userName, password, database)
-            
+                graph = create_graph_database_connection(
+                    uri, userName, password, database
+                )
+
             yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'}, ensure_ascii=False)}\n\n"
-            
+
             graph_DB_dataAccess = graphDBdataAccess(graph)
             write_access = graph_DB_dataAccess.check_account_access(database=database)
-            
+
             # Agent tipine göre streaming yaklaşımı seç
             final_result = None
             total_tokens = 0
-            
+
             if agent_type != "fast_agent":
                 # FastAgent kullanarak streaming
                 yield f"data: {json.dumps({'type': 'status', 'message': 'FastAgent ile işleniyor...', 'status': 'fast_agent_processing'}, ensure_ascii=False)}\n\n"
-                
+
                 async for chunk in stream_fast_agent_response(
                     question=question,
                     graph=graph,
                     # model=model,
-                    session_id=session_id
+                    session_id=session_id,
                 ):
                     # Client disconnect kontrolü
                     if await request.is_disconnected():
-                        logging.info("SSE Client disconnected during FastAgent streaming")
+                        logging.info(
+                            "SSE Client disconnected during FastAgent streaming"
+                        )
                         break
-                    
+
                     # Chunk'ı client'a gönder
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                    
+
                     # Final result'ı sakla
                     if chunk.get("type") == "complete":
                         final_result = chunk
                         total_tokens = chunk.get("info", {}).get("total_tokens", 0)
-                        
+
             else:
                 # Standart QA_RAG streaming
                 # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
@@ -1883,104 +2238,111 @@ async def chat_bot_stream(
                     mode=mode,
                     write_access=write_access,
                     intelligent_agent=intelligent_agent,
-                    files=downloadedFiles
+                    files=downloadedFiles,
                 ):
                     # Client disconnect kontrolü
                     if await request.is_disconnected():
                         logging.info("SSE Client disconnected during real streaming")
                         break
-                    
+
                     # Chunk'ı client'a gönder
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                    
+
                     # Final result'ı sakla
                     if chunk.get("type") == "complete":
                         final_result = chunk
                         total_tokens = chunk.get("info", {}).get("total_tokens", 0)
-            
+
             # Timing bilgilerini ekle
             total_call_time = time.time() - qa_rag_start_time
-            logging.info(f"Real streaming total response time: {total_call_time:.2f} seconds")
-            
+            logging.info(
+                f"Real streaming total response time: {total_call_time:.2f} seconds"
+            )
+
             # Final timing chunk'ı gönder
             timing_chunk = {
-                'type': 'timing',
-                'status': 'finished',
-                'elapsed_time': f"{total_call_time:.2f}",
-                'total_tokens': total_tokens,
-                'timestamp': formatted_time(datetime.now(timezone.utc))
+                "type": "timing",
+                "status": "finished",
+                "elapsed_time": f"{total_call_time:.2f}",
+                "total_tokens": total_tokens,
+                "timestamp": formatted_time(datetime.now(timezone.utc)),
             }
             yield f"data: {json.dumps(timing_chunk, ensure_ascii=False)}\n\n"
-            
+
             # Loglama
             json_obj = {
-                'api_name': 'chat_bot_stream_real',
-                'db_url': uri,
-                'userName': userName,
-                'database': database,
-                'question': question,
-                'document_names': document_names,
-                'session_id': session_id,
-                'mode': mode,
-                'logging_time': formatted_time(datetime.now(timezone.utc)),
-                'elapsed_api_time': f'{total_call_time:.2f}',
-                'total_tokens': total_tokens,
-                'email': email,
-                'streaming_type': 'real_llm_streaming'
+                "api_name": "chat_bot_stream_real",
+                "db_url": uri,
+                "userName": userName,
+                "database": database,
+                "question": question,
+                "document_names": document_names,
+                "session_id": session_id,
+                "mode": mode,
+                "logging_time": formatted_time(datetime.now(timezone.utc)),
+                "elapsed_api_time": f"{total_call_time:.2f}",
+                "total_tokens": total_tokens,
+                "email": email,
+                "streaming_type": "real_llm_streaming",
             }
             logger.log_struct(json_obj, "INFO")
-            
+
         except Exception as e:
             error_message = str(e)
-            logging.exception(f'Exception in real streaming chat bot: {error_message}')
-            
+            logging.exception(f"Exception in real streaming chat bot: {error_message}")
+
             error_chunk = {
-                'type': 'error',
-                'status': 'error', 
-                'message': 'Streaming sırasında bir hata oluştu',
-                'error': error_message,
-                'timestamp': formatted_time(datetime.now(timezone.utc))
+                "type": "error",
+                "status": "error",
+                "message": "Streaming sırasında bir hata oluştu",
+                "error": error_message,
+                "timestamp": formatted_time(datetime.now(timezone.utc)),
             }
             yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
-            
+
         finally:
             gc.collect()
-    
+
     return EventSourceResponse(generate_real_streaming_response())
+
 
 @app.post("/test_fast_agent")
 async def test_fast_agent(
     question: str = Form("Amasyalı soy adı olan sigortalımız var mı?"),
     model: str = Form("openai_gpt_4o_mini"),
-    session_id: str = Form("test_session")
+    session_id: str = Form("test_session"),
 ):
     """FastAgent'i test etmek için basit endpoint"""
     try:
-        from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
-        
+        from src.workflow.fast_agent_integration_simple import (
+            stream_fast_agent_response,
+        )
+
         # Test response'u topla
         response_parts = []
         async for chunk in stream_fast_agent_response(
             question=question,
             # model=model,
-            session_id=session_id
+            session_id=session_id,
         ):
             response_parts.append(chunk)
-        
-        return create_api_response('Success', 
+
+        return create_api_response(
+            "Success",
             data={
-                'chunks': response_parts,
-                'total_chunks': len(response_parts),
-                'question': question,
-                'model': model,
-                'session_id': session_id
-            }, 
-            message="FastAgent test completed successfully"
+                "chunks": response_parts,
+                "total_chunks": len(response_parts),
+                "question": question,
+                "model": model,
+                "session_id": session_id,
+            },
+            message="FastAgent test completed successfully",
         )
-        
+
     except Exception as e:
         logging.error(f"FastAgent test error: {e}")
-        return create_api_response('Failed', message=f"FastAgent test failed: {str(e)}")
+        return create_api_response("Failed", message=f"FastAgent test failed: {str(e)}")
+
 
 @app.get("/agent_cache_sessions")
 async def get_agent_cache_sessions():
@@ -1989,40 +2351,53 @@ async def get_agent_cache_sessions():
     """
     try:
         import time
+
         current_time = time.time()
-        
+
         sessions_info = []
         for session_id, agent in _agent_cache.items():
             last_access = _cache_access_times.get(session_id, 0)
-            sessions_info.append({
-                'session_id': session_id,
-                'model': getattr(agent, 'model_name', 'unknown'),
-                'last_access': last_access,
-                'last_access_formatted': formatted_time(datetime.fromtimestamp(last_access, tz=timezone.utc)),
-                'seconds_since_access': int(current_time - last_access),
-                'schema_cached': hasattr(agent, '_schema_cache') and agent._schema_cache is not None
-            })
-        
+            sessions_info.append(
+                {
+                    "session_id": session_id,
+                    "model": getattr(agent, "model_name", "unknown"),
+                    "last_access": last_access,
+                    "last_access_formatted": formatted_time(
+                        datetime.fromtimestamp(last_access, tz=timezone.utc)
+                    ),
+                    "seconds_since_access": int(current_time - last_access),
+                    "schema_cached": hasattr(agent, "_schema_cache")
+                    and agent._schema_cache is not None,
+                }
+            )
+
         # Son erişim zamanına göre sırala (en son kullanılan önce)
-        sessions_info.sort(key=lambda x: x['last_access'], reverse=True)
-        
+        sessions_info.sort(key=lambda x: x["last_access"], reverse=True)
+
         summary = {
-            'total_sessions': len(sessions_info),
-            'cache_limit': AGENT_CACHE_MAX_SIZE,
-            'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
-            'sessions': sessions_info
+            "total_sessions": len(sessions_info),
+            "cache_limit": AGENT_CACHE_MAX_SIZE,
+            "cleanup_count": AGENT_CACHE_CLEANUP_COUNT,
+            "sessions": sessions_info,
         }
-        
-        return create_api_response('Success', data=summary, message=f"Found {len(sessions_info)} cached sessions")
-    
+
+        return create_api_response(
+            "Success",
+            data=summary,
+            message=f"Found {len(sessions_info)} cached sessions",
+        )
+
     except Exception as e:
         logging.error(f"Agent cache sessions hatası: {e}")
-        return create_api_response('Failed', message=f"Error retrieving sessions: {str(e)}")
+        return create_api_response(
+            "Failed", message=f"Error retrieving sessions: {str(e)}"
+        )
+
 
 @app.post("/clear_agent_cache")
 async def clear_agent_cache(
     session_id: str = Form(None),  # Specific session to clear, or None for all
-    email: str = Form(None)
+    email: str = Form(None),
 ):
     """
     Agent cache'i temizle - belirli session veya tüm cache
@@ -2045,27 +2420,32 @@ async def clear_agent_cache(
             _cache_access_times.clear()
             message = f"Tüm agent cache temizlendi ({cleared_count} session)"
             action = "all_cache_cleared"
-        
+
         # Loglama
         json_obj = {
-            'api_name': 'clear_agent_cache',
-            'action': action,
-            'session_id': session_id,
-            'remaining_sessions': len(_agent_cache),
-            'logging_time': formatted_time(datetime.now(timezone.utc)),
-            'email': email
+            "api_name": "clear_agent_cache",
+            "action": action,
+            "session_id": session_id,
+            "remaining_sessions": len(_agent_cache),
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success', message=message, data={
-            'action': action,
-            'session_id': session_id,
-            'remaining_sessions': len(_agent_cache)
-        })
-    
+
+        return create_api_response(
+            "Success",
+            message=message,
+            data={
+                "action": action,
+                "session_id": session_id,
+                "remaining_sessions": len(_agent_cache),
+            },
+        )
+
     except Exception as e:
         logging.error(f"Agent cache clear hatası: {e}")
-        return create_api_response('Failed', message=f"Error clearing cache: {str(e)}")
+        return create_api_response("Failed", message=f"Error clearing cache: {str(e)}")
+
 
 @app.get("/agent_cache_stats")
 async def get_agent_cache_stats():
@@ -2074,51 +2454,68 @@ async def get_agent_cache_stats():
     """
     try:
         stats = get_cache_stats()
-        return create_api_response('Success', data=stats, message="Agent cache statistics retrieved successfully")
+        return create_api_response(
+            "Success",
+            data=stats,
+            message="Agent cache statistics retrieved successfully",
+        )
     except Exception as e:
         logging.error(f"Agent cache stats hatası: {e}")
-        return create_api_response('Failed', message=f"Error retrieving cache stats: {str(e)}")
+        return create_api_response(
+            "Failed", message=f"Error retrieving cache stats: {str(e)}"
+        )
+
 
 @app.post("/agent_cache_config")
 async def update_agent_cache_config(
-    max_size: int = Form(None),
-    cleanup_count: int = Form(None)
+    max_size: int = Form(None), cleanup_count: int = Form(None)
 ):
     """
     Agent cache konfigürasyonunu güncelle
     """
     global AGENT_CACHE_MAX_SIZE, AGENT_CACHE_CLEANUP_COUNT
-    
+
     try:
         updated_params = {}
-        
+
         if max_size is not None:
             if max_size > 0 and max_size <= 10000:  # Reasonable limits
                 AGENT_CACHE_MAX_SIZE = max_size
-                updated_params['max_size'] = max_size
+                updated_params["max_size"] = max_size
             else:
-                return create_api_response('Failed', message="max_size must be between 1 and 10000")
-        
+                return create_api_response(
+                    "Failed", message="max_size must be between 1 and 10000"
+                )
+
         if cleanup_count is not None:
             if cleanup_count > 0 and cleanup_count <= 1000:  # Reasonable limits
                 AGENT_CACHE_CLEANUP_COUNT = cleanup_count
-                updated_params['cleanup_count'] = cleanup_count
+                updated_params["cleanup_count"] = cleanup_count
             else:
-                return create_api_response('Failed', message="cleanup_count must be between 1 and 1000")
-        
+                return create_api_response(
+                    "Failed", message="cleanup_count must be between 1 and 1000"
+                )
+
         # Current config döndür
         current_config = {
-            'max_size': AGENT_CACHE_MAX_SIZE,
-            'cleanup_count': AGENT_CACHE_CLEANUP_COUNT,
-            'current_sessions': len(_agent_cache),
-            'updated_params': updated_params
+            "max_size": AGENT_CACHE_MAX_SIZE,
+            "cleanup_count": AGENT_CACHE_CLEANUP_COUNT,
+            "current_sessions": len(_agent_cache),
+            "updated_params": updated_params,
         }
-        
-        return create_api_response('Success', data=current_config, message="Cache configuration updated successfully")
-        
+
+        return create_api_response(
+            "Success",
+            data=current_config,
+            message="Cache configuration updated successfully",
+        )
+
     except Exception as e:
         logging.error(f"Cache config update hatası: {e}")
-        return create_api_response('Failed', message=f"Error updating cache config: {str(e)}")
+        return create_api_response(
+            "Failed", message=f"Error updating cache config: {str(e)}"
+        )
+
 
 # @app.post("/chat_bot_stream_legacy")
 # async def chat_bot_stream_legacy(
@@ -2137,28 +2534,28 @@ async def update_agent_cache_config(
 #     """
 #     Eski simüle streaming versiyonu (backward compatibility için)
 #     """
-    
+
 #     async def generate_simulated_streaming_response():
 #         try:
 #             logging.info(f"QA_RAG Simulated Stream called at {datetime.now()}")
 #             qa_rag_start_time = time.time()
-            
+
 #             # İlk durum mesajı gönder
 #             yield f"data: {json.dumps({'type': 'status', 'message': 'Simüle streaming başlatılıyor...', 'status': 'starting'})}\n\n"
-            
+
 #             # Graph bağlantısını kur
 #             if mode == "graph":
 #                 graph = Neo4jGraph(url=uri, username=userName, password=password, database=database, sanitize=True, refresh_schema=True)
 #             else:
 #                 graph = create_graph_database_connection(uri, userName, password, database)
-            
+
 #             yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'})}\n\n"
-            
+
 #             graph_DB_dataAccess = graphDBdataAccess(graph)
 #             write_access = graph_DB_dataAccess.check_account_access(database=database)
-            
+
 #             yield f"data: {json.dumps({'type': 'status', 'message': 'Soru işleniyor...', 'status': 'processing'})}\n\n"
-            
+
 #             # QA_RAG işlemini çalıştır (eski batch yöntem)
 #             result = await asyncio.to_thread(
 #                 QA_RAG,
@@ -2170,25 +2567,25 @@ async def update_agent_cache_config(
 #                 mode=mode,
 #                 write_access=write_access
 #             )
-            
+
 #             total_call_time = time.time() - qa_rag_start_time
 #             logging.info(f"Simulated streaming total response time: {total_call_time:.2f} seconds")
 #             result["info"]["response_time"] = round(total_call_time, 2)
-            
+
 #             # Cevap parçalayarak gönder (simüle streaming effect)
 #             message = result.get("message", "")
 #             if message:
 #                 # Mesajı kelime kelime stream et
 #                 words = message.split()
 #                 streamed_message = ""
-                
+
 #                 for i, word in enumerate(words):
 #                     if await request.is_disconnected():
 #                         logging.info("SSE Client disconnected during simulated streaming")
 #                         break
-                        
+
 #                     streamed_message += word + " "
-                    
+
 #                     # Her birkaç kelimede bir chunk gönder
 #                     if (i + 1) % 3 == 0 or i == len(words) - 1:
 #                         chunk_data = {
@@ -2201,10 +2598,10 @@ async def update_agent_cache_config(
 #                             'session_id': result.get("session_id", session_id)
 #                         }
 #                         yield f"data: {json.dumps(chunk_data)}\n\n"
-                        
+
 #                         # Streaming efekti için kısa bekleme
 #                         await asyncio.sleep(0.1)
-            
+
 #             # Son olarak tam sonucu gönder
 #             final_data = {
 #                 'type': 'complete',
@@ -2214,7 +2611,7 @@ async def update_agent_cache_config(
 #                 'timestamp': formatted_time(datetime.now(timezone.utc))
 #             }
 #             yield f"data: {json.dumps(final_data)}\n\n"
-            
+
 #             # Loglama
 #             json_obj = {
 #                 'api_name': 'chat_bot_stream_legacy',
@@ -2231,11 +2628,11 @@ async def update_agent_cache_config(
 #                 'streaming_type': 'simulated_streaming'
 #             }
 #             logger.log_struct(json_obj, "INFO")
-            
+
 #         except Exception as e:
 #             error_message = str(e)
 #             logging.exception(f'Exception in chat bot stream: {error_message}')
-            
+
 #             error_data = {
 #                 'type': 'error',
 #                 'status': 'failed',
@@ -2244,50 +2641,107 @@ async def update_agent_cache_config(
 #                 'timestamp': formatted_time(datetime.now(timezone.utc))
 #             }
 #             yield f"data: {json.dumps(error_data)}\n\n"
-        
+
 #         finally:
 #             gc.collect()
-    
+
 #     return EventSourceResponse(generate_simulated_streaming_response())
 
+
 @app.post("/chunk_entities")
-async def chunk_entities(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), nodedetails=Form(None),entities=Form(),mode=Form(),email=Form(None)):
+async def chunk_entities(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    nodedetails=Form(None),
+    entities=Form(),
+    mode=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
-        result = await asyncio.to_thread(get_entities_from_chunkids,nodedetails=nodedetails,entities=entities,mode=mode,uri=uri, username=userName, password=password, database=database)
+        result = await asyncio.to_thread(
+            get_entities_from_chunkids,
+            nodedetails=nodedetails,
+            entities=entities,
+            mode=mode,
+            uri=uri,
+            username=userName,
+            password=password,
+            database=database,
+        )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'chunk_entities','db_url':uri, 'userName':userName, 'database':database, 'nodedetails':nodedetails,'entities':entities,
-                            'mode':mode, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "chunk_entities",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "nodedetails": nodedetails,
+            "entities": entities,
+            "mode": mode,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to extract entities from chunk ids"
+        message = "Unable to extract entities from chunk ids"
         error_message = str(e)
-        logging.exception(f'Exception in chat bot:{error_message}')
+        logging.exception(f"Exception in chat bot:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
+
 @app.post("/get_neighbours")
-async def get_neighbours(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), elementId=Form(None),email=Form(None)):
+async def get_neighbours(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    elementId=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
-        result = await asyncio.to_thread(get_neighbour_nodes,uri=uri, username=userName, password=password,database=database, element_id=elementId)
+        result = await asyncio.to_thread(
+            get_neighbour_nodes,
+            uri=uri,
+            username=userName,
+            password=password,
+            database=database,
+            element_id=elementId,
+        )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'get_neighbours', 'userName':userName, 'database':database,'db_url':uri, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "get_neighbours",
+            "userName": userName,
+            "database": database,
+            "db_url": uri,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to extract neighbour nodes for given element ID"
+        message = "Unable to extract neighbour nodes for given element ID"
         error_message = str(e)
-        logging.exception(f'Exception in get neighbours :{error_message}')
+        logging.exception(f"Exception in get neighbours :{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
+
 
 @app.post("/graph_query")
 async def graph_query(
@@ -2296,7 +2750,7 @@ async def graph_query(
     userName: str = Form(None),
     password: str = Form(None),
     document_names: str = Form(None),
-    email=Form(None)
+    email=Form(None),
 ):
     try:
         start = time.time()
@@ -2306,28 +2760,48 @@ async def graph_query(
             username=userName,
             password=password,
             database=database,
-            document_names=document_names
+            document_names=document_names,
         )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'graph_query','db_url':uri, 'userName':userName, 'database':database, 'document_names':document_names, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "graph_query",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "document_names": document_names,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success', data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
         job_status = "Failed"
         message = "Unable to get graph query response"
         error_message = str(e)
-        logging.exception(f'Exception in graph query: {error_message}')
+        logging.exception(f"Exception in graph query: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-    
+
 
 @app.post("/clear_chat_bot")
-async def clear_chat_bot(uri=Form(None),userName=Form(None), password=Form(None), database=Form(None), session_id=Form(None), model=Form(None), new_session_id=Form(None),email=Form(None)):
+async def clear_chat_bot(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    session_id=Form(None),
+    model=Form(None),
+    new_session_id=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
-        
+
         # 🧹 SESSION-BASED AGENT CACHE TEMİZLİK ÖNCE YAP
         # Chat history temizlendiğinde ilgili agent'ı da cache'den kaldır
         agent_cache_result = "no_cache_entry"
@@ -2340,201 +2814,357 @@ async def clear_chat_bot(uri=Form(None),userName=Form(None), password=Form(None)
         elif session_id:
             agent_cache_result = "cache_not_found"
             print(f"🔍 Agent cache'de bulunamadı - Session: {session_id}")
-        
+
         # ⚠️ NEO4J BAĞLANTI KONTROLÜ
         result = None
         db_clear_result = "db_connection_failed"
         new_agent_result = "no_model_provided"
-        
+
         try:
             # Neo4j bağlantısını dene
             graph = create_graph_database_connection(uri, userName, password, database)
-            result = await asyncio.to_thread(clear_chat_history,graph=graph,session_id=session_id)
+            result = await asyncio.to_thread(
+                clear_chat_history, graph=graph, session_id=session_id
+            )
             db_clear_result = "db_cleared"
             print(f"✅ Neo4j'den chat history temizlendi - Session: {session_id}")
-            
+
             # 🆕 CLEAR CHAT'TEN SONRA YENİ SESSION ID İLE AGENT OLUŞTUR (eğer new_session_id gönderildiyse)
             if model and new_session_id and db_clear_result == "db_cleared":
                 try:
                     # Yeni session ID ile agent oluştur
                     new_session_agent = get_cached_agent(new_session_id, graph, model)
-                    new_agent_result = f"agent_created_for_new_session: {new_session_id}"
-                    print(f"🆕 Clear chat sonrası yeni session için agent oluşturuldu - New Session: {new_session_id}, Model: {model}")
+                    new_agent_result = (
+                        f"agent_created_for_new_session: {new_session_id}"
+                    )
+                    print(
+                        f"🆕 Clear chat sonrası yeni session için agent oluşturuldu - New Session: {new_session_id}, Model: {model}"
+                    )
+
+                    # 🆕 FastAgent için şema cache'ini doldur (yeni session için)
+                    try:
+                        from src.workflow.fast_agent_integration_simple import (
+                            get_or_create_fast_agent,
+                        )
+
+                        fast_agent = await get_or_create_fast_agent(model, graph)
+                        # Session bazlı cache durumunu kontrol et
+                        cache_before = new_session_id in fast_agent.schema_cache
+                        logging.info(
+                            f"📋 FastAgent CLEAR_CHAT: Session {new_session_id} için cache durumu (önce): {cache_before}"
+                        )
+
+                        # Yeni session için şema bilgisini önceden al ve cache'le
+                        schema_info = fast_agent._get_schema_for_session(new_session_id)
+
+                        # Cache durumunu tekrar kontrol et
+                        cache_after = new_session_id in fast_agent.schema_cache
+                        logging.info(
+                            f"📋 FastAgent CLEAR_CHAT: Session {new_session_id} için cache durumu (sonra): {cache_after}, Schema length: {len(schema_info) if schema_info else 0}"
+                        )
+
+                        if schema_info:
+                            print(
+                                f"✅ FastAgent: Session {new_session_id} için şema cache'lendi - Schema length: {len(schema_info)}"
+                            )
+                        else:
+                            print(
+                                f"⚠️ FastAgent: Session {new_session_id} için şema alınamadı"
+                            )
+                    except Exception as fast_agent_error:
+                        logging.error(
+                            f"⚠️ FastAgent şema cache hatası - Session {new_session_id}: {fast_agent_error}",
+                            exc_info=True,
+                        )
+                        print(
+                            f"⚠️ FastAgent şema cache hatası - Session {new_session_id}: {fast_agent_error}"
+                        )
                 except Exception as agent_error:
-                    new_agent_result = f"new_session_agent_creation_failed: {str(agent_error)}"
-                    print(f"❌ Yeni session için agent oluşturma hatası - New Session: {new_session_id}: {agent_error}")
-        
+                    new_agent_result = (
+                        f"new_session_agent_creation_failed: {str(agent_error)}"
+                    )
+                    print(
+                        f"❌ Yeni session için agent oluşturma hatası - New Session: {new_session_id}: {agent_error}"
+                    )
+
         except Exception as db_error:
             # Neo4j bağlantı hatası durumunda sadece cache temizle
             db_clear_result = f"db_connection_failed: {str(db_error)[:100]}"
-            print(f"⚠️ Neo4j bağlantı hatası, sadece cache temizlendi - Session: {session_id}: {db_error}")
+            print(
+                f"⚠️ Neo4j bağlantı hatası, sadece cache temizlendi - Session: {session_id}: {db_error}"
+            )
             # Fallback result oluştur
             result = {
-                "session_id": session_id, 
-                "message": "Chat cache cleared (database connection failed)", 
-                "user": "chatbot"
+                "session_id": session_id,
+                "message": "Chat cache cleared (database connection failed)",
+                "user": "chatbot",
             }
-        
+
         # Sonuca cache temizleme ve yeni agent bilgilerini ekle
         if isinstance(result, dict):
-            result['agent_cache_status'] = agent_cache_result
-            result['db_clear_status'] = db_clear_result
-            result['new_agent_status'] = new_agent_result
-            result['remaining_cached_sessions'] = len(_agent_cache)
-        
+            result["agent_cache_status"] = agent_cache_result
+            result["db_clear_status"] = db_clear_result
+            result["new_agent_status"] = new_agent_result
+            result["remaining_cached_sessions"] = len(_agent_cache)
+
         end = time.time()
         elapsed_time = end - start
         json_obj = {
-            'api_name':'clear_chat_bot', 
-            'db_url':uri, 
-            'userName':userName, 
-            'database':database, 
-            'session_id':session_id, 
-            'model': model,
-            'agent_cache_status': agent_cache_result,
-            'db_clear_status': db_clear_result,
-            'new_agent_status': new_agent_result,
-            'remaining_cached_sessions': len(_agent_cache),
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time':f'{elapsed_time:.2f}',
-            'email':email
+            "api_name": "clear_chat_bot",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "session_id": session_id,
+            "model": model,
+            "agent_cache_status": agent_cache_result,
+            "db_clear_status": db_clear_result,
+            "new_agent_status": new_agent_result,
+            "remaining_cached_sessions": len(_agent_cache),
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result)
+        return create_api_response("Success", data=result)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to clear chat History"
+        message = "Unable to clear chat History"
         error_message = str(e)
-        logging.exception(f'Exception in chat bot:{error_message}')
+        logging.exception(f"Exception in chat bot:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-            
+
+
 @app.post("/connect")
-async def connect(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),email=Form(None)):
+async def connect(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        result = await asyncio.to_thread(connection_check_and_get_vector_dimensions, graph, database)
-        gcs_file_cache = os.environ.get('GCS_FILE_CACHE')
+        result = await asyncio.to_thread(
+            connection_check_and_get_vector_dimensions, graph, database
+        )
+        gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'connect','db_url':uri, 'userName':userName, 'database':database, 'count':1, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "connect",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "count": 1,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        result['elapsed_api_time'] = f'{elapsed_time:.2f}'
-        result['gcs_file_cache'] = gcs_file_cache
-        return create_api_response('Success',data=result)
+        result["elapsed_api_time"] = f"{elapsed_time:.2f}"
+        result["gcs_file_cache"] = gcs_file_cache
+        return create_api_response("Success", data=result)
     except Exception as e:
         job_status = "Failed"
-        message="Connection failed to connect Neo4j database"
+        message = "Connection failed to connect Neo4j database"
         error_message = str(e)
-        logging.exception(f'Connection failed to connect Neo4j database:{error_message}')
+        logging.exception(
+            f"Connection failed to connect Neo4j database:{error_message}"
+        )
         return create_api_response(job_status, message=message, error=error_message)
 
+
 @app.post("/upload")
-async def upload_large_file_into_chunks(file:UploadFile = File(...), chunkNumber=Form(None), totalChunks=Form(None), 
-                                        originalname=Form(None), model=Form(None), uri=Form(None), userName=Form(None), 
-                                        password=Form(None), database=Form(None),email=Form(None), generateEmbedding=Form(None)):
+async def upload_large_file_into_chunks(
+    file: UploadFile = File(...),
+    chunkNumber=Form(None),
+    totalChunks=Form(None),
+    originalname=Form(None),
+    model=Form(None),
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    email=Form(None),
+    generateEmbedding=Form(None),
+):
     try:
         start = time.time()
-        
+
         # Debug: FastAPI Form field'ından gelen dosya ismini kontrol et
         logging.info(f"🔍 RAW originalname from FastAPI Form: {repr(originalname)}")
         logging.info(f"🔍 originalname type: {type(originalname)}")
-        
+
         # FastAPI Form field'ları bazen bytes olarak gelebilir, decode etmeye çalış
         if isinstance(originalname, bytes):
             try:
-                originalname = originalname.decode('utf-8')
+                originalname = originalname.decode("utf-8")
                 logging.info(f"🔄 Decoded bytes to UTF-8: {originalname}")
             except UnicodeDecodeError as e:
                 logging.warning(f"⚠️ UTF-8 decode failed, trying latin-1: {e}")
-                originalname = originalname.decode('latin-1')
+                originalname = originalname.decode("latin-1")
                 logging.info(f"🔄 Decoded bytes to latin-1: {originalname}")
-        
+
         # Eğer string ama yanlış encode edilmişse (URL-encoded UTF-8 bytes), düzelt
-        if isinstance(originalname, str) and '\\x' in originalname:
+        if isinstance(originalname, str) and "\\x" in originalname:
             try:
                 # '\\xc3\\xa7' gibi escaped bytes'ları gerçek bytes'a çevir
                 import codecs
-                originalname_bytes = codecs.decode(originalname, 'unicode_escape').encode('latin-1')
-                originalname = originalname_bytes.decode('utf-8')
+
+                originalname_bytes = codecs.decode(
+                    originalname, "unicode_escape"
+                ).encode("latin-1")
+                originalname = originalname_bytes.decode("utf-8")
                 logging.info(f"🔄 Fixed escaped UTF-8 bytes: {originalname}")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to fix escaped UTF-8: {e}")
-        
-        logging.info(f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}")
-        logging.info(f"🔧 Upload parameters - Model: {model}, GenerateEmbedding: {generateEmbedding}")
-        
+
+        logging.info(
+            f"📤 Upload API called - File: {originalname}, Chunk: {chunkNumber}/{totalChunks}"
+        )
+        logging.info(
+            f"🔧 Upload parameters - Model: {model}, GenerateEmbedding: {generateEmbedding}"
+        )
+
         # Model parametresi kontrolü
         if not model or model.strip() == "":
-            logging.warning(f"⚠️ Model parametresi boş veya gelmedi - upload_file fonksiyonunda varsayılan değer atanacak")
+            logging.warning(
+                f"⚠️ Model parametresi boş veya gelmedi - upload_file fonksiyonunda varsayılan değer atanacak"
+            )
         else:
             logging.info(f"✅ Model parametresi upload endpoint'inde alındı: {model}")
-        
+
         graph = create_graph_database_connection(uri, userName, password, database)
-        result = await asyncio.to_thread(upload_file, graph, model, file, chunkNumber, totalChunks, originalname, uri, CHUNK_DIR, MERGED_DIR, generateEmbedding)
-        
+        result = await asyncio.to_thread(
+            upload_file,
+            graph,
+            model,
+            file,
+            chunkNumber,
+            totalChunks,
+            originalname,
+            uri,
+            CHUNK_DIR,
+            MERGED_DIR,
+            generateEmbedding,
+        )
+
         end = time.time()
         elapsed_time = end - start
-        
-        logging.info(f"✅ Upload processing completed in {elapsed_time:.2f}s - Chunk: {chunkNumber}/{totalChunks}")
-        
+
+        logging.info(
+            f"✅ Upload processing completed in {elapsed_time:.2f}s - Chunk: {chunkNumber}/{totalChunks}"
+        )
+
         if int(chunkNumber) == int(totalChunks):
-            logging.info(f"🎉 Final chunk processed for {originalname} - Upload complete!")
-            json_obj = {'api_name':'upload','db_url':uri,'userName':userName, 'database':database, 'chunkNumber':chunkNumber,'totalChunks':totalChunks,
-                                'original_file_name':originalname,'model':model, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+            logging.info(
+                f"🎉 Final chunk processed for {originalname} - Upload complete!"
+            )
+            json_obj = {
+                "api_name": "upload",
+                "db_url": uri,
+                "userName": userName,
+                "database": database,
+                "chunkNumber": chunkNumber,
+                "totalChunks": totalChunks,
+                "original_file_name": originalname,
+                "model": model,
+                "logging_time": formatted_time(datetime.now(timezone.utc)),
+                "elapsed_api_time": f"{elapsed_time:.2f}",
+                "email": email,
+            }
             logger.log_struct(json_obj, "INFO")
         if int(chunkNumber) == int(totalChunks):
-            return create_api_response('Success',data=result, message='Source Node Created Successfully')
+            return create_api_response(
+                "Success", data=result, message="Source Node Created Successfully"
+            )
         else:
-            return create_api_response('Success', message=result)
+            return create_api_response("Success", message=result)
     except Exception as e:
-        message="Unable to upload file in chunks"
+        message = "Unable to upload file in chunks"
         error_message = str(e)
-        logging.error(f"❌ Upload failed for {originalname}, chunk {chunkNumber}/{totalChunks}: {error_message}")
-        
-        graph = create_graph_database_connection(uri, userName, password, database)   
+        logging.error(
+            f"❌ Upload failed for {originalname}, chunk {chunkNumber}/{totalChunks}: {error_message}"
+        )
+
+        graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
-        graphDb_data_Access.update_exception_db(originalname,error_message)
+        graphDb_data_Access.update_exception_db(originalname, error_message)
         logging.info(message)
-        logging.exception(f'Exception:{error_message}')
-        return create_api_response('Failed', message=message + error_message[:100], error=error_message, file_name = originalname)
+        logging.exception(f"Exception:{error_message}")
+        return create_api_response(
+            "Failed",
+            message=message + error_message[:100],
+            error=error_message,
+            file_name=originalname,
+        )
     finally:
         gc.collect()
-            
+
+
 @app.post("/schema")
-async def get_structured_schema(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),email=Form(None)):
+async def get_structured_schema(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
-        result = await asyncio.to_thread(get_labels_and_relationtypes, uri, userName, password, database)
+        result = await asyncio.to_thread(
+            get_labels_and_relationtypes, uri, userName, password, database
+        )
         end = time.time()
         elapsed_time = end - start
-        logging.info(f'Schema result from DB: {result}')
-        json_obj = {'api_name':'schema','db_url':uri, 'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        logging.info(f"Schema result from DB: {result}")
+        json_obj = {
+            "api_name": "schema",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success', data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
-        message="Unable to get the labels and relationtypes from neo4j database"
+        message = "Unable to get the labels and relationtypes from neo4j database"
         error_message = str(e)
         logging.info(message)
-        logging.exception(f'Exception:{error_message}')
+        logging.exception(f"Exception:{error_message}")
         return create_api_response("Failed", message=message, error=error_message)
     finally:
         gc.collect()
-            
+
+
 def decode_password(pwd):
     sample_string_bytes = base64.b64decode(pwd)
     decoded_password = sample_string_bytes.decode("utf-8")
     return decoded_password
 
+
 def encode_password(pwd):
-    data_bytes = pwd.encode('ascii')
+    data_bytes = pwd.encode("ascii")
     encoded_pwd_bytes = base64.b64encode(data_bytes)
     return encoded_pwd_bytes
 
+
 @app.get("/update_extract_status/{file_name}")
-async def update_extract_status(request: Request, file_name: str, uri:str=None, userName:str=None, password:str=None, database:str=None):
+async def update_extract_status(
+    request: Request,
+    file_name: str,
+    uri: str = None,
+    userName: str = None,
+    password: str = None,
+    database: str = None,
+):
     # URL decode the file name and normalize Unicode characters
     try:
         file_name = unquote(file_name)
@@ -2542,10 +3172,10 @@ async def update_extract_status(request: Request, file_name: str, uri:str=None, 
         logging.info(f"Decoded and normalized file name: {file_name}")
     except Exception as e:
         logging.error(f"Error decoding/normalizing file name: {e}")
-    
+
     async def generate():
-        status = ''
-        
+        status = ""
+
         if password is not None and password != "null":
             decoded_password = decode_password(password)
         else:
@@ -2553,9 +3183,11 @@ async def update_extract_status(request: Request, file_name: str, uri:str=None, 
 
         url = uri
         if url and " " in url:
-            url= url.replace(" ","+")
-            
-        graph = create_graph_database_connection(url, userName, decoded_password, database)
+            url = url.replace(" ", "+")
+
+        graph = create_graph_database_connection(
+            url, userName, decoded_password, database
+        )
         graphDb_data_Access = graphDBdataAccess(graph)
         while True:
             try:
@@ -2563,64 +3195,92 @@ async def update_extract_status(request: Request, file_name: str, uri:str=None, 
                     logging.info(" SSE Client disconnected")
                     break
                 # get the current status of document node
-                
+
                 else:
-                    result = graphDb_data_Access.get_current_status_document_node(file_name)
+                    result = graphDb_data_Access.get_current_status_document_node(
+                        file_name
+                    )
                     if len(result) > 0:
-                        status = json.dumps({'fileName':file_name, 
-                        'status':result[0]['Status'],
-                        'processingTime':result[0]['processingTime'],
-                        'nodeCount':result[0]['nodeCount'],
-                        'relationshipCount':result[0]['relationshipCount'],
-                        'model':result[0]['model'],
-                        'total_chunks':result[0]['total_chunks'],
-                        'fileSize':result[0]['fileSize'],
-                        'processed_chunk':result[0]['processed_chunk'],
-                        'fileSource':result[0]['fileSource'],
-                        'chunkNodeCount' : result[0]['chunkNodeCount'],
-                        'chunkRelCount' : result[0]['chunkRelCount'],
-                        'entityNodeCount' : result[0]['entityNodeCount'],
-                        'entityEntityRelCount' : result[0]['entityEntityRelCount'],
-                        'communityNodeCount' : result[0]['communityNodeCount'],
-                        'communityRelCount' : result[0]['communityRelCount']
-                        })
+                        status = json.dumps(
+                            {
+                                "fileName": file_name,
+                                "status": result[0]["Status"],
+                                "processingTime": result[0]["processingTime"],
+                                "nodeCount": result[0]["nodeCount"],
+                                "relationshipCount": result[0]["relationshipCount"],
+                                "model": result[0]["model"],
+                                "total_chunks": result[0]["total_chunks"],
+                                "fileSize": result[0]["fileSize"],
+                                "processed_chunk": result[0]["processed_chunk"],
+                                "fileSource": result[0]["fileSource"],
+                                "chunkNodeCount": result[0]["chunkNodeCount"],
+                                "chunkRelCount": result[0]["chunkRelCount"],
+                                "entityNodeCount": result[0]["entityNodeCount"],
+                                "entityEntityRelCount": result[0][
+                                    "entityEntityRelCount"
+                                ],
+                                "communityNodeCount": result[0]["communityNodeCount"],
+                                "communityRelCount": result[0]["communityRelCount"],
+                            }
+                        )
                     yield status
             except asyncio.CancelledError:
                 logging.info("SSE Connection cancelled")
-    
-    return EventSourceResponse(generate(),ping=60)
+
+    return EventSourceResponse(generate(), ping=60)
+
 
 @app.post("/delete_document_and_entities")
-async def delete_document_and_entities(uri=Form(None), 
-                                       userName=Form(None), 
-                                       password=Form(None), 
-                                       database=Form(None), 
-                                       filenames=Form(),
-                                       source_types=Form(),
-                                       deleteEntities=Form(),
-                                       email=Form(None)):
+async def delete_document_and_entities(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    filenames=Form(),
+    source_types=Form(),
+    deleteEntities=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
-        files_list_size = await asyncio.to_thread(graphDb_data_Access.delete_file_from_graph, filenames, source_types, deleteEntities, MERGED_DIR, uri)
+        files_list_size = await asyncio.to_thread(
+            graphDb_data_Access.delete_file_from_graph,
+            filenames,
+            source_types,
+            deleteEntities,
+            MERGED_DIR,
+            uri,
+        )
         message = f"Deleted {files_list_size} documents with entities from database"
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'delete_document_and_entities','db_url':uri, 'userName':userName, 'database':database, 'filenames':filenames,'deleteEntities':deleteEntities,
-                            'source_types':source_types, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "delete_document_and_entities",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "filenames": filenames,
+            "deleteEntities": deleteEntities,
+            "source_types": source_types,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',message=message)
+        return create_api_response("Success", message=message)
     except Exception as e:
         job_status = "Failed"
-        message=f"Unable to delete document {filenames}"
+        message = f"Unable to delete document {filenames}"
         error_message = str(e)
-        logging.exception(f'{message}:{error_message}')
+        logging.exception(f"{message}:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
-@app.get('/document_status/{file_name}')
+
+@app.get("/document_status/{file_name}")
 async def get_document_status(file_name, url, userName, password, database):
     # URL decode and normalize the file name
     try:
@@ -2629,87 +3289,132 @@ async def get_document_status(file_name, url, userName, password, database):
         logging.info(f"Getting status for normalized file name: {file_name}")
     except Exception as e:
         logging.error(f"Error decoding/normalizing file name: {e}")
-    
+
     decoded_password = decode_password(password)
-   
+
     try:
         if " " in url:
-            uri= url.replace(" ","+")
+            uri = url.replace(" ", "+")
         else:
-            uri=url
-        graph = create_graph_database_connection(uri, userName, decoded_password, database)
+            uri = url
+        graph = create_graph_database_connection(
+            uri, userName, decoded_password, database
+        )
         graphDb_data_Access = graphDBdataAccess(graph)
         result = graphDb_data_Access.get_current_status_document_node(file_name)
         if len(result) > 0:
-            status = {'fileName':file_name, 
-                'status':result[0]['Status'],
-                'processingTime':result[0]['processingTime'],
-                'nodeCount':result[0]['nodeCount'],
-                'relationshipCount':result[0]['relationshipCount'],
-                'model':result[0]['model'],
-                'total_chunks':result[0]['total_chunks'],
-                'fileSize':result[0]['fileSize'],
-                'processed_chunk':result[0]['processed_chunk'],
-                'fileSource':result[0]['fileSource'],
-                'chunkNodeCount' : result[0]['chunkNodeCount'],
-                'chunkRelCount' : result[0]['chunkRelCount'],
-                'entityNodeCount' : result[0]['entityNodeCount'],
-                'entityEntityRelCount' : result[0]['entityEntityRelCount'],
-                'communityNodeCount' : result[0]['communityNodeCount'],
-                'communityRelCount' : result[0]['communityRelCount']
-                }
+            status = {
+                "fileName": file_name,
+                "status": result[0]["Status"],
+                "processingTime": result[0]["processingTime"],
+                "nodeCount": result[0]["nodeCount"],
+                "relationshipCount": result[0]["relationshipCount"],
+                "model": result[0]["model"],
+                "total_chunks": result[0]["total_chunks"],
+                "fileSize": result[0]["fileSize"],
+                "processed_chunk": result[0]["processed_chunk"],
+                "fileSource": result[0]["fileSource"],
+                "chunkNodeCount": result[0]["chunkNodeCount"],
+                "chunkRelCount": result[0]["chunkRelCount"],
+                "entityNodeCount": result[0]["entityNodeCount"],
+                "entityEntityRelCount": result[0]["entityEntityRelCount"],
+                "communityNodeCount": result[0]["communityNodeCount"],
+                "communityRelCount": result[0]["communityRelCount"],
+            }
         else:
-            status = {'fileName':file_name, 'status':'Failed'}
-        logging.info(f'Result of document status in refresh : {result}')
-        return create_api_response('Success',message="",file_name=status)
+            status = {"fileName": file_name, "status": "Failed"}
+        logging.info(f"Result of document status in refresh : {result}")
+        return create_api_response("Success", message="", file_name=status)
     except Exception as e:
-        message=f"Unable to get the document status"
+        message = f"Unable to get the document status"
         error_message = str(e)
-        logging.exception(f'{message}:{error_message}')
-        return create_api_response('Failed',message=message)
-    
+        logging.exception(f"{message}:{error_message}")
+        return create_api_response("Failed", message=message)
+
+
 @app.post("/cancelled_job")
-async def cancelled_job(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), filenames=Form(None), source_types=Form(None),email=Form(None)):
+async def cancelled_job(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    filenames=Form(None),
+    source_types=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        result = manually_cancelled_job(graph,filenames, source_types, MERGED_DIR, uri)
+        result = manually_cancelled_job(graph, filenames, source_types, MERGED_DIR, uri)
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'cancelled_job','db_url':uri, 'userName':userName, 'database':database, 'filenames':filenames,
-                            'source_types':source_types, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "cancelled_job",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "filenames": filenames,
+            "source_types": source_types,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',message=result)
+        return create_api_response("Success", message=result)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to cancelled the running job"
+        message = "Unable to cancelled the running job"
         error_message = str(e)
-        logging.exception(f'Exception in cancelling the running job:{error_message}')
+        logging.exception(f"Exception in cancelling the running job:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
+
 @app.post("/populate_graph_schema")
-async def populate_graph_schema(input_text=Form(None), model=Form(None), is_schema_description_checked=Form(None),is_local_storage=Form(None),email=Form(None)):
+async def populate_graph_schema(
+    input_text=Form(None),
+    model=Form(None),
+    is_schema_description_checked=Form(None),
+    is_local_storage=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
-        result = populate_graph_schema_from_text(input_text, model, is_schema_description_checked, is_local_storage)
+        result = populate_graph_schema_from_text(
+            input_text, model, is_schema_description_checked, is_local_storage
+        )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'populate_graph_schema', 'model':model, 'is_schema_description_checked':is_schema_description_checked, 'input_text':input_text, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "populate_graph_schema",
+            "model": model,
+            "is_schema_description_checked": is_schema_description_checked,
+            "input_text": input_text,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result)
+        return create_api_response("Success", data=result)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to get the schema from text"
+        message = "Unable to get the schema from text"
         error_message = str(e)
-        logging.exception(f'Exception in getting the schema from text:{error_message}')
+        logging.exception(f"Exception in getting the schema from text:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/get_unconnected_nodes_list")
-async def get_unconnected_nodes_list(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),email=Form(None)):
+async def get_unconnected_nodes_list(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -2717,20 +3422,38 @@ async def get_unconnected_nodes_list(uri=Form(None), userName=Form(None), passwo
         nodes_list, total_nodes = graphDb_data_Access.list_unconnected_nodes()
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'get_unconnected_nodes_list','db_url':uri, 'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "get_unconnected_nodes_list",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=nodes_list,message=total_nodes)
+        return create_api_response("Success", data=nodes_list, message=total_nodes)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to get the list of unconnected nodes"
+        message = "Unable to get the list of unconnected nodes"
         error_message = str(e)
-        logging.exception(f'Exception in getting list of unconnected nodes:{error_message}')
+        logging.exception(
+            f"Exception in getting list of unconnected nodes:{error_message}"
+        )
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/delete_unconnected_nodes")
-async def delete_orphan_nodes(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),unconnected_entities_list=Form(),email=Form(None)):
+async def delete_orphan_nodes(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    unconnected_entities_list=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -2738,20 +3461,38 @@ async def delete_orphan_nodes(uri=Form(None), userName=Form(None), password=Form
         result = graphDb_data_Access.delete_unconnected_nodes(unconnected_entities_list)
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'delete_unconnected_nodes','db_url':uri, 'userName':userName, 'database':database,'unconnected_entities_list':unconnected_entities_list, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "delete_unconnected_nodes",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "unconnected_entities_list": unconnected_entities_list,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result,message="Unconnected entities delete successfully")
+        return create_api_response(
+            "Success", data=result, message="Unconnected entities delete successfully"
+        )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to delete the unconnected nodes"
+        message = "Unable to delete the unconnected nodes"
         error_message = str(e)
-        logging.exception(f'Exception in delete the unconnected nodes:{error_message}')
+        logging.exception(f"Exception in delete the unconnected nodes:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/get_duplicate_nodes")
-async def get_duplicate_nodes(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),email=Form(None)):
+async def get_duplicate_nodes(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -2759,20 +3500,38 @@ async def get_duplicate_nodes(uri=Form(None), userName=Form(None), password=Form
         nodes_list, total_nodes = graphDb_data_Access.get_duplicate_nodes_list()
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'get_duplicate_nodes','db_url':uri,'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "get_duplicate_nodes",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=nodes_list, message=total_nodes)
+        return create_api_response("Success", data=nodes_list, message=total_nodes)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to get the list of duplicate nodes"
+        message = "Unable to get the list of duplicate nodes"
         error_message = str(e)
-        logging.exception(f'Exception in getting list of duplicate nodes:{error_message}')
+        logging.exception(
+            f"Exception in getting list of duplicate nodes:{error_message}"
+        )
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/merge_duplicate_nodes")
-async def merge_duplicate_nodes(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None),duplicate_nodes_list=Form(),email=Form(None)):
+async def merge_duplicate_nodes(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    duplicate_nodes_list=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -2780,222 +3539,238 @@ async def merge_duplicate_nodes(uri=Form(None), userName=Form(None), password=Fo
         result = graphDb_data_Access.merge_duplicate_nodes(duplicate_nodes_list)
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'merge_duplicate_nodes','db_url':uri, 'userName':userName, 'database':database,
-                            'duplicate_nodes_list':duplicate_nodes_list, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "merge_duplicate_nodes",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "duplicate_nodes_list": duplicate_nodes_list,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',data=result,message="Duplicate entities merged successfully")
+        return create_api_response(
+            "Success", data=result, message="Duplicate entities merged successfully"
+        )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to merge the duplicate nodes"
+        message = "Unable to merge the duplicate nodes"
         error_message = str(e)
-        logging.exception(f'Exception in merge the duplicate nodes:{error_message}')
+        logging.exception(f"Exception in merge the duplicate nodes:{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
+
 @app.post("/merge_duplicate_entities")
 async def merge_duplicate_entities(
-    uri=Form(None), 
-    userName=Form(None), 
-    password=Form(None), 
-    database=Form(None), 
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
     node_types=Form(default=["all"]),
-    email=Form(None)
+    email=Form(None),
 ):
     """
     Seçilen node türlerine göre duplicate merge işlemi yapar.
-    
+
     Args:
-        node_types: Merge yapılacak node türleri. 
+        node_types: Merge yapılacak node türleri.
                    Seçenekler: ["customers"], ["insurance_companies"], ["coverage_types"], ["all"]
                    Birden fazla da seçilebilir: ["customers", "insurance_companies"]
     """
     try:
         start = time.time()
-        
+
         # Eğer userName, password, database boşsa environment'tan al
         if not userName:
-            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+            userName = os.environ.get("NEO4J_USERNAME", "neo4j")
         if not password:
-            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+            password = os.environ.get("NEO4J_PASSWORD", "password")
         if not database:
-            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
-        
+            database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
         # node_types parametresini işle
         if isinstance(node_types, str):
-            if node_types.startswith('[') and node_types.endswith(']'):
+            if node_types.startswith("[") and node_types.endswith("]"):
                 # JSON string formatında geldiyse parse et
                 import json
+
                 node_types = json.loads(node_types)
             else:
                 # Tek string geldiyse liste yap
                 node_types = [node_types]
-        
+
         # Geçerli node türlerini kontrol et
-        valid_node_types = ['customers', 'insurance_companies', 'coverage_types', 'all']
+        valid_node_types = ["customers", "insurance_companies", "coverage_types", "all"]
         if not all(nt in valid_node_types for nt in node_types):
             invalid_types = [nt for nt in node_types if nt not in valid_node_types]
             return create_api_response(
-                'Failed',
+                "Failed",
                 message=f"Geçersiz node türleri: {invalid_types}. Geçerli türler: {valid_node_types}",
-                error=f"Invalid node types: {invalid_types}"
+                error=f"Invalid node types: {invalid_types}",
             )
-        
+
         graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
-        
+
         # Selective merge işlemini çalıştır
         result = graphDb_data_Access.merge_duplicate_entities_selective(node_types)
-        
+
         end = time.time()
         elapsed_time = end - start
-        
+
         # Logging
         json_obj = {
-            'api_name': 'merge_duplicate_entities',
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database,
-            'node_types': node_types,
-            'merge_results': result,
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'email': email
+            "api_name": "merge_duplicate_entities",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "node_types": node_types,
+            "merge_results": result,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
+
         # Response mesajını oluştur
-        if result.get('error'):
+        if result.get("error"):
             return create_api_response(
-                'Failed', 
+                "Failed",
                 message="Duplicate merge işlemi sırasında hata oluştu",
-                error=result['error']
+                error=result["error"],
             )
-        
-        total_merged = result.get('total_merged', 0)
+
+        total_merged = result.get("total_merged", 0)
         details = []
         for node_type, count in result.items():
-            if node_type != 'total_merged' and count > 0:
+            if node_type != "total_merged" and count > 0:
                 details.append(f"{node_type}: {count}")
-        
+
         details_str = ", ".join(details) if details else "hiçbir duplicate bulunamadı"
         message = f"Duplicate merge tamamlandı. Toplam {total_merged} node birleştirildi ({details_str})"
-        
-        return create_api_response(
-            'Success',
-            data=result,
-            message=message
-        )
-        
+
+        return create_api_response("Success", data=result, message=message)
+
     except Exception as e:
         job_status = "Failed"
         message = "Duplicate entities merge işlemi başarısız"
         error_message = str(e)
-        logging.exception(f'Exception in merge duplicate entities: {error_message}')
+        logging.exception(f"Exception in merge duplicate entities: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
+
 @app.post("/create_embeddings")
 async def create_embeddings(
     uri=Form(None),
-    userName=Form(None), 
+    userName=Form(None),
     password=Form(None),
     database=Form(None),
     file_names=Form(...),
-    email=Form(None)
+    email=Form(None),
 ):
     """
     Belirtilen dosyalar için chunk embedding'leri oluşturur.
-    
+
     Args:
         file_names: Embedding oluşturulacak dosya adları (JSON string formatında liste)
     """
     try:
         start = time.time()
-        
+
         # Eğer userName, password, database boşsa environment'tan al
         if not userName:
-            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+            userName = os.environ.get("NEO4J_USERNAME", "neo4j")
         if not password:
-            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+            password = os.environ.get("NEO4J_PASSWORD", "password")
         if not database:
-            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
-        
+            database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
         # file_names parametresini işle
         if isinstance(file_names, str):
-            if file_names.startswith('[') and file_names.endswith(']'):
+            if file_names.startswith("[") and file_names.endswith("]"):
                 # JSON string formatında geldiyse parse et
                 import json
+
                 file_names = json.loads(file_names)
             else:
                 # Tek string geldiyse liste yap
                 file_names = [file_names]
-        
+
         if not file_names or len(file_names) == 0:
             return create_api_response(
-                'Failed',
+                "Failed",
                 message="En az bir dosya adı belirtilmelidir",
-                error="No file names provided"
+                error="No file names provided",
             )
-        
-        logging.info(f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}")
-        
+
+        logging.info(
+            f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}"
+        )
+
         graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
-        
+
         # Embedding oluşturma işlemini çalıştır
         result = graphDb_data_Access.create_embeddings_for_documents(file_names)
-        
+
         end = time.time()
         elapsed_time = end - start
-        
+
         # Logging
         json_obj = {
-            'api_name': 'create_embeddings',
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database,
-            'file_names': file_names,
-            'embedding_results': {
-                'total_files': result.get('total_files', 0),
-                'total_chunks_processed': result.get('total_chunks_processed', 0),
-                'total_chunks_updated': result.get('total_chunks_updated', 0),
-                'embedding_model': result.get('embedding_model', ''),
-                'embedding_dimension': result.get('embedding_dimension', 0)
+            "api_name": "create_embeddings",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "file_names": file_names,
+            "embedding_results": {
+                "total_files": result.get("total_files", 0),
+                "total_chunks_processed": result.get("total_chunks_processed", 0),
+                "total_chunks_updated": result.get("total_chunks_updated", 0),
+                "embedding_model": result.get("embedding_model", ""),
+                "embedding_dimension": result.get("embedding_dimension", 0),
             },
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'email': email
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
+
         # Response mesajını oluştur
-        if result.get('error'):
+        if result.get("error"):
             return create_api_response(
-                'Failed', 
+                "Failed",
                 message="Embedding oluşturma işlemi sırasında hata oluştu",
-                error=result['error']
+                error=result["error"],
             )
-        
-        total_files = result.get('total_files', 0)
-        total_chunks_updated = result.get('total_chunks_updated', 0)
-        embedding_model = result.get('embedding_model', 'Unknown')
-        
+
+        total_files = result.get("total_files", 0)
+        total_chunks_updated = result.get("total_chunks_updated", 0)
+        embedding_model = result.get("embedding_model", "Unknown")
+
         # Dosya bazında sonuçları özetle
         success_files = []
         failed_files = []
         skipped_files = []
-        
-        for file_name, file_result in result.get('files', {}).items():
-            status = file_result.get('status', 'unknown')
-            if status == 'success':
-                success_files.append(f"{file_name} ({file_result.get('chunks_updated', 0)} chunk)")
-            elif status == 'error':
-                failed_files.append(f"{file_name} ({file_result.get('message', 'Bilinmeyen hata')})")
-            elif status == 'skipped':
+
+        for file_name, file_result in result.get("files", {}).items():
+            status = file_result.get("status", "unknown")
+            if status == "success":
+                success_files.append(
+                    f"{file_name} ({file_result.get('chunks_updated', 0)} chunk)"
+                )
+            elif status == "error":
+                failed_files.append(
+                    f"{file_name} ({file_result.get('message', 'Bilinmeyen hata')})"
+                )
+            elif status == "skipped":
                 skipped_files.append(f"{file_name} (zaten embedding'e sahip)")
-        
+
         # Sonuç mesajını oluştur
         message_parts = []
         if success_files:
@@ -3004,132 +3779,136 @@ async def create_embeddings(
             message_parts.append(f"⏭️ Atlandı: {len(skipped_files)} dosya")
         if failed_files:
             message_parts.append(f"❌ Başarısız: {len(failed_files)} dosya")
-        
+
         if total_chunks_updated > 0:
             main_message = f"Embedding oluşturma tamamlandı. Toplam {total_chunks_updated} chunk için embedding oluşturuldu ({embedding_model})"
         else:
             main_message = "Hiçbir chunk için yeni embedding oluşturulmadı"
-        
+
         if message_parts:
             main_message += f" - {', '.join(message_parts)}"
-        
-        return create_api_response(
-            'Success',
-            data=result,
-            message=main_message
-        )
-        
+
+        return create_api_response("Success", data=result, message=main_message)
+
     except Exception as e:
         job_status = "Failed"
         message = "Embedding oluşturma işlemi başarısız"
         error_message = str(e)
-        logging.exception(f'Exception in create embeddings: {error_message}')
+        logging.exception(f"Exception in create embeddings: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
 
+
 @app.post("/create_entity_embeddings")
 async def create_entity_embeddings(
     uri=Form(None),
-    userName=Form(None), 
+    userName=Form(None),
     password=Form(None),
     database=Form(None),
     node_types=Form(...),
-    email=Form(None)
+    email=Form(None),
 ):
     """
     Belirtilen entity node türleri için embedding'ler oluşturur.
-    
+
     Args:
         node_types: Embedding oluşturulacak node türleri (JSON string formatında liste)
                    Örn: ["Customer", "Policy"] veya ["all"]
     """
     try:
         start = time.time()
-        
+
         # Eğer userName, password, database boşsa environment'tan al
         if not userName:
-            userName = os.environ.get('NEO4J_USERNAME', 'neo4j')
+            userName = os.environ.get("NEO4J_USERNAME", "neo4j")
         if not password:
-            password = os.environ.get('NEO4J_PASSWORD', 'password')  
+            password = os.environ.get("NEO4J_PASSWORD", "password")
         if not database:
-            database = os.environ.get('NEO4J_DATABASE', 'neo4j')
-        
+            database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
         # node_types parametresini işle
         if isinstance(node_types, str):
-            if node_types.startswith('[') and node_types.endswith(']'):
+            if node_types.startswith("[") and node_types.endswith("]"):
                 # JSON string formatında geldiyse parse et
                 import json
+
                 node_types = json.loads(node_types)
             else:
                 # Tek string geldiyse liste yap
                 node_types = [node_types]
-        
+
         if not node_types or len(node_types) == 0:
             return create_api_response(
-                'Failed',
+                "Failed",
                 message="En az bir node türü belirtilmelidir",
-                error="No node types provided"
+                error="No node types provided",
             )
-        
-        logging.info(f"🔄 {len(node_types)} node türü için entity embedding oluşturma başlatılıyor: {node_types}")
-        
+
+        logging.info(
+            f"🔄 {len(node_types)} node türü için entity embedding oluşturma başlatılıyor: {node_types}"
+        )
+
         graph = create_graph_database_connection(uri, userName, password, database)
         graphDb_data_Access = graphDBdataAccess(graph)
-        
+
         # Entity embedding oluşturma işlemini çalıştır
         result = graphDb_data_Access.create_entity_embeddings(node_types)
-        
+
         end = time.time()
         elapsed_time = end - start
-        
+
         # Logging
         json_obj = {
-            'api_name': 'create_entity_embeddings',
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database,
-            'node_types': node_types,
-            'embedding_results': {
-                'total_node_types': result.get('total_node_types', 0),
-                'total_entities_processed': result.get('total_entities_processed', 0),
-                'total_embeddings_created': result.get('total_embeddings_created', 0),
-                'embedding_model': result.get('embedding_model', ''),
-                'embedding_dimension': result.get('embedding_dimension', 0)
+            "api_name": "create_entity_embeddings",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "node_types": node_types,
+            "embedding_results": {
+                "total_node_types": result.get("total_node_types", 0),
+                "total_entities_processed": result.get("total_entities_processed", 0),
+                "total_embeddings_created": result.get("total_embeddings_created", 0),
+                "embedding_model": result.get("embedding_model", ""),
+                "embedding_dimension": result.get("embedding_dimension", 0),
             },
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'email': email
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        
+
         # Response mesajını oluştur
-        if result.get('error'):
+        if result.get("error"):
             return create_api_response(
-                'Failed', 
+                "Failed",
                 message="Entity embedding oluşturma işlemi sırasında hata oluştu",
-                error=result['error']
+                error=result["error"],
             )
-        
-        total_types = result.get('total_node_types', 0)
-        total_embeddings = result.get('total_embeddings_created', 0)
-        embedding_model = result.get('embedding_model', 'Unknown')
-        available_types = result.get('available_types', [])
-        
+
+        total_types = result.get("total_node_types", 0)
+        total_embeddings = result.get("total_embeddings_created", 0)
+        embedding_model = result.get("embedding_model", "Unknown")
+        available_types = result.get("available_types", [])
+
         # Node türü bazında sonuçları özetle
         success_types = []
         failed_types = []
         skipped_types = []
-        
-        for node_type, type_result in result.get('node_types', {}).items():
-            status = type_result.get('status', 'unknown')
-            if status == 'success':
-                success_types.append(f"{node_type} ({type_result.get('entities_updated', 0)} entity)")
-            elif status == 'error':
-                failed_types.append(f"{node_type} ({type_result.get('message', 'Bilinmeyen hata')})")
-            elif status == 'skipped':
+
+        for node_type, type_result in result.get("node_types", {}).items():
+            status = type_result.get("status", "unknown")
+            if status == "success":
+                success_types.append(
+                    f"{node_type} ({type_result.get('entities_updated', 0)} entity)"
+                )
+            elif status == "error":
+                failed_types.append(
+                    f"{node_type} ({type_result.get('message', 'Bilinmeyen hata')})"
+                )
+            elif status == "skipped":
                 skipped_types.append(f"{node_type} (zaten embedding'e sahip)")
-        
+
         # Sonuç mesajını oluştur
         message_parts = []
         if success_types:
@@ -3138,35 +3917,39 @@ async def create_entity_embeddings(
             message_parts.append(f"⏭️ Atlandı: {', '.join(skipped_types)}")
         if failed_types:
             message_parts.append(f"❌ Başarısız: {', '.join(failed_types)}")
-        
+
         if total_embeddings > 0:
             main_message = f"Entity embedding oluşturma tamamlandı. Toplam {total_embeddings} entity için embedding oluşturuldu ({embedding_model})"
         else:
             main_message = "Hiçbir entity için yeni embedding oluşturulmadı"
-        
+
         if message_parts:
             main_message += f" - {'. '.join(message_parts)}"
-        
+
         if available_types:
             main_message += f". Mevcut node türleri: {', '.join(available_types)}"
-        
-        return create_api_response(
-            'Success',
-            data=result,
-            message=main_message
-        )
-        
+
+        return create_api_response("Success", data=result, message=main_message)
+
     except Exception as e:
         job_status = "Failed"
         message = "Entity embedding oluşturma işlemi başarısız"
         error_message = str(e)
-        logging.exception(f'Exception in create entity embeddings: {error_message}')
+        logging.exception(f"Exception in create entity embeddings: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/drop_create_vector_index")
-async def drop_create_vector_index(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), isVectorIndexExist=Form(),email=Form(None)):
+async def drop_create_vector_index(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    isVectorIndexExist=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -3174,54 +3957,97 @@ async def drop_create_vector_index(uri=Form(None), userName=Form(None), password
         result = graphDb_data_Access.drop_create_vector_index(isVectorIndexExist)
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'drop_create_vector_index', 'db_url':uri, 'userName':userName, 'database':database,
-                            'isVectorIndexExist':isVectorIndexExist, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "drop_create_vector_index",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "isVectorIndexExist": isVectorIndexExist,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success',message=result)
+        return create_api_response("Success", message=result)
     except Exception as e:
         job_status = "Failed"
-        message="Unable to drop and re-create vector index with correct dimesion as per application configuration"
+        message = "Unable to drop and re-create vector index with correct dimesion as per application configuration"
         error_message = str(e)
-        logging.exception(f'Exception into drop and re-create vector index with correct dimesion as per application configuration:{error_message}')
+        logging.exception(
+            f"Exception into drop and re-create vector index with correct dimesion as per application configuration:{error_message}"
+        )
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
-        
+
+
 @app.post("/retry_processing")
-async def retry_processing(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), file_name=Form(), retry_condition=Form(), email=Form(None)):
+async def retry_processing(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    file_name=Form(),
+    retry_condition=Form(),
+    email=Form(None),
+):
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        chunks = execute_graph_query(graph,QUERY_TO_GET_CHUNKS,params={"filename":file_name})
+        chunks = execute_graph_query(
+            graph, QUERY_TO_GET_CHUNKS, params={"filename": file_name}
+        )
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'retry_processing', 'db_url':uri, 'userName':userName, 'database':database, 'file_name':file_name,'retry_condition':retry_condition,
-                            'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}','email':email}
+        json_obj = {
+            "api_name": "retry_processing",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "file_name": file_name,
+            "retry_condition": retry_condition,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
+        }
         logger.log_struct(json_obj, "INFO")
-        if chunks[0]['text'] is None or chunks[0]['text']=="" or not chunks :
-            return create_api_response('Success',message=f"Chunks are not created for the file{file_name}. Please upload again the file to re-process.",data=chunks)
+        if chunks[0]["text"] is None or chunks[0]["text"] == "" or not chunks:
+            return create_api_response(
+                "Success",
+                message=f"Chunks are not created for the file{file_name}. Please upload again the file to re-process.",
+                data=chunks,
+            )
         else:
-            await asyncio.to_thread(set_status_retry, graph,file_name,retry_condition)
-            return create_api_response('Success',message=f"Status set to Chunked for filename : {file_name}")
+            await asyncio.to_thread(set_status_retry, graph, file_name, retry_condition)
+            return create_api_response(
+                "Success", message=f"Status set to Chunked for filename : {file_name}"
+            )
     except Exception as e:
         job_status = "Failed"
-        message="Unable to set status to Retry"
+        message = "Unable to set status to Retry"
         error_message = str(e)
-        logging.exception(f'{error_message}')
+        logging.exception(f"{error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
-        gc.collect()    
+        gc.collect()
 
-@app.post('/metric')
-async def calculate_metric(question: str = Form(),
-                           context: str = Form(),
-                           answer: str = Form(),
-                           model: str = Form(),
-                           mode: str = Form()):
+
+@app.post("/metric")
+async def calculate_metric(
+    question: str = Form(),
+    context: str = Form(),
+    answer: str = Form(),
+    model: str = Form(),
+    mode: str = Form(),
+):
     try:
         start = time.time()
-        context_list = [str(item).strip() for item in json.loads(context)] if context else []
-        answer_list = [str(item).strip() for item in json.loads(answer)] if answer else []
+        context_list = (
+            [str(item).strip() for item in json.loads(context)] if context else []
+        )
+        answer_list = (
+            [str(item).strip() for item in json.loads(answer)] if answer else []
+        )
         mode_list = [str(item).strip() for item in json.loads(mode)] if mode else []
 
         result = await asyncio.to_thread(
@@ -3229,58 +4055,76 @@ async def calculate_metric(question: str = Form(),
         )
         if result is None or "error" in result:
             return create_api_response(
-                'Failed',
-                message='Failed to calculate evaluation metrics.',
-                error=result.get("error", "Ragas evaluation returned null")
+                "Failed",
+                message="Failed to calculate evaluation metrics.",
+                error=result.get("error", "Ragas evaluation returned null"),
             )
-        data = {mode: {metric: result[metric][i] for metric in result} for i, mode in enumerate(mode_list)}
+        data = {
+            mode: {metric: result[metric][i] for metric in result}
+            for i, mode in enumerate(mode_list)
+        }
         end = time.time()
         elapsed_time = end - start
-        json_obj = {'api_name':'metric', 'question':question, 'context':context, 'answer':answer, 'model':model,'mode':mode,
-                            'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}'}
+        json_obj = {
+            "api_name": "metric",
+            "question": question,
+            "context": context,
+            "answer": answer,
+            "model": model,
+            "mode": mode,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success', data=data)
+        return create_api_response("Success", data=data)
     except Exception as e:
         logging.exception(f"Error while calculating evaluation metrics: {e}")
         return create_api_response(
-            'Failed',
-            message="Error while calculating evaluation metrics",
-            error=str(e)
+            "Failed", message="Error while calculating evaluation metrics", error=str(e)
         )
     finally:
         gc.collect()
-       
 
-@app.post('/additional_metrics')
-async def calculate_additional_metrics(question: str = Form(),
-                                        context: str = Form(),
-                                        answer: str = Form(),
-                                        reference: str = Form(),
-                                        model: str = Form(),
-                                        mode: str = Form(),
+
+@app.post("/additional_metrics")
+async def calculate_additional_metrics(
+    question: str = Form(),
+    context: str = Form(),
+    answer: str = Form(),
+    reference: str = Form(),
+    model: str = Form(),
+    mode: str = Form(),
 ):
     try:
-        context_list = [str(item).strip() for item in json.loads(context)] if context else []
-        answer_list = [str(item).strip() for item in json.loads(answer)] if answer else []
+        context_list = (
+            [str(item).strip() for item in json.loads(context)] if context else []
+        )
+        answer_list = (
+            [str(item).strip() for item in json.loads(answer)] if answer else []
+        )
         mode_list = [str(item).strip() for item in json.loads(mode)] if mode else []
-        result = await get_additional_metrics(question, context_list,answer_list, reference, model)
+        result = await get_additional_metrics(
+            question, context_list, answer_list, reference, model
+        )
         if result is None or "error" in result:
             return create_api_response(
-                'Failed',
-                message='Failed to calculate evaluation metrics.',
-                error=result.get("error", "Ragas evaluation returned null")
+                "Failed",
+                message="Failed to calculate evaluation metrics.",
+                error=result.get("error", "Ragas evaluation returned null"),
             )
-        data = {mode: {metric: result[i][metric] for metric in result[i]} for i, mode in enumerate(mode_list)}
-        return create_api_response('Success', data=data)
+        data = {
+            mode: {metric: result[i][metric] for metric in result[i]}
+            for i, mode in enumerate(mode_list)
+        }
+        return create_api_response("Success", data=data)
     except Exception as e:
         logging.exception(f"Error while calculating evaluation metrics: {e}")
         return create_api_response(
-            'Failed',
-            message="Error while calculating evaluation metrics",
-            error=str(e)
+            "Failed", message="Error while calculating evaluation metrics", error=str(e)
         )
     finally:
         gc.collect()
+
 
 @app.post("/fetch_chunktext")
 async def fetch_chunktext(
@@ -3290,7 +4134,7 @@ async def fetch_chunktext(
     password: str = Form(None),
     document_name: str = Form(),
     page_no: int = Form(1),
-    email=Form(None)
+    email=Form(None),
 ):
     try:
         start = time.time()
@@ -3301,28 +4145,30 @@ async def fetch_chunktext(
             password=password,
             database=database,
             document_name=document_name,
-            page_no=page_no
+            page_no=page_no,
         )
         end = time.time()
         elapsed_time = end - start
         json_obj = {
-            'api_name': 'fetch_chunktext',
-            'db_url': uri,
-            'userName': userName,
-            'database': database,
-            'document_name': document_name,
-            'page_no': page_no,
-            'logging_time': formatted_time(datetime.now(timezone.utc)),
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'email': email
+            "api_name": "fetch_chunktext",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "document_name": document_name,
+            "page_no": page_no,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "email": email,
         }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success', data=result, message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
         job_status = "Failed"
         message = "Unable to get chunk text response"
         error_message = str(e)
-        logging.exception(f'Exception in fetch_chunktext: {error_message}')
+        logging.exception(f"Exception in fetch_chunktext: {error_message}")
         return create_api_response(job_status, message=message, error=error_message)
     finally:
         gc.collect()
@@ -3332,201 +4178,262 @@ async def fetch_chunktext(
 async def backend_connection_configuration():
     try:
         start = time.time()
-        uri = os.getenv('NEO4J_URI')
-        username= os.getenv('NEO4J_USERNAME')
-        database= os.getenv('NEO4J_DATABASE')
-        password= os.getenv('NEO4J_PASSWORD')
-        gcs_file_cache = os.environ.get('GCS_FILE_CACHE')
+        uri = os.getenv("NEO4J_URI")
+        username = os.getenv("NEO4J_USERNAME")
+        database = os.getenv("NEO4J_DATABASE")
+        password = os.getenv("NEO4J_PASSWORD")
+        gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
         if all([uri, username, database, password]):
             graph = Neo4jGraph()
-            logging.info(f'login connection status of object: {graph}')
+            logging.info(f"login connection status of object: {graph}")
             if graph is not None:
-                graph_connection = True        
+                graph_connection = True
                 graphDb_data_Access = graphDBdataAccess(graph)
-                result = graphDb_data_Access.connection_check_and_get_vector_dimensions(database)
-                result['gcs_file_cache'] = gcs_file_cache
-                result['uri'] = uri
+                result = graphDb_data_Access.connection_check_and_get_vector_dimensions(
+                    database
+                )
+                result["gcs_file_cache"] = gcs_file_cache
+                result["uri"] = uri
                 end = time.time()
                 elapsed_time = end - start
-                result['api_name'] = 'backend_connection_configuration'
-                result['elapsed_api_time'] = f'{elapsed_time:.2f}'
-                result['graph_connection'] = f'{graph_connection}',
-                result['connection_from'] = 'backendAPI'
+                result["api_name"] = "backend_connection_configuration"
+                result["elapsed_api_time"] = f"{elapsed_time:.2f}"
+                result["graph_connection"] = (f"{graph_connection}",)
+                result["connection_from"] = "backendAPI"
                 logger.log_struct(result, "INFO")
-                return create_api_response('Success',message=f"Backend connection successful",data=result)
+                return create_api_response(
+                    "Success", message=f"Backend connection successful", data=result
+                )
         else:
             graph_connection = False
-            return create_api_response('Success',message=f"Backend connection is not successful",data=graph_connection)
+            return create_api_response(
+                "Success",
+                message=f"Backend connection is not successful",
+                data=graph_connection,
+            )
     except Exception as e:
         graph_connection = False
         job_status = "Failed"
-        message="Unable to connect backend DB"
+        message = "Unable to connect backend DB"
         error_message = str(e)
-        logging.exception(f'{error_message}')
-        return create_api_response(job_status, message=message, error=error_message.rstrip('.') + ', or fill from the login dialog.', data=graph_connection)
+        logging.exception(f"{error_message}")
+        return create_api_response(
+            job_status,
+            message=message,
+            error=error_message.rstrip(".") + ", or fill from the login dialog.",
+            data=graph_connection,
+        )
     finally:
         gc.collect()
-    
+
+
 @app.post("/schema_visualization")
-async def get_schema_visualization(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)):
+async def get_schema_visualization(
+    uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)
+):
     try:
         start = time.time()
-        result = await asyncio.to_thread(visualize_schema,
-           uri=uri,
-           userName=userName,
-           password=password,
-           database=database)
+        result = await asyncio.to_thread(
+            visualize_schema,
+            uri=uri,
+            userName=userName,
+            password=password,
+            database=database,
+        )
         if result:
             logging.info("Graph schema visualization query successful")
         end = time.time()
         elapsed_time = end - start
-        logging.info(f'Schema result from DB: {result}')
-        json_obj = {'api_name':'schema_visualization','db_url':uri, 'userName':userName, 'database':database, 'logging_time': formatted_time(datetime.now(timezone.utc)), 'elapsed_api_time':f'{elapsed_time:.2f}'}
+        logging.info(f"Schema result from DB: {result}")
+        json_obj = {
+            "api_name": "schema_visualization",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+        }
         logger.log_struct(json_obj, "INFO")
-        return create_api_response('Success', data=result,message=f"Total elapsed API time {elapsed_time:.2f}")
+        return create_api_response(
+            "Success", data=result, message=f"Total elapsed API time {elapsed_time:.2f}"
+        )
     except Exception as e:
-        message="Unable to get schema visualization from neo4j database"
+        message = "Unable to get schema visualization from neo4j database"
         error_message = str(e)
-        logging.exception(f'Exception:{error_message}')
-        return create_api_response('Failed', message=message, error=error_message)
+        logging.exception(f"Exception:{error_message}")
+        return create_api_response("Failed", message=message, error=error_message)
+
 
 @app.get("/document_analytics")
-async def document_analytics(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), analysis_type=Form("overview")):
+async def document_analytics(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    analysis_type=Form("overview"),
+):
     """
     Document relationship analytics endpoint
-    
+
     analysis_type options:
     - overview: Genel document relationship istatistikleri
-    - person_policies: Kişi bazlı poliçe analizi  
+    - person_policies: Kişi bazlı poliçe analizi
     - company_analysis: Şirket bazlı analiz
     - person_search: Belirli kişi arama (person_name parametresi gerekli)
     """
     try:
         start_time = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         if analysis_type == "overview":
             result = get_document_relationship_stats(graph)
-            api_name = 'document_analytics/overview'
-            
+            api_name = "document_analytics/overview"
+
         elif analysis_type == "person_policies":
             result = get_person_policy_analytics(graph)
-            api_name = 'document_analytics/person_policies'
-            
+            api_name = "document_analytics/person_policies"
+
         elif analysis_type == "company_analysis":
             result = get_company_analytics(graph)
-            api_name = 'document_analytics/company_analysis'
-            
+            api_name = "document_analytics/company_analysis"
+
         else:
             result = {"error": f"Unknown analysis_type: {analysis_type}"}
-            api_name = 'document_analytics/error'
-        
+            api_name = "document_analytics/error"
+
         elapsed_time = time.time() - start_time
         json_obj = {
-            'api_name': api_name, 
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database, 
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'analysis_type': analysis_type
+            "api_name": api_name,
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "analysis_type": analysis_type,
         }
         logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success', data=result, message=f"Analysis completed in {elapsed_time:.2f} seconds")
-        
+
+        return create_api_response(
+            "Success",
+            data=result,
+            message=f"Analysis completed in {elapsed_time:.2f} seconds",
+        )
+
     except Exception as e:
         message = f"Unable to complete document analytics: {analysis_type}"
         error_message = str(e)
-        logging.exception(f'Exception in document_analytics: {error_message}')
-        return create_api_response('Failed', message=message, error=error_message)
+        logging.exception(f"Exception in document_analytics: {error_message}")
+        return create_api_response("Failed", message=message, error=error_message)
+
 
 @app.post("/search_person_documents")
-async def search_person_documents_endpoint(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None), person_name=Form(None)):
+async def search_person_documents_endpoint(
+    uri=Form(None),
+    userName=Form(None),
+    password=Form(None),
+    database=Form(None),
+    person_name=Form(None),
+):
     """
     Belirli bir kişinin tüm document'larını arar
     """
     try:
         if not person_name:
-            return create_api_response('Failed', message="person_name parameter is required")
-            
+            return create_api_response(
+                "Failed", message="person_name parameter is required"
+            )
+
         start_time = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         result = search_person_documents(graph, person_name)
-        
+
         elapsed_time = time.time() - start_time
         json_obj = {
-            'api_name': 'search_person_documents', 
-            'db_url': uri, 
-            'userName': userName, 
-            'database': database, 
-            'logging_time': formatted_time(datetime.now(timezone.utc)), 
-            'elapsed_api_time': f'{elapsed_time:.2f}',
-            'person_name': person_name
+            "api_name": "search_person_documents",
+            "db_url": uri,
+            "userName": userName,
+            "database": database,
+            "logging_time": formatted_time(datetime.now(timezone.utc)),
+            "elapsed_api_time": f"{elapsed_time:.2f}",
+            "person_name": person_name,
         }
         logger.log_struct(json_obj, "INFO")
-        
-        return create_api_response('Success', data=result, message=f"Search completed in {elapsed_time:.2f} seconds")
-        
+
+        return create_api_response(
+            "Success",
+            data=result,
+            message=f"Search completed in {elapsed_time:.2f} seconds",
+        )
+
     except Exception as e:
         message = f"Unable to search documents for person: {person_name}"
         error_message = str(e)
-        logging.exception(f'Exception in search_person_documents: {error_message}')
-        return create_api_response('Failed', message=message, error=error_message)
+        logging.exception(f"Exception in search_person_documents: {error_message}")
+        return create_api_response("Failed", message=message, error=error_message)
         error_message = str(e)
         logging.info(message)
-        logging.exception(f'Exception:{error_message}')
+        logging.exception(f"Exception:{error_message}")
         return create_api_response("Failed", message=message, error=error_message)
     finally:
         gc.collect()
 
 
 @app.delete("/delete_similar_relationships")
-async def delete_similar_relationships(uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)):
+async def delete_similar_relationships(
+    uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)
+):
     """
     Tüm SIMILAR ilişkilerini veritabanından siler
     """
     try:
         logging.info("🗑️ SIMILAR ilişkileri silme işlemi başlatıldı")
-        
+
         # Neo4j bağlantısı oluştur
         graph = create_graph_database_connection(uri, userName, password, database)
-        
+
         # SIMILAR ilişkilerini say
         count_query = "MATCH ()-[r:SIMILAR]-() RETURN count(r) as similar_count"
         count_result = graph.query(count_query, session_params={"database": database})
-        similar_count = count_result[0]['similar_count'] if count_result else 0
-        
+        similar_count = count_result[0]["similar_count"] if count_result else 0
+
         logging.info(f"📊 Silinecek SIMILAR ilişki sayısı: {similar_count}")
-        
+
         if similar_count == 0:
-            return create_api_response("Success", 
-                                     message="Silinecek SIMILAR ilişkisi bulunamadı",
-                                     data={"deleted_relationships": 0})
-        
+            return create_api_response(
+                "Success",
+                message="Silinecek SIMILAR ilişkisi bulunamadı",
+                data={"deleted_relationships": 0},
+            )
+
         # SIMILAR ilişkilerini sil
         delete_query = """
             MATCH ()-[r:SIMILAR]-()
             DELETE r
             RETURN count(r) as deleted_count
         """
-        
+
         delete_result = graph.query(delete_query, session_params={"database": database})
-        deleted_count = similar_count  # Neo4j DELETE count döndürmez, önceki sayımı kullan
-        
+        deleted_count = (
+            similar_count  # Neo4j DELETE count döndürmez, önceki sayımı kullan
+        )
+
         logging.info(f"✅ {deleted_count} SIMILAR ilişkisi silindi")
-        
-        return create_api_response("Success", 
-                                 message=f"{deleted_count} SIMILAR ilişkisi başarıyla silindi",
-                                 data={"deleted_relationships": deleted_count})
-        
+
+        return create_api_response(
+            "Success",
+            message=f"{deleted_count} SIMILAR ilişkisi başarıyla silindi",
+            data={"deleted_relationships": deleted_count},
+        )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ SIMILAR ilişkileri silme hatası: {error_message}")
-        return create_api_response("Failed", 
-                                 message="SIMILAR ilişkileri silme işlemi başarısız",
-                                 error=error_message)
+        return create_api_response(
+            "Failed",
+            message="SIMILAR ilişkileri silme işlemi başarısız",
+            error=error_message,
+        )
 
 
 # ==========================================
@@ -3539,6 +4446,7 @@ from typing import List, Dict, Any
 from pydantic import BaseModel
 import shutil
 from pathlib import Path
+
 
 # Pydantic models for API responses
 class FileResponse(BaseModel):
@@ -3553,6 +4461,7 @@ class FileResponse(BaseModel):
     created_at: str
     updated_at: str
 
+
 class QueueStatsResponse(BaseModel):
     uploaded: int
     queued: int
@@ -3561,22 +4470,24 @@ class QueueStatsResponse(BaseModel):
     error: int
     total: int
 
+
 class ProcessFileRequest(BaseModel):
     model: str = "openai_gpt_4o_mini"
     uri: str
-    userName: str  
+    userName: str
     password: str
     database: str
     generateEmbedding: str = "false"
+
 
 # Upload directory
 UPLOAD_DIR = Path(__file__).parent / "upload"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+
 @app.post("/api/v2/files/upload")
 async def upload_file_to_queue(
-    file: UploadFile = File(...), 
-    originalname: str = Form(None)
+    file: UploadFile = File(...), originalname: str = Form(None)
 ):
     """
     V2 Upload: Saves file to output structure + Image Extraction + S3 Upload
@@ -3585,164 +4496,217 @@ async def upload_file_to_queue(
     from concurrent.futures import ThreadPoolExecutor
     import json
     import shutil
-    
+
     try:
         start = time.time()
-        
-        # Normalize filename  
-        normalized_filename = normalize_file_name(originalname) if originalname else file.filename
-        logging.info(f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}")
-        
+
+        # Normalize filename
+        normalized_filename = (
+            normalize_file_name(originalname) if originalname else file.filename
+        )
+        logging.info(
+            f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}"
+        )
+
         # Create output directory structure
-        from src.document_sources.s3_upload_utils import create_document_output_structure
+        from src.document_sources.s3_upload_utils import (
+            create_document_output_structure,
+        )
+
         document_dir, pdf_dir, images_dir = create_document_output_structure(
             normalized_filename, "output"
         )
-        
+
         # Save file to document directory structure
         file_path = os.path.join(pdf_dir, normalized_filename)
         content = await file.read()
-        
+
         with open(file_path, "wb") as f:
             f.write(content)
-        
+
         file_size = len(content)
-        logging.info(f"✅ File saved to output structure: {file_path} ({file_size} bytes)")
-        
+        logging.info(
+            f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
+        )
+
         # Check file extension for image extraction
         file_extension = normalized_filename.split(".")[-1].lower()
         doc_link = None
         page_images = []
-        
+
         # Image extraction for PDF files
         if file_extension == "pdf":
             try:
-                logging.info(f"🖼️ Starting image extraction for PDF: {normalized_filename}")
-                
+                logging.info(
+                    f"🖼️ Starting image extraction for PDF: {normalized_filename}"
+                )
+
                 # Generate page images with PyMuPDF in executor (async)
                 loop = asyncio.get_event_loop()
-                
+
                 # 1️⃣ Image Generation
                 with ThreadPoolExecutor(max_workers=1) as image_executor:
-                    from src.document_sources.local_file import generate_page_images_with_pymupdf
-                    
+                    from src.document_sources.local_file import (
+                        generate_page_images_with_pymupdf,
+                    )
+
                     def gen_images():
                         return generate_page_images_with_pymupdf(file_path, images_dir)
-                    
-                    generated_images = await loop.run_in_executor(image_executor, gen_images)
-                
+
+                    generated_images = await loop.run_in_executor(
+                        image_executor, gen_images
+                    )
+
                 if generated_images:
                     logging.info(f"✅ Generated {len(generated_images)} page images")
-                    
+
                     # S3 upload configuration
-                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                    s3_bucket = os.environ.get(
+                        "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
+                    )
                     aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
                     aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-                    
+
                     if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                        logging.info(f"☁️ Starting S3 upload for document and {len(generated_images)} images")
-                        
+                        logging.info(
+                            f"☁️ Starting S3 upload for document and {len(generated_images)} images"
+                        )
+
                         # 2️⃣ S3 Upload - NEW EXECUTOR with organized structure
                         with ThreadPoolExecutor(max_workers=1) as s3_executor:
-                            from src.document_sources.s3_upload_utils import upload_files_to_s3_with_structure
+                            from src.document_sources.s3_upload_utils import (
+                                upload_files_to_s3_with_structure,
+                            )
+
                             doc_name = Path(normalized_filename).stem
                             base_s3_prefix = f"documents/{doc_name}"
-                            
+
                             def upload_to_s3():
                                 # Upload PDF to root of document folder
-                                pdf_urls, pdf_failed = upload_files_to_s3_with_structure(
-                                    [file_path],
-                                    s3_bucket,
-                                    f"{base_s3_prefix}",  # documents/{doc_name}/
-                                    aws_access_key_id,
-                                    aws_secret_access_key,
-                                    delete_local_after_upload=False
+                                pdf_urls, pdf_failed = (
+                                    upload_files_to_s3_with_structure(
+                                        [file_path],
+                                        s3_bucket,
+                                        f"{base_s3_prefix}",  # documents/{doc_name}/
+                                        aws_access_key_id,
+                                        aws_secret_access_key,
+                                        delete_local_after_upload=False,
+                                    )
                                 )
-                                
+
                                 # Upload images to images/ subfolder
-                                img_urls, img_failed = upload_files_to_s3_with_structure(
-                                    generated_images,
-                                    s3_bucket,
-                                    f"{base_s3_prefix}/images",  # documents/{doc_name}/images/
-                                    aws_access_key_id,
-                                    aws_secret_access_key,
-                                    delete_local_after_upload=False
+                                img_urls, img_failed = (
+                                    upload_files_to_s3_with_structure(
+                                        generated_images,
+                                        s3_bucket,
+                                        f"{base_s3_prefix}/images",  # documents/{doc_name}/images/
+                                        aws_access_key_id,
+                                        aws_secret_access_key,
+                                        delete_local_after_upload=False,
+                                    )
                                 )
-                                
+
                                 all_urls = pdf_urls + img_urls
                                 all_failed = pdf_failed + img_failed
                                 return all_urls, all_failed
-                            
-                            uploaded_urls, failed_files = await loop.run_in_executor(s3_executor, upload_to_s3)
-                        
+
+                            uploaded_urls, failed_files = await loop.run_in_executor(
+                                s3_executor, upload_to_s3
+                            )
+
                         if uploaded_urls:
-                            logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
-                            
+                            logging.info(
+                                f"✅ Uploaded {len(uploaded_urls)} files to S3"
+                            )
+
                             # Extract document link and page images (file names only)
                             for url in uploaded_urls:
                                 if url.endswith(f"/{normalized_filename}"):
                                     doc_link = os.path.basename(url)
                                     break
-                            
+
                             page_images = []
                             for url in uploaded_urls:
                                 # Skip the main document, only collect image file names
-                                if url != f"s3://{s3_bucket}/{base_s3_prefix}/{normalized_filename}":
+                                if (
+                                    url
+                                    != f"s3://{s3_bucket}/{base_s3_prefix}/{normalized_filename}"
+                                ):
                                     page_images.append(os.path.basename(url))
-                            
+
                             logging.info(f"📄 Document link: {doc_link}")
                             logging.info(f"🖼️ Page images: {len(page_images)} files")
-                        
+
                         if failed_files:
-                            logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
+                            logging.warning(
+                                f"⚠️ Failed to upload {len(failed_files)} files to S3"
+                            )
                     else:
-                        logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
+                        logging.warning(
+                            "⚠️ S3 credentials not configured, skipping S3 upload"
+                        )
                         # Keep local file names for page images
-                        page_images = [os.path.basename(img) for img in generated_images]
+                        page_images = [
+                            os.path.basename(img) for img in generated_images
+                        ]
                 else:
-                    logging.warning(f"⚠️ No images generated for PDF: {normalized_filename}")
-            
+                    logging.warning(
+                        f"⚠️ No images generated for PDF: {normalized_filename}"
+                    )
+
             except Exception as img_error:
-                logging.error(f"❌ Image extraction failed for {normalized_filename}: {img_error}")
+                logging.error(
+                    f"❌ Image extraction failed for {normalized_filename}: {img_error}"
+                )
                 # Continue without images
         else:
-            logging.info(f"ℹ️ Skipping image extraction for {file_extension.upper()} file")
-        
+            logging.info(
+                f"ℹ️ Skipping image extraction for {file_extension.upper()} file"
+            )
+
         # Add to database
         db = get_file_queue_db()
-        
+
         # Check for existing file by hash to prevent duplicates
         file_hash = UploadedFile.calculate_file_hash(str(file_path))
         existing_file = db.get_file_by_hash(file_hash) if file_hash else None
-        
+
         if existing_file:
-            logging.info(f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})")
-            return create_api_response("Success", 
-                                     message="File already exists in queue", 
-                                     data={
-                                         "file_id": existing_file.id,
-                                         "filename": existing_file.filename,
-                                         "original_name": existing_file.original_name,
-                                         "upload_status": existing_file.upload_status,
-                                         "chunking_status": existing_file.chunking_status,
-                                         "graph_status": existing_file.graph_status,
-                                         "file_size": existing_file.file_size,
-                                         "duplicate": True
-                                     })
-        
+            logging.info(
+                f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
+            )
+            return create_api_response(
+                "Success",
+                message="File already exists in queue",
+                data={
+                    "file_id": existing_file.id,
+                    "filename": existing_file.filename,
+                    "original_name": existing_file.original_name,
+                    "upload_status": existing_file.upload_status,
+                    "chunking_status": existing_file.chunking_status,
+                    "graph_status": existing_file.graph_status,
+                    "file_size": existing_file.file_size,
+                    "duplicate": True,
+                },
+            )
+
         # Add new file to queue
         uploaded_file = db.add_file(
             filename=normalized_filename,
             original_name=originalname or file.filename,
             file_path=str(file_path),
-            file_size=file_size
+            file_size=file_size,
         )
-        
+
         # Update file record with S3 metadata if available
         if doc_link or page_images:
             db_session = db.get_db_session()
             try:
-                file_record = db_session.query(UploadedFile).filter_by(id=uploaded_file.id).first()
+                file_record = (
+                    db_session.query(UploadedFile)
+                    .filter_by(id=uploaded_file.id)
+                    .first()
+                )
                 if file_record:
                     if doc_link:
                         file_record.doc_link = doc_link
@@ -3751,21 +4715,26 @@ async def upload_file_to_queue(
                     db_session.commit()
                     logging.info(f"✅ Updated file record with S3 metadata")
             except Exception as update_error:
-                logging.error(f"⚠️ Failed to update file record with S3 metadata: {update_error}")
+                logging.error(
+                    f"⚠️ Failed to update file record with S3 metadata: {update_error}"
+                )
             finally:
                 db_session.close()
-        
+
         elapsed_time = time.time() - start
-        logging.info(f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)")
-        
+        logging.info(
+            f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)"
+        )
+
         # Neo4j'ye initial sync et (upload başarılı)
         try:
             from src.models.status_sync import sync_queue_db_status_to_neo4j
+
             graph_connection = create_graph_database_connection(
-                os.environ.get('NEO4J_URI'),
-                os.environ.get('NEO4J_USERNAME'),
-                os.environ.get('NEO4J_PASSWORD'),
-                os.environ.get('NEO4J_DATABASE', 'neo4j')
+                os.environ.get("NEO4J_URI"),
+                os.environ.get("NEO4J_USERNAME"),
+                os.environ.get("NEO4J_PASSWORD"),
+                os.environ.get("NEO4J_DATABASE", "neo4j"),
             )
             sync_queue_db_status_to_neo4j(
                 graph=graph_connection,
@@ -3774,33 +4743,40 @@ async def upload_file_to_queue(
                 chunking_status=uploaded_file.chunking_status,
                 graph_status=uploaded_file.graph_status,
                 embedding_status=uploaded_file.embedding_status,
-                database=os.environ.get('NEO4J_DATABASE', 'neo4j')
+                database=os.environ.get("NEO4J_DATABASE", "neo4j"),
             )
-            logging.info(f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}")
+            logging.info(
+                f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
+            )
         except Exception as sync_error:
-            logging.warning(f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}")
-        
-        return create_api_response("Success", 
-                                 message="File uploaded with image extraction and S3 upload completed",
-                                 data={
-                                     "file_id": uploaded_file.id,
-                                     "filename": uploaded_file.filename,
-                                     "original_name": uploaded_file.original_name,
-                                     "upload_status": uploaded_file.upload_status,
-                                     "chunking_status": uploaded_file.chunking_status,
-                                     "graph_status": uploaded_file.graph_status,
-                                     "file_size": uploaded_file.file_size,
-                                     "doc_link": doc_link,
-                                     "page_images_count": len(page_images) if page_images else 0,
-                                     "duplicate": False
-                                 })
-        
+            logging.warning(
+                f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
+            )
+
+        return create_api_response(
+            "Success",
+            message="File uploaded with image extraction and S3 upload completed",
+            data={
+                "file_id": uploaded_file.id,
+                "filename": uploaded_file.filename,
+                "original_name": uploaded_file.original_name,
+                "upload_status": uploaded_file.upload_status,
+                "chunking_status": uploaded_file.chunking_status,
+                "graph_status": uploaded_file.graph_status,
+                "file_size": uploaded_file.file_size,
+                "doc_link": doc_link,
+                "page_images_count": len(page_images) if page_images else 0,
+                "duplicate": False,
+            },
+        )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ V2 Upload failed for {originalname}: {error_message}")
-        return create_api_response("Failed", 
-                                 message="File upload failed", 
-                                 error=error_message)
+        return create_api_response(
+            "Failed", message="File upload failed", error=error_message
+        )
+
 
 @app.get("/api/v2/files/list")
 async def list_queued_files(limit: int = 100, offset: int = 0):
@@ -3808,41 +4784,78 @@ async def list_queued_files(limit: int = 100, offset: int = 0):
     try:
         db = get_file_queue_db()
         files = db.get_all_files(limit=limit, offset=offset)
-        
+
         files_data = []
         for f in files:
-            files_data.append({
-                "id": f.id,
-                "filename": f.filename,
-                "original_name": f.original_name,
-                "file_path": f.file_path,
-                "upload_date": f.upload_date.isoformat(),
-                "file_size": f.file_size,
-                "file_hash": f.file_hash,
-                "status": f.status,
-                "upload_status": f.upload_status,
-                "chunking_status": f.chunking_status,
-                "graph_status": f.graph_status,
-                "embedding_status": f.embedding_status,
-                "created_at": f.created_at.isoformat(),
-                "updated_at": f.updated_at.isoformat(),
-                "chunking_started_at": f.chunking_started_at.isoformat() if f.chunking_started_at else None,
-                "chunking_completed_at": f.chunking_completed_at.isoformat() if f.chunking_completed_at else None,
-                "graph_started_at": f.graph_started_at.isoformat() if f.graph_started_at else None,
-                "graph_completed_at": f.graph_completed_at.isoformat() if f.graph_completed_at else None,
-                "embedding_started_at": f.embedding_started_at.isoformat() if f.embedding_started_at else None,
-                "embedding_completed_at": f.embedding_completed_at.isoformat() if f.embedding_completed_at else None,
-                "processing_started_at": f.processing_started_at.isoformat() if f.processing_started_at else None,
-                "processing_completed_at": f.processing_completed_at.isoformat() if f.processing_completed_at else None,
-                "processing_error": f.processing_error
-            })
-        
-        return create_api_response("Success", data={"files": files_data, "count": len(files_data)})
-        
+            files_data.append(
+                {
+                    "id": f.id,
+                    "filename": f.filename,
+                    "original_name": f.original_name,
+                    "file_path": f.file_path,
+                    "upload_date": f.upload_date.isoformat(),
+                    "file_size": f.file_size,
+                    "file_hash": f.file_hash,
+                    "status": f.status,
+                    "upload_status": f.upload_status,
+                    "chunking_status": f.chunking_status,
+                    "graph_status": f.graph_status,
+                    "embedding_status": f.embedding_status,
+                    "created_at": f.created_at.isoformat(),
+                    "updated_at": f.updated_at.isoformat(),
+                    "chunking_started_at": (
+                        f.chunking_started_at.isoformat()
+                        if f.chunking_started_at
+                        else None
+                    ),
+                    "chunking_completed_at": (
+                        f.chunking_completed_at.isoformat()
+                        if f.chunking_completed_at
+                        else None
+                    ),
+                    "graph_started_at": (
+                        f.graph_started_at.isoformat() if f.graph_started_at else None
+                    ),
+                    "graph_completed_at": (
+                        f.graph_completed_at.isoformat()
+                        if f.graph_completed_at
+                        else None
+                    ),
+                    "embedding_started_at": (
+                        f.embedding_started_at.isoformat()
+                        if f.embedding_started_at
+                        else None
+                    ),
+                    "embedding_completed_at": (
+                        f.embedding_completed_at.isoformat()
+                        if f.embedding_completed_at
+                        else None
+                    ),
+                    "processing_started_at": (
+                        f.processing_started_at.isoformat()
+                        if f.processing_started_at
+                        else None
+                    ),
+                    "processing_completed_at": (
+                        f.processing_completed_at.isoformat()
+                        if f.processing_completed_at
+                        else None
+                    ),
+                    "processing_error": f.processing_error,
+                }
+            )
+
+        return create_api_response(
+            "Success", data={"files": files_data, "count": len(files_data)}
+        )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to list files: {error_message}")
-        return create_api_response("Failed", message="Failed to retrieve file list", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to retrieve file list", error=error_message
+        )
+
 
 @app.post("/api/v2/files/{file_id}/chunk")
 async def start_chunking(file_id: int):
@@ -3850,48 +4863,59 @@ async def start_chunking(file_id: int):
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
-        
+
         # Check if already chunked
         if file_record.chunking_status == "chunked":
-            return create_api_response("Success", 
-                                     message="File already chunked",
-                                     data={"file_id": file_id, "chunking_status": "chunked"})
-        
+            return create_api_response(
+                "Success",
+                message="File already chunked",
+                data={"file_id": file_id, "chunking_status": "chunked"},
+            )
+
         # Update status to chunking
         file_record.chunking_status = "chunking"
         file_record.chunking_started_at = datetime.now(timezone.utc)
         db_session.commit()
-        
-        logging.info(f"🔄 Started chunking for file {file_id}: {file_record.original_name}")
-        
+
+        logging.info(
+            f"🔄 Started chunking for file {file_id}: {file_record.original_name}"
+        )
+
         # Database'den dosya yolunu al
         file_path = file_record.file_path
-        
+
         if not os.path.exists(file_path):
             file_record.chunking_status = "failed"
             db_session.commit()
-            return create_api_response("Failed", message=f"File not found at: {file_path}")
-        
-        # Chunking işlemini background'da çalıştır
-        asyncio.create_task(process_chunking_v2(file_id, file_record.original_name, file_path))
-        
+            return create_api_response(
+                "Failed", message=f"File not found at: {file_path}"
+            )
 
-        return create_api_response("Success", 
-                                 message="Chunking started",
-                                 data={
-                                     "file_id": file_id,
-                                     "chunking_status": "chunking"
-                                 })
+        # Chunking işlemini background'da çalıştır
+        asyncio.create_task(
+            process_chunking_v2(file_id, file_record.original_name, file_path)
+        )
+
+        return create_api_response(
+            "Success",
+            message="Chunking started",
+            data={"file_id": file_id, "chunking_status": "chunking"},
+        )
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Failed to start chunking for file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to start chunking", error=error_message)
+        logging.error(
+            f"❌ Failed to start chunking for file {file_id}: {error_message}"
+        )
+        return create_api_response(
+            "Failed", message="Failed to start chunking", error=error_message
+        )
     finally:
         db_session.close()
+
 
 @app.get("/api/v2/files/{file_id}/status")
 async def get_file_status(file_id: int):
@@ -3899,33 +4923,39 @@ async def get_file_status(file_id: int):
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
-        
-        return create_api_response("Success", data={
-            "id": file_record.id,
-            "original_name": file_record.original_name,
-            "upload_status": file_record.upload_status,
-            "chunking_status": file_record.chunking_status,
-            "graph_status": file_record.graph_status,
-            "embedding_status": file_record.embedding_status,
-            "file_size": file_record.file_size,
-            "markdown_path": file_record.markdown_path
-        })
+
+        return create_api_response(
+            "Success",
+            data={
+                "id": file_record.id,
+                "original_name": file_record.original_name,
+                "upload_status": file_record.upload_status,
+                "chunking_status": file_record.chunking_status,
+                "graph_status": file_record.graph_status,
+                "embedding_status": file_record.embedding_status,
+                "file_size": file_record.file_size,
+                "markdown_path": file_record.markdown_path,
+            },
+        )
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to get file status: {error_message}")
-        return create_api_response("Failed", message="Failed to get file status", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to get file status", error=error_message
+        )
     finally:
         db_session.close()
 
+
 @app.post("/api/v2/files/{file_id}/graph-create")
 async def start_graph_creation(
-    file_id: int, 
+    file_id: int,
     model: str = Form("openai_gpt_4o_mini"),
-    generate_embedding: bool = Form(False)
+    generate_embedding: bool = Form(False),
 ):
     """Start graph creation process for a file"""
     db_session = None  # Initialize outside try block
@@ -3935,28 +4965,38 @@ async def start_graph_creation(
         userName = os.environ.get("NEO4J_USERNAME")
         password = os.environ.get("NEO4J_PASSWORD")
         database = os.environ.get("NEO4J_DATABASE", "neo4j")
-        
+
         if not all([uri, userName, password]):
-            return create_api_response("Failed", message="Neo4j credentials not configured in backend .env")
-        
-        logging.info(f"🚀 Graph creation request for file {file_id}: model={model}, database={database}")
-        
+            return create_api_response(
+                "Failed", message="Neo4j credentials not configured in backend .env"
+            )
+
+        logging.info(
+            f"🚀 Graph creation request for file {file_id}: model={model}, database={database}"
+        )
+
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
-        
+
         # Check if chunking is completed
         if file_record.chunking_status != "chunked":
-            return create_api_response("Failed", 
-                                     message=f"File must be chunked first (current status: {file_record.chunking_status})")
-        
+            return create_api_response(
+                "Failed",
+                message=f"File must be chunked first (current status: {file_record.chunking_status})",
+            )
+
         # Check if markdown file exists
-        if not file_record.markdown_path or not os.path.exists(file_record.markdown_path):
-            return create_api_response("Failed", message="Markdown file not found. Please run chunking first.")
-        
+        if not file_record.markdown_path or not os.path.exists(
+            file_record.markdown_path
+        ):
+            return create_api_response(
+                "Failed", message="Markdown file not found. Please run chunking first."
+            )
+
         # Update status to processing
         file_record.graph_status = "processing"
         file_record.graph_started_at = datetime.now(timezone.utc)
@@ -3965,36 +5005,44 @@ async def start_graph_creation(
         file_record.neo4j_uri = uri
         file_record.neo4j_database = database
         db_session.commit()
-        
-        logging.info(f"✨ Started graph creation for file {file_id}: {file_record.original_name}, Model: {model}")
-        
+
+        logging.info(
+            f"✨ Started graph creation for file {file_id}: {file_record.original_name}, Model: {model}"
+        )
+
         # Graph creation işlemini background'da çalıştır
-        asyncio.create_task(process_graph_creation_v2(
-            file_id=file_id,
-            original_name=file_record.original_name,
-            markdown_path=file_record.markdown_path,
-            file_path=file_record.file_path,
-            model=model,
-            uri=uri,
-            userName=userName,
-            password=password,
-            database=database,
-            generate_embedding=generate_embedding
-        ))
-        
-        return create_api_response("Success", 
-                                 message="Graph creation started",
-                                 data={
-                                     "file_id": file_id,
-                                     "graph_status": "processing"
-                                 })
+        asyncio.create_task(
+            process_graph_creation_v2(
+                file_id=file_id,
+                original_name=file_record.original_name,
+                markdown_path=file_record.markdown_path,
+                file_path=file_record.file_path,
+                model=model,
+                uri=uri,
+                userName=userName,
+                password=password,
+                database=database,
+                generate_embedding=generate_embedding,
+            )
+        )
+
+        return create_api_response(
+            "Success",
+            message="Graph creation started",
+            data={"file_id": file_id, "graph_status": "processing"},
+        )
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Failed to start graph creation for file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to start graph creation", error=error_message)
+        logging.error(
+            f"❌ Failed to start graph creation for file {file_id}: {error_message}"
+        )
+        return create_api_response(
+            "Failed", message="Failed to start graph creation", error=error_message
+        )
     finally:
         if db_session:
             db_session.close()
+
 
 @app.post("/api/v2/files/{file_id}/create-embeddings")
 async def create_embeddings_for_file(file_id: int):
@@ -4006,54 +5054,68 @@ async def create_embeddings_for_file(file_id: int):
         userName = os.environ.get("NEO4J_USERNAME")
         password = os.environ.get("NEO4J_PASSWORD")
         database = os.environ.get("NEO4J_DATABASE", "neo4j")
-        
+
         if not all([uri, userName, password]):
-            return create_api_response("Failed", message="Neo4j credentials not configured in backend .env")
-        
-        logging.info(f"📊 Embedding creation request for file {file_id}, database={database}")
-        
+            return create_api_response(
+                "Failed", message="Neo4j credentials not configured in backend .env"
+            )
+
+        logging.info(
+            f"📊 Embedding creation request for file {file_id}, database={database}"
+        )
+
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
-        
+
         # Check if graph is completed
         if file_record.graph_status != "completed":
-            return create_api_response("Failed", 
-                                     message=f"Graph must be completed first (current status: {file_record.graph_status})")
-        
+            return create_api_response(
+                "Failed",
+                message=f"Graph must be completed first (current status: {file_record.graph_status})",
+            )
+
         # Update status to processing
         file_record.embedding_status = "processing"
         file_record.embedding_started_at = datetime.now(timezone.utc)
         db_session.commit()
-        
-        logging.info(f"🔄 Started embedding creation for file {file_id}: {file_record.original_name}")
-        
+
+        logging.info(
+            f"🔄 Started embedding creation for file {file_id}: {file_record.original_name}"
+        )
+
         # Embedding işlemini background'da çalıştır
-        asyncio.create_task(process_embedding_creation(
-            file_id=file_id,
-            original_name=file_record.original_name,
-            uri=uri,
-            userName=userName,
-            password=password,
-            database=database
-        ))
-        
-        return create_api_response("Success", 
-                                 message="Embedding creation started",
-                                 data={
-                                     "file_id": file_id,
-                                     "embedding_status": "processing"
-                                 })
+        asyncio.create_task(
+            process_embedding_creation(
+                file_id=file_id,
+                original_name=file_record.original_name,
+                uri=uri,
+                userName=userName,
+                password=password,
+                database=database,
+            )
+        )
+
+        return create_api_response(
+            "Success",
+            message="Embedding creation started",
+            data={"file_id": file_id, "embedding_status": "processing"},
+        )
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Failed to start embedding creation for file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to start embedding creation", error=error_message)
+        logging.error(
+            f"❌ Failed to start embedding creation for file {file_id}: {error_message}"
+        )
+        return create_api_response(
+            "Failed", message="Failed to start embedding creation", error=error_message
+        )
     finally:
         if db_session:
             db_session.close()
+
 
 @app.post("/api/v2/files/{file_id}/reset")
 async def reset_file_stage(file_id: int, stage: str = "upload"):
@@ -4061,14 +5123,14 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
     try:
         if stage not in ["upload", "chunking", "graph"]:
             return create_api_response("Failed", message="Invalid stage parameter")
-        
+
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
-        
+
         # Reset logic with cascading
         if stage == "upload":
             # Reset everything
@@ -4079,8 +5141,10 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
-            logging.info(f"🔄 Reset UPLOAD stage for file {file_id} (cascaded to all stages)")
-        
+            logging.info(
+                f"🔄 Reset UPLOAD stage for file {file_id} (cascaded to all stages)"
+            )
+
         elif stage == "chunking":
             # Reset chunking and graph (cascade)
             file_record.chunking_status = "pending"
@@ -4089,38 +5153,44 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
-            logging.info(f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph)")
-        
+            logging.info(
+                f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph)"
+            )
+
         elif stage == "graph":
             # Reset only graph
             file_record.graph_status = "pending"
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
             logging.info(f"🔄 Reset GRAPH stage for file {file_id}")
-        
+
         db_session.commit()
-        
+
         # Neo4j'ye sync et (reset sonrası status güncelle)
         try:
-            logging.info(f"📤 Syncing reset status to Neo4j: file_name={file_record.filename}, "
-                        f"upload_status={file_record.upload_status}, "
-                        f"chunking_status={file_record.chunking_status}, "
-                        f"graph_status={file_record.graph_status}, "
-                        f"embedding_status={file_record.embedding_status}")
-            
+            logging.info(
+                f"📤 Syncing reset status to Neo4j: file_name={file_record.filename}, "
+                f"upload_status={file_record.upload_status}, "
+                f"chunking_status={file_record.chunking_status}, "
+                f"graph_status={file_record.graph_status}, "
+                f"embedding_status={file_record.embedding_status}"
+            )
+
             from src.models.status_sync import sync_queue_db_status_to_neo4j
             from src.shared.common_fn import create_graph_database_connection
-            
+
             # Neo4j bağlantı bilgileri
-            neo4j_uri = file_record.neo4j_uri or os.environ.get('NEO4J_URI')
-            neo4j_database = file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
-            
+            neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+            neo4j_database = file_record.neo4j_database or os.environ.get(
+                "NEO4J_DATABASE", "neo4j"
+            )
+
             if neo4j_uri:
                 graph_connection = create_graph_database_connection(
                     neo4j_uri,
-                    os.environ.get('NEO4J_USERNAME'),
-                    os.environ.get('NEO4J_PASSWORD'),
-                    neo4j_database
+                    os.environ.get("NEO4J_USERNAME"),
+                    os.environ.get("NEO4J_PASSWORD"),
+                    neo4j_database,
                 )
                 sync_queue_db_status_to_neo4j(
                     graph=graph_connection,
@@ -4129,47 +5199,60 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
                     chunking_status=file_record.chunking_status,
                     graph_status=file_record.graph_status,
                     embedding_status=file_record.embedding_status,
-                    database=neo4j_database
+                    database=neo4j_database,
                 )
-                logging.info(f"✅ Successfully synced reset status to Neo4j for: {file_record.filename}")
+                logging.info(
+                    f"✅ Successfully synced reset status to Neo4j for: {file_record.filename}"
+                )
             else:
                 logging.warning("⚠️ Neo4j URI not configured, skipping status sync")
-                
+
         except Exception as sync_error:
-            logging.warning(f"⚠️ Could not sync reset status to Neo4j: {str(sync_error)}")
-        
-        return create_api_response("Success", 
-                                 message=f"{stage.capitalize()} stage reset",
-                                 data={
-                                     "file_id": file_id,
-                                     "upload_status": file_record.upload_status,
-                                     "chunking_status": file_record.chunking_status,
-                                     "graph_status": file_record.graph_status
-                                 })
+            logging.warning(
+                f"⚠️ Could not sync reset status to Neo4j: {str(sync_error)}"
+            )
+
+        return create_api_response(
+            "Success",
+            message=f"{stage.capitalize()} stage reset",
+            data={
+                "file_id": file_id,
+                "upload_status": file_record.upload_status,
+                "chunking_status": file_record.chunking_status,
+                "graph_status": file_record.graph_status,
+            },
+        )
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to reset file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to reset file", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to reset file", error=error_message
+        )
     finally:
         db_session.close()
+
 
 @app.post("/api/v2/files/{file_id}/process")
 async def queue_file_for_processing(file_id: int, request: ProcessFileRequest):
     """Queue a file for background processing"""
     try:
         db = get_file_queue_db()
-        
+
         # Get file from database
         file_record = db.get_file_by_id(file_id)
         if not file_record:
-            return create_api_response("Failed", message="File not found", error="File ID not in database")
-        
+            return create_api_response(
+                "Failed", message="File not found", error="File ID not in database"
+            )
+
         # Check if file is in correct status
         if file_record.status not in [FileStatus.UPLOADED, FileStatus.ERROR]:
-            return create_api_response("Failed", 
-                                     message=f"File cannot be processed in current status: {file_record.status}",
-                                     error="Invalid file status")
-        
+            return create_api_response(
+                "Failed",
+                message=f"File cannot be processed in current status: {file_record.status}",
+                error="Invalid file status",
+            )
+
         # Update file metadata with processing parameters
         db_session = db.get_db_session()
         try:
@@ -4178,75 +5261,88 @@ async def queue_file_for_processing(file_id: int, request: ProcessFileRequest):
             file_record.model_used = request.model
             file_record.generate_embedding = request.generateEmbedding
             file_record.update_status(FileStatus.QUEUED)
-            
+
             db_session.commit()
             db_session.refresh(file_record)
-            
-            logging.info(f"✅ File queued for processing: ID={file_id}, Model={request.model}")
-            
-            return create_api_response("Success", 
-                                     message="File queued for processing successfully",
-                                     data={
-                                         "file_id": file_id,
-                                         "status": file_record.status,
-                                         "model": request.model
-                                     })
-            
+
+            logging.info(
+                f"✅ File queued for processing: ID={file_id}, Model={request.model}"
+            )
+
+            return create_api_response(
+                "Success",
+                message="File queued for processing successfully",
+                data={
+                    "file_id": file_id,
+                    "status": file_record.status,
+                    "model": request.model,
+                },
+            )
+
         except Exception as e:
             db_session.rollback()
             raise e
         finally:
             db_session.close()
-            
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to queue file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to queue file for processing", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to queue file for processing", error=error_message
+        )
 
-@app.get("/api/v2/files/status") 
+
+@app.get("/api/v2/files/status")
 async def get_queue_status():
     """Get current queue statistics"""
     try:
         db = get_file_queue_db()
         stats = db.get_queue_stats()
-        
+
         return create_api_response("Success", data={"queue_stats": stats})
-        
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to get queue status: {error_message}")
-        return create_api_response("Failed", message="Failed to retrieve queue status", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to retrieve queue status", error=error_message
+        )
+
 
 @app.delete("/api/v2/files/{file_id}")
 async def delete_queued_file(file_id: int):
     """Delete a file from queue, filesystem, and Neo4j database"""
     try:
         db = get_file_queue_db()
-        
+
         # Get file info before deletion
         file_record = db.get_file_by_id(file_id)
         if not file_record:
-            return create_api_response("Failed", message="File not found", error="File ID not in database")
-        
+            return create_api_response(
+                "Failed", message="File not found", error="File ID not in database"
+            )
+
         file_path = Path(file_record.file_path)
         original_name = file_record.original_name
         filename = file_record.filename
-        
+
         # Neo4j'den Document ve ilişkili node'ları sil
         neo4j_deleted = False
         try:
             if file_record.neo4j_uri:
                 from src.shared.common_fn import create_graph_database_connection
-                
+
                 logging.info(f"🗑️ Deleting Neo4j nodes for file: {original_name}")
-                
+
                 graph_connection = create_graph_database_connection(
                     uri=file_record.neo4j_uri,
-                    userName=os.environ.get('NEO4J_USERNAME'),
-                    password=os.environ.get('NEO4J_PASSWORD'),
-                    database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    userName=os.environ.get("NEO4J_USERNAME"),
+                    password=os.environ.get("NEO4J_PASSWORD"),
+                    database=file_record.neo4j_database
+                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
                 )
-                
+
                 # V2 Document deletion query
                 delete_query = """
                     MATCH (d:Document {fileName: $filename})
@@ -4295,117 +5391,139 @@ async def delete_queued_file(file_id: int):
                     
                     RETURN count(d) AS deletedDocuments
                 """
-                
+
                 session_params = {}
                 if file_record.neo4j_database:
                     session_params["database"] = file_record.neo4j_database
-                
+
                 result = graph_connection.query(
-                    delete_query,
-                    {"filename": filename},
-                    session_params=session_params
+                    delete_query, {"filename": filename}, session_params=session_params
                 )
-                
+
                 if result and len(result) > 0:
                     deleted_count = result[0]["deletedDocuments"]
-                    logging.info(f"✅ Deleted {deleted_count} Document nodes from Neo4j for: {original_name}")
+                    logging.info(
+                        f"✅ Deleted {deleted_count} Document nodes from Neo4j for: {original_name}"
+                    )
                     neo4j_deleted = True
                 else:
-                    logging.warning(f"⚠️ No Document nodes found in Neo4j for: {original_name}")
+                    logging.warning(
+                        f"⚠️ No Document nodes found in Neo4j for: {original_name}"
+                    )
                     neo4j_deleted = True  # Not an error if document doesn't exist
-                    
+
             else:
-                logging.info(f"ℹ️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}")
+                logging.info(
+                    f"ℹ️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}"
+                )
                 neo4j_deleted = True
-                
+
         except Exception as neo4j_error:
             logging.error(f"❌ Failed to delete from Neo4j: {str(neo4j_error)}")
             # Continue with filesystem/database deletion even if Neo4j fails
-        
+
         # Delete file from filesystem if exists
         if file_path.exists():
             file_path.unlink()
             logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
-        
+
         # Delete from SQLite database
         success = db.delete_file(file_id)
         if success:
             logging.info(f"✅ File deleted from queue: ID={file_id}")
-            
+
             result_message = "File deleted successfully"
             if neo4j_deleted:
                 result_message += " (including Neo4j nodes)"
             else:
                 result_message += " (Neo4j deletion failed, check logs)"
-            
-            return create_api_response("Success", 
-                                     message=result_message,
-                                     data={
-                                         "file_id": file_id,
-                                         "neo4j_deleted": neo4j_deleted
-                                     })
+
+            return create_api_response(
+                "Success",
+                message=result_message,
+                data={"file_id": file_id, "neo4j_deleted": neo4j_deleted},
+            )
         else:
-            return create_api_response("Failed", message="Failed to delete file from database")
-            
+            return create_api_response(
+                "Failed", message="Failed to delete file from database"
+            )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to delete file {file_id}: {error_message}")
-        return create_api_response("Failed", message="Failed to delete file", error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to delete file", error=error_message
+        )
+
 
 # ==========================================
 # BACKGROUND PROCESSING ENDPOINTS
 # ==========================================
 
-from src.background_processor import get_background_processor, start_processing_loop, process_file_immediately
+from src.background_processor import (
+    get_background_processor,
+    start_processing_loop,
+    process_file_immediately,
+)
 
 # Global background task
 background_task = None
+
 
 @app.post("/api/v2/processing/start")
 async def start_background_processing():
     """Start background file processing"""
     global background_task
-    
+
     try:
         processor = get_background_processor()
-        
+
         if processor.is_processing:
-            return create_api_response("Success", 
-                                     message="Background processing already running",
-                                     data={"status": "already_running"})
-        
+            return create_api_response(
+                "Success",
+                message="Background processing already running",
+                data={"status": "already_running"},
+            )
+
         # Start background task
         background_task = asyncio.create_task(start_processing_loop())
-        
+
         logging.info("🚀 Background processing started via API")
-        
-        return create_api_response("Success", 
-                                 message="Background processing started successfully",
-                                 data={"status": "started"})
-        
+
+        return create_api_response(
+            "Success",
+            message="Background processing started successfully",
+            data={"status": "started"},
+        )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to start background processing: {error_message}")
-        return create_api_response("Failed", 
-                                 message="Failed to start background processing", 
-                                 error=error_message)
+        return create_api_response(
+            "Failed",
+            message="Failed to start background processing",
+            error=error_message,
+        )
+
 
 @app.post("/api/v2/processing/stop")
 async def stop_background_processing():
     """Stop background file processing"""
     global background_task
-    
+
     try:
         processor = get_background_processor()
-        
+
         if not processor.is_processing:
-            return create_api_response("Success", 
-                                     message="Background processing not running",
-                                     data={"status": "not_running"})
-        
+            return create_api_response(
+                "Success",
+                message="Background processing not running",
+                data={"status": "not_running"},
+            )
+
         # Stop processor
         processor.stop_background_processing()
-        
+
         # Cancel background task if exists
         if background_task and not background_task.done():
             background_task.cancel()
@@ -4414,19 +5532,24 @@ async def stop_background_processing():
             except asyncio.CancelledError:
                 pass
             background_task = None
-        
+
         logging.info("⏹️ Background processing stopped via API")
-        
-        return create_api_response("Success", 
-                                 message="Background processing stopped successfully",
-                                 data={"status": "stopped"})
-        
+
+        return create_api_response(
+            "Success",
+            message="Background processing stopped successfully",
+            data={"status": "stopped"},
+        )
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to stop background processing: {error_message}")
-        return create_api_response("Failed", 
-                                 message="Failed to stop background processing", 
-                                 error=error_message)
+        return create_api_response(
+            "Failed",
+            message="Failed to stop background processing",
+            error=error_message,
+        )
+
 
 @app.get("/api/v2/processing/status")
 async def get_processing_status():
@@ -4434,24 +5557,25 @@ async def get_processing_status():
     try:
         processor = get_background_processor()
         status = processor.get_processing_status()
-        
+
         return create_api_response("Success", data={"processing_status": status})
-        
+
     except Exception as e:
         error_message = str(e)
         logging.error(f"❌ Failed to get processing status: {error_message}")
-        return create_api_response("Failed", 
-                                 message="Failed to get processing status", 
-                                 error=error_message)
+        return create_api_response(
+            "Failed", message="Failed to get processing status", error=error_message
+        )
+
 
 def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     """
     Gemini 2.0 Flash ile image'ları markdown'a çevirme (sync function for executor)
-    
+
     Args:
         image_list: Image path'leri veya filename'leri
         image_source: "local" (filename) veya "generated" (full path)
-    
+
     Returns:
         str: Markdown content with [PAGE BREAK] separators
     """
@@ -4459,43 +5583,46 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     if not GEMINI_AVAILABLE:
         logging.warning("❌ google.genai not available")
         return markdown_text
-    
+
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             logging.warning("❌ GEMINI_API_KEY not found")
             return markdown_text
-        
+
         # Create client with new google-genai SDK
         client = genai_sdk.Client(api_key=api_key)
         logging.info("✅ Gemini client initialized successfully")
-        
+
         from google.genai import types
+
         for idx, img_ref in enumerate(sorted(image_list), start=1):
             try:
                 # Determine if img_ref is path or filename
                 if image_source == "local":
                     # img_ref is filename, construct path
-                    img_path = os.path.join(os.environ.get("OUTPUT_IMAGES_DIR", "output/images"), img_ref)
+                    img_path = os.path.join(
+                        os.environ.get("OUTPUT_IMAGES_DIR", "output/images"), img_ref
+                    )
                 else:
                     # img_ref is full path
                     img_path = img_ref
-                
+
                 # Read image as bytes
                 with open(img_path, "rb") as img_file:
                     image_bytes = img_file.read()
-                
+
                 # Send to Gemini with new SDK
                 prompt_text = "Convert this document page to clean markdown format. Don't use ```markdown tags```. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."
-                
+
                 response = client.models.generate_content(
-                    model='models/gemini-2.0-flash',
+                    model="models/gemini-2.0-flash",
                     contents=[
                         types.Part.from_text(text=prompt_text),
-                        types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-                    ]
+                        types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                    ],
                 )
-                
+
                 if response.text:
                     # Son sayfa değilse PAGE BREAK ekle
                     if idx < len(image_list):
@@ -4503,23 +5630,30 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
                     else:
                         # Son sayfa - PAGE BREAK ekleme
                         markdown_text += response.text
-                    
+
                     source_name = os.path.basename(img_path)
-                    logging.info(f"✅ Gemini 2.0 Flash processed page: {source_name} ({len(response.text)} chars)")
+                    logging.info(
+                        f"✅ Gemini 2.0 Flash processed page: {source_name} ({len(response.text)} chars)"
+                    )
                 else:
-                    logging.warning(f"Gemini returned empty response for {os.path.basename(img_path)}")
+                    logging.warning(
+                        f"Gemini returned empty response for {os.path.basename(img_path)}"
+                    )
             except Exception as e:
                 logging.warning(f"Gemini processing failed for {img_ref}: {e}")
-        
+
         if markdown_text:
-            logging.info(f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images")
+            logging.info(
+                f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images"
+            )
         else:
             logging.warning("Gemini generated empty markdown")
-        
+
     except Exception as e:
         logging.error(f"Gemini processing error: {e}")
-    
+
     return markdown_text
+
 
 async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
     """
@@ -4527,335 +5661,439 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
     Image extraction and S3 upload are already done in upload endpoint
     """
     import json
+
     db = None
     db_session = None
     loop = asyncio.get_event_loop()
     executor = None
-    
+
     try:
         # Thread pool executor'ı oluştur (Gemini OCR için)
         from concurrent.futures import ThreadPoolExecutor
+
         executor = ThreadPoolExecutor(max_workers=1)
-        
+
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             logging.error(f"❌ File record not found for ID: {file_id}")
             return
-        
-        logging.info(f"📖 Starting V2 chunking (Gemini OCR + Chunking) for: {original_name}")
-        
+
+        logging.info(
+            f"📖 Starting V2 chunking (Gemini OCR + Chunking) for: {original_name}"
+        )
+
         # Normalize filename
         from src.utf8_utils import normalize_file_name
+
         normalized_filename = normalize_file_name(original_name)
-        
+
         # Output klasör yapısını oluştur (local dosya yolları için)
-        from src.document_sources.s3_upload_utils import create_document_output_structure
+        from src.document_sources.s3_upload_utils import (
+            create_document_output_structure,
+        )
+
         document_dir, pdf_dir, images_dir = create_document_output_structure(
             normalized_filename, "output"
         )
-        
+
         # Database'den page images ve doc link bilgisini al (upload sırasında kaydedildi)
         page_images = []
-        doc_link = file_record.doc_link if hasattr(file_record, 'doc_link') and file_record.doc_link else None
-        
+        doc_link = (
+            file_record.doc_link
+            if hasattr(file_record, "doc_link") and file_record.doc_link
+            else None
+        )
+
         if file_record.page_images:
             try:
                 page_images = json.loads(file_record.page_images)
-                logging.info(f"📸 Using {len(page_images)} page images from upload step")
+                logging.info(
+                    f"📸 Using {len(page_images)} page images from upload step"
+                )
             except:
                 logging.warning("⚠️ Failed to parse page_images from database")
-        
+
         pages = []
-        
+
         # V2 Chunking: Sadece pre-extracted images ile Gemini OCR
         try:
-                # ✨ Markdown dosyası zaten var mı kontrol et
+            # ✨ Markdown dosyası zaten var mı kontrol et
+            markdown_filename = f"{normalized_filename}.md"
+            markdown_path = os.path.join(document_dir, markdown_filename)
+
+            # ⚠️ Her chunking başlatıldığında markdown'ı yeniden oluştur
+            if os.path.exists(markdown_path):
+                logging.info(
+                    f"� Deleting existing markdown for re-extraction: {markdown_path}"
+                )
+                os.remove(markdown_path)
+
+            # ✅ SADECE PRE-EXTRACTED IMAGES İLE GEMİNİ OCR YAPACAK
+            logging.info(
+                f"📝 Creating markdown using pre-extracted images for: {normalized_filename}"
+            )
+
+            # Local images_dir'de PNG dosyaları kontrol et (upload'da oluşturulan)
+            local_images = []
+            if os.path.exists(images_dir):
+                local_images = [
+                    os.path.join(images_dir, f)
+                    for f in os.listdir(images_dir)
+                    if f.endswith(".png")
+                ]
+                local_images.sort()  # Sayfa sırasını koru
+
+            # Pre-extracted images kontrolü - YOK İSE HATA FIRLAT
+            if not local_images:
+                error_msg = f"❌ No pre-extracted images found in {images_dir}. Cannot proceed with chunking without images."
+                logging.error(error_msg)
+                raise Exception(error_msg)
+
+            logging.info(
+                f"📸 Found {len(local_images)} pre-extracted images for Gemini OCR"
+            )
+
+            # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR
+            from langchain_core.documents import Document
+
+            markdown_text = await loop.run_in_executor(
+                executor, lambda: process_gemini_ocr(local_images, "generated")
+            )
+
+            # Gemini başarısız olduysa hata fırlat
+            if not markdown_text or not markdown_text.strip():
+                error_msg = f"❌ Gemini OCR failed to generate markdown from {len(local_images)} pre-extracted images"
+                logging.error(error_msg)
+                raise Exception(error_msg)
+
+            pages = [Document(page_content=markdown_text)]
+            logging.info(
+                f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images"
+            )
+
+            # Markdown dosyasını oluştur ve kaydet
+            markdown_content = ""
+            if pages:
+                for idx, page in enumerate(pages, start=1):
+                    page_text = (
+                        page.page_content
+                        if hasattr(page, "page_content")
+                        else str(page)
+                    )
+                    # Son sayfa değilse PAGE BREAK ekle
+                    if idx < len(pages):
+                        markdown_content += f"{page_text}\n\n[PAGE BREAK]\n\n"
+                    else:
+                        # Son sayfa - PAGE BREAK ekleme
+                        markdown_content += page_text
+
+                # Markdown dosyasını document klasörüne kaydet
                 markdown_filename = f"{normalized_filename}.md"
                 markdown_path = os.path.join(document_dir, markdown_filename)
-                
-                # ⚠️ Her chunking başlatıldığında markdown'ı yeniden oluştur
-                if os.path.exists(markdown_path):
-                    logging.info(f"� Deleting existing markdown for re-extraction: {markdown_path}")
-                    os.remove(markdown_path)
-                
-                # ✅ SADECE PRE-EXTRACTED IMAGES İLE GEMİNİ OCR YAPACAK
-                logging.info(f"📝 Creating markdown using pre-extracted images for: {normalized_filename}")
-                
-                # Local images_dir'de PNG dosyaları kontrol et (upload'da oluşturulan)
-                local_images = []
-                if os.path.exists(images_dir):
-                    local_images = [os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.endswith('.png')]
-                    local_images.sort()  # Sayfa sırasını koru
-                
-                # Pre-extracted images kontrolü - YOK İSE HATA FIRLAT
-                if not local_images:
-                    error_msg = f"❌ No pre-extracted images found in {images_dir}. Cannot proceed with chunking without images."
-                    logging.error(error_msg)
-                    raise Exception(error_msg)
-                
-                logging.info(f"📸 Found {len(local_images)} pre-extracted images for Gemini OCR")
-                
-                # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR
-                from langchain_core.documents import Document
-                markdown_text = await loop.run_in_executor(executor, lambda: process_gemini_ocr(local_images, "generated"))
-                
-                # Gemini başarısız olduysa hata fırlat
-                if not markdown_text or not markdown_text.strip():
-                    error_msg = f"❌ Gemini OCR failed to generate markdown from {len(local_images)} pre-extracted images"
-                    logging.error(error_msg)
-                    raise Exception(error_msg)
-                
-                pages = [Document(page_content=markdown_text)]
-                logging.info(f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images")
-                
-                # Markdown dosyasını oluştur ve kaydet
-                markdown_content = ""
-                if pages:
-                    for idx, page in enumerate(pages, start=1):
-                        page_text = page.page_content if hasattr(page, 'page_content') else str(page)
-                        # Son sayfa değilse PAGE BREAK ekle
-                        if idx < len(pages):
-                            markdown_content += f"{page_text}\n\n[PAGE BREAK]\n\n"
-                        else:
-                            # Son sayfa - PAGE BREAK ekleme
-                            markdown_content += page_text
-                    
-                    # Markdown dosyasını document klasörüne kaydet
-                    markdown_filename = f"{normalized_filename}.md"
-                    markdown_path = os.path.join(document_dir, markdown_filename)
-                    
-                    with open(markdown_path, "w", encoding="utf-8") as md_file:
-                        md_file.write(markdown_content.strip())
-                    
-                    logging.info(f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)")
-                    
-                    # Markdown path'i kaydet
-                    file_record.markdown_path = markdown_path
-                    
-                    # ☁️ MARKDOWN DOSYASINI S3'E UPLOAD ET
-                    try:
-                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
-                        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-                        
-                        if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                            logging.info(f"☁️ Uploading markdown file to S3: {markdown_filename}")
-                            
-                            # S3 upload - markdown dosyası için ayrı executor (organized structure)
-                            with ThreadPoolExecutor(max_workers=1) as md_executor:
-                                from src.document_sources.s3_upload_utils import upload_files_to_s3_with_structure
-                                doc_name = Path(normalized_filename).stem
-                                md_s3_prefix = f"documents/{doc_name}/md"  # documents/{doc_name}/md/
-                                
-                                def upload_markdown_to_s3():
-                                    urls, failed = upload_files_to_s3_with_structure(
-                                        [markdown_path],  # Sadece markdown dosyası
-                                        s3_bucket,
-                                        md_s3_prefix,
-                                        aws_access_key_id,
-                                        aws_secret_access_key,
-                                        delete_local_after_upload=False  # Local dosyayı sakla
-                                    )
-                                    return urls, failed
-                                
-                                md_urls, md_failed = await loop.run_in_executor(md_executor, upload_markdown_to_s3)
-                            
-                            if md_urls:
-                                logging.info(f"✅ Markdown uploaded to S3: {len(md_urls)} file")
-                                # Markdown S3 URL'ini database'e kaydet (opsiyonel)
-                                for url in md_urls:
-                                    if url.endswith(f"/{markdown_filename}"):
-                                        file_record.markdown_s3_url = url
-                                        logging.info(f"📄 Markdown S3 URL: {url}")
-                                        break
-                            else:
-                                logging.warning(f"⚠️ Failed to upload markdown to S3")
-                        else:
-                            logging.info(f"ℹ️ S3 credentials not configured, markdown saved locally only")
-                    
-                    except Exception as s3_error:
-                        logging.warning(f"⚠️ S3 upload failed for markdown: {s3_error}")
-                        # Continue with processing even if S3 upload fails
-                    
-                    # ✨ CHUNK NODE'LARI OLUŞTUR (tıpkı upload_file gibi)
-                    try:
-                        logging.info(f"🔄 Creating chunk nodes for: {normalized_filename}")
-                        
-                        # Neo4j bağlantısı kur
-                        uri = os.environ.get("NEO4J_URI")
-                        userName = os.environ.get("NEO4J_USERNAME")
-                        password = os.environ.get("NEO4J_PASSWORD")
-                        database = os.environ.get("NEO4J_DATABASE", "neo4j")
-                        
-                        if uri and userName and password:
-                            from src.shared.common_fn import create_graph_database_connection
-                            from src.graphDB_dataAccess import graphDBdataAccess
-                            from src.entities.source_node import sourceNode
-                            
-                            graph = create_graph_database_connection(uri, userName, password, database)
-                            graphDb_data_Access = graphDBdataAccess(graph)
-                            
-                            # 🧹 ÖNCE: Upload öncesi otomatik temizlik yap (duplicate prevention)
-                            logging.info(f"🧹 Starting pre-chunking cleanup check for: {normalized_filename}")
-                            cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(normalized_filename)
-                            if cleanup_result:
-                                logging.info(f"✅ Pre-chunking cleanup completed successfully")
-                            else:
-                                logging.info(f"ℹ️ No cleanup needed or cleanup skipped")
-                            
-                            # 1️⃣ Source node objesi oluştur (henüz kaydetme - upload_file gibi)
-                            obj_source_node = sourceNode()
-                            obj_source_node.file_name = normalized_filename
-                            obj_source_node.file_type = normalized_filename.split(".")[-1].lower()
-                            obj_source_node.file_size = file_record.file_size if file_record.file_size else 0
-                            obj_source_node.file_source = "local file"
-                            obj_source_node.model = "openai_gpt_4o_mini"
-                            obj_source_node.created_at = datetime.now()
-                            obj_source_node.chunkNodeCount = 0
-                            obj_source_node.chunkRelCount = 0
-                            obj_source_node.entityNodeCount = 0
-                            obj_source_node.entityEntityRelCount = 0
-                            obj_source_node.communityNodeCount = 0
-                            obj_source_node.communityRelCount = 0
-                            obj_source_node.total_chunks = 0
-                            obj_source_node.processed_chunk = 0
-                            obj_source_node.node_count = 0
-                            obj_source_node.relationship_count = 0
-                            obj_source_node.processing_time = 0
-                            
-                            # Page images ve doc link'i ekle
-                            if doc_link:
-                                obj_source_node.doc_link = doc_link
-                            if page_images:
-                                obj_source_node.page_images = page_images
-                            
-                            # 2️⃣ Chunk'ları oluştur
-                            from src.create_chunks import CreateChunksofDocument
-                            create_chunks_obj = CreateChunksofDocument(pages, graph)
-                            
-                            token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
-                            chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
-                            
-                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                                chunk_size=token_chunk_size, 
-                                chunk_overlap=chunk_overlap
-                            )
-                            
-                            if chunks:
-                                # 3️⃣ Chunk node'ları veritabanına kaydet
-                                from src.make_relationships import create_chunks_for_upload
-                                
-                                chunkId_chunkDoc_list = create_chunks_for_upload(
-                                    graph=graph,
-                                    chunks=chunks, 
-                                    file_name=normalized_filename,
-                                    page_images=page_images if page_images else [],
-                                    generate_embedding=False
-                                )
-                                
-                                logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes in Neo4j")
-                                
-                                # 4️⃣ Source node'a chunk count'ları ekle (upload_file gibi)
-                                obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
-                                obj_source_node.total_chunks = len(chunks)
-                                obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)
-                                
-                                # 5️⃣ Vector index oluştur/kontrol et
-                                try:
-                                    from src.make_relationships import create_chunk_vector_index
-                                    create_chunk_vector_index(graph)
-                                    logging.info(f"✅ Vector index checked/created")
-                                except Exception as vector_error:
-                                    logging.warning(f"⚠️ Vector index warning: {vector_error}")
-                            else:
-                                logging.warning(f"⚠️ No chunks created for: {normalized_filename}")
-                            
-                            # 6️⃣ Source node'u veritabanına kaydet (chunk count'larıyla birlikte - TEK SEFERDE)
-                            # ⚠️ V2 Chunking: Entity extraction'ı atla (sadece Document ve Chunk node'ları oluştur)
-                            # Entity extraction graph-create aşamasında yapılacak
-                            graphDb_data_Access.create_source_node(
-                                obj_source_node, 
-                                model="openai_gpt_4o_mini",
-                                skip_entity_extraction=True  # V2: Entity extraction'ı atla
-                            )
-                            logging.info(f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)")
-                            
-                            # 7️⃣ Chunk'ları Document'e bağla
-                            if chunks:
-                                from src.make_relationships import link_chunks_to_document
-                                linked_count = link_chunks_to_document(graph, normalized_filename)
-                                if linked_count > 0:
-                                    logging.info(f"🔗 Linked {linked_count} chunks to Document")
-                                else:
-                                    logging.info(f"ℹ️ Chunks already linked to Document")
-                            
-                            # Graph connection'ı kapat
-                            if graph and hasattr(graph, '_driver') and not graph._driver._closed:
-                                graph._driver.close()
-                                logging.info("🔌 Neo4j connection closed")
-                        else:
-                            logging.warning("⚠️ Neo4j credentials not configured, skipping chunk node creation")
-                    
-                    except Exception as chunk_node_error:
-                        logging.error(f"❌ Failed to create chunk nodes: {chunk_node_error}")
-                        import traceback
-                        logging.error(f"Traceback: {traceback.format_exc()}")
-                else:
-                    logging.warning(f"⚠️ No pages extracted for markdown creation: {normalized_filename}")
-                
-                # Chunking tamamlandı, status güncelle
-                file_record.chunking_status = "chunked"
-                file_record.chunking_completed_at = datetime.now(timezone.utc)
-                
-                # Metadata zaten upload sırasında kaydedildi, sadece markdown path ekle
-                # doc_link ve page_images zaten database'de mevcut
-                
-                db_session.commit()
-                
-                # Neo4j'ye sync et (Neo4j bağlantısı varsa)
+
+                with open(markdown_path, "w", encoding="utf-8") as md_file:
+                    md_file.write(markdown_content.strip())
+
+                logging.info(
+                    f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)"
+                )
+
+                # Markdown path'i kaydet
+                file_record.markdown_path = markdown_path
+
+                # ☁️ MARKDOWN DOSYASINI S3'E UPLOAD ET
                 try:
-                    logging.info(f"📤 Attempting Neo4j sync: file_name={normalized_filename}, "
-                                f"upload_status={file_record.upload_status}, "
-                                f"chunking_status={file_record.chunking_status}, "
-                                f"graph_status={file_record.graph_status}, "
-                                f"embedding_status={file_record.embedding_status}")
-                    from src.models.status_sync import sync_queue_db_status_to_neo4j
-                    graph_connection = create_graph_database_connection(
-                        file_record.neo4j_uri or os.environ.get('NEO4J_URI'),
-                        os.environ.get('NEO4J_USERNAME'),
-                        os.environ.get('NEO4J_PASSWORD'),
-                        file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    s3_bucket = os.environ.get(
+                        "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
                     )
-                    sync_queue_db_status_to_neo4j(
-                        graph=graph_connection,
-                        file_name=normalized_filename,
-                        upload_status=file_record.upload_status,
-                        chunking_status=file_record.chunking_status,
-                        graph_status=file_record.graph_status,
-                        embedding_status=file_record.embedding_status,
-                        database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        logging.info(
+                            f"☁️ Uploading markdown file to S3: {markdown_filename}"
+                        )
+
+                        # S3 upload - markdown dosyası için ayrı executor (organized structure)
+                        with ThreadPoolExecutor(max_workers=1) as md_executor:
+                            from src.document_sources.s3_upload_utils import (
+                                upload_files_to_s3_with_structure,
+                            )
+
+                            doc_name = Path(normalized_filename).stem
+                            md_s3_prefix = (
+                                f"documents/{doc_name}/md"  # documents/{doc_name}/md/
+                            )
+
+                            def upload_markdown_to_s3():
+                                urls, failed = upload_files_to_s3_with_structure(
+                                    [markdown_path],  # Sadece markdown dosyası
+                                    s3_bucket,
+                                    md_s3_prefix,
+                                    aws_access_key_id,
+                                    aws_secret_access_key,
+                                    delete_local_after_upload=False,  # Local dosyayı sakla
+                                )
+                                return urls, failed
+
+                            md_urls, md_failed = await loop.run_in_executor(
+                                md_executor, upload_markdown_to_s3
+                            )
+
+                        if md_urls:
+                            logging.info(
+                                f"✅ Markdown uploaded to S3: {len(md_urls)} file"
+                            )
+                            # Markdown S3 URL'ini database'e kaydet (opsiyonel)
+                            for url in md_urls:
+                                if url.endswith(f"/{markdown_filename}"):
+                                    file_record.markdown_s3_url = url
+                                    logging.info(f"📄 Markdown S3 URL: {url}")
+                                    break
+                        else:
+                            logging.warning(f"⚠️ Failed to upload markdown to S3")
+                    else:
+                        logging.info(
+                            f"ℹ️ S3 credentials not configured, markdown saved locally only"
+                        )
+
+                except Exception as s3_error:
+                    logging.warning(f"⚠️ S3 upload failed for markdown: {s3_error}")
+                    # Continue with processing even if S3 upload fails
+
+                # ✨ CHUNK NODE'LARI OLUŞTUR (tıpkı upload_file gibi)
+                try:
+                    logging.info(f"🔄 Creating chunk nodes for: {normalized_filename}")
+
+                    # Neo4j bağlantısı kur
+                    uri = os.environ.get("NEO4J_URI")
+                    userName = os.environ.get("NEO4J_USERNAME")
+                    password = os.environ.get("NEO4J_PASSWORD")
+                    database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
+                    if uri and userName and password:
+                        from src.shared.common_fn import (
+                            create_graph_database_connection,
+                        )
+                        from src.graphDB_dataAccess import graphDBdataAccess
+                        from src.entities.source_node import sourceNode
+
+                        graph = create_graph_database_connection(
+                            uri, userName, password, database
+                        )
+                        graphDb_data_Access = graphDBdataAccess(graph)
+
+                        # 🧹 ÖNCE: Upload öncesi otomatik temizlik yap (duplicate prevention)
+                        logging.info(
+                            f"🧹 Starting pre-chunking cleanup check for: {normalized_filename}"
+                        )
+                        cleanup_result = (
+                            graphDb_data_Access.auto_clean_existing_file_data(
+                                normalized_filename
+                            )
+                        )
+                        if cleanup_result:
+                            logging.info(
+                                f"✅ Pre-chunking cleanup completed successfully"
+                            )
+                        else:
+                            logging.info(f"ℹ️ No cleanup needed or cleanup skipped")
+
+                        # 1️⃣ Source node objesi oluştur (henüz kaydetme - upload_file gibi)
+                        obj_source_node = sourceNode()
+                        obj_source_node.file_name = normalized_filename
+                        obj_source_node.file_type = normalized_filename.split(".")[
+                            -1
+                        ].lower()
+                        obj_source_node.file_size = (
+                            file_record.file_size if file_record.file_size else 0
+                        )
+                        obj_source_node.file_source = "local file"
+                        obj_source_node.model = "openai_gpt_4o_mini"
+                        obj_source_node.created_at = datetime.now()
+                        obj_source_node.chunkNodeCount = 0
+                        obj_source_node.chunkRelCount = 0
+                        obj_source_node.entityNodeCount = 0
+                        obj_source_node.entityEntityRelCount = 0
+                        obj_source_node.communityNodeCount = 0
+                        obj_source_node.communityRelCount = 0
+                        obj_source_node.total_chunks = 0
+                        obj_source_node.processed_chunk = 0
+                        obj_source_node.node_count = 0
+                        obj_source_node.relationship_count = 0
+                        obj_source_node.processing_time = 0
+
+                        # Page images ve doc link'i ekle
+                        if doc_link:
+                            obj_source_node.doc_link = doc_link
+                        if page_images:
+                            obj_source_node.page_images = page_images
+
+                        # 2️⃣ Chunk'ları oluştur
+                        from src.create_chunks import CreateChunksofDocument
+
+                        create_chunks_obj = CreateChunksofDocument(pages, graph)
+
+                        token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
+                        chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
+
+                        chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                            chunk_size=token_chunk_size, chunk_overlap=chunk_overlap
+                        )
+
+                        if chunks:
+                            # 3️⃣ Chunk node'ları veritabanına kaydet
+                            from src.make_relationships import create_chunks_for_upload
+
+                            chunkId_chunkDoc_list = create_chunks_for_upload(
+                                graph=graph,
+                                chunks=chunks,
+                                file_name=normalized_filename,
+                                page_images=page_images if page_images else [],
+                                generate_embedding=False,
+                            )
+
+                            logging.info(
+                                f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes in Neo4j"
+                            )
+
+                            # 4️⃣ Source node'a chunk count'ları ekle (upload_file gibi)
+                            obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
+                            obj_source_node.total_chunks = len(chunks)
+                            obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)
+
+                            # 5️⃣ Vector index oluştur/kontrol et
+                            try:
+                                from src.make_relationships import (
+                                    create_chunk_vector_index,
+                                )
+
+                                create_chunk_vector_index(graph)
+                                logging.info(f"✅ Vector index checked/created")
+                            except Exception as vector_error:
+                                logging.warning(
+                                    f"⚠️ Vector index warning: {vector_error}"
+                                )
+                        else:
+                            logging.warning(
+                                f"⚠️ No chunks created for: {normalized_filename}"
+                            )
+
+                        # 6️⃣ Source node'u veritabanına kaydet (chunk count'larıyla birlikte - TEK SEFERDE)
+                        # ⚠️ V2 Chunking: Entity extraction'ı atla (sadece Document ve Chunk node'ları oluştur)
+                        # Entity extraction graph-create aşamasında yapılacak
+                        graphDb_data_Access.create_source_node(
+                            obj_source_node,
+                            model="openai_gpt_4o_mini",
+                            skip_entity_extraction=True,  # V2: Entity extraction'ı atla
+                        )
+                        logging.info(
+                            f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)"
+                        )
+
+                        # 7️⃣ Chunk'ları Document'e bağla
+                        if chunks:
+                            from src.make_relationships import link_chunks_to_document
+
+                            linked_count = link_chunks_to_document(
+                                graph, normalized_filename
+                            )
+                            if linked_count > 0:
+                                logging.info(
+                                    f"🔗 Linked {linked_count} chunks to Document"
+                                )
+                            else:
+                                logging.info(f"ℹ️ Chunks already linked to Document")
+
+                        # Graph connection'ı kapat
+                        if (
+                            graph
+                            and hasattr(graph, "_driver")
+                            and not graph._driver._closed
+                        ):
+                            graph._driver.close()
+                            logging.info("🔌 Neo4j connection closed")
+                    else:
+                        logging.warning(
+                            "⚠️ Neo4j credentials not configured, skipping chunk node creation"
+                        )
+
+                except Exception as chunk_node_error:
+                    logging.error(
+                        f"❌ Failed to create chunk nodes: {chunk_node_error}"
                     )
-                except Exception as sync_error:
-                    logging.warning(f"⚠️ Could not sync chunking status to Neo4j: {str(sync_error)}")
-                
-                logging.info(f"✅ V2 Chunking completed for: {original_name}")
-                
+                    import traceback
+
+                    logging.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                logging.warning(
+                    f"⚠️ No pages extracted for markdown creation: {normalized_filename}"
+                )
+
+            # Chunking tamamlandı, status güncelle
+            file_record.chunking_status = "chunked"
+            file_record.chunking_completed_at = datetime.now(timezone.utc)
+
+            # Metadata zaten upload sırasında kaydedildi, sadece markdown path ekle
+            # doc_link ve page_images zaten database'de mevcut
+
+            db_session.commit()
+
+            # Neo4j'ye sync et (Neo4j bağlantısı varsa)
+            try:
+                logging.info(
+                    f"📤 Attempting Neo4j sync: file_name={normalized_filename}, "
+                    f"upload_status={file_record.upload_status}, "
+                    f"chunking_status={file_record.chunking_status}, "
+                    f"graph_status={file_record.graph_status}, "
+                    f"embedding_status={file_record.embedding_status}"
+                )
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+
+                graph_connection = create_graph_database_connection(
+                    file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
+                    os.environ.get("NEO4J_USERNAME"),
+                    os.environ.get("NEO4J_PASSWORD"),
+                    file_record.neo4j_database
+                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                )
+                sync_queue_db_status_to_neo4j(
+                    graph=graph_connection,
+                    file_name=normalized_filename,
+                    upload_status=file_record.upload_status,
+                    chunking_status=file_record.chunking_status,
+                    graph_status=file_record.graph_status,
+                    embedding_status=file_record.embedding_status,
+                    database=file_record.neo4j_database
+                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                )
+            except Exception as sync_error:
+                logging.warning(
+                    f"⚠️ Could not sync chunking status to Neo4j: {str(sync_error)}"
+                )
+
+            logging.info(f"✅ V2 Chunking completed for: {original_name}")
+
         except Exception as chunk_error:
-            logging.error(f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}")
+            logging.error(
+                f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}"
+            )
             file_record.chunking_status = "failed"
             db_session.commit()
-            
+
             # Neo4j'ye failed status sync et
             try:
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+
                 graph_connection = create_graph_database_connection(
-                    file_record.neo4j_uri or os.environ.get('NEO4J_URI'),
-                    os.environ.get('NEO4J_USERNAME'),
-                    os.environ.get('NEO4J_PASSWORD'),
-                    file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
+                    os.environ.get("NEO4J_USERNAME"),
+                    os.environ.get("NEO4J_PASSWORD"),
+                    file_record.neo4j_database
+                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
                 )
                 sync_queue_db_status_to_neo4j(
                     graph=graph_connection,
@@ -4864,11 +6102,14 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                     chunking_status="failed",
                     graph_status=file_record.graph_status,
                     embedding_status=file_record.embedding_status,
-                    database=file_record.neo4j_database or os.environ.get('NEO4J_DATABASE', 'neo4j')
+                    database=file_record.neo4j_database
+                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
                 )
             except Exception as sync_error:
-                logging.warning(f"⚠️ Could not sync chunking failure to Neo4j: {str(sync_error)}")
-            
+                logging.warning(
+                    f"⚠️ Could not sync chunking failure to Neo4j: {str(sync_error)}"
+                )
+
     except Exception as e:
         logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {str(e)}")
         if db_session and file_record:
@@ -4881,6 +6122,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
         if executor:
             executor.shutdown(wait=False)
 
+
 async def process_graph_creation_v2(
     file_id: int,
     original_name: str,
@@ -4891,7 +6133,7 @@ async def process_graph_creation_v2(
     userName: str,
     password: str,
     database: str,
-    generate_embedding: bool = False
+    generate_embedding: bool = False,
 ):
     """
     V2 Graph Creation Process: Extract entities and relationships from markdown
@@ -4900,25 +6142,26 @@ async def process_graph_creation_v2(
     # Import'ları fonksiyonun başında yap
     from src.shared.common_fn import create_graph_database_connection
     from src.models.status_sync import sync_queue_db_status_to_neo4j
-    
+
     db = None
     db_session = None
-    
+
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             logging.error(f"❌ File record not found for ID: {file_id}")
             return
-        
+
         logging.info(f"🎨 Starting V2 graph creation for: {original_name}")
-        
+
         # Normalize filename
         from src.utf8_utils import normalize_file_name
+
         normalized_filename = normalize_file_name(original_name)
-        
+
         # Markdown dosyasını oku
         if not os.path.exists(markdown_path):
             logging.error(f"❌ Markdown file not found: {markdown_path}")
@@ -4926,31 +6169,39 @@ async def process_graph_creation_v2(
             file_record.processing_error = "Markdown file not found"
             db_session.commit()
             return
-        
+
         # Markdown'ı pages olarak yükle
         from langchain_core.documents import Document
+
         with open(markdown_path, "r", encoding="utf-8") as md_file:
             markdown_content = md_file.read()
-        
+
         # Page break'lere göre sayfalara böl
         page_texts = markdown_content.split("[PAGE BREAK]")
-        pages = [Document(page_content=text.strip(), metadata={"page": idx}) 
-                for idx, text in enumerate(page_texts, 1) if text.strip()]
-        
-        logging.info(f"📄 Loaded {len(pages)} pages from markdown for V2 graph extraction")
-        
+        pages = [
+            Document(page_content=text.strip(), metadata={"page": idx})
+            for idx, text in enumerate(page_texts, 1)
+            if text.strip()
+        ]
+
+        logging.info(
+            f"📄 Loaded {len(pages)} pages from markdown for V2 graph extraction"
+        )
+
         # V2 processing_source_v2 fonksiyonunu kullan (NO chunks)
         from src.main import processing_source_v2
-        
+
         # Parametreler
         allowedNodes = []  # Boş = tüm node'lar
         allowedRelationship = []  # Boş = tüm relationship'ler
         additional_instructions = None
         max_pages = None
-        
+
         logging.info(f"🔄 Calling processing_source_v2 for: {normalized_filename}")
-        logging.info(f"✨ V2 Mode: Pages-based extraction (NO chunks, NO embeddings, NO chunk-entity linking)")
-        
+        logging.info(
+            f"✨ V2 Mode: Pages-based extraction (NO chunks, NO embeddings, NO chunk-entity linking)"
+        )
+
         # V2 Graph extraction - pages-based, chunk'sız
         latency, response = await processing_source_v2(
             uri=uri,
@@ -4963,56 +6214,66 @@ async def process_graph_creation_v2(
             allowedNodes=allowedNodes,
             allowedRelationship=allowedRelationship,
             additional_instructions=additional_instructions,
-            max_pages=max_pages
+            max_pages=max_pages,
         )
-        
+
         logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
-        logging.info(f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships")
+        logging.info(
+            f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships"
+        )
         logging.info(f"⏱️ Latency details: {latency}")
-        
+
         # Embedding oluştur (eğer isteniyorsa)
         if generate_embedding:
             try:
                 logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
                 from src.graphDB_dataAccess import graphDBdataAccess
-                graph = create_graph_database_connection(uri, userName, password, database)
+
+                graph = create_graph_database_connection(
+                    uri, userName, password, database
+                )
                 graphDb_data_Access = graphDBdataAccess(graph)
-                
+
                 # Document için embedding oluştur
-                embedding_result = graphDb_data_Access.create_embeddings_for_documents([normalized_filename])
-                if embedding_result and not embedding_result.get('error'):
-                    logging.info(f"✅ Embeddings created successfully for: {normalized_filename}")
+                embedding_result = graphDb_data_Access.create_embeddings_for_documents(
+                    [normalized_filename]
+                )
+                if embedding_result and not embedding_result.get("error"):
+                    logging.info(
+                        f"✅ Embeddings created successfully for: {normalized_filename}"
+                    )
                 else:
-                    logging.warning(f"⚠️ Embedding creation warning: {embedding_result.get('error', 'Unknown error')}")
+                    logging.warning(
+                        f"⚠️ Embedding creation warning: {embedding_result.get('error', 'Unknown error')}"
+                    )
             except Exception as emb_error:
                 logging.error(f"❌ Embedding creation failed: {emb_error}")
                 # Continue without embeddings
-        
+
         # Graph creation tamamlandı, status güncelle
         file_record.graph_status = "completed"
         file_record.graph_completed_at = datetime.now(timezone.utc)
-        
+
         # Response'tan istatistikleri al
         if response:
-            file_record.node_count = response.get('nodeCount', 0)
-            file_record.relationship_count = response.get('relationshipCount', 0)
-            processing_time = response.get('total_processing_time', 0)
+            file_record.node_count = response.get("nodeCount", 0)
+            file_record.relationship_count = response.get("relationshipCount", 0)
+            processing_time = response.get("total_processing_time", 0)
             file_record.processing_time = processing_time
-        
+
         db_session.commit()
-        
+
         # Neo4j'ye sync et
         try:
-            logging.info(f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
-                        f"upload_status={file_record.upload_status}, "
-                        f"chunking_status={file_record.chunking_status}, "
-                        f"graph_status={file_record.graph_status}, "
-                        f"embedding_status={file_record.embedding_status}")
+            logging.info(
+                f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
+                f"upload_status={file_record.upload_status}, "
+                f"chunking_status={file_record.chunking_status}, "
+                f"graph_status={file_record.graph_status}, "
+                f"embedding_status={file_record.embedding_status}"
+            )
             graph_connection = create_graph_database_connection(
-                uri=uri,
-                userName=userName,
-                password=password,
-                database=database
+                uri=uri, userName=userName, password=password, database=database
             )
             sync_queue_db_status_to_neo4j(
                 graph=graph_connection,
@@ -5021,35 +6282,41 @@ async def process_graph_creation_v2(
                 chunking_status=file_record.chunking_status,
                 graph_status=file_record.graph_status,
                 embedding_status=file_record.embedding_status,
-                database=database
+                database=database,
             )
         except Exception as sync_error:
-            logging.warning(f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}")
-        
-        logging.info(f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}")
-        
+            logging.warning(
+                f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}"
+            )
+
+        logging.info(
+            f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}"
+        )
+
     except Exception as e:
-        logging.error(f"❌ process_graph_creation_v2 failed for file {file_id}: {str(e)}")
+        logging.error(
+            f"❌ process_graph_creation_v2 failed for file {file_id}: {str(e)}"
+        )
         import traceback
+
         logging.error(f"Traceback: {traceback.format_exc()}")
-        
+
         if db_session and file_record:
             file_record.graph_status = "failed"
             file_record.processing_error = str(e)[:500]  # İlk 500 karakter
             db_session.commit()
-            
+
             # Neo4j'ye failed status sync et
             try:
-                logging.info(f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
-                            f"upload_status={file_record.upload_status}, "
-                            f"chunking_status={file_record.chunking_status}, "
-                            f"graph_status=failed, "
-                            f"embedding_status={file_record.embedding_status}")
+                logging.info(
+                    f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
+                    f"upload_status={file_record.upload_status}, "
+                    f"chunking_status={file_record.chunking_status}, "
+                    f"graph_status=failed, "
+                    f"embedding_status={file_record.embedding_status}"
+                )
                 graph_connection = create_graph_database_connection(
-                    uri=uri,
-                    userName=userName,
-                    password=password,
-                    database=database
+                    uri=uri, userName=userName, password=password, database=database
                 )
                 sync_queue_db_status_to_neo4j(
                     graph=graph_connection,
@@ -5058,17 +6325,15 @@ async def process_graph_creation_v2(
                     chunking_status=file_record.chunking_status,
                     graph_status="failed",
                     embedding_status=file_record.embedding_status,
-                    database=database
+                    database=database,
                 )
             except Exception as sync_error:
-                logging.warning(f"⚠️ Could not sync graph failure to Neo4j: {str(sync_error)}")
+                logging.warning(
+                    f"⚠️ Could not sync graph failure to Neo4j: {str(sync_error)}"
+                )
     finally:
         if db_session:
             db_session.close()
-
-
-
-
 
 
 async def process_embedding_creation(
@@ -5077,7 +6342,7 @@ async def process_embedding_creation(
     uri: str,
     userName: str,
     password: str,
-    database: str
+    database: str,
 ):
     """
     V2 Embedding Creation Process - Background Task
@@ -5085,43 +6350,43 @@ async def process_embedding_creation(
     """
     db = None
     db_session = None
-    
+
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
-        
+
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             logging.error(f"❌ File record not found for ID: {file_id}")
             return
-        
+
         logging.info(f"📊 Starting embedding creation for: {original_name}")
-        
+
         try:
             # Get graph connection
             graph = create_graph_database_connection(uri, userName, password, database)
             graphDb_data_Access = graphDBdataAccess(graph)
-            
+
             # Create embeddings for chunks of this file
-            result = graphDb_data_Access.create_embeddings_for_documents([original_name])
-            
-            if result.get('error'):
+            result = graphDb_data_Access.create_embeddings_for_documents(
+                [original_name]
+            )
+
+            if result.get("error"):
                 error_msg = f"Embedding creation failed: {result['error']}"
                 logging.error(f"❌ {error_msg}")
-                
+
                 # Update status to failed
                 file_record.embedding_status = "failed"
                 file_record.embedding_completed_at = datetime.now(timezone.utc)
                 db_session.commit()
-                
+
                 # Neo4j'ye failed status sync et
                 try:
                     from src.models.status_sync import sync_queue_db_status_to_neo4j
+
                     graph_connection = create_graph_database_connection(
-                        uri=uri,
-                        userName=userName,
-                        password=password,
-                        database=database
+                        uri=uri, userName=userName, password=password, database=database
                     )
                     sync_queue_db_status_to_neo4j(
                         graph=graph_connection,
@@ -5130,33 +6395,35 @@ async def process_embedding_creation(
                         chunking_status=file_record.chunking_status,
                         graph_status=file_record.graph_status,
                         embedding_status="failed",
-                        database=database
+                        database=database,
                     )
                 except Exception as sync_error:
-                    logging.warning(f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}")
+                    logging.warning(
+                        f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
+                    )
                 return
-            
-            total_chunks = result.get('total_chunks_updated', 0)
-            embedding_model = result.get('embedding_model', 'Unknown')
-            
+
+            total_chunks = result.get("total_chunks_updated", 0)
+            embedding_model = result.get("embedding_model", "Unknown")
+
             # Update status to completed
             file_record.embedding_status = "completed"
             file_record.embedding_completed_at = datetime.now(timezone.utc)
             db_session.commit()
-            
+
             # Neo4j'ye completed status sync et
             try:
-                logging.info(f"📤 Attempting Neo4j sync for embedding completion: file_name={original_name}, "
-                            f"upload_status={file_record.upload_status}, "
-                            f"chunking_status={file_record.chunking_status}, "
-                            f"graph_status={file_record.graph_status}, "
-                            f"embedding_status={file_record.embedding_status}")
+                logging.info(
+                    f"📤 Attempting Neo4j sync for embedding completion: file_name={original_name}, "
+                    f"upload_status={file_record.upload_status}, "
+                    f"chunking_status={file_record.chunking_status}, "
+                    f"graph_status={file_record.graph_status}, "
+                    f"embedding_status={file_record.embedding_status}"
+                )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+
                 graph_connection = create_graph_database_connection(
-                    uri=uri,
-                    userName=userName,
-                    password=password,
-                    database=database
+                    uri=uri, userName=userName, password=password, database=database
                 )
                 sync_queue_db_status_to_neo4j(
                     graph=graph_connection,
@@ -5165,36 +6432,40 @@ async def process_embedding_creation(
                     chunking_status=file_record.chunking_status,
                     graph_status=file_record.graph_status,
                     embedding_status=file_record.embedding_status,
-                    database=database
+                    database=database,
                 )
             except Exception as sync_error:
-                logging.warning(f"⚠️ Could not sync embedding status to Neo4j: {str(sync_error)}")
-            
+                logging.warning(
+                    f"⚠️ Could not sync embedding status to Neo4j: {str(sync_error)}"
+                )
+
             logging.info(f"✅ Embedding creation completed for: {original_name}")
-            logging.info(f"📊 Updated {total_chunks} chunks with {embedding_model} embeddings")
-            
+            logging.info(
+                f"📊 Updated {total_chunks} chunks with {embedding_model} embeddings"
+            )
+
         except Exception as process_error:
             error_msg = str(process_error)
             logging.error(f"❌ Embedding creation error: {error_msg}")
-            
+
             # Update status to failed
             file_record.embedding_status = "failed"
             file_record.embedding_completed_at = datetime.now(timezone.utc)
             db_session.commit()
-            
+
             # Neo4j'ye failed status sync et
             try:
-                logging.info(f"📤 Attempting Neo4j sync for embedding FAILURE: file_name={original_name}, "
-                            f"upload_status={file_record.upload_status}, "
-                            f"chunking_status={file_record.chunking_status}, "
-                            f"graph_status={file_record.graph_status}, "
-                            f"embedding_status=failed")
+                logging.info(
+                    f"📤 Attempting Neo4j sync for embedding FAILURE: file_name={original_name}, "
+                    f"upload_status={file_record.upload_status}, "
+                    f"chunking_status={file_record.chunking_status}, "
+                    f"graph_status={file_record.graph_status}, "
+                    f"embedding_status=failed"
+                )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+
                 graph_connection = create_graph_database_connection(
-                    uri=uri,
-                    userName=userName,
-                    password=password,
-                    database=database
+                    uri=uri, userName=userName, password=password, database=database
                 )
                 sync_queue_db_status_to_neo4j(
                     graph=graph_connection,
@@ -5203,40 +6474,51 @@ async def process_embedding_creation(
                     chunking_status=file_record.chunking_status,
                     graph_status=file_record.graph_status,
                     embedding_status="failed",
-                    database=database
+                    database=database,
                 )
             except Exception as sync_error:
-                logging.warning(f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}")
-            
+                logging.warning(
+                    f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
+                )
+
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Background embedding creation failed for file {file_id}: {error_message}")
+        logging.error(
+            f"❌ Background embedding creation failed for file {file_id}: {error_message}"
+        )
     finally:
         if db_session:
             db_session.close()
 
 
-@app.post("/api/v2/files/{file_id}/process-immediately") 
+@app.post("/api/v2/files/{file_id}/process-immediately")
 async def process_file_now(file_id: int):
     """Process a specific file immediately (bypass queue)"""
     try:
         success = await process_file_immediately(file_id)
-        
+
         if success:
-            return create_api_response("Success", 
-                                     message="File processed successfully",
-                                     data={"file_id": file_id, "status": "completed"})
+            return create_api_response(
+                "Success",
+                message="File processed successfully",
+                data={"file_id": file_id, "status": "completed"},
+            )
         else:
-            return create_api_response("Failed", 
-                                     message="File processing failed",
-                                     data={"file_id": file_id, "status": "error"})
-            
+            return create_api_response(
+                "Failed",
+                message="File processing failed",
+                data={"file_id": file_id, "status": "error"},
+            )
+
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Immediate processing failed for file {file_id}: {error_message}")
-        return create_api_response("Failed", 
-                                 message="Immediate processing failed", 
-                                 error=error_message)
+        logging.error(
+            f"❌ Immediate processing failed for file {file_id}: {error_message}"
+        )
+        return create_api_response(
+            "Failed", message="Immediate processing failed", error=error_message
+        )
+
 
 if __name__ == "__main__":
     uvicorn.run(app)

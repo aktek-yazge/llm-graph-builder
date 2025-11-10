@@ -76,6 +76,7 @@ def _initialize_embedding_model():
             raise
     return _embedding_model
 
+
 @mcp.tool(
     name="generate_embeddings_for_cypher",
     description=(
@@ -131,6 +132,7 @@ def generate_embeddings_for_cypher(text: str, context) -> ToolResult:
             },
         )
 
+
 # Resources - Embedding server hakkında bilgi
 @mcp.resource("resource://embedding/info")
 def embedding_info():
@@ -181,23 +183,29 @@ ORDER BY score DESC
 
 if __name__ == "__main__":
     import argparse
-    
+
     # Command line arguments
     parser = argparse.ArgumentParser(description="Embedding MCP Server")
-    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio", 
-                       help="Transport mode: stdio or http")
-    parser.add_argument("--port", type=int, default=8001, 
-                       help="HTTP port (default: 8001)")
-    parser.add_argument("--host", default="0.0.0.0", 
-                       help="HTTP host (default: 0.0.0.0)")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport mode: stdio or http",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8001, help="HTTP port (default: 8001)"
+    )
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="HTTP host (default: 0.0.0.0)"
+    )
     args = parser.parse_args()
-    
+
     # Environment değişkenlerini kontrol et ve log'la
     logger.info("🚀 Embedding MCP Server başlatılıyor...")
     logger.info(f"🌐 Transport mode: {args.transport}")
     if args.transport == "http":
         logger.info(f"🌐 HTTP Server: http://{args.host}:{args.port}")
-    
+
     logger.info("🔧 Environment değişkenleri kontrol ediliyor...")
 
     # OpenAI API key kontrol

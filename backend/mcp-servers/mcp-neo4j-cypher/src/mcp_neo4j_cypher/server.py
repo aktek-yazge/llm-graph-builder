@@ -24,19 +24,19 @@ def _create_direct_schema_format(nodes_result, rels_result):
     Doğrudan Cypher sorgu sonuçlarından minimal şema formatı oluşturur
     """
     lines = []
-    
+
     # Tip kısaltmaları (property tahmin için)
     type_mapping = {
         "createdAt": "dt",
-        "updatedAt": "dt", 
+        "updatedAt": "dt",
         "created_at": "dt",
         "updated_at": "dt",
         "amount": "float",
         "count": "int",
         "year": "int",
-        "month": "int"
+        "month": "int",
     }
-    
+
     # Node'ları işle
     nodes_section = []
     if not nodes_result:
@@ -51,8 +51,10 @@ def _create_direct_schema_format(nodes_result, rels_result):
 
         node_name = node_data.get("nodeType") if isinstance(node_data, dict) else None
         node_count = node_data.get("nodeCount") if isinstance(node_data, dict) else None
-        properties = node_data.get("properties", []) if isinstance(node_data, dict) else []
-        
+        properties = (
+            node_data.get("properties", []) if isinstance(node_data, dict) else []
+        )
+
         # İlk 6 property'yi kısa tip bilgisiyle al
         props_with_types = []
         for prop_name in properties[:6]:
@@ -69,11 +71,13 @@ def _create_direct_schema_format(nodes_result, rels_result):
                 prop_type = "str"
             else:
                 prop_type = "str"  # default
-            
+
             props_with_types.append(f"{prop_name}:{prop_type}")
-        
-        nodes_section.append(f"({node_name}:{node_count}){{{','.join(props_with_types)}}}")
-    
+
+        nodes_section.append(
+            f"({node_name}:{node_count}){{{','.join(props_with_types)}}}"
+        )
+
     # Relationship'leri işle
     relationships_section = []
     if not rels_result:
@@ -85,11 +89,13 @@ def _create_direct_schema_format(nodes_result, rels_result):
             logger.debug("_create_direct_schema_format: skipping empty rel_data entry")
             continue
 
-        rel_name = rel_data.get("relationshipType") if isinstance(rel_data, dict) else None
+        rel_name = (
+            rel_data.get("relationshipType") if isinstance(rel_data, dict) else None
+        )
         from_node = rel_data.get("from_node") if isinstance(rel_data, dict) else None
         to_node = rel_data.get("to_node") if isinstance(rel_data, dict) else None
         rel_props = rel_data.get("rel_props", []) if isinstance(rel_data, dict) else []
-        
+
         # Relationship properties (varsa ilk 3'ü)
         rel_props_with_types = []
         for prop_name in rel_props[:3]:
@@ -98,26 +104,26 @@ def _create_direct_schema_format(nodes_result, rels_result):
             else:
                 prop_type = "str"  # default
             rel_props_with_types.append(f"{prop_name}:{prop_type}")
-        
+
         # Pattern oluştur
         if rel_props_with_types:
             pattern = f"({from_node})-[:{rel_name} {{{','.join(rel_props_with_types)}}}]->({to_node})"
         else:
             pattern = f"({from_node})-[:{rel_name}]->({to_node})"
-        
+
         relationships_section.append(pattern)
-    
+
     # Sonucu birleştir
     if nodes_section:
         lines.append("# NODES")
         lines.extend(nodes_section)
-        
+
     if relationships_section:
         lines.append("")
         lines.append("# RELATIONSHIPS")
         lines.extend(relationships_section)
-    
-    return '\n'.join(lines)
+
+    return "\n".join(lines)
 
 
 def _to_minimal_schema_format(schema_json):
@@ -128,25 +134,25 @@ def _to_minimal_schema_format(schema_json):
         schema = json.loads(schema_json)
     else:
         schema = schema_json
-    
+
     lines = []
-    
+
     # Tip kısaltmaları
     type_mapping = {
         "STRING": "str",
-        "INTEGER": "int", 
+        "INTEGER": "int",
         "DATE_TIME": "dt",
         "LOCAL_DATE_TIME": "ldt",
         "BOOLEAN": "bool",
         "LIST": "list",
-        "FLOAT": "float"
+        "FLOAT": "float",
     }
-    
+
     # Node'ları işle
     nodes_section = []
     unique_relationships = set()  # Duplicate'ları engellemek için
     relationship_stats = {}  # Relationship istatistikleri için
-    
+
     for node_name, node_data in schema.items():
         if node_data.get("type") == "node":
             count = node_data.get("count", 0)
@@ -157,19 +163,21 @@ def _to_minimal_schema_format(schema_json):
                 prop_type = prop_info.get("type", "?")
                 short_type = type_mapping.get(prop_type, prop_type.lower()[:3])
                 props_with_types.append(f"{prop_name}:{short_type}")
-            nodes_section.append(f"({node_name}:{count}){{{','.join(props_with_types)}}}")
-            
+            nodes_section.append(
+                f"({node_name}:{count}){{{','.join(props_with_types)}}}"
+            )
+
             # Relationship'leri işle - sadece OUT direction'ları al (duplicate'ları önler)
             relationships = node_data.get("relationships", {})
             for rel_name, rel_data in relationships.items():
                 direction = rel_data.get("direction", "OUT")
-                
+
                 # Sadece OUT direction'ları işle, IN'leri atla (çünkü başka node'da OUT olarak zaten var)
                 if direction != "OUT":
                     continue
-                    
+
                 target_labels = rel_data.get("labels", [])
-                
+
                 # Relationship properties (varsa ilk 3'ü)
                 rel_props = rel_data.get("properties", {})
                 rel_props_with_types = []
@@ -177,7 +185,7 @@ def _to_minimal_schema_format(schema_json):
                     prop_type = prop_info.get("type", "?")
                     short_type = type_mapping.get(prop_type, prop_type.lower()[:3])
                     rel_props_with_types.append(f"{prop_name}:{short_type}")
-                
+
                 # Her target label için pattern oluştur
                 for target_label in target_labels:
                     # APOC direction'ını doğrudan kullan (çevirme yok)
@@ -191,10 +199,10 @@ def _to_minimal_schema_format(schema_json):
                             pattern = f"({target_label})-[:{rel_name} {{{','.join(rel_props_with_types)}}}]->({node_name})"
                         else:
                             pattern = f"({target_label})-[:{rel_name}]->({node_name})"
-                    
+
                     # Sadece OUT direction'lı pattern'leri ekle
                     unique_relationships.add(pattern)
-                    
+
                     # İstatistik topla
                     rel_key = f"{rel_name}"
                     if rel_key not in relationship_stats:
@@ -203,35 +211,34 @@ def _to_minimal_schema_format(schema_json):
                         relationship_stats[rel_key].add(f"{node_name}->{target_label}")
                     else:  # Target'dan node'a
                         relationship_stats[rel_key].add(f"{target_label}->{node_name}")
-    
+
     # Unique relationship'leri listeye çevir
     relationships_section = list(unique_relationships)
-    
+
     # Önce node'lar
     if nodes_section:
         lines.append("# NODES")
         lines.extend(nodes_section)
-        
+
     # Sonra relationship pattern'leri
     if relationships_section:
         lines.append("")
         lines.append("# RELATIONSHIPS")
         lines.extend(relationships_section)
-        
 
-    
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def _handle_datetime_in_record(record):
     """
     Neo4j record'ındaki DateTime objelerini string'e çevirir
     """
+
     def _convert_datetime(obj):
         """Recursive olarak DateTime objelerini string'e çevirir"""
-        if hasattr(obj, 'year') and hasattr(obj, 'month') and hasattr(obj, 'day'):
+        if hasattr(obj, "year") and hasattr(obj, "month") and hasattr(obj, "day"):
             # Neo4j DateTime objesi
-            if hasattr(obj, 'hour'):  # DateTime
+            if hasattr(obj, "hour"):  # DateTime
                 return f"{obj.year}-{obj.month:02d}-{obj.day:02d}T{obj.hour:02d}:{obj.minute:02d}:{obj.second:02d}"
             else:  # Date
                 return f"{obj.year}-{obj.month:02d}-{obj.day:02d}"
@@ -241,7 +248,7 @@ def _handle_datetime_in_record(record):
             return [_convert_datetime(item) for item in obj]
         else:
             return obj
-    
+
     return _convert_datetime(record)
 
 
@@ -251,13 +258,13 @@ def _to_minimal_data_format(data):
     """
     if isinstance(data, str):
         data = json.loads(data)
-    
+
     if not isinstance(data, list):
         return "Error: Veri list formatında olmalı"
-    
+
     if not data:
         return "[]"
-    
+
     # Her kaydı minimal hale çevir
     minimal_records = []
     for i, record in enumerate(data):
@@ -265,11 +272,11 @@ def _to_minimal_data_format(data):
         props = []
         for key, value in record.items():
             props.append(f"{key}:{value}")
-        
+
         # (Record:index){key1:value1,key2:value2} formatında
         minimal_records.append(f"(R:{i}){{{','.join(props)}}}")
-    
-    return '\n'.join(minimal_records)
+
+    return "\n".join(minimal_records)
 
 
 def _format_namespace(namespace: str) -> str:
@@ -335,7 +342,7 @@ def create_mcp_server(
         RETURN lbl as nodeType, cnt as nodeCount, props as properties
         ORDER BY lbl
         """
-        
+
         # Relationship pattern'lerini al
         get_rels_query = """
         CALL db.relationshipTypes() YIELD relationshipType
@@ -419,7 +426,7 @@ def create_mcp_server(
                 database_=database,
                 result_transformer_=lambda r: r.data(),
             )
-            
+
             # Relationship bilgilerini al
             rels_result = await neo4j_driver.execute_query(
                 get_rels_query,
@@ -430,14 +437,20 @@ def create_mcp_server(
 
             # Validate results
             if nodes_result is None:
-                logger.error("get_neo4j_schema: neo4j_driver.execute_query returned None for nodes_result")
+                logger.error(
+                    "get_neo4j_schema: neo4j_driver.execute_query returned None for nodes_result"
+                )
                 raise ToolError("Neo4j driver returned no nodes result (None)")
 
             if rels_result is None:
-                logger.error("get_neo4j_schema: neo4j_driver.execute_query returned None for rels_result")
+                logger.error(
+                    "get_neo4j_schema: neo4j_driver.execute_query returned None for rels_result"
+                )
                 raise ToolError("Neo4j driver returned no relationships result (None)")
 
-            logger.debug(f"Found {len(nodes_result)} nodes and {len(rels_result)} relationship types")
+            logger.debug(
+                f"Found {len(nodes_result)} nodes and {len(rels_result)} relationship types"
+            )
 
             # Yeni format'a çevir
             minimal_schema = _create_direct_schema_format(nodes_result, rels_result)
@@ -485,18 +498,22 @@ def create_mcp_server(
                 result_transformer_=lambda r: r.data(),
             )
             # Önce DateTime objelerini handle et, sonra sanitize et
-            datetime_handled_results = [_handle_datetime_in_record(el) for el in results]
+            datetime_handled_results = [
+                _handle_datetime_in_record(el) for el in results
+            ]
             sanitized_results = [_value_sanitize(el) for el in datetime_handled_results]
-            
+
             # Minimal format'a çevir
             minimal_results = _to_minimal_data_format(sanitized_results)
-            
+
             if token_limit:
                 minimal_results = _truncate_string_to_tokens(
                     minimal_results, token_limit
                 )
 
-            logger.debug(f"Read query returned {len(results)} rows, minimal format: {len(minimal_results)} chars")
+            logger.debug(
+                f"Read query returned {len(results)} rows, minimal format: {len(minimal_results)} chars"
+            )
 
             return ToolResult(content=[TextContent(type="text", text=minimal_results)])
 
