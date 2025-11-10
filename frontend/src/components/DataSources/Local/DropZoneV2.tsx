@@ -6,7 +6,7 @@ import { useCredentials } from '../../../context/UserCredentials';
 import { useFileContext } from '../../../context/UsersFiles';
 import { CustomFile } from '../../../types';
 import { buttonCaptions, chunkSize } from '../../../utils/Constants';
-import { uploadFileToQueueAPI } from '../../../utils/FileAPI';
+import { getQueuedFilesAPI, uploadFileToQueueAPI } from '../../../utils/FileAPI';
 import Loader from '../../../utils/Loader';
 import { showErrorToast, showSuccessToast } from '../../../utils/Toasts';
 import { normalizeFileName } from '../../../utils/utf8';
@@ -135,37 +135,94 @@ const DropZoneV2: FunctionComponent = () => {
           : `File "${file.name}" uploaded successfully`;
         showSuccessToast(message);
 
-        // Add to FileContext for FileTable display
-        if (!fileInfo.duplicate) {
-          const newFile: CustomFile = {
-            id: `v2_${fileInfo.id}`, // Backend ile aynı ID formatı kullan
-            name: fileInfo.original_name,
-            type: fileInfo.original_name.substring(fileInfo.original_name.lastIndexOf('.') + 1).toUpperCase(),
-            size: fileInfo.file_size || 0,
-            uploadProgress: 100,
-            processingProgress: 0,
-            status: 'pending', // V2: chunking_status = "pending"
-            nodesCount: 0,
-            relationshipsCount: 0,
-            processingTotalTime: 0,
-            model: model || 'openai_gpt_4o_mini',
-            fileSource: 'V2 Queue',
-            retryOptionStatus: false,
-            retryOption: '',
-            chunkNodeCount: 0,
-            chunkRelCount: 0,
-            entityNodeCount: 0,
-            entityEntityRelCount: 0,
-            communityNodeCount: 0,
-            communityRelCount: 0,
-            createdAt: new Date(),
-            // V2 Queue specific fields
-            v2FileId: fileInfo.id,
-            upload_status: fileInfo.upload_status,
-            chunking_status: fileInfo.chunking_status,
-            graph_status: fileInfo.graph_status,
-          };
-          setFilesData([newFile, ...filesData]);
+        // Reload all V2 files from backend to ensure FileTable is up-to-date
+        // This ensures uploaded files are added and statuses are synchronized
+        try {
+          const queuedFilesResponse = await getQueuedFilesAPI();
+          if (queuedFilesResponse?.status === 'Success' && queuedFilesResponse?.data?.files) {
+            const v2Files = queuedFilesResponse.data.files.map((file: any) => {
+              // V2 Workflow: status belirleme
+              let status = 'New';
+              if (file.graph_status === 'completed') {
+                status = 'Completed';
+              } else if (file.graph_status === 'processing') {
+                status = 'Processing';
+              } else if (file.chunking_status === 'chunked') {
+                status = 'Chunked';
+              } else if (file.chunking_status === 'chunking') {
+                status = 'Processing';
+              } else if (file.chunking_status === 'ready') {
+                status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
+              } else if (file.chunking_status === 'pending') {
+                status = 'pending'; // Image extraction henüz başlamadı
+              } else if (file.chunking_status === 'failed') {
+                status = 'Failed';
+              }
+
+              return {
+                id: `v2_${file.id}`,
+                name: file.original_name,
+                type: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
+                size: file.file_size || 0,
+                uploadProgress: 100,
+                processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
+                status,
+                nodesCount: 0,
+                relationshipsCount: 0,
+                processingTotalTime: 0,
+                model: file.model_used || model || 'openai_gpt_4o_mini',
+                fileSource: 'V2 Queue',
+                retryOptionStatus: false,
+                retryOption: '',
+                chunkNodeCount: 0,
+                chunkRelCount: 0,
+                entityNodeCount: 0,
+                entityEntityRelCount: 0,
+                communityNodeCount: 0,
+                communityRelCount: 0,
+                createdAt: new Date(file.created_at || Date.now()),
+                v2FileId: file.id,
+                upload_status: file.upload_status,
+                chunking_status: file.chunking_status,
+                graph_status: file.graph_status,
+                embedding_status: file.embedding_status,
+              } as CustomFile;
+            });
+            setFilesData(v2Files);
+          }
+        } catch (error) {
+          console.error('Failed to reload V2 files after upload:', error);
+          // Fallback: Add file manually if reload fails
+          if (!fileInfo.duplicate) {
+            const newFile: CustomFile = {
+              id: `v2_${fileInfo.id}`,
+              name: fileInfo.original_name,
+              type: fileInfo.original_name.substring(fileInfo.original_name.lastIndexOf('.') + 1).toUpperCase(),
+              size: fileInfo.file_size || 0,
+              uploadProgress: 100,
+              processingProgress: 0,
+              status: 'pending',
+              nodesCount: 0,
+              relationshipsCount: 0,
+              processingTotalTime: 0,
+              model: model || 'openai_gpt_4o_mini',
+              fileSource: 'V2 Queue',
+              retryOptionStatus: false,
+              retryOption: '',
+              chunkNodeCount: 0,
+              chunkRelCount: 0,
+              entityNodeCount: 0,
+              entityEntityRelCount: 0,
+              communityNodeCount: 0,
+              communityRelCount: 0,
+              createdAt: new Date(),
+              v2FileId: fileInfo.id,
+              upload_status: fileInfo.upload_status,
+              chunking_status: fileInfo.chunking_status,
+              graph_status: fileInfo.graph_status,
+            };
+            setFilesData([newFile, ...filesData]);
+          }
         }
 
         return fileInfo;

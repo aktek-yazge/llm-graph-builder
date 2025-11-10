@@ -36,6 +36,7 @@ import { AxiosError } from 'axios';
 import React, {
   ForwardRefRenderFunction,
   forwardRef,
+  useCallback,
   useContext,
   useEffect,
   useImperativeHandle,
@@ -144,6 +145,62 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       // Hata durumunda sadece toast göster
     }
   };
+
+  // V2 Queue dosyalarını yeniden yükle
+  const reloadV2Files = useCallback(async () => {
+    try {
+      const response = await getQueuedFilesAPI();
+      if (response?.status === 'Success' && response?.data?.files) {
+        const v2Files = response.data.files.map((file: any) => {
+          // V2 Workflow: status belirleme (aynı mantık ile)
+          let status = 'New';
+          if (file.graph_status === 'completed') {
+            status = 'Completed';
+          } else if (file.graph_status === 'processing') {
+            status = 'Processing';
+          } else if (file.chunking_status === 'chunked') {
+            status = 'Chunked'; // Chunking tamamlandı, graph creation bekliyor
+          } else if (file.chunking_status === 'chunking') {
+            status = 'Processing'; // Chunking yapılıyor
+          } else if (file.chunking_status === 'ready') {
+            status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
+          } else if (file.chunking_status === 'pending') {
+            status = 'pending'; // Image extraction henüz başlamadı
+          } else if (file.chunking_status === 'failed') {
+            status = 'Failed';
+          }
+
+          return {
+            id: `v2_${file.id}`, // Unique ID for V2 files
+            name: file.original_name,
+            size: file.file_size || 0, // File size in bytes
+            status, // Mapped status
+            fileSource: 'V2 Queue',
+            sourceUrl: '',
+            fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
+            nodesCount: 0,
+            relationshipsCount: 0,
+            processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
+            model: file.model_used || 'Not set',
+            processingTotalTime: '0',
+            chunkNodeCount: 0,
+            chunkRelCount: 0,
+            // V2 stage info
+            v2FileId: file.id,
+            upload_status: file.upload_status,
+            chunking_status: file.chunking_status,
+            graph_status: file.graph_status,
+            embedding_status: file.embedding_status,
+          };
+        });
+
+        // Sadece V2 dosyalarını set et (V1'leri gizle)
+        setFilesData(v2Files);
+      }
+    } catch (error) {
+      // Failed silently
+    }
+  }, [setFilesData]);
 
   const { updateStatusForLargeFiles } = useServerSideEvent(
     (inMinutes, time, fileName) => {
@@ -763,7 +820,11 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   };
 
   useEffect(() => {
-    // V2 dosyaları varsa, eski V1 sources_list çağrısını yapma
+    // V1 sources_list endpoint'i devre dışı bırakıldı - V2 Queue sistemi kullanılıyor
+    // V2 dosyaları getQueuedFilesAPI ile yükleniyor (reloadV2Files fonksiyonu)
+    return;
+
+    // Eski V1 kod - artık kullanılmıyor
     const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
     if (hasV2Files) {
       return;
@@ -860,7 +921,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 
           // Fetch V2 Queue files
           try {
-            const v2Response = await getQueuedFilesAPI(200);
+            const v2Response = await getQueuedFilesAPI();
             if (v2Response?.status === 'Success' && v2Response?.data?.files) {
               const v2Files: CustomFile[] = v2Response.data.files.map((file: any) => {
                 // V2 Workflow: status belirleme
@@ -878,8 +939,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                   status = 'Chunked'; // Chunking tamamlandı, graph creation bekliyor
                 } else if (file.chunking_status === 'chunking') {
                   status = 'Processing';
+                } else if (file.chunking_status === 'ready') {
+                  status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
                 } else if (file.chunking_status === 'pending') {
-                  status = 'pending'; // Chunking bekliyor
+                  status = 'pending'; // Image extraction henüz başlamadı
                 }
 
                 return {
@@ -964,7 +1027,23 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   // V2 Queue dosyalarını ilk render'da yükle
   useEffect(() => {
     reloadV2Files();
-  }, []);
+  }, [reloadV2Files]);
+
+  // V2 dosyaları için periyodik polling (her 3 saniyede bir)
+  useEffect(() => {
+    // V2 dosyaları var mı kontrol et
+    const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
+    if (!hasV2Files) {
+      return;
+    }
+
+    // Her 3 saniyede bir durumları güncelle (tüm V2 dosyaları için)
+    const interval = setInterval(() => {
+      reloadV2Files();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [filesData, reloadV2Files]);
 
   const cancelHandler = async (fileName: string, id: string, fileSource: string) => {
     // V2 Queue dosyası mı kontrol et
@@ -1189,11 +1268,28 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           showErrorToast('Please select V2 files first');
           return;
         }
+
+        // Check if all V2 files are selected
+        const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+        const isAllSelected = allV2Files.length > 0 && selected.length === allV2Files.length;
+
         try {
-          for (const fileId of selected) {
-            await startChunkingAPI(fileId);
+          if (isAllSelected) {
+            // Use "all" parameter
+            const response = await startChunkingAPI('all');
+            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+              const processedCount = response.data?.processed_count || selected.length;
+              showNormalToast(`✓ Chunking started for ${processedCount} file(s)`);
+            } else {
+              showErrorToast(`Failed to start chunking: ${response.message || 'Unknown error'}`);
+            }
+          } else {
+            // Start chunking for selected files
+            for (const fileId of selected) {
+              await startChunkingAPI(fileId);
+            }
+            showNormalToast(`✓ Chunking started for ${selected.length} file(s)`);
           }
-          showNormalToast(`✓ Chunking started for ${selected.length} file(s)`);
           setV2SelectedFileIds(new Set());
           await reloadV2Files();
         } catch (error) {
@@ -1211,48 +1307,65 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           showErrorToast('Please select V2 files first');
           return;
         }
+
+        // Check if all V2 files are selected
+        const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+        const isAllSelected = allV2Files.length > 0 && selectedV2Files.length === allV2Files.length;
+
         try {
-          // Chunked olanları filtrele
-          const chunkedFiles = selectedV2Files.filter(
-            (f) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
-          );
-          const notChunkedFiles = selectedV2Files.filter(
-            (f) => f.chunking_status !== 'chunked' || f.graph_status === 'completed'
-          );
-
-          if (chunkedFiles.length === 0) {
-            showErrorToast('Seçilen dosyaların hiçbiri graph oluşturmaya hazır değildir.');
-            return;
-          }
-
-          // Uyar varsa göster
-          if (notChunkedFiles.length > 0) {
-            showNormalToast(
-              `⚠️ ${notChunkedFiles.length} dosya henüz hazır değil, sadece ${chunkedFiles.length} dosya için graph oluşturulacak`
+          if (isAllSelected) {
+            // Use "all" parameter - backend will filter files by status
+            showNormalToast('Tüm hazır dosyalar için graph oluşturuluyor...');
+            const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
+            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+              const processedCount = response.data?.processed_count || 0;
+              showNormalToast(`✓ Graph creation started for ${processedCount} file(s)`);
+            } else {
+              showErrorToast(`Failed to start graph creation: ${response.message || 'Unknown error'}`);
+            }
+          } else {
+            // Chunked olanları filtrele
+            const chunkedFiles = selectedV2Files.filter(
+              (f) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
             );
-          }
+            const notChunkedFiles = selectedV2Files.filter(
+              (f) => f.chunking_status !== 'chunked' || f.graph_status === 'completed'
+            );
 
-          // Dosyaların durumunu Processing olarak güncelle (UI'de göstermek için)
-          setFilesData((prev) =>
-            prev.map((f) => {
-              if (chunkedFiles.some((cf) => cf.v2FileId === f.v2FileId)) {
-                return { ...f, status: 'Processing', processingProgress: 50 };
-              }
-              return f;
-            })
-          );
+            if (chunkedFiles.length === 0) {
+              showErrorToast('Seçilen dosyaların hiçbiri graph oluşturmaya hazır değildir.');
+              return;
+            }
 
-          // Sadece chunked olanlar için graph oluştur
-          for (const file of chunkedFiles) {
-            if (file.v2FileId) {
-              try {
-                await startGraphCreationAPI(file.v2FileId, 'openai_gpt_4o_mini', false);
-              } catch (error) {
-                // Graph creation error handled
+            // Uyar varsa göster
+            if (notChunkedFiles.length > 0) {
+              showNormalToast(
+                `⚠️ ${notChunkedFiles.length} dosya henüz hazır değil, sadece ${chunkedFiles.length} dosya için graph oluşturulacak`
+              );
+            }
+
+            // Dosyaların durumunu Processing olarak güncelle (UI'de göstermek için)
+            setFilesData((prev) =>
+              prev.map((f) => {
+                if (chunkedFiles.some((cf) => cf.v2FileId === f.v2FileId)) {
+                  return { ...f, status: 'Processing', processingProgress: 50 };
+                }
+                return f;
+              })
+            );
+
+            // Sadece chunked olanlar için graph oluştur
+            for (const file of chunkedFiles) {
+              if (file.v2FileId) {
+                try {
+                  await startGraphCreationAPI(file.v2FileId, 'openai_gpt_4o_mini', false);
+                } catch (error) {
+                  // Graph creation error handled
+                }
               }
             }
+            showNormalToast(`✓ Graph creation started for ${chunkedFiles.length} file(s)`);
           }
-          showNormalToast(`✓ Graph creation started for ${chunkedFiles.length} file(s)`);
           setV2SelectedFileIds(new Set());
 
           // 2 saniye sonra status'u güncelle
@@ -1265,66 +1378,12 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       },
       reloadV2Files: () => reloadV2Files(),
     }),
-    [table, v2SelectedFileIds]
+    [table, v2SelectedFileIds, reloadV2Files]
   );
 
   useEffect(() => {
     setSelectedRows(table.getSelectedRowModel().rows.map((i) => i.id));
   }, [table.getSelectedRowModel()]);
-
-  // V2 Queue dosyalarını yeniden yükle
-  const reloadV2Files = async () => {
-    try {
-      const response = await getQueuedFilesAPI(200);
-      if (response?.status === 'Success' && response?.data?.files) {
-        const v2Files = response.data.files.map((file: any) => {
-          // V2 Workflow: status belirleme (aynı mantık ile)
-          let status = 'New';
-          if (file.graph_status === 'completed') {
-            status = 'Completed';
-          } else if (file.graph_status === 'processing') {
-            status = 'Processing';
-          } else if (file.chunking_status === 'chunked') {
-            status = 'Chunked'; // Chunking tamamlandı, graph creation bekliyor
-          } else if (file.chunking_status === 'chunking') {
-            status = 'Processing'; // Chunking yapılıyor
-          } else if (file.chunking_status === 'pending') {
-            status = 'pending'; // Chunking bekliyor
-          } else if (file.chunking_status === 'failed') {
-            status = 'Failed';
-          }
-
-          return {
-            id: `v2_${file.id}`, // Unique ID for V2 files
-            name: file.original_name,
-            size: file.file_size || 0, // File size in bytes
-            status, // Mapped status
-            fileSource: 'V2 Queue',
-            sourceUrl: '',
-            fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
-            nodesCount: 0,
-            relationshipsCount: 0,
-            processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
-            model: file.model_used || 'Not set',
-            processingTotalTime: '0',
-            chunkNodeCount: 0,
-            chunkRelCount: 0,
-            // V2 stage info
-            v2FileId: file.id,
-            upload_status: file.upload_status,
-            chunking_status: file.chunking_status,
-            graph_status: file.graph_status,
-            embedding_status: file.embedding_status,
-          };
-        });
-
-        // Sadece V2 dosyalarını set et (V1'leri gizle)
-        setFilesData(v2Files);
-      }
-    } catch (error) {
-      // Failed silently
-    }
-  };
 
   return (
     <>

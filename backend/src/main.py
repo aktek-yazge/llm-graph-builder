@@ -18,6 +18,7 @@ from datetime import datetime
 import logging
 import os
 import time
+import asyncio
 
 # OpenTelemetry logging setup - mevcut kodda değişiklik yapmadan tüm logları Loki'ye gönder
 # OpenTelemetry ve Loki entegrasyonu şimdilik comment yapıldı
@@ -1263,15 +1264,19 @@ async def processing_source_v2(
         if not result or len(result) == 0:
             raise LLMGraphBuilderException(f"Unable to get document status for: {file_name}")
         
-        # Eğer zaten Processing durumunda ise (ama Chunked değilse), işleme devam etme
+        # Neo4j'deki Document node status'unu kontrol et
         current_status = result[0]["Status"]
-        if current_status == "Processing":
-            logging.warning(f"⚠️ File already in Processing status: {file_name}")
-            return uri_latency, {"status": "Already Processing", "fileName": file_name}
         
         # Chunked status'u graph creation için uygun
         if current_status == "Chunked":
             logging.info(f"✅ File is Chunked and ready for graph creation: {file_name}")
+        # Processing status'u restart sonrası olabilir, bu durumda işleme devam et
+        # (SQLite'daki status "pending"e reset edilmiş olabilir ama Neo4j'deki status hala "Processing" olabilir)
+        elif current_status == "Processing":
+            logging.warning(
+                f"⚠️ File is in Processing status in Neo4j, but continuing anyway (may be restart scenario): {file_name}"
+            )
+            # Continue processing - this handles restart scenarios where SQLite was reset but Neo4j wasn't
         else:
             logging.info(f"📋 Current file status: {current_status} for {file_name}")
         
@@ -1297,7 +1302,14 @@ async def processing_source_v2(
         try:
             # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
             # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
-            graphDb_data_Access._create_document_related_nodes(file_name, "auto", None, model)
+            # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
+            await asyncio.to_thread(
+                graphDb_data_Access._create_document_related_nodes,
+                file_name,
+                "auto",
+                None,
+                model
+            )
             
             elapsed_extraction = time.time() - start_extraction
             uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"

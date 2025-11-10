@@ -192,9 +192,9 @@ export const uploadFileToQueueAPI = async (
   return response;
 };
 
-// Get list of files in queue
-export const getQueuedFilesAPI = async (limit = 100, offset = 0): Promise<any> => {
-  const urlList = `${url()}/api/v2/files/list?limit=${limit}&offset=${offset}`;
+// Get list of files in queue (no pagination - returns all files)
+export const getQueuedFilesAPI = async (): Promise<any> => {
+  const urlList = `${url()}/api/v2/files/list`;
   const method: Method = 'get';
   const response = await apiCall(urlList, method, {});
   return response;
@@ -232,8 +232,8 @@ export const getQueueStatusAPI = async (): Promise<any> => {
   return response;
 };
 
-// Delete file from queue
-export const deleteFileFromQueueAPI = async (fileId: number): Promise<any> => {
+// Delete file from queue or all files
+export const deleteFileFromQueueAPI = async (fileId: number | string): Promise<any> => {
   const urlDelete = `${url()}/api/v2/files/${fileId}`;
   const method: Method = 'delete';
   const response = await apiCall(urlDelete, method, {});
@@ -276,8 +276,8 @@ export const processFileImmediatelyAPI = async (fileId: number): Promise<any> =>
 // V2 WORKFLOW STAGE APIs
 // ==========================================
 
-// Start chunking for a file
-export const startChunkingAPI = async (fileId: number): Promise<any> => {
+// Start chunking for a file or all files
+export const startChunkingAPI = async (fileId: number | string): Promise<any> => {
   const urlChunk = `${url()}/api/v2/files/${fileId}/chunk`;
   const method: Method = 'post';
   const response = await apiCall(urlChunk, method, {});
@@ -292,9 +292,9 @@ export const getFileStatusAPI = async (fileId: number): Promise<any> => {
   return response;
 };
 
-// Start graph creation for a file
+// Start graph creation for a file or all files
 export const startGraphCreationAPI = async (
-  fileId: number,
+  fileId: number | string,
   model: string = 'openai_gpt_4o_mini',
   generateEmbedding: boolean = false
 ): Promise<any> => {

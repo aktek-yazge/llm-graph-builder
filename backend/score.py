@@ -646,8 +646,28 @@ async def lifespan(app: FastAPI):
     # Startup
     optimize_for_apple_silicon()
     print_device_info()
+
+    # V2 background processor manuel başlatmaya ayarlı (otomatik başlatma devre dışı)
+    # Background processor'ı başlatmak için /api/v2/processing/start endpoint'ini kullanın
+    logging.info(
+        "ℹ️ V2 Background processor manuel başlatmaya ayarlı. Başlatmak için /api/v2/processing/start endpoint'ini kullanın."
+    )
+
     yield
     # Shutdown - here you can add cleanup code if needed
+    try:
+        from src.background_processor import stop_processing_loop
+
+        stop_processing_loop()
+        logging.info("⏹️ V2 Background processor stopped on server shutdown")
+    except asyncio.CancelledError:
+        # Cancellation durumunda sessizce geç (normal shutdown)
+        logging.info(
+            "⏹️ Server shutdown cancelled, background processor cleanup skipped"
+        )
+        raise  # CancelledError'ı yeniden fırlat (lifespan context manager için gerekli)
+    except Exception as bg_error:
+        logging.warning(f"⚠️ Failed to stop background processor: {bg_error}")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -4487,7 +4507,9 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 @app.post("/api/v2/files/upload")
 async def upload_file_to_queue(
-    file: UploadFile = File(...), originalname: str = Form(None)
+    file: UploadFile = File(...),
+    originalname: str = Form(None),
+    auto_process: str = Form("false"),
 ):
     """
     V2 Upload: Saves file to output structure + Image Extraction + S3 Upload
@@ -4529,140 +4551,11 @@ async def upload_file_to_queue(
             f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
         )
 
-        # Check file extension for image extraction
-        file_extension = normalized_filename.split(".")[-1].lower()
-        doc_link = None
-        page_images = []
-
-        # Image extraction for PDF files
-        if file_extension == "pdf":
-            try:
-                logging.info(
-                    f"🖼️ Starting image extraction for PDF: {normalized_filename}"
-                )
-
-                # Generate page images with PyMuPDF in executor (async)
-                loop = asyncio.get_event_loop()
-
-                # 1️⃣ Image Generation
-                with ThreadPoolExecutor(max_workers=1) as image_executor:
-                    from src.document_sources.local_file import (
-                        generate_page_images_with_pymupdf,
-                    )
-
-                    def gen_images():
-                        return generate_page_images_with_pymupdf(file_path, images_dir)
-
-                    generated_images = await loop.run_in_executor(
-                        image_executor, gen_images
-                    )
-
-                if generated_images:
-                    logging.info(f"✅ Generated {len(generated_images)} page images")
-
-                    # S3 upload configuration
-                    s3_bucket = os.environ.get(
-                        "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
-                    )
-                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-
-                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                        logging.info(
-                            f"☁️ Starting S3 upload for document and {len(generated_images)} images"
-                        )
-
-                        # 2️⃣ S3 Upload - NEW EXECUTOR with organized structure
-                        with ThreadPoolExecutor(max_workers=1) as s3_executor:
-                            from src.document_sources.s3_upload_utils import (
-                                upload_files_to_s3_with_structure,
-                            )
-
-                            doc_name = Path(normalized_filename).stem
-                            base_s3_prefix = f"documents/{doc_name}"
-
-                            def upload_to_s3():
-                                # Upload PDF to root of document folder
-                                pdf_urls, pdf_failed = (
-                                    upload_files_to_s3_with_structure(
-                                        [file_path],
-                                        s3_bucket,
-                                        f"{base_s3_prefix}",  # documents/{doc_name}/
-                                        aws_access_key_id,
-                                        aws_secret_access_key,
-                                        delete_local_after_upload=False,
-                                    )
-                                )
-
-                                # Upload images to images/ subfolder
-                                img_urls, img_failed = (
-                                    upload_files_to_s3_with_structure(
-                                        generated_images,
-                                        s3_bucket,
-                                        f"{base_s3_prefix}/images",  # documents/{doc_name}/images/
-                                        aws_access_key_id,
-                                        aws_secret_access_key,
-                                        delete_local_after_upload=False,
-                                    )
-                                )
-
-                                all_urls = pdf_urls + img_urls
-                                all_failed = pdf_failed + img_failed
-                                return all_urls, all_failed
-
-                            uploaded_urls, failed_files = await loop.run_in_executor(
-                                s3_executor, upload_to_s3
-                            )
-
-                        if uploaded_urls:
-                            logging.info(
-                                f"✅ Uploaded {len(uploaded_urls)} files to S3"
-                            )
-
-                            # Extract document link and page images (file names only)
-                            for url in uploaded_urls:
-                                if url.endswith(f"/{normalized_filename}"):
-                                    doc_link = os.path.basename(url)
-                                    break
-
-                            page_images = []
-                            for url in uploaded_urls:
-                                # Skip the main document, only collect image file names
-                                if (
-                                    url
-                                    != f"s3://{s3_bucket}/{base_s3_prefix}/{normalized_filename}"
-                                ):
-                                    page_images.append(os.path.basename(url))
-
-                            logging.info(f"📄 Document link: {doc_link}")
-                            logging.info(f"🖼️ Page images: {len(page_images)} files")
-
-                        if failed_files:
-                            logging.warning(
-                                f"⚠️ Failed to upload {len(failed_files)} files to S3"
-                            )
-                    else:
-                        logging.warning(
-                            "⚠️ S3 credentials not configured, skipping S3 upload"
-                        )
-                        # Keep local file names for page images
-                        page_images = [
-                            os.path.basename(img) for img in generated_images
-                        ]
-                else:
-                    logging.warning(
-                        f"⚠️ No images generated for PDF: {normalized_filename}"
-                    )
-
-            except Exception as img_error:
-                logging.error(
-                    f"❌ Image extraction failed for {normalized_filename}: {img_error}"
-                )
-                # Continue without images
-        else:
-            logging.info(
-                f"ℹ️ Skipping image extraction for {file_extension.upper()} file"
-            )
+        # Image extraction will be done in background processor (20-file batches)
+        # Upload endpoint only saves the file and returns immediately
+        logging.info(
+            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
+        )
 
         # Add to database
         db = get_file_queue_db()
@@ -4690,36 +4583,24 @@ async def upload_file_to_queue(
                 },
             )
 
+        # Convert auto_process string to boolean
+        auto_process_bool = (
+            auto_process.lower() in ("true", "1", "yes", "on")
+            if auto_process
+            else False
+        )
+
         # Add new file to queue
         uploaded_file = db.add_file(
             filename=normalized_filename,
             original_name=originalname or file.filename,
             file_path=str(file_path),
             file_size=file_size,
+            auto_process=auto_process_bool,
         )
 
-        # Update file record with S3 metadata if available
-        if doc_link or page_images:
-            db_session = db.get_db_session()
-            try:
-                file_record = (
-                    db_session.query(UploadedFile)
-                    .filter_by(id=uploaded_file.id)
-                    .first()
-                )
-                if file_record:
-                    if doc_link:
-                        file_record.doc_link = doc_link
-                    if page_images:
-                        file_record.page_images = json.dumps(page_images)
-                    db_session.commit()
-                    logging.info(f"✅ Updated file record with S3 metadata")
-            except Exception as update_error:
-                logging.error(
-                    f"⚠️ Failed to update file record with S3 metadata: {update_error}"
-                )
-            finally:
-                db_session.close()
+        # Image extraction and S3 upload will be done in background processor
+        # No metadata update needed here
 
         elapsed_time = time.time() - start
         logging.info(
@@ -4753,9 +4634,32 @@ async def upload_file_to_queue(
                 f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
             )
 
+        # Background processor'ı otomatik başlat (eğer çalışmıyorsa)
+        try:
+            from src.background_processor import (
+                get_background_processor,
+                start_processing_loop,
+            )
+
+            processor = get_background_processor()
+            if not processor.is_processing:
+                # Background processor çalışmıyor, başlat
+                # background_task global değişkeni BACKGROUND PROCESSING ENDPOINTS bölümünde tanımlı
+                # Burada doğrudan asyncio.create_task kullanarak başlatıyoruz
+                asyncio.create_task(start_processing_loop())
+                logging.info(
+                    "🚀 Background processor otomatik olarak başlatıldı (upload sonrası)"
+                )
+            else:
+                logging.info(
+                    "ℹ️ Background processor zaten çalışıyor, yeniden başlatmaya gerek yok"
+                )
+        except Exception as bg_error:
+            logging.warning(f"⚠️ Background processor başlatılamadı: {str(bg_error)}")
+
         return create_api_response(
             "Success",
-            message="File uploaded with image extraction and S3 upload completed",
+            message="File uploaded successfully. Image extraction will be done in background.",
             data={
                 "file_id": uploaded_file.id,
                 "filename": uploaded_file.filename,
@@ -4764,8 +4668,6 @@ async def upload_file_to_queue(
                 "chunking_status": uploaded_file.chunking_status,
                 "graph_status": uploaded_file.graph_status,
                 "file_size": uploaded_file.file_size,
-                "doc_link": doc_link,
-                "page_images_count": len(page_images) if page_images else 0,
                 "duplicate": False,
             },
         )
@@ -4779,11 +4681,12 @@ async def upload_file_to_queue(
 
 
 @app.get("/api/v2/files/list")
-async def list_queued_files(limit: int = 100, offset: int = 0):
-    """Get list of all files in queue with their status"""
+async def list_queued_files():
+    """Get list of all files in queue with their status (no pagination - returns all files)"""
     try:
         db = get_file_queue_db()
-        files = db.get_all_files(limit=limit, offset=offset)
+        # Tüm kayıtları çek (limit ve offset yok)
+        files = db.get_all_files(limit=None, offset=0)
 
         files_data = []
         for f in files:
@@ -4858,22 +4761,100 @@ async def list_queued_files(limit: int = 100, offset: int = 0):
 
 
 @app.post("/api/v2/files/{file_id}/chunk")
-async def start_chunking(file_id: int):
-    """Start chunking process for a file (OCR + Image Extraction + Markdown)"""
+async def start_chunking(file_id: str):
+    """Start chunking process for a file or all files (OCR + Image Extraction + Markdown)
+
+    If file_id is "all", processes all files with chunking_status="ready" (image extraction completed)
+    """
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        # Handle "all" parameter
+        if file_id.lower() == "all":
+            # Get all files ready for chunking (image extraction completed)
+            files_ready_for_chunking = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.upload_status == "uploaded")
+                .filter(UploadedFile.chunking_status == "ready")
+                .order_by(UploadedFile.created_at.asc())
+                .all()
+            )
+
+            if not files_ready_for_chunking:
+                db_session.close()
+                return create_api_response(
+                    "Success",
+                    message="No files ready for chunking",
+                    data={"processed_count": 0},
+                )
+
+            processed_count = 0
+            for file_record in files_ready_for_chunking:
+                try:
+                    # Check if already chunked
+                    if file_record.chunking_status == "chunked":
+                        continue
+
+                    # Update status to chunking
+                    file_record.chunking_status = "chunking"
+                    file_record.chunking_started_at = datetime.now(timezone.utc)
+                    db_session.commit()
+
+                    logging.info(
+                        f"🔄 Started chunking for file {file_record.id}: {file_record.original_name}"
+                    )
+
+                    # Database'den dosya yolunu al
+                    file_path = file_record.file_path
+
+                    if not os.path.exists(file_path):
+                        file_record.chunking_status = "failed"
+                        db_session.commit()
+                        logging.warning(
+                            f"⚠️ File not found at: {file_path} for {file_record.original_name}"
+                        )
+                        continue
+
+                    # Chunking işlemini background'da çalıştır
+                    asyncio.create_task(
+                        process_chunking_v2(
+                            file_record.id, file_record.original_name, file_path
+                        )
+                    )
+                    processed_count += 1
+                except Exception as file_error:
+                    logging.error(
+                        f"❌ Failed to start chunking for file {file_record.id}: {str(file_error)}"
+                    )
+                    continue
+
+            db_session.close()
+            return create_api_response(
+                "Success",
+                message=f"Chunking started for {processed_count} file(s)",
+                data={"processed_count": processed_count},
+            )
+
+        # Single file processing
+        try:
+            file_id_int = int(file_id)
+        except ValueError:
+            db_session.close()
+            return create_api_response("Failed", message="Invalid file_id parameter")
+
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
         if not file_record:
+            db_session.close()
             return create_api_response("Failed", message="File not found")
 
         # Check if already chunked
         if file_record.chunking_status == "chunked":
+            db_session.close()
             return create_api_response(
                 "Success",
                 message="File already chunked",
-                data={"file_id": file_id, "chunking_status": "chunked"},
+                data={"file_id": file_id_int, "chunking_status": "chunked"},
             )
 
         # Update status to chunking
@@ -4882,7 +4863,7 @@ async def start_chunking(file_id: int):
         db_session.commit()
 
         logging.info(
-            f"🔄 Started chunking for file {file_id}: {file_record.original_name}"
+            f"🔄 Started chunking for file {file_id_int}: {file_record.original_name}"
         )
 
         # Database'den dosya yolunu al
@@ -4891,19 +4872,21 @@ async def start_chunking(file_id: int):
         if not os.path.exists(file_path):
             file_record.chunking_status = "failed"
             db_session.commit()
+            db_session.close()
             return create_api_response(
                 "Failed", message=f"File not found at: {file_path}"
             )
 
         # Chunking işlemini background'da çalıştır
         asyncio.create_task(
-            process_chunking_v2(file_id, file_record.original_name, file_path)
+            process_chunking_v2(file_id_int, file_record.original_name, file_path)
         )
 
+        db_session.close()
         return create_api_response(
             "Success",
             message="Chunking started",
-            data={"file_id": file_id, "chunking_status": "chunking"},
+            data={"file_id": file_id_int, "chunking_status": "chunking"},
         )
     except Exception as e:
         error_message = str(e)
@@ -4913,8 +4896,6 @@ async def start_chunking(file_id: int):
         return create_api_response(
             "Failed", message="Failed to start chunking", error=error_message
         )
-    finally:
-        db_session.close()
 
 
 @app.get("/api/v2/files/{file_id}/status")
@@ -4953,11 +4934,14 @@ async def get_file_status(file_id: int):
 
 @app.post("/api/v2/files/{file_id}/graph-create")
 async def start_graph_creation(
-    file_id: int,
+    file_id: str,
     model: str = Form("openai_gpt_4o_mini"),
     generate_embedding: bool = Form(False),
 ):
-    """Start graph creation process for a file"""
+    """Start graph creation process for a file or all files
+
+    If file_id is "all", processes all files with chunking_status="chunked" and graph_status="pending"
+    """
     db_session = None  # Initialize outside try block
     try:
         # Get Neo4j credentials from environment
@@ -4971,19 +4955,165 @@ async def start_graph_creation(
                 "Failed", message="Neo4j credentials not configured in backend .env"
             )
 
-        logging.info(
-            f"🚀 Graph creation request for file {file_id}: model={model}, database={database}"
-        )
-
         db = get_file_queue_db()
         db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        # Handle "all" parameter
+        if file_id.lower() == "all":
+            # Get all files ready for graph creation (chunking completed, graph pending or processing)
+            # Include "processing" status files to handle restart scenarios
+            from sqlalchemy import or_
+
+            files_ready_for_graph = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.upload_status == "uploaded")
+                .filter(UploadedFile.chunking_status == "chunked")
+                .filter(
+                    or_(
+                        UploadedFile.graph_status == "pending",
+                        UploadedFile.graph_status == "processing",
+                    )
+                )
+                .order_by(UploadedFile.created_at.asc())
+                .all()
+            )
+
+            if not files_ready_for_graph:
+                db_session.close()
+                return create_api_response(
+                    "Success",
+                    message="No files ready for graph creation",
+                    data={"processed_count": 0},
+                )
+
+            # Prepare all files for processing
+            tasks = []
+            processed_count = 0
+
+            for file_record in files_ready_for_graph:
+                try:
+                    # Check if markdown file exists
+                    if not file_record.markdown_path or not os.path.exists(
+                        file_record.markdown_path
+                    ):
+                        logging.warning(
+                            f"⚠️ Markdown file not found for {file_record.original_name}, skipping"
+                        )
+                        continue
+
+                    # If file is already in "processing" status, reset it to "pending" to allow restart
+                    # This handles the case where graph creation was started but server restarted
+                    if file_record.graph_status == "processing":
+                        logging.info(
+                            f"🔄 File {file_record.id} ({file_record.original_name}) is already in processing status, resetting to pending to allow restart"
+                        )
+                        file_record.graph_status = "pending"
+                        file_record.graph_started_at = None
+                        db_session.commit()
+
+                    # Update status to processing
+                    file_record.graph_status = "processing"
+                    file_record.graph_started_at = datetime.now(timezone.utc)
+                    file_record.model_used = model
+                    file_record.generate_embedding = str(generate_embedding)
+                    file_record.neo4j_uri = uri
+                    file_record.neo4j_database = database
+                    db_session.commit()
+
+                    logging.info(
+                        f"✨ Started graph creation for file {file_record.id}: {file_record.original_name}, Model: {model}"
+                    )
+
+                    # Graph creation işlemini background'da çalıştır (task olarak ekle)
+                    # Wrap in error handler to catch and log any exceptions
+                    async def process_with_error_handling():
+                        try:
+                            await process_graph_creation_v2(
+                                file_id=file_record.id,
+                                original_name=file_record.original_name,
+                                markdown_path=file_record.markdown_path,
+                                file_path=file_record.file_path,
+                                model=model,
+                                uri=uri,
+                                userName=userName,
+                                password=password,
+                                database=database,
+                                generate_embedding=generate_embedding,
+                            )
+                        except Exception as task_error:
+                            logging.error(
+                                f"❌ Graph creation task failed for file {file_record.id} ({file_record.original_name}): {str(task_error)}"
+                            )
+                            import traceback
+
+                            logging.error(f"Traceback: {traceback.format_exc()}")
+                            # Update status to failed
+                            try:
+                                db = get_file_queue_db()
+                                db_session = db.get_db_session()
+                                try:
+                                    failed_file = (
+                                        db_session.query(UploadedFile)
+                                        .filter_by(id=file_record.id)
+                                        .first()
+                                    )
+                                    if failed_file:
+                                        failed_file.graph_status = "failed"
+                                        failed_file.processing_error = str(task_error)[
+                                            :500
+                                        ]
+                                        db_session.commit()
+                                finally:
+                                    db_session.close()
+                            except Exception as db_error:
+                                logging.error(
+                                    f"❌ Failed to update status for file {file_record.id}: {str(db_error)}"
+                                )
+
+                    task = asyncio.create_task(process_with_error_handling())
+                    tasks.append(task)
+                    processed_count += 1
+                except Exception as file_error:
+                    logging.error(
+                        f"❌ Failed to start graph creation for file {file_record.id}: {str(file_error)}"
+                    )
+                    continue
+
+            # Close DB session before waiting for tasks
+            db_session.close()
+
+            # Start all tasks in background (don't await, let them run concurrently)
+            # Tasks will complete in background, endpoint returns immediately
+            logging.info(
+                f"🚀 Started {len(tasks)} graph creation tasks in background (concurrent processing)"
+            )
+
+            return create_api_response(
+                "Success",
+                message=f"Graph creation started for {processed_count} file(s)",
+                data={"processed_count": processed_count},
+            )
+
+        # Single file processing
+        try:
+            file_id_int = int(file_id)
+        except ValueError:
+            if db_session:
+                db_session.close()
+            return create_api_response("Failed", message="Invalid file_id parameter")
+
+        logging.info(
+            f"🚀 Graph creation request for file {file_id_int}: model={model}, database={database}"
+        )
+
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
         if not file_record:
+            db_session.close()
             return create_api_response("Failed", message="File not found")
 
         # Check if chunking is completed
         if file_record.chunking_status != "chunked":
+            db_session.close()
             return create_api_response(
                 "Failed",
                 message=f"File must be chunked first (current status: {file_record.chunking_status})",
@@ -4993,9 +5123,20 @@ async def start_graph_creation(
         if not file_record.markdown_path or not os.path.exists(
             file_record.markdown_path
         ):
+            db_session.close()
             return create_api_response(
                 "Failed", message="Markdown file not found. Please run chunking first."
             )
+
+        # If file is already in "processing" status, reset it to "pending" to allow restart
+        # This handles the case where graph creation was started but server restarted
+        if file_record.graph_status == "processing":
+            logging.info(
+                f"🔄 File {file_id_int} is already in processing status, resetting to pending to allow restart"
+            )
+            file_record.graph_status = "pending"
+            file_record.graph_started_at = None
+            db_session.commit()
 
         # Update status to processing
         file_record.graph_status = "processing"
@@ -5007,13 +5148,13 @@ async def start_graph_creation(
         db_session.commit()
 
         logging.info(
-            f"✨ Started graph creation for file {file_id}: {file_record.original_name}, Model: {model}"
+            f"✨ Started graph creation for file {file_id_int}: {file_record.original_name}, Model: {model}"
         )
 
         # Graph creation işlemini background'da çalıştır
         asyncio.create_task(
             process_graph_creation_v2(
-                file_id=file_id,
+                file_id=file_id_int,
                 original_name=file_record.original_name,
                 markdown_path=file_record.markdown_path,
                 file_path=file_record.file_path,
@@ -5026,10 +5167,11 @@ async def start_graph_creation(
             )
         )
 
+        db_session.close()
         return create_api_response(
             "Success",
             message="Graph creation started",
-            data={"file_id": file_id, "graph_status": "processing"},
+            data={"file_id": file_id_int, "graph_status": "processing"},
         )
     except Exception as e:
         error_message = str(e)
@@ -5147,14 +5289,22 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
 
         elif stage == "chunking":
             # Reset chunking and graph (cascade)
-            file_record.chunking_status = "pending"
+            # If image extraction was already completed (file was chunked before),
+            # set chunking_status to "ready" instead of "pending"
+            # This allows chunking to be restarted immediately
+            if file_record.chunking_status in ["chunked", "chunking", "ready"]:
+                # Image extraction was already completed, set to "ready" for chunking
+                file_record.chunking_status = "ready"
+            else:
+                # Image extraction not completed yet, set to "pending"
+                file_record.chunking_status = "pending"
             file_record.graph_status = "pending"
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
             logging.info(
-                f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph)"
+                f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph, chunking_status={file_record.chunking_status})"
             )
 
         elif stage == "graph":
@@ -5311,14 +5461,203 @@ async def get_queue_status():
 
 
 @app.delete("/api/v2/files/{file_id}")
-async def delete_queued_file(file_id: int):
-    """Delete a file from queue, filesystem, and Neo4j database"""
+async def delete_queued_file(file_id: str):
+    """Delete a file or all files from queue, filesystem, and Neo4j database
+
+    If file_id is "all", deletes all files from the database
+    """
     try:
         db = get_file_queue_db()
+        db_session = db.get_db_session()
+
+        # Handle "all" parameter
+        if file_id.lower() == "all":
+            # Get all files
+            all_files = db_session.query(UploadedFile).all()
+
+            if not all_files:
+                db_session.close()
+                return create_api_response(
+                    "Success",
+                    message="No files to delete",
+                    data={"deleted_count": 0},
+                )
+
+            deleted_count = 0
+            failed_count = 0
+
+            for file_record in all_files:
+                try:
+                    file_path = Path(file_record.file_path)
+                    original_name = file_record.original_name
+                    filename = file_record.filename
+                    file_id_int = file_record.id
+
+                    # Neo4j'den Document ve ilişkili node'ları sil
+                    neo4j_deleted = False
+                    try:
+                        from src.shared.common_fn import (
+                            create_graph_database_connection,
+                        )
+
+                        # Neo4j bağlantı bilgilerini al (file_record'dan veya environment variable'lardan)
+                        neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        neo4j_username = os.environ.get("NEO4J_USERNAME")
+                        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+                        neo4j_database = file_record.neo4j_database or os.environ.get(
+                            "NEO4J_DATABASE", "neo4j"
+                        )
+
+                        if neo4j_uri:
+                            logging.info(
+                                f"🗑️ Deleting Neo4j nodes for file: {original_name} (URI: {neo4j_uri})"
+                            )
+
+                            graph_connection = create_graph_database_connection(
+                                uri=neo4j_uri,
+                                userName=neo4j_username,
+                                password=neo4j_password,
+                                database=neo4j_database,
+                            )
+
+                            # V2 Document deletion query
+                            delete_query = """
+                                MATCH (d:Document {fileName: $filename})
+                                
+                                // 1. Document'a bağlı Chunk node'ları topla
+                                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                                
+                                // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
+                                OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
+                                
+                                // 3. Policy'den -> yönünde bağlı tüm node'ları topla
+                                OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
+                                WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
+                                      relatedNodes:PolicyType OR relatedNodes:Customer OR
+                                      relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
+                                      relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
+                                
+                                // 4. Sadece başka Document'larda kullanılmayan node'ları sil
+                                WITH d, 
+                                     COLLECT(DISTINCT c) AS chunks,
+                                     COLLECT(DISTINCT p) AS policies,
+                                     COLLECT(DISTINCT relatedNodes) AS relatedNodesList
+                                
+                                // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
+                                WITH d, chunks,
+                                     [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
+                                         MATCH (d2:Document)
+                                         WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
+                                     }] AS safePolicies,
+                                     [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
+                                         MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
+                                         WHERE d2 <> d AND (
+                                             (p2)-[*1..2]->(node) OR
+                                             (p2)<-[:HAS_DOC]-(node) OR
+                                             (p2)<-[:DOCUMENTED_IN]-(node)
+                                         )
+                                     }] AS safeRelatedNodes
+                                
+                                // 5. Silme işlemi
+                                FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                                FOREACH (policy IN safePolicies | 
+                                    FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
+                                )
+                                FOREACH (policy IN safePolicies | DETACH DELETE policy)
+                                DETACH DELETE d
+                                
+                                RETURN count(d) AS deletedDocuments
+                            """
+
+                            session_params = {}
+                            if neo4j_database:
+                                session_params["database"] = neo4j_database
+
+                            result = graph_connection.query(
+                                delete_query,
+                                {"filename": filename},
+                                session_params=session_params,
+                            )
+
+                            if result and len(result) > 0:
+                                deleted_count_neo4j = result[0]["deletedDocuments"]
+                                logging.info(
+                                    f"✅ Deleted {deleted_count_neo4j} Document nodes from Neo4j for: {original_name}"
+                                )
+                                neo4j_deleted = True
+                            else:
+                                logging.warning(
+                                    f"⚠️ No Document nodes found in Neo4j for: {original_name}"
+                                )
+                                neo4j_deleted = (
+                                    True  # Not an error if document doesn't exist
+                                )
+                        else:
+                            logging.warning(
+                                f"⚠️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}"
+                            )
+                            neo4j_deleted = (
+                                True  # Not an error if Neo4j is not configured
+                            )
+
+                    except Exception as neo4j_error:
+                        logging.error(
+                            f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
+                        )
+                        # Continue with filesystem/database deletion even if Neo4j fails
+                        neo4j_deleted = True  # Continue anyway
+
+                    # Delete file from filesystem if exists
+                    if file_path.exists():
+                        file_path.unlink()
+                        logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
+
+                    # Delete from SQLite database
+                    success = db.delete_file(file_id_int)
+                    if success:
+                        logging.info(
+                            f"✅ File deleted from queue: ID={file_id_int}, Name={original_name}"
+                        )
+                        deleted_count += 1
+                    else:
+                        logging.warning(
+                            f"⚠️ Failed to delete file from database: ID={file_id_int}, Name={original_name}"
+                        )
+                        failed_count += 1
+
+                except Exception as file_error:
+                    logging.error(
+                        f"❌ Failed to delete file {file_record.id}: {str(file_error)}"
+                    )
+                    failed_count += 1
+                    continue
+
+            db_session.close()
+
+            result_message = f"Deleted {deleted_count} file(s) successfully"
+            if failed_count > 0:
+                result_message += f", {failed_count} file(s) failed"
+
+            return create_api_response(
+                "Success",
+                message=result_message,
+                data={
+                    "deleted_count": deleted_count,
+                    "failed_count": failed_count,
+                },
+            )
+
+        # Single file processing
+        try:
+            file_id_int = int(file_id)
+        except ValueError:
+            db_session.close()
+            return create_api_response("Failed", message="Invalid file_id parameter")
 
         # Get file info before deletion
-        file_record = db.get_file_by_id(file_id)
+        file_record = db.get_file_by_id(file_id_int)
         if not file_record:
+            db_session.close()
             return create_api_response(
                 "Failed", message="File not found", error="File ID not in database"
             )
@@ -5330,17 +5669,26 @@ async def delete_queued_file(file_id: int):
         # Neo4j'den Document ve ilişkili node'ları sil
         neo4j_deleted = False
         try:
-            if file_record.neo4j_uri:
-                from src.shared.common_fn import create_graph_database_connection
+            from src.shared.common_fn import create_graph_database_connection
 
-                logging.info(f"🗑️ Deleting Neo4j nodes for file: {original_name}")
+            # Neo4j bağlantı bilgilerini al (file_record'dan veya environment variable'lardan)
+            neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+            neo4j_username = os.environ.get("NEO4J_USERNAME")
+            neo4j_password = os.environ.get("NEO4J_PASSWORD")
+            neo4j_database = file_record.neo4j_database or os.environ.get(
+                "NEO4J_DATABASE", "neo4j"
+            )
+
+            if neo4j_uri:
+                logging.info(
+                    f"🗑️ Deleting Neo4j nodes for file: {original_name} (URI: {neo4j_uri})"
+                )
 
                 graph_connection = create_graph_database_connection(
-                    uri=file_record.neo4j_uri,
-                    userName=os.environ.get("NEO4J_USERNAME"),
-                    password=os.environ.get("NEO4J_PASSWORD"),
-                    database=file_record.neo4j_database
-                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                    uri=neo4j_uri,
+                    userName=neo4j_username,
+                    password=neo4j_password,
+                    database=neo4j_database,
                 )
 
                 # V2 Document deletion query
@@ -5393,8 +5741,8 @@ async def delete_queued_file(file_id: int):
                 """
 
                 session_params = {}
-                if file_record.neo4j_database:
-                    session_params["database"] = file_record.neo4j_database
+                if neo4j_database:
+                    session_params["database"] = neo4j_database
 
                 result = graph_connection.query(
                     delete_query, {"filename": filename}, session_params=session_params
@@ -5411,12 +5759,11 @@ async def delete_queued_file(file_id: int):
                         f"⚠️ No Document nodes found in Neo4j for: {original_name}"
                     )
                     neo4j_deleted = True  # Not an error if document doesn't exist
-
             else:
-                logging.info(
-                    f"ℹ️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}"
+                logging.warning(
+                    f"⚠️ No Neo4j URI configured (neither in file record nor environment), skipping Neo4j deletion for: {original_name}"
                 )
-                neo4j_deleted = True
+                neo4j_deleted = True  # Not an error if Neo4j is not configured
 
         except Exception as neo4j_error:
             logging.error(f"❌ Failed to delete from Neo4j: {str(neo4j_error)}")
@@ -5428,9 +5775,9 @@ async def delete_queued_file(file_id: int):
             logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
 
         # Delete from SQLite database
-        success = db.delete_file(file_id)
+        success = db.delete_file(file_id_int)
         if success:
-            logging.info(f"✅ File deleted from queue: ID={file_id}")
+            logging.info(f"✅ File deleted from queue: ID={file_id_int}")
 
             result_message = "File deleted successfully"
             if neo4j_deleted:
@@ -5438,12 +5785,14 @@ async def delete_queued_file(file_id: int):
             else:
                 result_message += " (Neo4j deletion failed, check logs)"
 
+            db_session.close()
             return create_api_response(
                 "Success",
                 message=result_message,
-                data={"file_id": file_id, "neo4j_deleted": neo4j_deleted},
+                data={"file_id": file_id_int, "neo4j_deleted": neo4j_deleted},
             )
         else:
+            db_session.close()
             return create_api_response(
                 "Failed", message="Failed to delete file from database"
             )
@@ -6217,11 +6566,95 @@ async def process_graph_creation_v2(
             max_pages=max_pages,
         )
 
+        # Check if processing_source_v2 failed
+        if not response or response.get("status") == "Failed":
+            error_message = (
+                response.get("error", "Unknown error")
+                if response
+                else "No response from processing_source_v2"
+            )
+            logging.error(
+                f"❌ V2 Graph extraction failed for: {normalized_filename} - {error_message}"
+            )
+            file_record.graph_status = "failed"
+            file_record.processing_error = error_message[:500]
+            db_session.commit()
+            return
+
+        # Note: "Already Processing" status check removed
+        # processing_source_v2 now continues even if Neo4j status is "Processing"
+        # This handles restart scenarios where SQLite was reset but Neo4j wasn't
+
         logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
         logging.info(
             f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships"
         )
         logging.info(f"⏱️ Latency details: {latency}")
+
+        # Check if Policy node was created in Neo4j
+        # If no Policy node exists, mark as failed
+        try:
+            from src.main import create_graph_database_connection
+
+            graph_connection = create_graph_database_connection(
+                uri=uri, userName=userName, password=password, database=database
+            )
+
+            # Check if Policy node exists for this document
+            policy_check_query = """
+            MATCH (d:Document {fileName: $file_name})
+            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+            RETURN count(p) as policy_count
+            """
+
+            policy_result = graph_connection.query(
+                policy_check_query,
+                params={"file_name": normalized_filename},
+            )
+
+            policy_count = policy_result[0]["policy_count"] if policy_result else 0
+
+            if policy_count == 0:
+                error_message = (
+                    f"Policy node was not created for document: {normalized_filename}"
+                )
+                logging.error(f"❌ {error_message}")
+                file_record.graph_status = "failed"
+                file_record.processing_error = error_message[:500]
+                db_session.commit()
+
+                # Sync failed status to Neo4j
+                try:
+                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+
+                    sync_queue_db_status_to_neo4j(
+                        graph=graph_connection,
+                        file_name=normalized_filename,
+                        upload_status=file_record.upload_status,
+                        chunking_status=file_record.chunking_status,
+                        graph_status="failed",
+                        embedding_status=file_record.embedding_status,
+                        database=database,
+                    )
+                except Exception as sync_error:
+                    logging.warning(
+                        f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
+                    )
+
+                return
+            else:
+                logging.info(
+                    f"✅ Policy node verified: {policy_count} Policy node(s) found for {normalized_filename}"
+                )
+        except Exception as policy_check_error:
+            logging.error(
+                f"❌ Error checking Policy node for {normalized_filename}: {str(policy_check_error)}"
+            )
+            # Don't fail the entire process if policy check fails
+            # But log the error for investigation
+            import traceback
+
+            logging.error(f"Traceback: {traceback.format_exc()}")
 
         # Embedding oluştur (eğer isteniyorsa)
         if generate_embedding:
@@ -6250,16 +6683,26 @@ async def process_graph_creation_v2(
                 logging.error(f"❌ Embedding creation failed: {emb_error}")
                 # Continue without embeddings
 
+        # Response'tan istatistikleri al
+        node_count = response.get("nodeCount", 0) if response else 0
+        relationship_count = response.get("relationshipCount", 0) if response else 0
+        processing_time = response.get("total_processing_time", 0) if response else 0
+
+        # Check if graph creation actually created nodes and relationships
+        # If both are 0, the processing might have failed silently
+        if node_count == 0 and relationship_count == 0:
+            logging.warning(
+                f"⚠️ V2 Graph extraction completed but no nodes or relationships created for: {normalized_filename}"
+            )
+            # Still mark as completed, but log a warning
+            # This might be a valid case for some documents
+
         # Graph creation tamamlandı, status güncelle
         file_record.graph_status = "completed"
         file_record.graph_completed_at = datetime.now(timezone.utc)
-
-        # Response'tan istatistikleri al
-        if response:
-            file_record.node_count = response.get("nodeCount", 0)
-            file_record.relationship_count = response.get("relationshipCount", 0)
-            processing_time = response.get("total_processing_time", 0)
-            file_record.processing_time = processing_time
+        file_record.node_count = node_count
+        file_record.relationship_count = relationship_count
+        file_record.processing_time = processing_time
 
         db_session.commit()
 
