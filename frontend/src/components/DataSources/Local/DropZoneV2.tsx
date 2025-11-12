@@ -142,20 +142,47 @@ const DropZoneV2: FunctionComponent = () => {
           if (queuedFilesResponse?.status === 'Success' && queuedFilesResponse?.data?.files) {
             const v2Files = queuedFilesResponse.data.files.map((file: any) => {
               // V2 Workflow: status belirleme
+              // status alanı + chunking_status/graph_status alanlarına bakarak durumu belirle
               let status = 'New';
-              if (file.graph_status === 'completed') {
+
+              // status = "processing" kontrolü (herhangi bir işlem yapılıyor)
+              if (file.status === 'processing') {
+                if (file.graph_status === 'processing') {
+                  status = 'Processing Graph'; // Graph creation yapılıyor
+                } else if (file.chunking_status === 'chunking') {
+                  status = 'Processing Chunks'; // Chunking yapılıyor
+                } else if (file.chunking_status === 'extracting') {
+                  status = 'Extracting'; // Image extraction yapılıyor
+                } else {
+                  status = 'Processing'; // Genel processing
+                }
+              }
+              // status = "queued" kontrolü (kuyrukta bekliyor)
+              else if (file.status === 'queued') {
+                if (file.chunking_status === 'ready' && file.graph_status === 'pending') {
+                  status = 'Queued for Chunking'; // Chunking kuyruğunda bekliyor
+                } else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
+                  status = 'Queued for Graph'; // Graph creation kuyruğunda bekliyor
+                } else if (file.chunking_status === 'pending') {
+                  status = 'Queued for Extraction'; // Image extraction kuyruğunda bekliyor
+                } else {
+                  status = 'Queued'; // Genel queue
+                }
+              }
+              // status = "completed" kontrolü
+              else if (file.status === 'completed' || file.graph_status === 'completed') {
                 status = 'Completed';
-              } else if (file.graph_status === 'processing') {
-                status = 'Processing';
+              }
+              // Diğer durumlar (status = "uploaded" veya diğer)
+              else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
+                status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
               } else if (file.chunking_status === 'chunked') {
-                status = 'Chunked';
-              } else if (file.chunking_status === 'chunking') {
-                status = 'Processing';
+                status = 'Chunked'; // Chunking tamamlandı
               } else if (file.chunking_status === 'ready') {
-                status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
+                status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
               } else if (file.chunking_status === 'pending') {
-                status = 'pending'; // Image extraction henüz başlamadı
-              } else if (file.chunking_status === 'failed') {
+                status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
+              } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
                 status = 'Failed';
               }
 
@@ -165,7 +192,14 @@ const DropZoneV2: FunctionComponent = () => {
                 type: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
                 size: file.file_size || 0,
                 uploadProgress: 100,
-                processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
+                processingProgress:
+                  file.chunking_status === 'chunked'
+                    ? 100
+                    : file.chunking_status === 'chunking'
+                      ? 50
+                      : file.chunking_status === 'extracting'
+                        ? 25
+                        : 0,
                 status,
                 nodesCount: 0,
                 relationshipsCount: 0,

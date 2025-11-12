@@ -73,6 +73,16 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
 def create_graph_database_connection(uri, userName, password, database):
   enable_user_agent = os.environ.get("ENABLE_USER_AGENT", "False").lower() in ("true", "1", "yes")
   
+  # Eğer username veya password boş/None ise, environment variable'lardan al
+  if not userName or (isinstance(userName, str) and userName.strip() == ""):
+    userName = os.environ.get("NEO4J_USERNAME")
+  if not password or (isinstance(password, str) and password.strip() == ""):
+    password = os.environ.get("NEO4J_PASSWORD")
+  if not database or (isinstance(database, str) and database.strip() == ""):
+    database = os.environ.get("NEO4J_DATABASE", "neo4j")
+  if not uri or (isinstance(uri, str) and uri.strip() == ""):
+    uri = os.environ.get("NEO4J_URI")
+  
   # Environment'tan timeout ve connection ayarlarını al
   connection_timeout = int(os.environ.get("NEO4J_CONNECTION_TIMEOUT", "30"))
   read_timeout = int(os.environ.get("NEO4J_READ_TIMEOUT", "120"))

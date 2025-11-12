@@ -418,27 +418,74 @@ def check_document_images_exist_in_s3(
         else:
             s3_client = boto3.client('s3')
         
-        # Prefix pattern: documents/doc_name/doc_name_page_*.png
-        s3_prefix = f"documents/{document_name}/"
+        # Prefix pattern: documents/doc_name/images/doc_name_page_*.png
+        # Önce images/ alt klasöründe ara
+        s3_prefix_images = f"documents/{document_name}/images/"
         
         # S3'te bu prefix ile başlayan dosyaları listele
         response = s3_client.list_objects_v2(
             Bucket=bucket_name,
-            Prefix=s3_prefix
+            Prefix=s3_prefix_images
         )
         
-        if 'Contents' not in response:
-            return False, []
-        
-        # Page image dosyalarını filtrele
         existing_images = []
-        for obj in response['Contents']:
-            key = obj['Key']
-            filename = os.path.basename(key)
+        
+        if 'Contents' in response:
+            # Page image dosyalarını filtrele ve gerçekten var olup olmadığını kontrol et
+            for obj in response['Contents']:
+                key = obj['Key']
+                filename = os.path.basename(key)
+                
+                # Page image pattern'ini kontrol et: doc_name_page_001.png
+                if filename.startswith(f"{document_name}_page_") and filename.endswith('.png'):
+                    # Gerçek dosya varlığını kontrol et (head_object ile)
+                    # list_objects bazen yanlış pozitif sonuç verebilir
+                    try:
+                        s3_client.head_object(Bucket=bucket_name, Key=key)
+                        existing_images.append(filename)
+                    except ClientError as e:
+                        if e.response['Error']['Code'] == '404':
+                            # Dosya list_objects'te görünüyor ama gerçekte yok
+                            logging.warning(f"⚠️ Image listed in S3 but not found (404): {key}")
+                        else:
+                            # Diğer hatalar için de ekle (erişim sorunu olabilir)
+                            existing_images.append(filename)
+                    except Exception:
+                        # Hata durumunda ekle (erişim sorunu olabilir, download sırasında kontrol edilecek)
+                        existing_images.append(filename)
+        
+        # Eğer images/ altında bulunamazsa, root'ta da ara (eski format için backward compatibility)
+        if not existing_images:
+            s3_prefix_root = f"documents/{document_name}/"
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=s3_prefix_root
+            )
             
-            # Page image pattern'ini kontrol et: doc_name_page_001.png
-            if filename.startswith(f"{document_name}_page_") and filename.endswith('.png'):
-                existing_images.append(filename)
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    filename = os.path.basename(key)
+                    
+                    # Page image pattern'ini kontrol et: doc_name_page_001.png
+                    # Ama images/ klasöründe olmayanları al
+                    if (filename.startswith(f"{document_name}_page_") and 
+                        filename.endswith('.png') and 
+                        'images/' not in key):
+                        # Gerçek dosya varlığını kontrol et (head_object ile)
+                        try:
+                            s3_client.head_object(Bucket=bucket_name, Key=key)
+                            existing_images.append(filename)
+                        except ClientError as e:
+                            if e.response['Error']['Code'] == '404':
+                                # Dosya list_objects'te görünüyor ama gerçekte yok
+                                logging.warning(f"⚠️ Image listed in S3 but not found (404): {key}")
+                            else:
+                                # Diğer hatalar için de ekle (erişim sorunu olabilir)
+                                existing_images.append(filename)
+                        except Exception:
+                            # Hata durumunda ekle (erişim sorunu olabilir, download sırasında kontrol edilecek)
+                            existing_images.append(filename)
         
         if existing_images:
             logging.info(f"🔍 Found {len(existing_images)} existing page images in S3 for document: {document_name}")
@@ -450,6 +497,89 @@ def check_document_images_exist_in_s3(
     except Exception as e:
         logging.error(f"❌ Error checking document images in S3 for {document_name}: {e}")
         return False, []
+
+
+def download_images_from_s3(
+    image_names: List[str],
+    bucket_name: str,
+    document_name: str,
+    local_images_dir: str,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None
+) -> List[str]:
+    """
+    Download page images from S3 to local directory
+    
+    Args:
+        image_names: List of image file names to download (e.g., ["doc_page_001.png", "doc_page_002.png"])
+        bucket_name: S3 bucket name
+        document_name: Document name (used to construct S3 prefix)
+        local_images_dir: Local directory to save downloaded images
+        aws_access_key_id: AWS access key (None ise environment variable kullanılır)
+        aws_secret_access_key: AWS secret key (None ise environment variable kullanılır)
+    
+    Returns:
+        List[str]: List of local file paths for downloaded images
+    """
+    try:
+        from botocore.config import Config
+        
+        # S3 config with signature version 4
+        config = Config(
+            signature_version='s3v4',
+            region_name='us-east-1'  # Default region
+        )
+        
+        # S3 client oluştur
+        if aws_access_key_id and aws_secret_access_key:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key,
+                config=config
+            )
+        else:
+            # Environment variables veya AWS profile kullan
+            s3_client = boto3.client('s3', config=config)
+        
+        # Ensure local directory exists
+        os.makedirs(local_images_dir, exist_ok=True)
+        
+        downloaded_files = []
+        base_s3_prefix = f"documents/{document_name}/images"
+        
+        logging.info(f"📥 Starting S3 download for {len(image_names)} images from bucket: {bucket_name}")
+        
+        for image_name in image_names:
+            try:
+                # S3 key oluştur
+                s3_key = f"{base_s3_prefix}/{image_name}"
+                
+                # Local file path
+                local_file_path = os.path.join(local_images_dir, image_name)
+                
+                # Download file from S3
+                logging.info(f"📥 Downloading {image_name} from s3://{bucket_name}/{s3_key}")
+                
+                s3_client.download_file(bucket_name, s3_key, local_file_path)
+                
+                downloaded_files.append(local_file_path)
+                logging.info(f"✅ Successfully downloaded: {local_file_path}")
+                
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'NoSuchKey':
+                    logging.warning(f"⚠️ Image not found in S3: {s3_key}")
+                else:
+                    logging.error(f"❌ Failed to download {image_name} from S3: {e}")
+            except Exception as download_error:
+                logging.error(f"❌ Failed to download {image_name} from S3: {download_error}")
+        
+        logging.info(f"✅ S3 download completed: {len(downloaded_files)} successful out of {len(image_names)}")
+        return downloaded_files
+        
+    except Exception as e:
+        logging.error(f"❌ S3 download error: {e}")
+        return []
 
 
 def upload_files_to_s3_with_structure(

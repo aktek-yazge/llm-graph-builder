@@ -1,8 +1,8 @@
 import { Method } from 'axios';
 import { apiCall } from '../services/CommonAPI';
 import { ExtractParams, UploadParams, UploadV2Params } from '../types';
-import { normalizeFileName } from './utf8';
 import { url } from './Utils';
+import { normalizeFileName } from './utf8';
 
 // Upload Call
 export const uploadAPI = async (
@@ -320,7 +320,7 @@ export const startEmbeddingAPI = async (
 
 // Reset file to a specific stage
 export const resetFileStageAPI = async (
-  fileId: number,
+  fileId: number | string,
   stage: 'upload' | 'chunking' | 'graph' = 'upload'
 ): Promise<any> => {
   const urlReset = `${url()}/api/v2/files/${fileId}/reset?stage=${stage}`;

@@ -265,6 +265,10 @@ const Content: React.FC<ContentProps> = ({
     const pendingChunking = selectedFiles.filter(
       (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'ready'
     ).length;
+    
+    const extractingImages = selectedFiles.filter(
+      (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'extracting'
+    ).length;
 
     const readyForGraph = selectedFiles.filter(
       (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
@@ -1082,60 +1086,16 @@ const Content: React.FC<ContentProps> = ({
           showErrorToast(`Chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
         }
       } else {
-        // Chunking başlat
-        showNormalToast(`${v2FileIds.length} dosya için chunking başlatılıyor...`);
-
-        for (const fileId of v2FileIds) {
-          try {
-            const response = await startChunkingAPI(fileId);
-            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
-              showSuccessToast(`Dosya ${fileId} chunking'e alındı`);
-
-              // Hemen status'u güncelle
-              await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 saniye bekle
-              childRef.current?.reloadV2Files?.(); // Status'u hemen güncelle
-
-              // Bu dosyanın durumunu polling ile kontrol et
-              const pollStatus = async () => {
-                let attempts = 0;
-                const maxAttempts = 600;
-
-                while (attempts < maxAttempts) {
-                  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-                  try {
-                    const statusResponse = await getFileStatusAPI(fileId);
-                    const fileStatus = statusResponse?.data?.chunking_status;
-                    const elapsedSeconds = attempts * 5;
-
-                    if (fileStatus === 'chunked') {
-                      showSuccessToast(`✓ Dosya ${fileId} chunking tamamlandı`);
-                      childRef.current?.reloadV2Files?.();
-                      break;
-                    }
-                    if (fileStatus === 'failed') {
-                      showErrorToast(`✗ Dosya ${fileId} chunking başarısız`);
-                      break;
-                    }
-                    if (elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
-                      showNormalToast(`⏱ Dosya işleniyor... (${Math.floor(elapsedSeconds / 60)} dk)`);
-                    }
-                  } catch (err) {
-                    // Continue polling
-                  }
-                  attempts++;
-                }
-              };
-
-              // Polling'i background'da çalıştır
-              pollStatus();
-            } else {
-              showErrorToast(`Dosya ${fileId} chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
-            }
-          } catch (error: any) {
-            const errorMsg = error.response?.data?.message || error.message || 'Chunking hatası';
-            showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
-          }
+        // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
+        // Backend zaten batch batch işlemek için dosyaları işaretliyor
+        showNormalToast(`${v2FileIds.length} dosya için chunking başlatılıyor (batch batch işlenecek)...`);
+        const response = await startChunkingAPI('all');
+        if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+          const processedCount = response.data?.processed_count || v2FileIds.length;
+          showSuccessToast(`✓ ${processedCount} dosya chunking'e alındı (batch batch işlenecek)`);
+          childRef.current?.reloadV2Files?.();
+        } else {
+          showErrorToast(`Chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
         }
       }
     } catch (error: any) {
@@ -1201,22 +1161,50 @@ const Content: React.FC<ContentProps> = ({
       return;
     }
 
+    // Check if all V2 files are selected
+    const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+    const isAllSelected = allV2Files.length > 0 && v2FileIds.length === allV2Files.length;
+
     try {
       setIsExtractLoading(true);
-      showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
 
-      for (const fileId of v2FileIds) {
-        try {
-          const response = await resetFileStageAPI(fileId, 'chunking');
-          if (response.status === 'Success' || response.status === 'success') {
-            showSuccessToast(`Dosya ${fileId} reset edildi`);
-          } else {
-            showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
-          }
-        } catch (error: any) {
-          const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
-          showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+      if (isAllSelected) {
+        // Use "all" parameter when all files are selected
+        showNormalToast('Tüm dosyalar için chunking reset ediliyor...');
+        const response = await resetFileStageAPI('all', 'chunking');
+        if (response.status === 'Success' || response.status === 'success') {
+          const resetCount = response.data?.reset_count || v2FileIds.length;
+          showSuccessToast(`✓ ${resetCount} dosya chunking reset edildi`);
+          childRef.current?.reloadV2Files?.();
+        } else {
+          showErrorToast(`Chunking reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
         }
+      } else {
+        // Seçili dosyalar için tek tek çağrı yap
+        showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const fileId of v2FileIds) {
+          try {
+            const response = await resetFileStageAPI(fileId, 'chunking');
+            if (response.status === 'Success' || response.status === 'success') {
+              successCount++;
+            } else {
+              failCount++;
+              showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
+            }
+          } catch (error: any) {
+            failCount++;
+            const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
+            showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+          }
+        }
+
+        if (successCount > 0) {
+          showSuccessToast(`✓ ${successCount} dosya chunking reset edildi`);
+        }
+        childRef.current?.reloadV2Files?.();
       }
     } catch (error: any) {
       showErrorToast('Reset işlemi başlatılamadı');

@@ -4762,9 +4762,11 @@ async def list_queued_files():
 
 @app.post("/api/v2/files/{file_id}/chunk")
 async def start_chunking(file_id: str):
-    """Start chunking process for a file or all files (OCR + Image Extraction + Markdown)
+    """Start chunking process for a file, multiple files, or all files (OCR + Image Extraction + Markdown)
 
-    If file_id is "all", processes all files with chunking_status="ready" (image extraction completed)
+    - If file_id is "all", processes all files with chunking_status="ready"
+    - If file_id is comma-separated IDs (e.g., "1,2,3"), processes those specific files in batches
+    - Otherwise, processes single file
     """
     try:
         db = get_file_queue_db()
@@ -4789,45 +4791,96 @@ async def start_chunking(file_id: str):
                     data={"processed_count": 0},
                 )
 
+            # Process files in batches - Image extraction'daki mantık gibi
+            # Background processor'daki batch mantığını kullan
+            from src.background_processor import get_background_processor
+
+            processor = get_background_processor()
+            batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
             processed_count = 0
-            for file_record in files_ready_for_chunking:
-                try:
-                    # Check if already chunked
-                    if file_record.chunking_status == "chunked":
-                        continue
 
-                    # Update status to chunking
-                    file_record.chunking_status = "chunking"
-                    file_record.chunking_started_at = datetime.now(timezone.utc)
-                    db_session.commit()
+            # Önce tüm "ready" dosyalarını queue'ya al (status = "queued")
+            # Bu sayede frontend'te "Queued for Chunking" gösterilebilir ve dosyalar kilitlenir
+            all_ready_files = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.upload_status == "uploaded")
+                .filter(UploadedFile.chunking_status == "ready")
+                .all()
+            )
 
+            if all_ready_files:
+                all_ready_file_ids = [f.id for f in all_ready_files]
+                db_session.query(UploadedFile).filter(
+                    UploadedFile.id.in_(all_ready_file_ids)
+                ).update(
+                    {UploadedFile.status: "queued"},  # status = "queued" ile kuyruğa al
+                    synchronize_session=False,
+                )
+                db_session.commit()
+                logging.info(
+                    f"📋 {len(all_ready_files)} dosya chunking kuyruğuna alındı (status=queued, chunking_status=ready)"
+                )
+
+            # While loop ile batch'ler halinde işle (Image extraction'daki gibi)
+            while True:
+                # Her seferinde fresh batch al (status = "queued" ve chunking_status = "ready")
+                batch_files = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(UploadedFile.status == "queued")  # Queue'daki dosyalar
+                    .filter(UploadedFile.chunking_status == "ready")
+                    .order_by(UploadedFile.created_at.asc())
+                    .limit(batch_size)
+                    .all()
+                )
+
+                if not batch_files:
+                    # No more files in queue
+                    break
+
+                # Batch'teki dosyaların ID'lerini al
+                batch_file_ids = [f.id for f in batch_files]
+
+                # Sadece bu batch'teki dosyaların status'unu "processing" ve chunking_status'unu "chunking" olarak güncelle
+                # (Image extraction'daki mantık gibi)
+                db_session.query(UploadedFile).filter(
+                    UploadedFile.id.in_(batch_file_ids)
+                ).update(
+                    {
+                        UploadedFile.status: "processing",  # status = "processing" ile işleme al
+                        UploadedFile.chunking_status: "chunking",
+                        UploadedFile.chunking_started_at: datetime.now(timezone.utc),
+                    },
+                    synchronize_session=False,
+                )
+                db_session.commit()
+
+                logging.info(
+                    f"📦 Chunking batch seçildi: {len(batch_files)} dosya işlenmeye başlanıyor (ID'ler: {batch_file_ids})"
+                )
+
+                # Background processor'daki batch processing fonksiyonunu kullan
+                # Bu fonksiyon zaten batch'ler halinde işlem yapıyor
+                await processor.process_v2_chunking_batch(batch_files)
+                processed_count += len(batch_files)
+
+                # Wait before processing next batch (eğer daha fazla dosya varsa)
+                remaining_files = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(UploadedFile.status == "queued")  # Queue'daki dosyalar
+                    .filter(UploadedFile.chunking_status == "ready")
+                    .count()
+                )
+
+                if remaining_files > 0:
                     logging.info(
-                        f"🔄 Started chunking for file {file_record.id}: {file_record.original_name}"
+                        f"⏳ Waiting before starting next batch ({remaining_files} files remaining)..."
                     )
-
-                    # Database'den dosya yolunu al
-                    file_path = file_record.file_path
-
-                    if not os.path.exists(file_path):
-                        file_record.chunking_status = "failed"
-                        db_session.commit()
-                        logging.warning(
-                            f"⚠️ File not found at: {file_path} for {file_record.original_name}"
-                        )
-                        continue
-
-                    # Chunking işlemini background'da çalıştır
-                    asyncio.create_task(
-                        process_chunking_v2(
-                            file_record.id, file_record.original_name, file_path
-                        )
-                    )
-                    processed_count += 1
-                except Exception as file_error:
-                    logging.error(
-                        f"❌ Failed to start chunking for file {file_record.id}: {str(file_error)}"
-                    )
-                    continue
+                    await asyncio.sleep(2)  # 2 saniye bekle, sonraki batch'i al
+                else:
+                    # No more files, break
+                    break
 
             db_session.close()
             return create_api_response(
@@ -4960,6 +5013,9 @@ async def start_graph_creation(
 
         # Handle "all" parameter
         if file_id.lower() == "all":
+            # Get batch size from environment variable (default: 20)
+            batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
+
             # Get all files ready for graph creation (chunking completed, graph pending or processing)
             # Include "processing" status files to handle restart scenarios
             from sqlalchemy import or_
@@ -4986,107 +5042,121 @@ async def start_graph_creation(
                     data={"processed_count": 0},
                 )
 
-            # Prepare all files for processing
-            tasks = []
+            # Process files in batches
             processed_count = 0
 
-            for file_record in files_ready_for_graph:
-                try:
-                    # Check if markdown file exists
-                    if not file_record.markdown_path or not os.path.exists(
-                        file_record.markdown_path
-                    ):
-                        logging.warning(
-                            f"⚠️ Markdown file not found for {file_record.original_name}, skipping"
-                        )
-                        continue
-
-                    # If file is already in "processing" status, reset it to "pending" to allow restart
-                    # This handles the case where graph creation was started but server restarted
-                    if file_record.graph_status == "processing":
-                        logging.info(
-                            f"🔄 File {file_record.id} ({file_record.original_name}) is already in processing status, resetting to pending to allow restart"
-                        )
-                        file_record.graph_status = "pending"
-                        file_record.graph_started_at = None
-                        db_session.commit()
-
-                    # Update status to processing
-                    file_record.graph_status = "processing"
-                    file_record.graph_started_at = datetime.now(timezone.utc)
-                    file_record.model_used = model
-                    file_record.generate_embedding = str(generate_embedding)
-                    file_record.neo4j_uri = uri
-                    file_record.neo4j_database = database
-                    db_session.commit()
-
-                    logging.info(
-                        f"✨ Started graph creation for file {file_record.id}: {file_record.original_name}, Model: {model}"
-                    )
-
-                    # Graph creation işlemini background'da çalıştır (task olarak ekle)
-                    # Wrap in error handler to catch and log any exceptions
-                    async def process_with_error_handling():
-                        try:
-                            await process_graph_creation_v2(
-                                file_id=file_record.id,
-                                original_name=file_record.original_name,
-                                markdown_path=file_record.markdown_path,
-                                file_path=file_record.file_path,
-                                model=model,
-                                uri=uri,
-                                userName=userName,
-                                password=password,
-                                database=database,
-                                generate_embedding=generate_embedding,
-                            )
-                        except Exception as task_error:
-                            logging.error(
-                                f"❌ Graph creation task failed for file {file_record.id} ({file_record.original_name}): {str(task_error)}"
-                            )
-                            import traceback
-
-                            logging.error(f"Traceback: {traceback.format_exc()}")
-                            # Update status to failed
-                            try:
-                                db = get_file_queue_db()
-                                db_session = db.get_db_session()
-                                try:
-                                    failed_file = (
-                                        db_session.query(UploadedFile)
-                                        .filter_by(id=file_record.id)
-                                        .first()
-                                    )
-                                    if failed_file:
-                                        failed_file.graph_status = "failed"
-                                        failed_file.processing_error = str(task_error)[
-                                            :500
-                                        ]
-                                        db_session.commit()
-                                finally:
-                                    db_session.close()
-                            except Exception as db_error:
-                                logging.error(
-                                    f"❌ Failed to update status for file {file_record.id}: {str(db_error)}"
-                                )
-
-                    task = asyncio.create_task(process_with_error_handling())
-                    tasks.append(task)
-                    processed_count += 1
-                except Exception as file_error:
-                    logging.error(
-                        f"❌ Failed to start graph creation for file {file_record.id}: {str(file_error)}"
-                    )
-                    continue
-
-            # Close DB session before waiting for tasks
-            db_session.close()
-
-            # Start all tasks in background (don't await, let them run concurrently)
-            # Tasks will complete in background, endpoint returns immediately
-            logging.info(
-                f"🚀 Started {len(tasks)} graph creation tasks in background (concurrent processing)"
+            # Önce tüm "pending" dosyalarını queue'ya al (status = "queued")
+            # Bu sayede frontend'te "Queued for Graph" gösterilebilir ve dosyalar kilitlenir
+            all_pending_files = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.upload_status == "uploaded")
+                .filter(UploadedFile.chunking_status == "chunked")
+                .filter(UploadedFile.graph_status == "pending")
+                .all()
             )
+
+            if all_pending_files:
+                all_pending_file_ids = [f.id for f in all_pending_files]
+                db_session.query(UploadedFile).filter(
+                    UploadedFile.id.in_(all_pending_file_ids)
+                ).update(
+                    {UploadedFile.status: "queued"},  # status = "queued" ile kuyruğa al
+                    synchronize_session=False,
+                )
+                db_session.commit()
+                logging.info(
+                    f"📋 {len(all_pending_files)} dosya graph creation kuyruğuna alındı (status=queued, graph_status=pending)"
+                )
+
+            batch_number = 0
+            while True:
+                batch_number += 1
+                # Get fresh batch from database for each iteration
+                # Only get files that are still queued (status = "queued" and graph_status = "pending")
+                batch_files = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(UploadedFile.status == "queued")  # Queue'daki dosyalar
+                    .filter(UploadedFile.chunking_status == "chunked")
+                    .filter(UploadedFile.graph_status == "pending")
+                    .order_by(UploadedFile.created_at.asc())
+                    .limit(batch_size)
+                    .all()
+                )
+
+                if not batch_files:
+                    # No more files in queue
+                    break
+
+                # Batch'teki dosyaların ID'lerini al
+                batch_file_ids = [f.id for f in batch_files]
+
+                # Sadece bu batch'teki dosyaların status'unu "processing" ve graph_status'unu "processing" olarak güncelle
+                db_session.query(UploadedFile).filter(
+                    UploadedFile.id.in_(batch_file_ids)
+                ).update(
+                    {
+                        UploadedFile.status: "processing",  # status = "processing" ile işleme al
+                        UploadedFile.graph_status: "processing",
+                    },
+                    synchronize_session=False,
+                )
+                db_session.commit()
+
+                logging.info(
+                    f"📦 Graph creation batch seçildi: {len(batch_files)} dosya işlenmeye başlanıyor (ID'ler: {batch_file_ids})"
+                )
+
+                # Batch'teki dosyalar için model, uri gibi bilgileri güncelle
+                db_session.query(UploadedFile).filter(
+                    UploadedFile.id.in_(batch_file_ids)
+                ).update(
+                    {
+                        UploadedFile.graph_started_at: datetime.now(timezone.utc),
+                        UploadedFile.model_used: model,
+                        UploadedFile.generate_embedding: str(generate_embedding),
+                        UploadedFile.neo4j_uri: uri,
+                        UploadedFile.neo4j_database: database,
+                    },
+                    synchronize_session=False,
+                )
+                db_session.commit()
+
+                # Background processor'daki batch processing fonksiyonunu kullan
+                # (Image extraction ve chunking'deki mantık gibi)
+                from src.background_processor import get_background_processor
+
+                processor = get_background_processor()
+
+                # Batch'teki dosyaları refresh et (güncellenmiş bilgileri almak için)
+                for file_record in batch_files:
+                    db_session.refresh(file_record)
+
+                # Background processor'daki batch processing fonksiyonunu kullan
+                await processor.process_v2_graph_creation_batch(batch_files)
+                processed_count += len(batch_files)
+
+                # Wait before starting next batch (eğer daha fazla dosya varsa)
+                remaining_files = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(UploadedFile.status == "queued")  # Queue'daki dosyalar
+                    .filter(UploadedFile.chunking_status == "chunked")
+                    .filter(UploadedFile.graph_status == "pending")
+                    .count()
+                )
+
+                if remaining_files > 0:
+                    logging.info(
+                        f"⏳ Waiting before starting next batch ({remaining_files} files remaining)..."
+                    )
+                    await asyncio.sleep(2)  # 2 saniye bekle, sonraki batch'i al
+                else:
+                    # No more files, break
+                    break
+
+            # Close DB session
+            db_session.close()
 
             return create_api_response(
                 "Success",
@@ -5260,8 +5330,11 @@ async def create_embeddings_for_file(file_id: int):
 
 
 @app.post("/api/v2/files/{file_id}/reset")
-async def reset_file_stage(file_id: int, stage: str = "upload"):
-    """Reset file to a specific stage (cascading: upload→chunking→graph)"""
+async def reset_file_stage(file_id: str, stage: str = "upload"):
+    """Reset file to a specific stage (cascading: upload→chunking→graph)
+
+    If file_id is "all", resets all files based on their current status and the stage parameter.
+    """
     try:
         if stage not in ["upload", "chunking", "graph"]:
             return create_api_response("Failed", message="Invalid stage parameter")
@@ -5269,7 +5342,96 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
         db = get_file_queue_db()
         db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        # Handle "all" parameter
+        if file_id.lower() == "all":
+            # Get all files based on stage
+            if stage == "upload":
+                # Reset all uploaded files
+                files_to_reset = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .all()
+                )
+            elif stage == "chunking":
+                # Reset all files that have chunking_status in ["chunked", "chunking", "ready"]
+                files_to_reset = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(
+                        UploadedFile.chunking_status.in_(
+                            ["chunked", "chunking", "ready"]
+                        )
+                    )
+                    .all()
+                )
+            elif stage == "graph":
+                # Reset all files that have graph_status in ["processing", "completed"]
+                files_to_reset = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(UploadedFile.graph_status.in_(["processing", "completed"]))
+                    .all()
+                )
+            else:
+                files_to_reset = []
+
+            reset_count = 0
+            for file_record in files_to_reset:
+                # Reset logic with cascading
+                if stage == "upload":
+                    # Reset everything
+                    file_record.upload_status = "uploading"
+                    file_record.chunking_status = "pending"
+                    file_record.graph_status = "pending"
+                    file_record.status = "uploaded"  # Reset status
+                    file_record.chunking_started_at = None
+                    file_record.chunking_completed_at = None
+                    file_record.graph_started_at = None
+                    file_record.graph_completed_at = None
+                    reset_count += 1
+
+                elif stage == "chunking":
+                    # Reset chunking and graph (cascade)
+                    # If image extraction was already completed (file was chunked before),
+                    # set chunking_status to "ready" instead of "pending"
+                    # This allows chunking to be restarted immediately
+                    if file_record.chunking_status in ["chunked", "chunking", "ready"]:
+                        # Image extraction was already completed, set to "ready" for chunking
+                        file_record.chunking_status = "ready"
+                    else:
+                        # Image extraction not completed yet, set to "pending"
+                        file_record.chunking_status = "pending"
+                    file_record.graph_status = "pending"
+                    file_record.status = "uploaded"  # Reset status
+                    file_record.chunking_started_at = None
+                    file_record.chunking_completed_at = None
+                    file_record.graph_started_at = None
+                    file_record.graph_completed_at = None
+                    reset_count += 1
+
+                elif stage == "graph":
+                    # Reset only graph
+                    file_record.graph_status = "pending"
+                    file_record.status = "uploaded"  # Reset status
+                    file_record.graph_started_at = None
+                    file_record.graph_completed_at = None
+                    reset_count += 1
+
+            db_session.commit()
+            logging.info(f"🔄 Reset {stage.upper()} stage for {reset_count} file(s)")
+            return create_api_response(
+                "Success",
+                message=f"Reset {stage} stage for {reset_count} file(s)",
+                data={"reset_count": reset_count, "stage": stage},
+            )
+
+        # Single file reset (original logic)
+        try:
+            file_id_int = int(file_id)
+        except ValueError:
+            return create_api_response("Failed", message="Invalid file_id parameter")
+
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
 
@@ -5279,12 +5441,13 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
             file_record.upload_status = "uploading"
             file_record.chunking_status = "pending"
             file_record.graph_status = "pending"
+            file_record.status = "uploaded"  # Reset status
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
             logging.info(
-                f"🔄 Reset UPLOAD stage for file {file_id} (cascaded to all stages)"
+                f"🔄 Reset UPLOAD stage for file {file_id_int} (cascaded to all stages)"
             )
 
         elif stage == "chunking":
@@ -5299,20 +5462,22 @@ async def reset_file_stage(file_id: int, stage: str = "upload"):
                 # Image extraction not completed yet, set to "pending"
                 file_record.chunking_status = "pending"
             file_record.graph_status = "pending"
+            file_record.status = "uploaded"  # Reset status
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
             logging.info(
-                f"🔄 Reset CHUNKING stage for file {file_id} (cascaded to graph, chunking_status={file_record.chunking_status})"
+                f"🔄 Reset CHUNKING stage for file {file_id_int} (cascaded to graph, chunking_status={file_record.chunking_status})"
             )
 
         elif stage == "graph":
             # Reset only graph
             file_record.graph_status = "pending"
+            file_record.status = "uploaded"  # Reset status
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
-            logging.info(f"🔄 Reset GRAPH stage for file {file_id}")
+            logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
 
         db_session.commit()
 
@@ -5530,18 +5695,39 @@ async def delete_queued_file(file_id: str):
                                 // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
                                 OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
                                 
-                                // 3. Policy'den -> yönünde bağlı tüm node'ları topla
+                                // 3. Document'a HAS_ENDORSEMENT ile bağlı Endorsement node'ları topla
+                                OPTIONAL MATCH (d)<-[:HAS_ENDORSEMENT]-(e:Endorsement)
+                                
+                                // 4. Policy'den -> yönünde bağlı tüm node'ları topla
                                 OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
                                 WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
                                       relatedNodes:PolicyType OR relatedNodes:Customer OR
                                       relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
                                       relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
                                 
-                                // 4. Sadece başka Document'larda kullanılmayan node'ları sil
+                                // 5. Policy'den bağlı Endorsement node'ları topla (FIRST_ENDORSEMENT, NEXT_ENDORSEMENT)
+                                OPTIONAL MATCH (p)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(policyEndorsements:Endorsement)
+                                
+                                // 6. Endorsement'lardan bağlı node'ları topla
+                                OPTIONAL MATCH (e)-[*1..2]->(endorsementRelatedNodes)
+                                WHERE endorsementRelatedNodes:Premium OR endorsementRelatedNodes:Coverage OR
+                                      endorsementRelatedNodes:Clause OR endorsementRelatedNodes:Payment OR
+                                      endorsementRelatedNodes:Address OR endorsementRelatedNodes:Phone OR
+                                      endorsementRelatedNodes:Email
+                                
+                                OPTIONAL MATCH (policyEndorsements)-[*1..2]->(policyEndorsementRelatedNodes)
+                                WHERE policyEndorsementRelatedNodes:Premium OR policyEndorsementRelatedNodes:Coverage OR
+                                      policyEndorsementRelatedNodes:Clause OR policyEndorsementRelatedNodes:Payment OR
+                                      policyEndorsementRelatedNodes:Address OR policyEndorsementRelatedNodes:Phone OR
+                                      policyEndorsementRelatedNodes:Email
+                                
+                                // 7. Sadece başka Document'larda kullanılmayan node'ları sil
                                 WITH d, 
                                      COLLECT(DISTINCT c) AS chunks,
                                      COLLECT(DISTINCT p) AS policies,
-                                     COLLECT(DISTINCT relatedNodes) AS relatedNodesList
+                                     COLLECT(DISTINCT e) + COLLECT(DISTINCT policyEndorsements) AS allEndorsements,
+                                     COLLECT(DISTINCT relatedNodes) AS relatedNodesList,
+                                     COLLECT(DISTINCT endorsementRelatedNodes) + COLLECT(DISTINCT policyEndorsementRelatedNodes) AS endorsementRelatedNodesList
                                 
                                 // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
                                 WITH d, chunks,
@@ -5549,6 +5735,13 @@ async def delete_queued_file(file_id: str):
                                          MATCH (d2:Document)
                                          WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
                                      }] AS safePolicies,
+                                     [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
+                                         MATCH (d2:Document)
+                                         WHERE d2 <> d AND (
+                                             (d2)<-[:HAS_ENDORSEMENT]-(endorsement) OR
+                                             (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
+                                         )
+                                     }] AS safeEndorsements,
                                      [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
                                          MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
                                          WHERE d2 <> d AND (
@@ -5556,10 +5749,21 @@ async def delete_queued_file(file_id: str):
                                              (p2)<-[:HAS_DOC]-(node) OR
                                              (p2)<-[:DOCUMENTED_IN]-(node)
                                          )
-                                     }] AS safeRelatedNodes
+                                     }] AS safeRelatedNodes,
+                                     [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
+                                         MATCH (d2:Document)
+                                         WHERE d2 <> d AND (
+                                             (d2)<-[:HAS_ENDORSEMENT]-(:Endorsement)-[*1..2]->(node) OR
+                                             (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
+                                         )
+                                     }] AS safeEndorsementRelatedNodes
                                 
-                                // 5. Silme işlemi
+                                // 8. Silme işlemi
                                 FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                                FOREACH (endorsement IN safeEndorsements | 
+                                    FOREACH (relNode IN safeEndorsementRelatedNodes | DETACH DELETE relNode)
+                                )
+                                FOREACH (endorsement IN safeEndorsements | DETACH DELETE endorsement)
                                 FOREACH (policy IN safePolicies | 
                                     FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
                                 )
@@ -6385,6 +6589,9 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
             # Chunking tamamlandı, status güncelle
             file_record.chunking_status = "chunked"
             file_record.chunking_completed_at = datetime.now(timezone.utc)
+            file_record.status = (
+                "uploaded"  # Chunking tamamlandı, status'u "uploaded" olarak güncelle
+            )
 
             # Metadata zaten upload sırasında kaydedildi, sadece markdown path ekle
             # doc_link ve page_images zaten database'de mevcut
@@ -6700,6 +6907,7 @@ async def process_graph_creation_v2(
         # Graph creation tamamlandı, status güncelle
         file_record.graph_status = "completed"
         file_record.graph_completed_at = datetime.now(timezone.utc)
+        file_record.status = "completed"  # Graph creation tamamlandı, status'u "completed" olarak güncelle
         file_record.node_count = node_count
         file_record.relationship_count = relationship_count
         file_record.processing_time = processing_time

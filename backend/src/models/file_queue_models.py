@@ -276,7 +276,7 @@ class FileQueueDatabase:
                 file_hash=file_hash,
                 status=FileStatus.UPLOADED,  # Old field for compatibility
                 upload_status="uploaded",  # V2 workflow
-                chunking_status="pending",  # V2 workflow
+                chunking_status="pending",  # V2 workflow: Upload sonrası "pending", batch seçildiğinde "extracting" olacak
                 graph_status="pending",  # V2 workflow
                 neo4j_uri=neo4j_uri,
                 neo4j_database=neo4j_database,

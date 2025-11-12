@@ -80,24 +80,16 @@ const V2FileQueue: React.FC = () => {
       const fileIds = Array.from(selectedFileIds);
       console.log(`🔄 Starting chunking for ${fileIds.length} files`);
 
-      // Call backend API for each selected file
-      for (const fileId of fileIds) {
-        const response = await startChunkingAPI(fileId);
+      // Use "all" parameter for batch processing (backend will handle batching)
+      const response = await startChunkingAPI('all');
 
-        // Immediately update local state if API returns chunking_status
-        if (response?.status === 'Success' && response?.data?.chunking_status) {
-          setFiles((prevFiles) =>
-            prevFiles.map((file) => {
-              if (file.id === fileId) {
-                return { ...file, chunking_status: response.data.chunking_status };
-              }
-              return file;
-            })
-          );
-        }
+      if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+        const processedCount = response.data?.processed_count || fileIds.length;
+        showSuccessToast(`Started chunking for ${processedCount} file(s) (batch processing)`);
+      } else {
+        showErrorToast(`Failed to start chunking: ${response?.message || 'Unknown error'}`);
       }
 
-      showSuccessToast(`Started chunking for ${fileIds.length} file(s)`);
       setSelectedFileIds(new Set());
       await fetchV2Files(); // Refresh file list
     } catch (error) {
@@ -118,24 +110,16 @@ const V2FileQueue: React.FC = () => {
       const fileIds = Array.from(selectedFileIds);
       console.log(`✨ Starting graph creation for ${fileIds.length} files`);
 
-      // Call backend API for each selected file
-      for (const fileId of fileIds) {
-        const response = await startGraphCreationAPI(fileId, 'openai_gpt_4o_mini', false);
+      // Use "all" parameter for batch processing (backend will handle batching)
+      const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
 
-        // Immediately update local state if API returns graph_status
-        if (response?.status === 'Success' && response?.data?.graph_status) {
-          setFiles((prevFiles) =>
-            prevFiles.map((file) => {
-              if (file.id === fileId) {
-                return { ...file, graph_status: response.data.graph_status };
-              }
-              return file;
-            })
-          );
-        }
+      if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+        const processedCount = response.data?.processed_count || fileIds.length;
+        showSuccessToast(`Started graph creation for ${processedCount} file(s) (batch processing)`);
+      } else {
+        showErrorToast(`Failed to start graph creation: ${response?.message || 'Unknown error'}`);
       }
 
-      showSuccessToast(`Started graph creation for ${fileIds.length} file(s)`);
       setSelectedFileIds(new Set());
       await fetchV2Files(); // Refresh file list
     } catch (error) {

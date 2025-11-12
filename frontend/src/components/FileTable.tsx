@@ -44,29 +44,19 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { ThemeWrapperContext } from '../context/ThemeWrapper';
 import { useCredentials } from '../context/UserCredentials';
 import { useFileContext } from '../context/UsersFiles';
 import useServerSideEvent from '../hooks/useSse';
 import cancelAPI from '../services/CancelAPI';
-import { getSourceNodes } from '../services/GetFiles';
 import subscribe from '../services/PollingAPI';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
 import { ChildRef, CustomFile, FileTableProps, SourceNode, UserCredentials, statusupdate } from '../types';
-import { batchSize, largeFileSize, llms } from '../utils/Constants';
+import { batchSize, llms } from '../utils/Constants';
 import { getQueuedFilesAPI, startChunkingAPI, startGraphCreationAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast } from '../utils/Toasts';
+import { capitalizeWithUnderscore, statusCheck } from '../utils/Utils';
 import { normalizeFileName } from '../utils/utf8';
-import {
-  calculateProcessedCount,
-  capitalizeWithUnderscore,
-  getFileSourceStatus,
-  getParsedDate,
-  isFileCompleted,
-  isProcessingFileValid,
-  statusCheck,
-} from '../utils/Utils';
 import BreakDownPopOver from './BreakDownPopOver';
 import CustomProgressBar from './UI/CustomProgressBar';
 import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
@@ -152,21 +142,48 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       const response = await getQueuedFilesAPI();
       if (response?.status === 'Success' && response?.data?.files) {
         const v2Files = response.data.files.map((file: any) => {
-          // V2 Workflow: status belirleme (aynı mantık ile)
+          // V2 Workflow: status belirleme
+          // status alanı + chunking_status/graph_status alanlarına bakarak durumu belirle
           let status = 'New';
-          if (file.graph_status === 'completed') {
+
+          // status = "processing" kontrolü (herhangi bir işlem yapılıyor)
+          if (file.status === 'processing') {
+            if (file.graph_status === 'processing') {
+              status = 'Processing Graph'; // Graph creation yapılıyor
+            } else if (file.chunking_status === 'chunking') {
+              status = 'Processing Chunks'; // Chunking yapılıyor
+            } else if (file.chunking_status === 'extracting') {
+              status = 'Extracting'; // Image extraction yapılıyor
+            } else {
+              status = 'Processing'; // Genel processing
+            }
+          }
+          // status = "queued" kontrolü (kuyrukta bekliyor)
+          else if (file.status === 'queued') {
+            if (file.chunking_status === 'ready' && file.graph_status === 'pending') {
+              status = 'Queued for Chunking'; // Chunking kuyruğunda bekliyor
+            } else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
+              status = 'Queued for Graph'; // Graph creation kuyruğunda bekliyor
+            } else if (file.chunking_status === 'pending') {
+              status = 'Queued for Extraction'; // Image extraction kuyruğunda bekliyor
+            } else {
+              status = 'Queued'; // Genel queue
+            }
+          }
+          // status = "completed" kontrolü
+          else if (file.status === 'completed' || file.graph_status === 'completed') {
             status = 'Completed';
-          } else if (file.graph_status === 'processing') {
-            status = 'Processing';
+          }
+          // Diğer durumlar (status = "uploaded" veya diğer)
+          else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
+            status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
           } else if (file.chunking_status === 'chunked') {
-            status = 'Chunked'; // Chunking tamamlandı, graph creation bekliyor
-          } else if (file.chunking_status === 'chunking') {
-            status = 'Processing'; // Chunking yapılıyor
+            status = 'Chunked'; // Chunking tamamlandı
           } else if (file.chunking_status === 'ready') {
-            status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
+            status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
           } else if (file.chunking_status === 'pending') {
-            status = 'pending'; // Image extraction henüz başlamadı
-          } else if (file.chunking_status === 'failed') {
+            status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
+          } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
             status = 'Failed';
           }
 
@@ -180,7 +197,14 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
             fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
             nodesCount: 0,
             relationshipsCount: 0,
-            processingProgress: file.chunking_status === 'chunked' ? 100 : file.chunking_status === 'chunking' ? 50 : 0,
+            processingProgress:
+              file.chunking_status === 'chunked'
+                ? 100
+                : file.chunking_status === 'chunking'
+                  ? 50
+                  : file.chunking_status === 'extracting'
+                    ? 25
+                    : 0,
             model: file.model_used || 'Not set',
             processingTotalTime: '0',
             chunkNodeCount: 0,
@@ -224,10 +248,21 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       {
         id: 'select',
         header: ({ table }: { table: Table<CustomFile> }) => {
-          const processingcheck = table
-            .getRowModel()
-            .rows.map((i) => i.original.status)
-            .includes('Processing');
+          // V2 dosyaları için daha esnek kontrol: sadece gerçekten işlem yapılan dosyaları disable et
+          // V2 dosyaları queue'da bekliyor olabilir ama seçilebilir olmalı
+          const processingcheck = table.getRowModel().rows.some((i) => {
+            const file = i.original;
+            // V2 dosyaları için: sadece gerçekten işlem yapılan dosyaları disable et
+            if (file.fileSource === 'V2 Queue') {
+              // V2 dosyaları için: "Processing Graph", "Processing Chunks", "Extracting" seçilebilir
+              // Sadece "Processing" (genel) veya "Uploading" disable olsun
+              return (
+                file.status === 'Processing' && !file.status?.includes('Graph') && !file.status?.includes('Chunks')
+              );
+            }
+            // V1 dosyaları için: eski mantık
+            return file.status === 'Processing';
+          });
           return (
             <Checkbox
               ariaLabel='header-checkbox'
@@ -245,17 +280,30 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         cell: ({ row }: { row: Row<CustomFile> }) => {
           const isV2File = row.original.fileSource === 'V2 Queue';
           const { v2FileId } = row.original;
+          const file = row.original;
+
+          // V2 dosyaları için daha esnek kontrol
+          let isDisabled =
+            !row.getCanSelect() || row.original.status === 'Uploading' || row.original.status === 'Waiting';
+
+          if (isV2File) {
+            // V2 dosyaları için: sadece gerçekten işlem yapılan dosyaları disable et
+            // "Processing Graph", "Processing Chunks", "Extracting" seçilebilir
+            // Sadece genel "Processing" disable olsun
+            if (file.status === 'Processing' && !file.status.includes('Graph') && !file.status.includes('Chunks')) {
+              isDisabled = true;
+            }
+          } else if (file.status === 'Processing') {
+            // V1 dosyaları için: eski mantık
+            isDisabled = true;
+          }
+
           return (
             <div className='px-1'>
               <Checkbox
                 ariaLabel='row-selection'
                 isChecked={row.getIsSelected()}
-                isDisabled={
-                  !row.getCanSelect() ||
-                  row.original.status == 'Uploading' ||
-                  row.original.status === 'Processing' ||
-                  row.original.status === 'Waiting'
-                }
+                isDisabled={isDisabled}
                 onChange={() => {
                   // React table'ın selection'ını kullan, ayrı state'e gerek yok
                   row.toggleSelected();
@@ -289,7 +337,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       columnHelper.accessor((row) => row.status, {
         id: 'status',
         cell: (info) => {
-          if (info.getValue() != 'Processing') {
+          if (info.getValue() != 'Processing' && info.getValue() != 'Extracting') {
             return (
               <div
                 className='cellClass flex! gap-1 items-center'
@@ -316,14 +364,17 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                   )}
               </div>
             );
-          } else if (info.getValue() === 'Processing' && info.row.original.processingProgress === undefined) {
+          } else if (
+            (info.getValue() === 'Processing' || info.getValue() === 'Extracting') &&
+            info.row.original.processingProgress === undefined
+          ) {
             return (
               <div className='cellClass flex! gap-1 items-center'>
                 <div>
                   <StatusIndicator type={statusCheck(info.getValue())} />
                 </div>
                 <div>
-                  <i>Processing</i>
+                  <i>{info.getValue() === 'Extracting' ? 'Extracting' : 'Processing'}</i>
                 </div>
                 <div className='mx-1'>
                   <IconButton
@@ -348,14 +399,14 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               </div>
             );
           } else if (
-            info.getValue() === 'Processing' &&
+            (info.getValue() === 'Processing' || info.getValue() === 'Extracting') &&
             info.row.original.processingProgress != undefined &&
             info.row.original.processingProgress < 100
           ) {
             return (
               <div className='cellClass'>
                 <ProgressBar
-                  heading='Processing '
+                  heading={info.getValue() === 'Extracting' ? 'Extracting ' : 'Processing '}
                   size='small'
                   value={info.row.original.processingProgress}
                 ></ProgressBar>
@@ -819,190 +870,21 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     triggerStatusUpdateAPI(item.fileName, userCredentials, updateStatusForLargeFiles);
   };
 
-  useEffect(() => {
-    // V1 sources_list endpoint'i devre dışı bırakıldı - V2 Queue sistemi kullanılıyor
-    // V2 dosyaları getQueuedFilesAPI ile yükleniyor (reloadV2Files fonksiyonu)
-    return;
-
-    // Eski V1 kod - artık kullanılmıyor
-    const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
-    if (hasV2Files) {
-      return;
-    }
-
-    const waitingQueue: CustomFile[] = JSON.parse(
-      localStorage.getItem('waitingQueue') ?? JSON.stringify({ queue: [] })
-    ).queue;
-    const fetchFiles = async () => {
-      try {
-        setIsLoading(true);
-        const res = await getSourceNodes();
-        if (!res.data) {
-          throw new Error('Please check backend connection');
-        }
-        const stringified = waitingQueue.reduce((accu, f) => {
-          const key = f.id;
-          // @ts-ignore
-          accu[key] = true;
-          return accu;
-        }, {});
-        setRowSelection(stringified);
-        if (res.data.status !== 'Failed') {
-          const prefiles: CustomFile[] = [];
-          if (res.data.data.length) {
-            res.data.data.forEach((item) => {
-              if (item.fileName != undefined && item.fileName.length) {
-                const waitingFile =
-                  waitingQueue.length && waitingQueue.find((f: CustomFile) => f.name === item.fileName);
-                if (isFileCompleted(waitingFile as CustomFile, item)) {
-                  setProcessedCount((prev) => calculateProcessedCount(prev, batchSize));
-                  queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(item.fileName));
-                }
-                if (waitingFile && item.status === 'Completed') {
-                  setProcessedCount((prev) => {
-                    if (prev === batchSize) {
-                      return batchSize - 1;
-                    }
-                    return prev + 1;
-                  });
-                  queue.remove((i) => normalizeFileName(i.name) === normalizeFileName(item.fileName));
-                }
-                prefiles.push({
-                  name: item?.fileName,
-                  size: item?.fileSize ?? 0,
-                  type: item?.fileType?.includes('.')
-                    ? (item?.fileType?.substring(1)?.toUpperCase() ?? 'None')
-                    : (item?.fileType?.toUpperCase() ?? 'None'),
-                  nodesCount: item?.nodeCount ?? 0,
-                  processingTotalTime: item?.processingTime ?? 'None',
-                  relationshipsCount: item?.relationshipCount ?? 0,
-                  status: waitingFile ? 'Waiting' : getFileSourceStatus(item),
-                  model: item?.model ?? model,
-                  id: !waitingFile ? uuidv4() : waitingFile.id,
-                  sourceUrl: item?.url != 'None' && item?.url != '' ? item.url : '',
-                  fileSource: item?.fileSource ?? 'None',
-                  gcsBucket: item?.gcsBucket,
-                  gcsBucketFolder: item?.gcsBucketFolder,
-                  errorMessage: item?.errorMessage,
-                  uploadProgress: item?.uploadprogress ?? 0,
-                  googleProjectId: item?.gcsProjectId,
-                  language: item?.language ?? '',
-                  processingProgress:
-                    item?.processed_chunk != undefined &&
-                    item?.total_chunks != undefined &&
-                    !isNaN(Math.floor((item?.processed_chunk / item?.total_chunks) * 100))
-                      ? Math.floor((item?.processed_chunk / item?.total_chunks) * 100)
-                      : undefined,
-                  accessToken: item?.accessToken ?? '',
-                  retryOption: item.retry_condition ?? '',
-                  retryOptionStatus: false,
-                  chunkNodeCount: item.chunkNodeCount ?? 0,
-                  chunkRelCount: item.chunkRelCount ?? 0,
-                  entityNodeCount: item.entityNodeCount ?? 0,
-                  entityEntityRelCount: item.entityEntityRelCount ?? 0,
-                  communityNodeCount: item.communityNodeCount ?? 0,
-                  communityRelCount: item.communityRelCount ?? 0,
-                  createdAt: item.createdAt != undefined ? getParsedDate(item?.createdAt) : undefined,
-                });
-              }
-            });
-            res.data.data.forEach((item) => {
-              if (isProcessingFileValid(item, userCredentials as UserCredentials)) {
-                item.fileSize < largeFileSize
-                  ? handleSmallFile(item, userCredentials as UserCredentials)
-                  : handleLargeFile(item, userCredentials as UserCredentials);
-              }
-            });
-          } else {
-            queue.clear();
-          }
-          setIsLoading(false);
-          setFilesData(prefiles);
-
-          // Fetch V2 Queue files
-          try {
-            const v2Response = await getQueuedFilesAPI();
-            if (v2Response?.status === 'Success' && v2Response?.data?.files) {
-              const v2Files: CustomFile[] = v2Response.data.files.map((file: any) => {
-                // V2 Workflow: status belirleme
-                // chunking_status: pending -> "pending" (chunking bekliyor)
-                // chunking_status: chunking -> "Processing" (chunking yapılıyor)
-                // chunking_status: chunked -> "Chunked" (chunking tamamlandı, graph bekliyor)
-                // graph_status: processing -> "Processing" (graph oluşturuluyor)
-                // graph_status: completed -> "Completed" (tüm iş bitti)
-                let status = 'New';
-                if (file.graph_status === 'completed') {
-                  status = 'Completed';
-                } else if (file.graph_status === 'processing') {
-                  status = 'Processing';
-                } else if (file.chunking_status === 'chunked') {
-                  status = 'Chunked'; // Chunking tamamlandı, graph creation bekliyor
-                } else if (file.chunking_status === 'chunking') {
-                  status = 'Processing';
-                } else if (file.chunking_status === 'ready') {
-                  status = 'pending'; // Image extraction tamamlandı, chunking'e hazır
-                } else if (file.chunking_status === 'pending') {
-                  status = 'pending'; // Image extraction henüz başlamadı
-                }
-
-                return {
-                  id: `v2_${file.id}`,
-                  name: file.original_name,
-                  type: file.original_name.substring(file.original_name.lastIndexOf('.') + 1).toUpperCase(),
-                  size: file.file_size,
-                  uploadProgress: 100,
-                  processingProgress: 0,
-                  status,
-                  nodesCount: 0,
-                  relationshipsCount: 0,
-                  processingTotalTime: 0,
-                  model: 'openai_gpt_4o_mini',
-                  fileSource: 'V2 Queue',
-                  retryOptionStatus: false,
-                  retryOption: '',
-                  chunkNodeCount: 0,
-                  chunkRelCount: 0,
-                  entityNodeCount: 0,
-                  entityEntityRelCount: 0,
-                  communityNodeCount: 0,
-                  communityRelCount: 0,
-                  createdAt: new Date(file.upload_date),
-                  // V2 Queue specific fields
-                  v2FileId: file.id,
-                  upload_status: file.upload_status,
-                  chunking_status: file.chunking_status,
-                  graph_status: file.graph_status,
-                };
-              });
-              setFilesData([...prefiles, ...v2Files]);
-            }
-          } catch (v2Error) {
-            // Continue with just V1 files if V2 fetch fails
-          }
-        } else {
-          throw new Error(res?.data?.error);
-        }
-        setIsLoading(false);
-      } catch (error: any) {
-        if (error instanceof Error) {
-          showErrorToast(error.message);
-        }
-
-        setIsLoading(false);
-        setConnectionStatus(false);
-        setFilesData([]);
-      }
-    };
-    if (connectionStatus) {
-      fetchFiles();
-    } else {
-      setFilesData([]);
-    }
-  }, [connectionStatus, userCredentials]);
+  // V1 sources_list endpoint'i devre dışı bırakıldı - V2 Queue sistemi kullanılıyor
+  // V2 dosyaları getQueuedFilesAPI ile yükleniyor (reloadV2Files fonksiyonu)
+  // useEffect removed - no longer needed
 
   useEffect(() => {
     if (connectionStatus && filesData.length && onlyfortheFirstRender && !isReadOnlyUser) {
-      const processingFilesCount = filesData.filter((f) => f.status === 'Processing').length;
+      // V2 dosyaları için daha esnek kontrol: sadece gerçekten işlem yapılan dosyaları say
+      const processingFilesCount = filesData.filter((f) => {
+        if (f.fileSource === 'V2 Queue') {
+          // V2 dosyaları için: sadece genel "Processing" status'ünü say
+          // "Processing Graph", "Processing Chunks", "Extracting" sayılmasın
+          return f.status === 'Processing' && !f.status.includes('Graph') && !f.status.includes('Chunks');
+        }
+        return f.status === 'Processing';
+      }).length;
       if (processingFilesCount) {
         if (processingFilesCount === 1) {
           setProcessedCount(1);
@@ -1284,11 +1166,16 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               showErrorToast(`Failed to start chunking: ${response.message || 'Unknown error'}`);
             }
           } else {
-            // Start chunking for selected files
-            for (const fileId of selected) {
-              await startChunkingAPI(fileId);
+            // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
+            // Backend zaten batch batch işlemek için dosyaları işaretliyor
+            showNormalToast(`${selected.length} dosya için chunking başlatılıyor (batch batch işlenecek)...`);
+            const response = await startChunkingAPI('all');
+            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+              const processedCount = response.data?.processed_count || selected.length;
+              showNormalToast(`✓ Chunking started for ${processedCount} file(s) (batch batch işlenecek)`);
+            } else {
+              showErrorToast(`Failed to start chunking: ${response.message || 'Unknown error'}`);
             }
-            showNormalToast(`✓ Chunking started for ${selected.length} file(s)`);
           }
           setV2SelectedFileIds(new Set());
           await reloadV2Files();
@@ -1354,17 +1241,16 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               })
             );
 
-            // Sadece chunked olanlar için graph oluştur
-            for (const file of chunkedFiles) {
-              if (file.v2FileId) {
-                try {
-                  await startGraphCreationAPI(file.v2FileId, 'openai_gpt_4o_mini', false);
-                } catch (error) {
-                  // Graph creation error handled
-                }
-              }
+            // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
+            // Backend zaten batch batch işlemek için dosyaları işaretliyor
+            showNormalToast(`${chunkedFiles.length} dosya için graph oluşturuluyor (batch batch işlenecek)...`);
+            const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
+            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+              const processedCount = response.data?.processed_count || chunkedFiles.length;
+              showNormalToast(`✓ Graph creation started for ${processedCount} file(s) (batch batch işlenecek)`);
+            } else {
+              showErrorToast(`Failed to start graph creation: ${response.message || 'Unknown error'}`);
             }
-            showNormalToast(`✓ Graph creation started for ${chunkedFiles.length} file(s)`);
           }
           setV2SelectedFileIds(new Set());
 

@@ -84,10 +84,28 @@ export const statusCheck = (status: string) => {
     // V2 Queue statuses
     case 'pending':
       return 'info';
+    case 'Extracting':
+      return 'warning'; // Image extraction yapılıyor
+    case 'Queued for Extraction':
+      return 'info'; // Image extraction kuyruğunda
+    case 'Ready for Chunking':
+      return 'info'; // Chunking'e hazır
+    case 'Queued for Chunking':
+      return 'info'; // Chunking kuyruğunda
+    case 'Processing Chunks':
+      return 'warning'; // Chunking yapılıyor
     case 'chunking':
       return 'warning';
     case 'chunked':
       return 'success';
+    case 'Ready for Graph':
+      return 'info'; // Graph oluşturmaya hazır
+    case 'Queued for Graph':
+      return 'info'; // Graph creation kuyruğunda
+    case 'Processing Graph':
+      return 'warning'; // Graph creation yapılıyor
+    case 'Queued':
+      return 'info'; // Genel queue
     default:
       return 'unknown';
   }
