@@ -17,13 +17,19 @@ services:
       context: ./backend
       dockerfile: Dockerfile # Production Dockerfile
     env_file:
-      - ./backend/.env
+      - ./backend/.preview.env
     container_name: backend-preview
     ports:
       - "8000:8000" # preview port - production test
     environment:
       - PYTHONPATH=/code
       - ENV=preview
+      - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
+    volumes:
+      # Persist queue.db in user's home directory - survives container/image deletion
+      # Mount directory so Docker can auto-create the file
+      # Backend will use QUEUE_DB_PATH environment variable to write to this location
+      - ~/sqlite-db:/code/backend/sqlite-data
     restart: unless-stopped
     # depends_on:
     #   - jaeger

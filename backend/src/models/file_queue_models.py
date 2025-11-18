@@ -502,9 +502,14 @@ def get_file_queue_db(db_path: str = None) -> FileQueueDatabase:
 
     if _db_instance is None:
         if db_path is None:
-            # Default path: backend/queue.db
-            current_dir = Path(__file__).parent.parent.parent  # backend/
-            db_path = current_dir / "queue.db"
+            # Check environment variable first
+            env_db_path = os.getenv("QUEUE_DB_PATH")
+            if env_db_path:
+                db_path = env_db_path
+            else:
+                # Default path: backend/queue.db
+                current_dir = Path(__file__).parent.parent.parent  # backend/
+                db_path = current_dir / "queue.db"
 
         _db_instance = FileQueueDatabase(str(db_path))
 
