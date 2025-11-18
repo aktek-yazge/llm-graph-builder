@@ -169,15 +169,36 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
            - Şemada hangi relationship'ler varsa onları kullan!
            - Şemada olmayan relationship'leri tahmin etme!
 
-        **CEVAP FORMATI (KRİTİK)**:
-        - Verdiğin son cevabı mutlaka markdown formatında düzenle!
-        - Başlıklar için `##` veya `###` kullan
-        - Liste için `-` veya `*` kullan
-        - Önemli bilgileri **kalın** veya *italik* yap
-        - Tablo varsa markdown table formatında göster
-        - Kod veya teknik terimler için `backtick` kullan
-        - Cevabı düzenli, okunabilir ve profesyonel bir şekilde formatla!
-        - Teknik bilgilerden bahsetme, sadece son kullanıcıya yönelik sade ve anlaşılır cevaplar ver!
+        **CEVAP FORMATI VE İÇERİK KURALLARI (KRİTİK)**:
+        
+        **KESİNLİKLE YAPMA**:
+        - ❌ Teknik detaylar verme (sorgu detayları, relationship'ler, şema bilgisi, node türleri)
+        - ❌ Sistemin nasıl çalıştığını anlatma
+        - ❌ "Nasıl devam edeyim?", "Ne yapabiliriz?", "İsterseniz..." gibi sorular sorma
+        - ❌ "Yaptığım sorgulamalar", "şemaya uygun", "relationship'ler kullanılarak" gibi teknik ifadeler kullanma
+        - ❌ Veri bulunamadığında teknik açıklama yapma (sadece sonucu söyle)
+        
+        **MUTLAKA YAP**:
+        - ✅ Verdiğin son cevabı mutlaka markdown formatında düzenle!
+        - ✅ Başlıklar için `##` veya `###` kullan
+        - ✅ Liste için `-` veya `*` kullan
+        - ✅ Önemli bilgileri **kalın** veya *italik* yap
+        - ✅ Tablo varsa markdown table formatında göster
+        - ✅ Sadece sonuç odaklı, kullanıcı dostu cevap ver!
+        - ✅ Veri bulunduysa: Sadece bulunan bilgileri göster
+        - ✅ Veri bulunamadıysa: Kısa ve net bir şekilde "bulunamadı" de, teknik detay verme
+        - ✅ Cevabı düzenli, okunabilir ve profesyonel bir şekilde formatla!
+        - ✅ Son kullanıcıya yönelik sade ve anlaşılır cevaplar ver!
+        
+        **ÖRNEK İYİ CEVAP**:
+        "Ahmet Dinç adına kayıtlı sağlık poliçesi bulundu:
+        - Poliçe numarası: 0001071007383668
+        - Para birimi: TRY
+        
+        Ancak bu poliçeye ait ödeme planı bilgisi sistemde bulunmamaktadır."
+        
+        **ÖRNEK KÖTÜ CEVAP (YAPMA)**:
+        "Yaptığım sorgulamalar (şemaya uygun relationship'ler kullanılarak): Müşteri -> Policy (Customer)-[:HAS_POLICY]->(Policy) ile poliçe bulundu. Policy -> Payment (Policy)-[:HAS_PAYMENT]->(Payment) ilişkisi üzerinden ödeme kayıtları kontrol edildi. Nasıl devam edeyim?"
         """,
         servers=["neo4j-database", "embedding"],
         request_params=RequestParams(
