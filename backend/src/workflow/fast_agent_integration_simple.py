@@ -55,10 +55,7 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         
         Neo4j veritabanı şema bilgisi prompt'a eklenmiştir. Bu şema bilgisini kullanarak tool çağrıları yap.
         
-        **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
-        ```cypher
-        toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
-        ```
+        **STRING NORMALİZASYON**: String karşılaştırmalarında mutlaka kullan: toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
        
         Şema bilgisine göre tool çağrıları yaparak sonuca ulaşmaya çalış.
         
@@ -79,48 +76,108 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         Keşif sorguları yaparken özne ve nesneye odaklanarak tekil kelimeler ile arama yapmalısın.
         
 
-        **İÇERİK ARAMASI STRATEJİSİ (KRİTİK)**:
+        **ARAMA STRATEJİSİ (KRİTİK - ŞEMADAN ÖĞREN)**:
         
-        **CONTENT SORULARI için APOC ile text araması yap**: 
-        - "ödeme planı", "taksit tablosu", "tablo halinde", "detay", "açıklama", "tutar", "plan", "tablo" gibi içerik terimleri varsa
-        - Chunk node'larında text alanında APOC ile clean contains araması yap:
-          ```cypher
-          MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-          WHERE toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('içerik_terimi'))
-          RETURN c.text, c.page_link, c.page_number, d.fileName
-          LIMIT 10
-          ```
-        - İçerik terimlerini tek tek veya birleştirerek ara (örnek: "ödeme planı" veya "ödeme" ve "plan" ayrı ayrı)
+        **TEMEL PRENSİP**: Şemadan öğren! Prompt'ta kod örneği yok, şemadan node türlerini ve relationship'leri öğrenerek kendi sorgunu oluştur!
         
-        **METADATA SORULARI için entity araması**: 
-        - Müşteri adı, poliçe numarası, yıl gibi yapılandırılmış veriler için Customer/Policy node'larında ara
+        **ENTITY SORULARI için relationship-based arama (ÖNCELİKLİ)**: 
+        - Soruda geçen terimlerin şemada hangi node türlerine karşılık geldiğini kontrol et!
+        - Şemadan ilgili node türlerini ve relationship'leri bul!
+        - Şemada node türü ve relationship varsa, direkt relationship üzerinden sorgula!
+        - Chunk'larda text araması YAPMA! Entity'ler relationship üzerinden sorgulanır!
+        - Şemadan öğrendiğin node türleri ve relationship'leri kullanarak sorgunu oluştur!
         
-        **HİBRİT ARAMALAR**: 
-        - Önce entity filtresi (Customer/Policy), sonra o belgelerin Chunk'larında content search
-        - Örnek: "Ahmet dinçin sağlık poliçesi ödeme planı" → Önce Customer filtresi (Ahmet dinç), PolicyType filtresi (sağlık), sonra Chunk'larda "ödeme planı" için APOC text araması
-          ```cypher
-          MATCH (customer:Customer)-[:HAS_POLICY]->(policy:Policy)-[:HAS_TYPE]->(pt:PolicyType)
-          WHERE toLower(apoc.text.clean(customer.name)) CONTAINS toLower(apoc.text.clean('Ahmet dinç'))
-            AND toLower(apoc.text.clean(pt.typeName)) CONTAINS toLower(apoc.text.clean('sağlık'))
-          MATCH (policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION|HAS_DOC]->(doc:Document)<-[:PART_OF]-(c:Chunk)
-          WHERE toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('ödeme planı'))
-          RETURN c.text, c.page_link, c.page_number, doc.fileName
-          LIMIT 10
-          ```
+        **CONTENT SORULARI için APOC ile text araması (SADECE İÇERİK TERİMLERİ)**: 
+        - Soruda "plan", "tablo", "detay", "açıklama", "tutar" gibi içerik terimleri varsa VE şemada bu terimlere karşılık gelen node türü YOKSA
+        - Chunk node'larında text alanında APOC ile clean contains araması yap
+        - STRING NORMALİZASYON kullan: toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
         
-        **ÖNEMLİ**: Entity araması sonuç vermezse veya içerik terimleri (tablo, plan, detay, tutar vb.) varsa MUTLAKA Chunk'larda APOC text araması yap! Vector/embedding search KULLANMA!
+        **ÖNEMLİ KURALLAR**:
+        1. **ŞEMADAN ÖĞREN (EN ÖNEMLİSİ)**: 
+           - Sorudaki terimlerin şemada hangi node türlerine karşılık geldiğini ÖNCE kontrol et!
+           - Şemada node türü varsa MUTLAKA relationship üzerinden sorgula!
+           - Şemada node türü varsa Chunk'larda text araması YAPMA!
+           - Şemada node türü yoksa ve içerik terimleri varsa Chunk'larda text araması yapabilirsin!
+        2. **ÖNCELİK SIRASI**: 
+           - ÖNCE şemadan entity node'larını ve relationship'leri kontrol et!
+           - Entity varsa relationship üzerinden sorgula, Chunk'larda arama yapma!
+           - Entity yoksa ve içerik terimleri varsa Chunk'larda APOC text araması yap!
+        3. **YANLIŞ YAKLAŞIM - KESİNLİKLE YAPMA**: 
+           - Şemada node türü varsa Chunk'larda text araması yapmak YANLIŞ!
+           - Örnek: Şemada Endorsement node'u varsa, "zeyilname" veya "endorsement" kelimelerini Chunk'larda aramak YANLIŞ!
+           - Şemadan relationship'leri öğren ve direkt relationship üzerinden sorgula!
+        4. **KOD ÖRNEĞİ YOK**: 
+           - Prompt'ta kod örneği yok! Şemadan öğrenerek kendi sorgunu oluştur!
+           - Akıl yürüt ve şemadan öğrendiklerini kullan!
         
         **PAGE_LINK EKLEME (KRİTİK)**: 
         - Cypher query sonuçlarında Chunk node'ları bulduğunda ve bu chunk'larda `page_link` alanı varsa
-        - Cypher query sonuçlarında `c.page_link` veya `page_link` alanı görürsen, bu değerleri cevabının sonunda listele
-        - Örnek: Cypher query sonucunda `c.page_link:AHMET DİNÇ SAĞLIK_page_002.png` görürsen → cevabının sonunda "page_link: AHMET DİNÇ SAĞLIK_page_002.png" şeklinde belirt
+        - Cypher query sonuçlarında `page_link` alanı görürsen, bu değerleri cevabının sonunda listele
         - Her bulduğun page_link'i ayrı ayrı listele
         
-        İçerik, Konu, bağlam hakkındaki bilgiler Chunk nodelarında text alanında saklıdır. İlgili belgeleri bulduktan sonra (**STRING NORMALİZASYON**) ile içerik araması yap ve ilgili aramalara metadata filtreleri ile tekil keywordler ile aranmalı.
+        **KRİTİK KURAL**: Şemada node türü varsa relationship üzerinden sorgula! Chunk'larda text araması yapma!
+        - Şemada Endorsement node'u varsa, "zeyilname" veya "endorsement" kelimelerini Chunk'larda aramak YANLIŞ!
+        - Şemada Policy node'u varsa, "poliçe" kelimesini Chunk'larda aramak YANLIŞ!
+        - Şemada Customer node'u varsa, "müşteri" kelimesini Chunk'larda aramak YANLIŞ!
+        - İçerik bilgileri (plan, tablo, detay, açıklama vb.) şemada node türü olmayan bilgilerdir ve Chunk nodelarında text alanında saklıdır. SADECE bu tür içerik soruları için (**STRING NORMALİZASYON**) ile Chunk'larda text araması yap!
 
         Eğer Chunk araması yaptıysan ve chunklarda kesik veya eksik bilgi olabilir. Bir sonraki 2 chunka bakarak bu bilgiyi tamamlamaya çalış.
 
-        Verdiğin son cevapta teknik bilgilerden bahsetmeni istemiyorum. Sadece son kullanıcıya yönelik sade ve anlaşılır cevaplar ver.
+        **RELATIONSHIP-BASED ARAMALAR (DOMAIN AGNOSTIC - KRİTİK)**:
+        
+        **GENEL PRENSİP**: İki node arasındaki ilişkiyi sorgularken, önce şemadan relationship'leri kontrol et! Şemada hangi relationship'ler varsa sadece onları kullan!
+        
+        **ŞEMA KONTROLÜ (KRİTİK)**: 
+        - Herhangi bir node türü arasında ilişki sorgularken, ÖNCE şemadan relationship'leri kontrol et!
+        - Şemada hangi relationship'ler varsa sadece onları kullan!
+        - Şemada olmayan relationship'leri KULLANMA!
+        - Şemada birden fazla relationship varsa, hepsini OPTIONAL MATCH ile kontrol edebilirsin
+        - Şemada sadece bir relationship varsa, sadece onu kullan!
+        
+        **SORGU YAPISI (DOMAIN AGNOSTIC)**:
+        - İlişki sorgularında gereksiz OPTIONAL MATCH kullanma!
+        - Önce ana node'u bul (MATCH), sonra ilişkili node'ları ara (MATCH veya OPTIONAL MATCH)
+        - Eğer ilişki zorunlu ise MATCH kullan, opsiyonel ise OPTIONAL MATCH kullan
+        - Çok fazla OPTIONAL MATCH kullanmak sorguyu yavaşlatır ve gereksiz karmaşık hale getirir!
+        
+        **GENEL YAKLAŞIM (ŞEMADAN ÖĞREN)**:
+        - Şemadan node türlerini ve relationship'leri kontrol et
+        - Sorudaki terim hangi node türüne karşılık geliyor?
+        - O node türüne nasıl ulaşılır? (relationship'ler)
+        - Şemada hangi relationship'ler varsa onları kullan!
+        - Akıl yürüt ve şemadan öğrendiklerini kullanarak sorgunu oluştur!
+        
+        **ÖNEMLİ KURALLAR (DOMAIN AGNOSTIC)**:
+        1. **ŞEMA KONTROLÜ (EN ÖNEMLİSİ)**: 
+           - Herhangi bir node türü arasında ilişki sorgularken, ÖNCE şemadan relationship'leri kontrol et!
+           - Şemada hangi relationship'ler varsa sadece onları kullan!
+           - Şemada olmayan relationship'leri KULLANMA!
+           - Şemada birden fazla relationship varsa, hepsini kontrol edebilirsin ama gereksiz OPTIONAL MATCH kullanma!
+        2. **SORGU YAPISI**: 
+           - Gereksiz OPTIONAL MATCH kullanma! Sorguyu gereksiz karmaşık hale getirir!
+           - İlişki zorunlu ise MATCH kullan, opsiyonel ise OPTIONAL MATCH kullan
+           - Önce ana node'u bul (MATCH), sonra ilişkili node'ları ara
+           - Çok fazla OPTIONAL MATCH zinciri sorguyu yavaşlatır!
+        3. **İLK SORGU HATASI**: İlk sorguda bulduğun node ID'leri yanlış olabilir veya veritabanında olmayabilir! Bu ID'leri kullanarak ilişki araması yapma!
+        4. **DOĞRU YAKLAŞIM**: İlişki araması yaparken MUTLAKA ana node'dan başla! ID'lere güvenme!
+        5. **SORGU SONUCU KONTROLÜ**: 
+           - Eğer sorgu sonucunda ilişkili node bulunamazsa, başka path'ler olabilir!
+           - Tüm olası path'leri kontrol et!
+           - Eğer node ID değeri veritabanında yoksa, bu yanlış bir ID'dir! Ana node'dan tekrar sorgula!
+        6. **DOMAIN AGNOSTIC YAKLAŞIM**: 
+           - Spesifik domain bilgisi olmadan, şemadan öğrenerek sorgu yap!
+           - Şemada hangi relationship'ler varsa onları kullan!
+           - Şemada olmayan relationship'leri tahmin etme!
+
+        **CEVAP FORMATI (KRİTİK)**:
+        - Verdiğin son cevabı mutlaka markdown formatında düzenle!
+        - Başlıklar için `##` veya `###` kullan
+        - Liste için `-` veya `*` kullan
+        - Önemli bilgileri **kalın** veya *italik* yap
+        - Tablo varsa markdown table formatında göster
+        - Kod veya teknik terimler için `backtick` kullan
+        - Cevabı düzenli, okunabilir ve profesyonel bir şekilde formatla!
+        - Teknik bilgilerden bahsetme, sadece son kullanıcıya yönelik sade ve anlaşılır cevaplar ver!
         """,
         servers=["neo4j-database", "embedding"],
         request_params=RequestParams(

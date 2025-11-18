@@ -37,7 +37,7 @@ const DropZoneV2: FunctionComponent = () => {
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
 
-  const BATCH_SIZE = 10; // Smaller batch size for V2
+  const BATCH_SIZE = 20; // Smaller batch size for V2
 
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
@@ -173,17 +173,21 @@ const DropZoneV2: FunctionComponent = () => {
               else if (file.status === 'completed' || file.graph_status === 'completed') {
                 status = 'Completed';
               }
+              // pending_endorsement kontrolü (endorsement'lar için özel durum)
+              else if (file.graph_status === 'pending_endorsement') {
+                status = 'Pending Endorsement'; // Endorsement olarak işaretlenmiş, graph creation bekliyor
+              }
               // Diğer durumlar (status = "uploaded" veya diğer)
               else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
-                status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
-              } else if (file.chunking_status === 'chunked') {
-                status = 'Chunked'; // Chunking tamamlandı
-              } else if (file.chunking_status === 'ready') {
-                status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
-              } else if (file.chunking_status === 'pending') {
-                status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
-              } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
-                status = 'Failed';
+                  status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
+                } else if (file.chunking_status === 'chunked') {
+                  status = 'Chunked'; // Chunking tamamlandı
+                } else if (file.chunking_status === 'ready') {
+                  status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
+                } else if (file.chunking_status === 'pending') {
+                  status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
+                } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
+                  status = 'Failed';
               }
 
               return {

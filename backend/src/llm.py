@@ -372,8 +372,8 @@ def get_upload_time_nodes(graph, file_name):
         query = """
         MATCH (d:Document {fileName: $file_name})
         
-        // Policy node'ları
-        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+        // Policy node'ları (DOCUMENTED_IN: Policy'nin hangi Document'ta dokümante edildiğini gösterir)
+        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
         
         // Customer node'ları
         OPTIONAL MATCH (c:Customer)-[:HAS_DOC]->(d)
@@ -512,7 +512,8 @@ def merge_duplicate_nodes_with_upload_nodes(graph, file_name):
         MATCH (d:Document {fileName: $file_name})
         
         // Upload sırasında oluşturulan tüm node tiplerini al
-        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+        // DOCUMENTED_IN: Policy'nin hangi Document'ta dokümante edildiğini gösterir
+        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
         OPTIONAL MATCH (c:Customer)-[:HAS_DOC]->(d)
         OPTIONAL MATCH (p)-[:HAS_YEAR]->(py:PolicyYear)
         OPTIONAL MATCH (p)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)

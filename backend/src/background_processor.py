@@ -1421,6 +1421,89 @@ class BackgroundProcessor:
                     )
                     return
 
+                # Check docType before graph creation (Neo4j'den direkt okuyoruz, LLM'den tekrar çıkarmıyoruz)
+                # If docType is not MAIN_POLICY, skip graph creation and mark as pending_endorsement
+                try:
+                    from src.shared.common_fn import create_graph_database_connection
+
+                    # Get Neo4j credentials for docType check
+                    uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                    userName = os.environ.get("NEO4J_USERNAME")
+                    password = os.environ.get("NEO4J_PASSWORD")
+                    database = file_record.neo4j_database or os.environ.get(
+                        "NEO4J_DATABASE", "neo4j"
+                    )
+
+                    if all([uri, userName, password]):
+                        # Create graph connection for docType check (async olarak thread pool'da çalıştır)
+                        graph = await asyncio.to_thread(
+                            create_graph_database_connection,
+                            uri,
+                            userName,
+                            password,
+                            database,
+                        )
+
+                        if graph:
+                            # Neo4j'den docType'ı direkt oku (chunking aşamasında kaydedilmiş)
+                            doc_type_query = """
+                            MATCH (d:Document {fileName: $file_name})
+                            RETURN d.docType as docType
+                            LIMIT 1
+                            """
+                            
+                            doc_type_result = await asyncio.to_thread(
+                                graph.query,
+                                doc_type_query,
+                                {"file_name": file_record.filename}
+                            )
+
+                            doc_type = None
+                            if doc_type_result and len(doc_type_result) > 0:
+                                doc_type = doc_type_result[0].get("docType")
+                            
+                            # Eğer docType yoksa veya MAIN_POLICY değilse, pending_endorsement olarak işaretle
+                            if doc_type and doc_type not in ["MAIN_POLICY", None, ""]:
+                                logging.info(
+                                    f"📋 V2: Document docType is {doc_type} (not MAIN_POLICY), skipping graph creation for: {file_record.original_name}"
+                                )
+                                # Mark as pending_endorsement
+                                file_record.graph_status = "pending_endorsement"
+                                # Remove from processing queue
+                                if file_record.status in (
+                                    "queued",
+                                    "processing",
+                                ):
+                                    file_record.status = "uploaded"
+                                db_session.commit()
+                                logging.info(
+                                    f"✅ V2: File {file_record.id} ({file_record.original_name}) marked as pending_endorsement"
+                                )
+                                
+                                # Close graph connection
+                                if hasattr(graph, "_driver") and not graph._driver._closed:
+                                    graph._driver.close()
+                                
+                                return  # Skip graph creation
+                            elif doc_type == "MAIN_POLICY":
+                                logging.info(
+                                    f"✅ V2: Document docType is MAIN_POLICY, proceeding with graph creation for: {file_record.original_name}"
+                                )
+                            else:
+                                # docType yoksa veya None ise, varsayılan olarak MAIN_POLICY kabul et
+                                logging.info(
+                                    f"ℹ️ V2: Document docType not found or None for {file_record.original_name}, assuming MAIN_POLICY and proceeding with graph creation"
+                                )
+                            
+                            # Close graph connection (graph creation'da tekrar açılacak)
+                            if hasattr(graph, "_driver") and not graph._driver._closed:
+                                graph._driver.close()
+                except Exception as doc_type_error:
+                    # If docType check fails, proceed with graph creation (fallback to MAIN_POLICY)
+                    logging.warning(
+                        f"⚠️ V2: Document docType check failed for {file_record.original_name}: {str(doc_type_error)}. Proceeding with graph creation (assuming MAIN_POLICY)."
+                    )
+
                 # Status zaten batch seçiminde "processing" olarak güncellenmiş
                 # Model, uri gibi bilgiler de batch seçiminde güncellenmiş
                 # Sadece graph_started_at güncelle (eğer yoksa)

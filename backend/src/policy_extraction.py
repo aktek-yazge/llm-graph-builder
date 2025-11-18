@@ -100,7 +100,8 @@ class PolicyExtractionService:
             MATCH (d:Document {fileName: $file_name})
             
             // Policy bilgilerini al - önce doğrudan Document'e bağlı Policy'leri ara
-            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
+            // DOCUMENTED_IN: Policy'nin hangi Document'ta dokümante edildiğini gösterir
+            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
             
             // Eğer direkt ilişki yoksa, dosya adından Policy ID çıkar ve o Policy'yi ara
             WITH d, p, CASE WHEN p IS NULL THEN split($file_name, '.')[0] ELSE p.id END as potential_policy_id

@@ -4,6 +4,12 @@ import sys
 import logging
 import importlib.util
 
+# OpenTelemetry configuration - Jaeger collector için
+# Jaeger OTLP endpoint: localhost:4318 (HTTP) veya localhost:4317 (gRPC)
+os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")  # Jaeger OTLP HTTP endpoint
+os.environ.setdefault("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")  # HTTP protobuf protocol
+os.environ.setdefault("OTEL_SERVICE_NAME", "llm-graph-builder")  # Service name for traces
+
 # Ensure UTF-8 encoding for Turkish characters
 if sys.stdout.encoding != "utf-8":
     import codecs
@@ -4985,6 +4991,226 @@ async def get_file_status(file_id: int):
         db_session.close()
 
 
+@app.post("/api/v2/files/endorsements/graph-create")
+async def start_endorsement_graph_creation(
+    file_id: str = Form("all"),
+    model: str = Form("openai_gpt_4o_mini"),
+    generate_embedding: bool = Form(False),
+):
+    """Start graph creation process for endorsement files (ENDORSEMENT, RENEWAL, CANCELLATION)
+
+    If file_id is "all", processes all files with graph_status="pending_endorsement"
+    If file_id is provided, processes that specific file
+    """
+    db_session = None
+    try:
+        # Debug: Log received parameters
+        logging.info(
+            f"📥 Endorsement graph creation request received - file_id: {repr(file_id)}, type: {type(file_id)}, model: {model}"
+        )
+
+        # Get Neo4j credentials from environment
+        uri = os.environ.get("NEO4J_URI")
+        userName = os.environ.get("NEO4J_USERNAME")
+        password = os.environ.get("NEO4J_PASSWORD")
+        database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
+        if not all([uri, userName, password]):
+            return create_api_response(
+                "Failed", message="Neo4j credentials not configured in backend .env"
+            )
+
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+
+        # Normalize file_id: None, boş string veya "all" ise "all" olarak kabul et
+        original_file_id = file_id
+        if file_id is None:
+            file_id = "all"
+            logging.info(f"🔄 file_id was None, normalized to 'all'")
+        elif isinstance(file_id, str):
+            file_id = file_id.strip().lower()
+            if file_id == "":
+                file_id = "all"
+                logging.info(f"🔄 file_id was empty string, normalized to 'all'")
+            else:
+                logging.info(
+                    f"🔄 file_id normalized: '{original_file_id}' -> '{file_id}'"
+                )
+        else:
+            # file_id is not None and not a string, convert to string
+            file_id = str(file_id).strip().lower()
+            logging.info(f"🔄 file_id converted to string: '{file_id}'")
+
+        logging.info(f"✅ Final file_id value: '{file_id}' (type: {type(file_id)})")
+
+        # Handle "all" parameter - explicit check with multiple variations
+        # file_id zaten normalize edilmiş, direkt kontrol et
+        if file_id == "all":
+            logging.info(
+                f"✅ Processing 'all' endorsement files (normalized from: {repr(original_file_id)})"
+            )
+            # Get all files with pending_endorsement status
+            files_ready_for_graph = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.upload_status == "uploaded")
+                .filter(UploadedFile.chunking_status == "chunked")
+                .filter(UploadedFile.graph_status == "pending_endorsement")
+                .order_by(UploadedFile.created_at.asc())
+                .all()
+            )
+
+            if not files_ready_for_graph:
+                db_session.close()
+                return create_api_response(
+                    "Success",
+                    message="No endorsement files ready for graph creation",
+                    data={"processed_count": 0},
+                )
+
+            # Process all endorsement files
+            processed_count = 0
+            for file_record in files_ready_for_graph:
+                try:
+                    # Update status to processing
+                    file_record.graph_status = "processing"
+                    file_record.graph_started_at = datetime.now(timezone.utc)
+                    file_record.model_used = model
+                    file_record.generate_embedding = (
+                        "true" if generate_embedding else "false"
+                    )
+                    db_session.commit()
+
+                    # Start graph creation in background
+                    asyncio.create_task(
+                        process_graph_creation_v2(
+                            file_id=file_record.id,
+                            original_name=file_record.original_name,
+                            markdown_path=file_record.markdown_path,
+                            file_path=file_record.file_path,
+                            model=model,
+                            uri=uri,
+                            userName=userName,
+                            password=password,
+                            database=database,
+                            generate_embedding=generate_embedding,
+                        )
+                    )
+                    processed_count += 1
+                    logging.info(
+                        f"✅ Endorsement graph creation started for: {file_record.original_name} (ID: {file_record.id})"
+                    )
+                except Exception as file_error:
+                    logging.error(
+                        f"❌ Failed to start graph creation for endorsement file {file_record.id}: {str(file_error)}"
+                    )
+                    # Mark as failed
+                    file_record.graph_status = "failed"
+                    file_record.processing_error = str(file_error)[:500]
+                    db_session.commit()
+
+            db_session.close()
+            return create_api_response(
+                "Success",
+                message=f"Graph creation started for {processed_count} endorsement file(s)",
+                data={"processed_count": processed_count},
+            )
+
+        # Handle single file
+        # file_id "all" değilse, sayısal bir ID olmalı
+        # Eğer buraya geldiysek, file_id "all" değil demektir
+        logging.warning(
+            f"⚠️ file_id is not 'all', attempting to parse as integer: {repr(file_id)}"
+        )
+        try:
+            file_id_int = int(file_id)
+        except (ValueError, TypeError) as e:
+            db_session.close()
+            error_msg = f"Invalid file_id parameter: '{file_id}' is not a valid file ID (expected integer or 'all'). Error: {str(e)}"
+            logging.error(f"❌ {error_msg}")
+            return create_api_response(
+                "Failed",
+                message=error_msg,
+            )
+
+        file_record = (
+            db_session.query(UploadedFile)
+            .filter(UploadedFile.id == file_id_int)
+            .first()
+        )
+
+        if not file_record:
+            db_session.close()
+            return create_api_response(
+                "Failed", message=f"File not found: {file_id_int}"
+            )
+
+        # Check if file is an endorsement
+        if file_record.graph_status != "pending_endorsement":
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message=f"File {file_id_int} is not an endorsement file (status: {file_record.graph_status})",
+            )
+
+        # Check if chunking is completed
+        if file_record.chunking_status != "chunked":
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message=f"File {file_id_int} chunking not completed (status: {file_record.chunking_status})",
+            )
+
+        # Update status to processing
+        file_record.graph_status = "processing"
+        file_record.graph_started_at = datetime.now(timezone.utc)
+        file_record.model_used = model
+        file_record.generate_embedding = "true" if generate_embedding else "false"
+        db_session.commit()
+
+        logging.info(
+            f"🎨 Starting endorsement graph creation for file {file_id_int}: {file_record.original_name}, Model: {model}"
+        )
+
+        # Graph creation işlemini background'da çalıştır
+        asyncio.create_task(
+            process_graph_creation_v2(
+                file_id=file_id_int,
+                original_name=file_record.original_name,
+                markdown_path=file_record.markdown_path,
+                file_path=file_record.file_path,
+                model=model,
+                uri=uri,
+                userName=userName,
+                password=password,
+                database=database,
+                generate_embedding=generate_embedding,
+            )
+        )
+
+        db_session.close()
+        return create_api_response(
+            "Success",
+            message="Endorsement graph creation started",
+            data={"file_id": file_id_int, "graph_status": "processing"},
+        )
+    except Exception as e:
+        import traceback
+
+        error_message = str(e)
+        error_traceback = traceback.format_exc()
+        logging.error(f"❌ Failed to start endorsement graph creation: {error_message}")
+        logging.error(f"❌ Traceback: {error_traceback}")
+        return create_api_response(
+            "Failed",
+            message="Failed to start endorsement graph creation",
+            error=error_message,
+        )
+    finally:
+        if db_session:
+            db_session.close()
+
+
 @app.post("/api/v2/files/{file_id}/graph-create")
 async def start_graph_creation(
     file_id: str,
@@ -5695,8 +5921,8 @@ async def delete_queued_file(file_id: str):
                                 // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
                                 OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
                                 
-                                // 3. Document'a HAS_ENDORSEMENT ile bağlı Endorsement node'ları topla
-                                OPTIONAL MATCH (d)<-[:HAS_ENDORSEMENT]-(e:Endorsement)
+                                // 3. Document'a DOCUMENTED_IN ile bağlı Endorsement node'ları topla
+                                OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(e:Endorsement)
                                 
                                 // 4. Policy'den -> yönünde bağlı tüm node'ları topla
                                 OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
@@ -5738,7 +5964,7 @@ async def delete_queued_file(file_id: str):
                                      [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
                                          MATCH (d2:Document)
                                          WHERE d2 <> d AND (
-                                             (d2)<-[:HAS_ENDORSEMENT]-(endorsement) OR
+                                             (d2)<-[:DOCUMENTED_IN]-(endorsement) OR
                                              (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
                                          )
                                      }] AS safeEndorsements,
@@ -5753,7 +5979,7 @@ async def delete_queued_file(file_id: str):
                                      [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
                                          MATCH (d2:Document)
                                          WHERE d2 <> d AND (
-                                             (d2)<-[:HAS_ENDORSEMENT]-(:Endorsement)-[*1..2]->(node) OR
+                                             (d2)<-[:DOCUMENTED_IN]-(:Endorsement)-[*1..2]->(node) OR
                                              (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
                                          )
                                      }] AS safeEndorsementRelatedNodes
@@ -5808,8 +6034,21 @@ async def delete_queued_file(file_id: str):
                         logging.error(
                             f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
                         )
-                        # Continue with filesystem/database deletion even if Neo4j fails
-                        neo4j_deleted = True  # Continue anyway
+                        neo4j_deleted = False
+                        # Neo4j silme başarısız olduğu için bu dosyayı atla
+                        logging.warning(
+                            f"⚠️ Skipping deletion of {original_name} from SQLite/filesystem due to Neo4j deletion failure"
+                        )
+                        failed_count += 1
+                        continue  # Bu dosyayı atla, bir sonrakine geç
+
+                    # Neo4j silme başarılı olmalı (veya Neo4j yapılandırılmamış olmalı)
+                    if not neo4j_deleted:
+                        logging.warning(
+                            f"⚠️ Skipping deletion of {original_name} from SQLite/filesystem due to Neo4j deletion failure"
+                        )
+                        failed_count += 1
+                        continue  # Bu dosyayı atla, bir sonrakine geç
 
                     # Delete file from filesystem if exists
                     if file_path.exists():
@@ -5970,8 +6209,25 @@ async def delete_queued_file(file_id: str):
                 neo4j_deleted = True  # Not an error if Neo4j is not configured
 
         except Exception as neo4j_error:
-            logging.error(f"❌ Failed to delete from Neo4j: {str(neo4j_error)}")
-            # Continue with filesystem/database deletion even if Neo4j fails
+            logging.error(
+                f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
+            )
+            neo4j_deleted = False
+            # Neo4j silme başarısız olduğu için SQLite ve filesystem'den de silme
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message=f"Failed to delete from Neo4j: {str(neo4j_error)}. File not deleted from database.",
+                error=str(neo4j_error),
+            )
+
+        # Neo4j silme başarılı olmalı (veya Neo4j yapılandırılmamış olmalı)
+        if not neo4j_deleted:
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message="Neo4j deletion failed. File not deleted from database.",
+            )
 
         # Delete file from filesystem if exists
         if file_path.exists():
@@ -5986,8 +6242,6 @@ async def delete_queued_file(file_id: str):
             result_message = "File deleted successfully"
             if neo4j_deleted:
                 result_message += " (including Neo4j nodes)"
-            else:
-                result_message += " (Neo4j deletion failed, check logs)"
 
             db_session.close()
             return create_api_response(
@@ -6123,25 +6377,39 @@ async def get_processing_status():
 
 def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     """
-    Gemini 2.0 Flash ile image'ları markdown'a çevirme (sync function for executor)
+    Gemini 2.0 Flash ile image'ları markdown'a çevirme ve belge tipini tespit etme (sync function for executor)
 
     Args:
         image_list: Image path'leri veya filename'leri
         image_source: "local" (filename) veya "generated" (full path)
 
     Returns:
-        str: Markdown content with [PAGE BREAK] separators
+        dict: {
+            "metadata": {
+                "docType": "MAIN_POLICY" | "ENDORSEMENT" | "RENEWAL" | "CANCELLATION",
+                ...
+            },
+            "markdown": "Markdown content with [PAGE BREAK] separators"
+        }
     """
-    markdown_text = ""
+    import json
+    
+    result = {
+        "metadata": {
+            "docType": "MAIN_POLICY"  # Default value
+        },
+        "markdown": ""
+    }
+    
     if not GEMINI_AVAILABLE:
         logging.warning("❌ google.genai not available")
-        return markdown_text
+        return result
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             logging.warning("❌ GEMINI_API_KEY not found")
-            return markdown_text
+            return result
 
         # Create client with new google-genai SDK
         client = genai_sdk.Client(api_key=api_key)
@@ -6149,7 +6417,125 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
 
         from google.genai import types
 
-        for idx, img_ref in enumerate(sorted(image_list), start=1):
+        sorted_images = sorted(image_list)
+        
+        # İlk 1-2 resme bakarak belge tipini tespit et (1 sayfa varsa 1'e, 2+ sayfa varsa 2'ye bak)
+        doc_type_detected = False
+        if len(sorted_images) >= 1:
+            try:
+                # Kaç sayfaya bakacağımızı belirle (1 sayfa varsa 1'e, 2+ sayfa varsa 2'ye bak)
+                pages_to_analyze = min(2, len(sorted_images))
+                logging.info(f"🔍 Analyzing first {pages_to_analyze} page(s) to detect document type...")
+                
+                # İlk 1-2 resmi oku
+                images_to_analyze = []
+                for i in range(pages_to_analyze):
+                    img_ref = sorted_images[i]
+                    if image_source == "local":
+                        img_path = os.path.join(
+                            os.environ.get("OUTPUT_IMAGES_DIR", "output/images"), img_ref
+                        )
+                    else:
+                        img_path = img_ref
+                    
+                    with open(img_path, "rb") as img_file:
+                        images_to_analyze.append(img_file.read())
+                    logging.info(f"🔍 Loaded image {i+1}/{pages_to_analyze}: {os.path.basename(img_path)}")
+                
+                # Belge tipi tespit prompt'u (dinamik - 1 veya 2 sayfa için)
+                page_text = "page" if pages_to_analyze == 1 else "first 2 pages"
+                doc_type_prompt = f"""Analyze this {page_text} of an insurance document and determine the document type.
+
+IMPORTANT: Return ONLY a valid JSON object with this exact structure (no markdown, no code blocks, no explanations):
+{{
+    "docType": "MAIN_POLICY" | "ENDORSEMENT" | "RENEWAL" | "CANCELLATION"
+}}
+
+Document type definitions:
+- MAIN_POLICY: Main insurance policy document (ana poliçe) - Original policy document
+- ENDORSEMENT: Endorsement/amendment document (zeyilname) - Document that modifies or adds to an existing policy
+- RENEWAL: Policy renewal document (yenileme) - Document for renewing an existing policy
+- CANCELLATION: Policy cancellation document (iptal) - Document for canceling a policy
+
+Look for these keywords in Turkish or English:
+- "ZEYİLNAME", "ZEYİL", "ENDORSEMENT", "AMENDMENT" → ENDORSEMENT
+- "YENİLEME", "RENEWAL", "RENEW" → RENEWAL
+- "İPTAL", "CANCELLATION", "CANCEL" → CANCELLATION
+- "POLİÇE", "POLICY" (without zeyilname/renewal/cancellation) → MAIN_POLICY
+
+If the document title or header contains "ZEYİLNAME" or "ENDORSEMENT", it is ENDORSEMENT.
+If uncertain or cannot determine, default to "MAIN_POLICY".
+
+CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explanations, no other text. Just the JSON."""
+
+                # Resimleri Gemini'ye gönder
+                parts = [types.Part.from_text(text=doc_type_prompt)]
+                for img_bytes in images_to_analyze:
+                    parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/png"))
+                
+                logging.info(f"🔍 Sending {len(images_to_analyze)} image(s) to Gemini for document type detection...")
+                
+                doc_type_response = client.models.generate_content(
+                    model="models/gemini-2.0-flash",
+                    contents=parts,
+                )
+                
+                # 🔍 Gemini'nin raw response'unu logla
+                raw_response = doc_type_response.text if doc_type_response.text else ""
+                logging.info(f"🔍 Gemini document type detection - Raw response: {raw_response}")
+                logging.info(f"🔍 Gemini document type detection - Response length: {len(raw_response)} chars")
+                
+                if doc_type_response.text:
+                    # JSON'u parse et
+                    try:
+                        # JSON'u temizle (eğer markdown code block içindeyse)
+                        response_text = doc_type_response.text.strip()
+                        logging.info(f"🔍 Gemini document type detection - After strip: {response_text[:500]}")
+                        
+                        if response_text.startswith("```"):
+                            # Markdown code block'u kaldır
+                            lines = response_text.split("\n")
+                            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+                            logging.info(f"🔍 Gemini document type detection - After removing ```: {response_text[:500]}")
+                        elif response_text.startswith("```json"):
+                            lines = response_text.split("\n")
+                            response_text = "\n".join(lines[1:-1]) if len(lines) > 2 else response_text
+                            logging.info(f"🔍 Gemini document type detection - After removing ```json: {response_text[:500]}")
+                        
+                        doc_type_data = json.loads(response_text)
+                        logging.info(f"🔍 Gemini document type detection - Parsed JSON: {doc_type_data}")
+                        
+                        detected_doc_type = doc_type_data.get("docType", "MAIN_POLICY")
+                        logging.info(f"🔍 Gemini document type detection - Extracted docType: {detected_doc_type}")
+                        
+                        # Geçerli docType kontrolü
+                        valid_types = ["MAIN_POLICY", "ENDORSEMENT", "RENEWAL", "CANCELLATION"]
+                        if detected_doc_type in valid_types:
+                            result["metadata"]["docType"] = detected_doc_type
+                            doc_type_detected = True
+                            logging.info(f"✅ Document type detected: {detected_doc_type}")
+                        else:
+                            logging.warning(f"⚠️ Invalid docType detected: {detected_doc_type}, using default MAIN_POLICY")
+                            logging.warning(f"⚠️ Valid types are: {valid_types}")
+                    except json.JSONDecodeError as e:
+                        logging.error(f"❌ Failed to parse document type JSON: {e}")
+                        logging.error(f"❌ Raw response (first 500 chars): {doc_type_response.text[:500]}")
+                        logging.error(f"❌ Raw response (full): {doc_type_response.text}")
+                    except Exception as e:
+                        logging.error(f"❌ Error processing document type detection: {e}")
+                        logging.error(f"❌ Exception type: {type(e).__name__}")
+                        import traceback
+                        logging.error(f"❌ Traceback: {traceback.format_exc()}")
+                
+                if not doc_type_detected:
+                    logging.info("ℹ️ Document type detection failed or returned invalid result, using default MAIN_POLICY")
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ Document type detection failed: {e}, using default MAIN_POLICY")
+        
+        # Tüm sayfaları markdown'a çevir
+        markdown_text = ""
+        for idx, img_ref in enumerate(sorted_images, start=1):
             try:
                 # Determine if img_ref is path or filename
                 if image_source == "local":
@@ -6178,7 +6564,7 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
 
                 if response.text:
                     # Son sayfa değilse PAGE BREAK ekle
-                    if idx < len(image_list):
+                    if idx < len(sorted_images):
                         markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
                     else:
                         # Son sayfa - PAGE BREAK ekleme
@@ -6195,6 +6581,8 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
             except Exception as e:
                 logging.warning(f"Gemini processing failed for {img_ref}: {e}")
 
+        result["markdown"] = markdown_text
+
         if markdown_text:
             logging.info(
                 f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images"
@@ -6205,7 +6593,7 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     except Exception as e:
         logging.error(f"Gemini processing error: {e}")
 
-    return markdown_text
+    return result
 
 
 async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
@@ -6289,7 +6677,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                 f"📝 Creating markdown using pre-extracted images for: {normalized_filename}"
             )
 
-            # Local images_dir'de PNG dosyaları kontrol et (upload'da oluşturulan)
+            # 1️⃣ Local images_dir'de PNG dosyaları kontrol et
             local_images = []
             if os.path.exists(images_dir):
                 local_images = [
@@ -6299,22 +6687,118 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                 ]
                 local_images.sort()  # Sayfa sırasını koru
 
-            # Pre-extracted images kontrolü - YOK İSE HATA FIRLAT
+            # 2️⃣ Local'de yoksa, S3'ten download et
+            if not local_images and page_images:
+                logging.info(
+                    f"📥 Local images not found, attempting to download from S3 for: {normalized_filename}"
+                )
+                
+                s3_bucket = os.environ.get(
+                    "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
+                )
+                aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+                if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                    from src.document_sources.s3_upload_utils import (
+                        download_images_from_s3,
+                    )
+                    from pathlib import Path
+
+                    doc_name = Path(normalized_filename).stem
+
+                    def download_images():
+                        return download_images_from_s3(
+                            page_images,  # Database'deki image isimleri
+                            s3_bucket,
+                            doc_name,
+                            images_dir,
+                            aws_access_key_id,
+                            aws_secret_access_key,
+                        )
+
+                    downloaded_images = await loop.run_in_executor(
+                        executor, download_images
+                    )
+
+                    if downloaded_images:
+                        local_images = sorted(downloaded_images)
+                        logging.info(
+                            f"✅ Downloaded {len(local_images)} images from S3 for: {normalized_filename}"
+                        )
+                    else:
+                        logging.warning(
+                            f"⚠️ Failed to download images from S3 for: {normalized_filename}"
+                        )
+                else:
+                    logging.warning(
+                        f"⚠️ S3 credentials not configured, cannot download images"
+                    )
+
+            # 3️⃣ S3'te de yoksa, PDF'den extract et
             if not local_images:
-                error_msg = f"❌ No pre-extracted images found in {images_dir}. Cannot proceed with chunking without images."
+                logging.info(
+                    f"🖼️ No images found locally or in S3, extracting from PDF: {normalized_filename}"
+                )
+                
+                # PDF dosyasını bul
+                pdf_path = os.path.join(pdf_dir, normalized_filename)
+                if not os.path.exists(pdf_path):
+                    # Alternatif olarak merged_file_path'i dene
+                    if os.path.exists(merged_file_path):
+                        pdf_path = merged_file_path
+                    else:
+                        error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
+                        logging.error(error_msg)
+                        raise Exception(error_msg)
+
+                from src.document_sources.local_file import (
+                    generate_page_images_with_pymupdf,
+                )
+
+                def extract_images():
+                    return generate_page_images_with_pymupdf(pdf_path, images_dir)
+
+                extracted_images = await loop.run_in_executor(
+                    executor, extract_images
+                )
+
+                if extracted_images:
+                    local_images = sorted(extracted_images)
+                    logging.info(
+                        f"✅ Extracted {len(local_images)} images from PDF for: {normalized_filename}"
+                    )
+                else:
+                    error_msg = f"❌ Failed to extract images from PDF: {normalized_filename}"
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
+
+            # Final kontrol
+            if not local_images:
+                error_msg = f"❌ No images available for Gemini OCR: {normalized_filename}"
                 logging.error(error_msg)
                 raise Exception(error_msg)
 
             logging.info(
-                f"📸 Found {len(local_images)} pre-extracted images for Gemini OCR"
+                f"📸 Found {len(local_images)} images for Gemini OCR (local/S3/extracted)"
             )
 
-            # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR
+            # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR (metadata + markdown)
             from langchain_core.documents import Document
 
-            markdown_text = await loop.run_in_executor(
+            ocr_result = await loop.run_in_executor(
                 executor, lambda: process_gemini_ocr(local_images, "generated")
             )
+
+            # OCR sonucunu kontrol et
+            if not ocr_result or not isinstance(ocr_result, dict):
+                error_msg = f"❌ Gemini OCR returned invalid result format"
+                logging.error(error_msg)
+                raise Exception(error_msg)
+
+            markdown_text = ocr_result.get("markdown", "")
+            metadata = ocr_result.get("metadata", {})
+            doc_type = metadata.get("docType", "MAIN_POLICY")
 
             # Gemini başarısız olduysa hata fırlat
             if not markdown_text or not markdown_text.strip():
@@ -6324,7 +6808,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
 
             pages = [Document(page_content=markdown_text)]
             logging.info(
-                f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images"
+                f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images, detected docType: {doc_type}"
             )
 
             # Markdown dosyasını oluştur ve kaydet
@@ -6546,6 +7030,28 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                         logging.info(
                             f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)"
                         )
+
+                        # 6️⃣.5️⃣ Document node'una metadata'yı kaydet (sadece docType kullanıyoruz)
+                        try:
+                            update_query = """
+                            MATCH (d:Document {fileName: $file_name})
+                            SET d.docType = $doc_type
+                            RETURN d
+                            """
+                            graph.query(
+                                update_query,
+                                params={
+                                    "file_name": normalized_filename,
+                                    "doc_type": doc_type
+                                }
+                            )
+                            logging.info(
+                                f"✅ Document metadata updated: docType={doc_type} for {normalized_filename}"
+                            )
+                        except Exception as metadata_error:
+                            logging.warning(
+                                f"⚠️ Failed to update document metadata: {metadata_error}"
+                            )
 
                         # 7️⃣ Chunk'ları Document'e bağla
                         if chunks:
@@ -6807,21 +7313,62 @@ async def process_graph_creation_v2(
                 uri=uri, userName=userName, password=password, database=database
             )
 
-            # Check if Policy node exists for this document
-            policy_check_query = """
+            # Check if Policy or Endorsement node exists for this document
+            # Endorsement dosyaları için Endorsement node, ana poliçeler için Policy node kontrol edilmeli
+            # NOT: DOCUMENTED_IN hem Policy hem Endorsement için kullanılır (hangi Document'ta dokümante edildiğini gösterir)
+            # HAS_ENDORSEMENT ise Policy'den Endorsement'a olan bağlantıdır (Policy node'unun bir Endorsement'a sahip olduğunu gösterir)
+            node_check_query = """
             MATCH (d:Document {fileName: $file_name})
-            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION]->(d)
-            RETURN count(p) as policy_count
+            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+            OPTIONAL MATCH (e:Endorsement)-[:DOCUMENTED_IN]->(d)
+            RETURN count(p) as policy_count, count(e) as endorsement_count, d.docType as doc_type
             """
 
-            policy_result = graph_connection.query(
-                policy_check_query,
+            node_result = graph_connection.query(
+                node_check_query,
                 params={"file_name": normalized_filename},
             )
 
-            policy_count = policy_result[0]["policy_count"] if policy_result else 0
+            policy_count = node_result[0]["policy_count"] if node_result else 0
+            endorsement_count = (
+                node_result[0]["endorsement_count"] if node_result else 0
+            )
+            doc_type = node_result[0].get("doc_type", "") if node_result else ""
 
-            if policy_count == 0:
+            # Endorsement dosyaları için Endorsement node kontrolü yap
+            # Ana poliçeler için Policy node kontrolü yap
+            if doc_type in ["ENDORSEMENT", "RENEWAL", "CANCELLATION"]:
+                if endorsement_count == 0:
+                    error_message = f"Endorsement node was not created for document: {normalized_filename}"
+                    logging.error(f"❌ {error_message}")
+                    file_record.graph_status = "failed"
+                    file_record.processing_error = error_message[:500]
+                    db_session.commit()
+
+                    # Sync failed status to Neo4j
+                    try:
+                        from src.models.status_sync import sync_queue_db_status_to_neo4j
+
+                        sync_queue_db_status_to_neo4j(
+                            graph=graph_connection,
+                            file_name=normalized_filename,
+                            upload_status=file_record.upload_status,
+                            chunking_status=file_record.chunking_status,
+                            graph_status="failed",
+                            embedding_status=file_record.embedding_status,
+                            database=database,
+                        )
+                    except Exception as sync_error:
+                        logging.warning(
+                            f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
+                        )
+
+                    return
+                else:
+                    logging.info(
+                        f"✅ Endorsement node found for document: {normalized_filename} (count: {endorsement_count})"
+                    )
+            elif policy_count == 0:
                 error_message = (
                     f"Policy node was not created for document: {normalized_filename}"
                 )

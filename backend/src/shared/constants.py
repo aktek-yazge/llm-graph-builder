@@ -19,15 +19,15 @@ MATCH (customer:Customer)-[:HAS_POLICY]->(policy:Policy)
 MATCH (doc:Document)<-[:PART_OF]-(chunk:Chunk)
 
 // Policy->Document ilişki türleri:
-// - DOCUMENTED_IN: Ana poliçe belgesi
-// - HAS_ENDORSEMENT: Ana poliçenin zeyilnameleri (endorsement documents)
-// - HAS_RENEWAL: Yenileme belgeleri  
-// - HAS_CANCELLATION: İptal belgeleri
+// - DOCUMENTED_IN: Policy ve Endorsement'ın hangi Document'ta dokümante edildiğini gösterir
 // - HAS_DOC: Genel doküman ilişkisi
-OPTIONAL MATCH (policy)-[:DOCUMENTED_IN|HAS_ENDORSEMENT|HAS_RENEWAL|HAS_CANCELLATION|HAS_DOC]->(doc)
+// NOT: HAS_ENDORSEMENT Policy'den Endorsement'a olan bağlantıdır (Policy → Endorsement), Document'a değil
+OPTIONAL MATCH (policy)-[:DOCUMENTED_IN|HAS_DOC]->(doc)
+// Endorsement Document'ları için Endorsement node'undan Document'a bak
+OPTIONAL MATCH (endorsement:Endorsement)-[:DOCUMENTED_IN]->(doc)
 
 // Document match kontrolü + ilişki türü kontrolü (opsiyonel)
-WITH customer, policy, doc, chunk, 
+WITH customer, policy, doc, chunk, endorsement,
      customer_filter, year_filter, policy_type_filter, document_type_filter, 
      insured_item_filter, document_name_filter, question_embedding
 WHERE doc IS NOT NULL 
@@ -35,10 +35,13 @@ WHERE doc IS NOT NULL
     // Eğer document type filtresi yoksa, tüm ilişki türlerini kabul et
     document_type_filter IS NULL OR document_type_filter = '' OR
     // Eğer document type filtresi varsa, sadece o ilişki türünü kabul et
-    (document_type_filter = 'ENDORSEMENT' AND (policy)-[:HAS_ENDORSEMENT]->(doc)) OR
-    (document_type_filter = 'RENEWAL' AND (policy)-[:HAS_RENEWAL]->(doc)) OR
-    (document_type_filter = 'CANCELLATION' AND (policy)-[:HAS_CANCELLATION]->(doc)) OR
-    (document_type_filter = 'MAIN_POLICY' AND (policy)-[:DOCUMENTED_IN]->(doc))
+    // ENDORSEMENT: Endorsement node'undan Document'a DOCUMENTED_IN ile bağlı
+    (document_type_filter = 'ENDORSEMENT' AND endorsement IS NOT NULL) OR
+    // RENEWAL ve CANCELLATION: Endorsement node'larının document_type property'sine göre
+    (document_type_filter = 'RENEWAL' AND endorsement IS NOT NULL AND endorsement.document_type = 'RENEWAL') OR
+    (document_type_filter = 'CANCELLATION' AND endorsement IS NOT NULL AND endorsement.document_type = 'CANCELLATION') OR
+    // MAIN_POLICY: Policy'den Document'a DOCUMENTED_IN ile bağlı
+    (document_type_filter = 'MAIN_POLICY' AND policy IS NOT NULL AND (policy)-[:DOCUMENTED_IN]->(doc))
   )
 
 // PolicyType ve PolicyYear kontrolü
@@ -103,7 +106,7 @@ WITH customer, policy, pt, py, ii, doc, chunk,
      base_score, filter_boost, 
      (base_score * filter_boost) AS final_score
 
-WHERE final_score > 0.15
+WHERE final_score > 0.30
 
 // Sonuçları sırala ve döndür
 RETURN 

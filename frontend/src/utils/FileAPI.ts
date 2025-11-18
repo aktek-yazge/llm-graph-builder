@@ -308,6 +308,26 @@ export const startGraphCreationAPI = async (
   return response;
 };
 
+// Start graph creation for endorsement files (ENDORSEMENT, RENEWAL, CANCELLATION)
+export const startEndorsementGraphCreationAPI = async (
+  fileId: number | string = 'all',
+  model: string = 'openai_gpt_4o_mini',
+  generateEmbedding: boolean = false
+): Promise<any> => {
+  const urlEndorsementGraphCreate = `${url()}/api/v2/files/endorsements/graph-create`;
+  const method: Method = 'post';
+  // fileId'yi string'e çevir ve normalize et
+  const fileIdStr = fileId === 'all' || fileId === 'ALL' ? 'all' : String(fileId);
+  const additionalParams = {
+    file_id: fileIdStr,
+    model,
+    generate_embedding: generateEmbedding ? 'true' : 'false', // Boolean'ı string'e çevir
+  };
+  console.log('📤 Endorsement graph creation API call:', additionalParams);
+  const response = await apiCall(urlEndorsementGraphCreate, method, additionalParams);
+  return response;
+};
+
 // Start embedding creation for file chunks
 export const startEmbeddingAPI = async (
   fileId: number

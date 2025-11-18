@@ -58,6 +58,7 @@ class GraphStatus(str, Enum):
     PROCESSING = "processing"  # Currently creating graph
     COMPLETED = "completed"  # Graph creation completed
     FAILED = "failed"  # Graph creation failed
+    PENDING_ENDORSEMENT = "pending_endorsement"  # Waiting for endorsement processing (after all policies are loaded)
 
 
 class UploadedFile(Base):

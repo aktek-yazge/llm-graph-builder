@@ -12,13 +12,15 @@ const apiCall = async (url: string, method: Method, additionalParams: Partial<Fo
 
     for (const key in additionalParams) {
       const value = additionalParams[key];
-      formData.append(key, value);
-
-      // File parametresi için ek bilgi
+      // FormData'ya eklerken tüm değerleri string'e çevir (file hariç)
       if (key === 'file' && value instanceof Blob) {
+        formData.append(key, value);
         console.log(`📎 File parameter - Size: ${value.size} bytes, Type: ${value.type}`);
-      } else if (key !== 'file') {
-        console.log(`📝 Parameter ${key}: ${value}`);
+      } else {
+        // Boolean, number veya diğer tipleri string'e çevir
+        const stringValue = value !== null && value !== undefined ? String(value) : '';
+        formData.append(key, stringValue);
+        console.log(`📝 Parameter ${key}: ${stringValue} (original: ${value}, type: ${typeof value})`);
       }
     }
 

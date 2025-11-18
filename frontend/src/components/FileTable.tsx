@@ -174,17 +174,21 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           else if (file.status === 'completed' || file.graph_status === 'completed') {
             status = 'Completed';
           }
+          // pending_endorsement kontrolü (endorsement'lar için özel durum)
+          else if (file.graph_status === 'pending_endorsement') {
+            status = 'Pending Endorsement'; // Endorsement olarak işaretlenmiş, graph creation bekliyor
+          }
           // Diğer durumlar (status = "uploaded" veya diğer)
           else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
-            status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
-          } else if (file.chunking_status === 'chunked') {
-            status = 'Chunked'; // Chunking tamamlandı
-          } else if (file.chunking_status === 'ready') {
-            status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
-          } else if (file.chunking_status === 'pending') {
-            status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
-          } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
-            status = 'Failed';
+              status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
+            } else if (file.chunking_status === 'chunked') {
+              status = 'Chunked'; // Chunking tamamlandı
+            } else if (file.chunking_status === 'ready') {
+              status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
+            } else if (file.chunking_status === 'pending') {
+              status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
+            } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
+              status = 'Failed';
           }
 
           return {
@@ -870,8 +874,8 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     triggerStatusUpdateAPI(item.fileName, userCredentials, updateStatusForLargeFiles);
   };
 
-  // V1 sources_list endpoint'i devre dışı bırakıldı - V2 Queue sistemi kullanılıyor
-  // V2 dosyaları getQueuedFilesAPI ile yükleniyor (reloadV2Files fonksiyonu)
+    // V1 sources_list endpoint'i devre dışı bırakıldı - V2 Queue sistemi kullanılıyor
+    // V2 dosyaları getQueuedFilesAPI ile yükleniyor (reloadV2Files fonksiyonu)
   // useEffect removed - no longer needed
 
   useEffect(() => {

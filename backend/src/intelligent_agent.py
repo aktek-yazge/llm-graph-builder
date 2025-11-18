@@ -1336,13 +1336,13 @@ SADECE TEK CÜMLE ile cevap ver."""
                 "type": "function",
                 "function": {
                     "name": "add_page_resource",
-                    "description": "ZORUNLU: Faydalanılan chunk'ların sayfa görsellerini resource listesine ekler. Final answer'da manuel sayfa referansı ekleme, sadece bu tool'u kullan!",
+                    "description": "KRİTİK: SADECE final answer'da kullandığın ve soruya cevap veren chunk'ların sayfa görsellerini ekler. TÜM page_link'leri ekleme! Önce chunk içeriğini analiz et, soruya cevap veriyor mu kontrol et. Sadece cevabı destekleyen chunk'ların page_link'lerini ekle. Final answer'da manuel sayfa referansı ekleme, sadece bu tool'u kullan!",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "page_link": {
                                 "type": "string",
-                                "description": "Sayfa görseli linki - Cypher sonucundan gelen page_link değeri",
+                                "description": "Sayfa görseli linki - SADECE soruya cevap veren chunk'ların page_link değeri. Cypher sonucundan gelen tüm page_link'leri ekleme, sadece kullandığın chunk'ların page_link'lerini ekle!",
                             }
                         },
                         "required": ["page_link"],
@@ -1982,9 +1982,12 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                 chunk_contents = (
                     "\n\n**KEŞFEDİLEN CHUNK İÇERİKLERİ (MUTLAKA ANALİZ ET!):**\n"
                 )
+                chunk_contents += "⚠️ KRİTİK: add_page_resource tool'unu çağırırken SADECE soruya cevap veren chunk'ların page_link'lerini ekle! Tüm chunk'ların page_link'lerini ekleme!\n\n"
                 for i, chunk in enumerate(sorted_chunks[:15], 1):  # Top 15 chunk
-                    chunk_contents += f"\n--- Chunk {i} (Relevance: {chunk.relevance_score:.3f}, Sayfa: {chunk.page_number}) ---\n"
+                    relevance_indicator = "✅ YÜKSEK" if chunk.relevance_score > 0.5 else "⚠️ DÜŞÜK"
+                    chunk_contents += f"\n--- Chunk {i} (Relevance: {chunk.relevance_score:.3f} {relevance_indicator}, Sayfa: {chunk.page_number}) ---\n"
                     chunk_contents += f"{chunk.text}\n"
+                    chunk_contents += f"💡 Bu chunk soruya cevap veriyor mu? Sadece cevap veren chunk'ların page_link'ini ekle!\n"
 
                 context_info += chunk_contents
 
@@ -2267,7 +2270,24 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                         if document_filenames_found:
                             filename_info = f" Document filenames keşfedildi: {document_filenames_found}. Sonraki chunk sorgusunda bu filename'leri kullan!"
 
-                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info} Bu veri soru için yeterliyse final_answer ver"
+                        # Relevance kontrolü uyarısı ekle
+                        relevance_warning = ""
+                        if result:
+                            # İlk sonuçların score'larını kontrol et
+                            scores = []
+                            for row in result[:5]:
+                                if isinstance(row, dict):
+                                    score = row.get("score") or row.get("final_score") or row.get("relevance_score")
+                                    if score is not None:
+                                        scores.append(float(score))
+                            
+                            if scores:
+                                max_score = max(scores)
+                                min_score = min(scores)
+                                if min_score < 0.5:
+                                    relevance_warning = f" ⚠️ ÖNEMLİ: Bazı sonuçların relevance score'u düşük (min: {min_score:.2f}, max: {max_score:.2f}). Sadece score > 0.5 olan ve soruya cevap veren chunk'ların page_link'lerini add_page_resource ile ekle! İlgisiz chunk'ların page_link'lerini ekleme!"
+                        
+                        current_observation = f"Cypher sorgusu başarılı: {len(result)} sonuç bulundu. Örnek veriler: {'; '.join(data_summary[:2])}.{filename_info}{relevance_warning} Bu veri soru için yeterliyse final_answer ver"
 
                         # 🧠 MEM0: Başarılı stratejiyi takip et - DEVRE DIŞI
                         # strategy_type = self._classify_cypher_strategy(action_content)
@@ -2967,26 +2987,31 @@ ORDER BY score DESC LIMIT 10
 - ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
 - **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
 
-**add_page_resource(page_link)**:
-- Kullanılan içerik node'larının sayfa referanslarını kaynak olarak ekler
-- Her kullanılan içerik için mutlaka çağır
-- `page_link` parametresi: Cypher sonucundan gelen page_link değeri
+**add_page_resource(page_link)** - KRİTİK KULLANIM KURALLARI:
+- ⚠️ SADECE final answer'da kullandığın ve soruya cevap veren chunk'ların page_link'lerini ekle!
+- ❌ Cypher sonucunda gelen TÜM page_link'leri ekleme!
+- ✅ Önce chunk içeriğini analiz et, soruya cevap veriyor mu kontrol et
+- ✅ Sadece relevance_score > 0.5 olan ve soruya cevap veren chunk'ların page_link'lerini ekle
+- ✅ İlgisiz chunk'ların (genel şartlar, başlık sayfaları, footer'lar vb.) page_link'lerini ekleme
+- `page_link` parametresi: SADECE soruya cevap veren chunk'ların page_link değeri
 
 #### 🛠️ TOOL KULLANIM KURALLARI:
 
 **TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
 - **generate_embeddings_for_cypher**: Semantic/Vector arama için embedding oluştur  
-- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet
+- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet (SADECE kullandığın chunk'ların!)
 
 **ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
 
 1. **Vector/Semantic/Chunk Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
    - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
 
-2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR:**
-   - Cypher sonucunda `page_link`, `page_number` vb. sayfa bilgisi gelince
-   - Final answer'da sayfa referansları gösterilecekse
-   - Chunk'lar bulunup kullanıcıya kaynak gösterilecekse
+2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR (KRİTİK FİLTRELEME):**
+   - ⚠️ ÖNCE chunk içeriğini analiz et: Bu chunk soruya cevap veriyor mu?
+   - ⚠️ Relevance score kontrolü: score > 0.5 olan chunk'ları tercih et
+   - ⚠️ SADECE final answer'da kullandığın chunk'ların page_link'lerini ekle
+   - ❌ Tüm Cypher sonuçlarındaki page_link'leri ekleme!
+   - ✅ Örnek: "Ayça Hanım'ın primi" sorusu için prim bilgisi içeren chunk'ın page_link'ini ekle, genel şartlar chunk'ının page_link'ini ekleme
 
 ### 🔗 PARAMETER INHERITANCE:
 

@@ -58,6 +58,7 @@ import {
   startBackgroundProcessingAPI,
   startChunkingAPI,
   startEmbeddingAPI,
+  startEndorsementGraphCreationAPI,
 } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/Toasts';
 import { normalizeFileName } from '../utils/utf8';
@@ -126,10 +127,12 @@ const Content: React.FC<ContentProps> = ({
   const [v2FilesCategorized, setV2FilesCategorized] = useState<{
     pendingChunking: number;
     readyForGraph: number;
+    pendingEndorsement: number;
     completed: number;
   }>({
     pendingChunking: 0,
     readyForGraph: 0,
+    pendingEndorsement: 0,
     completed: 0,
   });
   const [alertStateForRetry, setAlertStateForRetry] = useState<BannerAlertProps>({
@@ -250,7 +253,7 @@ const Content: React.FC<ContentProps> = ({
     });
 
     if (selectedV2FileIds.size === 0) {
-      setV2FilesCategorized({ pendingChunking: 0, readyForGraph: 0, completed: 0 });
+      setV2FilesCategorized({ pendingChunking: 0, readyForGraph: 0, pendingEndorsement: 0, completed: 0 });
       setV2SelectedFileCount(0);
       return;
     }
@@ -271,12 +274,16 @@ const Content: React.FC<ContentProps> = ({
     ).length;
 
     const readyForGraph = selectedFiles.filter(
-      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
+      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status === 'pending'
+    ).length;
+
+    const pendingEndorsement = selectedFiles.filter(
+      (f: CustomFile) => f.graph_status === 'pending_endorsement'
     ).length;
 
     setV2SelectedFileCount(totalCount);
 
-    setV2FilesCategorized({ pendingChunking, readyForGraph, completed: 0 });
+    setV2FilesCategorized({ pendingChunking, readyForGraph, pendingEndorsement, completed: 0 });
   }, [filesData, rowSelection]);
 
   const handleDropdownChange = (selectedOption: OptionType | null | void) => {
@@ -1049,12 +1056,16 @@ const Content: React.FC<ContentProps> = ({
     ).length;
 
     const readyForGraph = v2Files.filter(
-      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
+      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status === 'pending'
+    ).length;
+
+    const pendingEndorsement = v2Files.filter(
+      (f: CustomFile) => f.graph_status === 'pending_endorsement'
     ).length;
 
     const readyForEmbedding = v2Files.filter((f: CustomFile) => f.graph_status === 'completed').length;
 
-    return { pendingChunking, readyForGraph, readyForEmbedding, completed: 0 };
+    return { pendingChunking, readyForGraph, pendingEndorsement, readyForEmbedding, completed: 0 };
   };
 
   // V2 Chunking başlatma handler'ı
@@ -1181,24 +1192,24 @@ const Content: React.FC<ContentProps> = ({
         }
       } else {
         // Seçili dosyalar için tek tek çağrı yap
-        showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
+      showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
         let successCount = 0;
         let failCount = 0;
 
-        for (const fileId of v2FileIds) {
-          try {
-            const response = await resetFileStageAPI(fileId, 'chunking');
-            if (response.status === 'Success' || response.status === 'success') {
+      for (const fileId of v2FileIds) {
+        try {
+          const response = await resetFileStageAPI(fileId, 'chunking');
+          if (response.status === 'Success' || response.status === 'success') {
               successCount++;
-            } else {
+          } else {
               failCount++;
-              showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
-            }
-          } catch (error: any) {
-            failCount++;
-            const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
-            showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+            showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
           }
+        } catch (error: any) {
+            failCount++;
+          const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
+          showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+        }
         }
 
         if (successCount > 0) {
@@ -1666,6 +1677,46 @@ const Content: React.FC<ContentProps> = ({
               {(() => {
                 const cat = getV2FilesCategorized();
                 return cat.readyForEmbedding > 0 ? `(${cat.readyForEmbedding})` : '';
+              })()}
+            </ButtonWithToolTip>
+            <ButtonWithToolTip
+              text='Seçili endorsement dosyaları için graph oluştur (Zeyilname, İptal, Yenileme)'
+              placement='top'
+              onClick={async () => {
+                try {
+                  setIsExtractLoading(true);
+                  const categorized = getV2FilesCategorized();
+                  if (categorized.pendingEndorsement > 0) {
+                    showNormalToast('Endorsement dosyaları için graph oluşturuluyor...');
+                    const response = await startEndorsementGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
+                    if (response.status === 'Success' || response.status === 'success') {
+                      const processedCount = response.data?.processed_count || categorized.pendingEndorsement;
+                      showSuccessToast(`✓ ${processedCount} endorsement dosyası için graph oluşturma başlatıldı`);
+                      childRef.current?.reloadV2Files?.();
+                    } else {
+                      showErrorToast(`Endorsement graph oluşturma başarısız: ${response.message || 'Bilinmeyen hata'}`);
+                    }
+                  } else {
+                    showErrorToast('Endorsement graph oluşturmak için pending endorsement dosyası seçiniz');
+                  }
+                } catch (error: any) {
+                  showErrorToast('Endorsement graph oluşturma başlatılamadı');
+                } finally {
+                  setIsExtractLoading(false);
+                  setTimeout(() => {
+                    childRef.current?.reloadV2Files?.();
+                  }, 500);
+                }
+              }}
+              disabled={!getV2FilesCategorized().pendingEndorsement || isReadOnlyUser || extractLoading}
+              className='ml-0.5'
+              label='Create Endorsement Graph'
+              size={isTablet ? 'small' : 'medium'}
+            >
+              Endorsement Graph Oluştur{' '}
+              {(() => {
+                const cat = getV2FilesCategorized();
+                return cat.pendingEndorsement > 0 ? `(${cat.pendingEndorsement})` : '';
               })()}
             </ButtonWithToolTip>
             <ButtonWithToolTip
