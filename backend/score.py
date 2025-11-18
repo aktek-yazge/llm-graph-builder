@@ -158,7 +158,7 @@ except ImportError:
 from docling_core.types.doc import ImageRefMode, DocItemLabel
 from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
 
-load_dotenv(override=True)
+load_dotenv(override=False)  # Don't override environment variables set by Docker Compose
 
 from pathlib import Path
 from typing import Dict, List
@@ -4209,6 +4209,7 @@ async def backend_connection_configuration():
         database = os.getenv("NEO4J_DATABASE")
         password = os.getenv("NEO4J_PASSWORD")
         gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
+        logging.info(f"🔍 Backend connection config - NEO4J_URI from env: {uri}")
         if all([uri, username, database, password]):
             graph = Neo4jGraph()
             logging.info(f"login connection status of object: {graph}")
@@ -4220,6 +4221,7 @@ async def backend_connection_configuration():
                 )
                 result["gcs_file_cache"] = gcs_file_cache
                 result["uri"] = uri
+                logging.info(f"🔍 Backend connection config - Returning URI: {result.get('uri')}")
                 end = time.time()
                 elapsed_time = end - start
                 result["api_name"] = "backend_connection_configuration"
