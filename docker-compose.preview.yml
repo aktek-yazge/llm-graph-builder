@@ -24,6 +24,9 @@ services:
     environment:
       - PYTHONPATH=/code
       - ENV=preview
+    volumes:
+      # Persist queue.db in user's home directory - survives container/image deletion
+      - ~/sqlite-db/queue.db:/code/queue.db
     restart: unless-stopped
     # depends_on:
     #   - jaeger
