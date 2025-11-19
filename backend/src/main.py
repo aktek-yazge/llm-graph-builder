@@ -1224,14 +1224,15 @@ async def processing_source_v2(
     allowedRelationship,
     additional_instructions=None,
     max_pages=None,
+    page_images=None,
 ):
     """
     V2 Processing: Policy-specific entity extraction (simplified)
     
-    Pages'ten Policy-specific entity'leri çıkarır (chunk işlemleri YOK):
-    - ❌ Chunk oluşturma yok
-    - ❌ Chunk embeddings yok  
-    - ❌ Chunk-Entity linking yok
+    Pages'ten Policy-specific entity'leri çıkarır:
+    - ✅ Chunk oluşturma (create_chunks_for_upload ile)
+    - ❌ Chunk embeddings yok (şimdilik)
+    - ❌ Chunk-Entity linking yok (şimdilik)
     - ❌ Rastgele entity extraction yok (Person, Organization, etc.)
     - ✅ Policy-specific entities (Policy, Customer, InsuranceCompany, Agent, Coverage)
     - ✅ LLM extraction (_create_document_related_nodes)
@@ -1254,6 +1255,13 @@ async def processing_source_v2(
         uri_latency["create_connection"] = f"{elapsed_create_connection:.2f}"
         
         graphDb_data_Access = graphDBdataAccess(graph)
+        
+        # Chunk'ları oluştur (V2 için)
+        if pages:
+            logging.info(f"🧩 Creating {len(pages)} chunks for V2 file: {file_name}")
+            # create_chunks_for_upload imported via src.make_relationships import *
+            create_chunks_for_upload(graph, pages, file_name, page_images=page_images)
+            logging.info(f"✅ Chunks created successfully")
         
         # Document status kontrolü (node zaten chunking'de oluşturuldu)
         start_status_check = time.time()

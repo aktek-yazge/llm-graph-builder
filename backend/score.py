@@ -6609,6 +6609,8 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
         
         # Tüm sayfaları markdown'a çevir
         markdown_text = ""
+        previous_page_context = ""
+        
         for idx, img_ref in enumerate(sorted_images, start=1):
             try:
                 # Determine if img_ref is path or filename
@@ -6625,8 +6627,45 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                 with open(img_path, "rb") as img_file:
                     image_bytes = img_file.read()
 
+                # Prepare context string
+                context_str = ""
+                if previous_page_context:
+                    context_str = f"\n\nCONTEXT FROM PREVIOUS PAGE (Use this to handle split sentences/paragraphs):\n{previous_page_context}\n"
+
                 # Send to Gemini with new SDK
-                prompt_text = "Convert this document page to clean markdown format. Don't use ```markdown tags```. Extract all text, tables, and structure exactly as shown. Return ONLY the markdown content, nothing else."
+                prompt_text = f"""You are an AI expert in OCR and Semantic Chunking.
+This is page {idx} of {len(sorted_images)} of a document.
+
+TASK:
+1. Convert this document page to clean markdown.
+2. Group semantically related text into chunks wrapped in <CHUNK>...</CHUNK> tags.
+3. Do NOT use ```markdown tags```.
+4. Extract all text, tables, and structure exactly as shown.
+
+CRITICAL CHUNKING RULES:
+1. **HEADERS & CONTENT:** ALWAYS group a header with the content that follows it. NEVER create a chunk containing *only* a header.
+   - BAD: <CHUNK># Header</CHUNK> <CHUNK>Content...</CHUNK>
+   - GOOD: <CHUNK># Header\nContent...</CHUNK>
+
+2. **TABLES:** ALWAYS group the table title/header with the table itself.
+   - BAD: <CHUNK>Table Title</CHUNK> <CHUNK>| Col1 | Col2 |...</CHUNK>
+   - GOOD: <CHUNK>Table Title\n| Col1 | Col2 |...</CHUNK>
+
+3. **KEY-VALUE PAIRS:** Group section headers with their key-value pairs.
+   - Example: "RİSK BİLGİLERİ" and the details below it (Kullanım Tarzı, Marka, etc.) MUST be in ONE chunk.
+
+4. **SIGNATURES & FOOTERS:** Group all signature blocks, timestamps, and footer information into a SINGLE chunk at the end. Do not split names, dates, or "Asıldır" text into separate chunks.
+
+5. **GENERAL:** Avoid creating very small chunks (1-2 lines) unless they are completely independent. Prefer merging with the preceding or following context.
+
+REPETITIVE CONTENT HANDLING:
+{f"- IGNORE headers and footers that are repeated from the first page (e.g., document titles, logos, standard footers).\n- Extract ONLY the unique content of this page.\n- Do NOT extract the main document title if it appears again." if idx > 1 else ""}
+
+CONTEXT HANDLING:
+{context_str}
+- If the page starts with a continuation of a sentence/paragraph from the previous context, include it in the first <CHUNK> of this page.
+
+Return ONLY the markdown content with <CHUNK> tags, nothing else."""
 
                 response = client.models.generate_content(
                     model="models/gemini-2.0-flash",
@@ -6637,16 +6676,21 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                 )
 
                 if response.text:
+                    current_page_text = response.text
+                    
                     # Son sayfa değilse PAGE BREAK ekle
                     if idx < len(sorted_images):
-                        markdown_text += response.text + "\n\n[PAGE BREAK]\n\n"
+                        markdown_text += current_page_text + "\n\n[PAGE BREAK]\n\n"
                     else:
                         # Son sayfa - PAGE BREAK ekleme
-                        markdown_text += response.text
+                        markdown_text += current_page_text
+
+                    # Update context for next page (last 1000 chars)
+                    previous_page_context = current_page_text[-1000:] if len(current_page_text) > 1000 else current_page_text
 
                     source_name = os.path.basename(img_path)
                     logging.info(
-                        f"✅ Gemini 2.0 Flash processed page: {source_name} ({len(response.text)} chars)"
+                        f"✅ Gemini 2.0 Flash processed page {idx}/{len(sorted_images)}: {source_name} ({len(current_page_text)} chars)"
                     )
                 else:
                     logging.warning(
@@ -7043,17 +7087,98 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                         if page_images:
                             obj_source_node.page_images = page_images
 
-                        # 2️⃣ Chunk'ları oluştur
-                        from src.create_chunks import CreateChunksofDocument
-
-                        create_chunks_obj = CreateChunksofDocument(pages, graph)
-
-                        token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
-                        chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
-
-                        chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                            chunk_size=token_chunk_size, chunk_overlap=chunk_overlap
-                        )
+                        # 2️⃣ Chunk'ları oluştur (Semantic Chunking)
+                        import re
+                        chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+                        raw_chunks = chunk_pattern.findall(markdown_text)
+                        
+                        chunks = []
+                        if not raw_chunks:
+                            # Fallback to token splitting if no <CHUNK> tags
+                            logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, falling back to token splitting")
+                            from src.create_chunks import CreateChunksofDocument
+                            create_chunks_obj = CreateChunksofDocument(pages, graph)
+                            
+                            token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
+                            chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
+                            
+                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
+                                chunk_size=token_chunk_size, chunk_overlap=chunk_overlap
+                            )
+                        else:
+                            # Merge small chunks (< 150 chars) with page tracking
+                            merged_chunks = []
+                            current_chunk_text = ""
+                            current_chunk_page = 1  # Start from page 1
+                            
+                            # Split markdown by [PAGE BREAK] to track pages
+                            page_sections = markdown_text.split('[PAGE BREAK]')
+                            
+                            for page_idx, page_section in enumerate(page_sections, start=1):
+                                # Extract chunks from this page section
+                                page_raw_chunks = chunk_pattern.findall(page_section)
+                                
+                                for chunk_text in page_raw_chunks:
+                                    chunk_text = chunk_text.strip()
+                                    if not chunk_text:
+                                        continue
+                                        
+                                    if not current_chunk_text:
+                                        current_chunk_text = chunk_text
+                                        current_chunk_page = page_idx
+                                    else:
+                                        # Check if adding this chunk keeps it under limit or if current is too small
+                                        if len(current_chunk_text) < 150:
+                                            # Current is small.
+                                            # Check if the INCOMING chunk is big (>150) AND we have a previous chunk
+                                            if len(chunk_text) > 150 and merged_chunks:
+                                                # User Rule: Current is small, Next is Big -> Merge Current to Previous
+                                                merged_chunks[-1]['text'] += "\n" + current_chunk_text
+                                                # Set incoming (big) as new current
+                                                current_chunk_text = chunk_text
+                                                current_chunk_page = page_idx
+                                            else:
+                                                # Standard: Merge incoming into current
+                                                current_chunk_text += "\n" + chunk_text
+                                        else:
+                                            # Current chunk is big enough, save it and start new
+                                            merged_chunks.append({
+                                                'text': current_chunk_text,
+                                                'page': current_chunk_page
+                                            })
+                                            current_chunk_text = chunk_text
+                                            current_chunk_page = page_idx
+                            
+                            # Add the last chunk
+                            if current_chunk_text:
+                                merged_chunks.append({
+                                    'text': current_chunk_text,
+                                    'page': current_chunk_page
+                                })
+                                
+                            logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
+                            
+                            # Create Document objects from merged chunks with page metadata
+                            from langchain_core.documents import Document
+                            chunks = []
+                            for idx, chunk_data in enumerate(merged_chunks, 1):
+                                page_num = chunk_data['page']
+                                # Generate page_link from page_images if available
+                                page_link = None
+                                if page_images and page_num <= len(page_images):
+                                    page_link = page_images[page_num - 1]  # 0-indexed
+                                
+                                chunks.append(
+                                    Document(
+                                        page_content=chunk_data['text'], 
+                                        metadata={
+                                            "chunk_id": idx, 
+                                            "source": normalized_filename,
+                                            "page_number": page_num,
+                                            "page_link": page_link
+                                        }
+                                    )
+                                )
 
                         if chunks:
                             # 3️⃣ Chunk node'ları veritabanına kaydet
@@ -7315,16 +7440,108 @@ async def process_graph_creation_v2(
         with open(markdown_path, "r", encoding="utf-8") as md_file:
             markdown_content = md_file.read()
 
-        # Page break'lere göre sayfalara böl
-        page_texts = markdown_content.split("[PAGE BREAK]")
-        pages = [
-            Document(page_content=text.strip(), metadata={"page": idx})
-            for idx, text in enumerate(page_texts, 1)
-            if text.strip()
-        ]
+        # Retrieve page_images from file_record BEFORE chunk parsing
+        page_images = []
+        if file_record.page_images:
+            try:
+                import json
+                page_images = json.loads(file_record.page_images)
+                logging.info(f"🖼️ Retrieved {len(page_images)} page images from file record")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to parse page_images from file record: {e}")
+
+        # Page break'lere göre sayfalara bölmek yerine CHUNK'ları parse et
+        import re
+        
+        # Regex to find content within <CHUNK> tags
+        chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+        raw_chunks = chunk_pattern.findall(markdown_content)
+        
+        if not raw_chunks:
+            # Fallback to page splitting if no chunks found
+            logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, falling back to page splitting")
+            page_texts = markdown_content.split("[PAGE BREAK]")
+            pages = [
+                Document(page_content=text.strip(), metadata={"page": idx, "chunk_id": idx})
+                for idx, text in enumerate(page_texts, 1)
+                if text.strip()
+            ]
+        else:
+            # Merge small chunks (< 150 chars) with page tracking
+            merged_chunks = []
+            current_chunk_text = ""
+            current_chunk_page = 1  # Start from page 1
+            
+            # Split markdown by [PAGE BREAK] to track pages
+            page_sections = markdown_content.split('[PAGE BREAK]')
+            
+            for page_idx, page_section in enumerate(page_sections, start=1):
+                # Extract chunks from this page section
+                page_raw_chunks = chunk_pattern.findall(page_section)
+                
+                for chunk_text in page_raw_chunks:
+                    chunk_text = chunk_text.strip()
+                    if not chunk_text:
+                        continue
+                        
+                    if not current_chunk_text:
+                        current_chunk_text = chunk_text
+                        current_chunk_page = page_idx
+                    else:
+                        # Check if adding this chunk keeps it under limit or if current is too small
+                        if len(current_chunk_text) < 150:
+                            # Current is small.
+                            # Check if the INCOMING chunk is big (>150) AND we have a previous chunk
+                            if len(chunk_text) > 150 and merged_chunks:
+                                # User Rule: Current is small, Next is Big -> Merge Current to Previous
+                                merged_chunks[-1]['text'] += "\n" + current_chunk_text
+                                # Set incoming (big) as new current
+                                current_chunk_text = chunk_text
+                                current_chunk_page = page_idx
+                            else:
+                                # Standard: Merge incoming into current
+                                current_chunk_text += "\n" + chunk_text
+                        else:
+                            # Current chunk is big enough, save it and start new
+                            merged_chunks.append({
+                                'text': current_chunk_text,
+                                'page': current_chunk_page
+                            })
+                            current_chunk_text = chunk_text
+                            current_chunk_page = page_idx
+            
+            # Add the last chunk
+            if current_chunk_text:
+                merged_chunks.append({
+                    'text': current_chunk_text,
+                    'page': current_chunk_page
+                })
+                
+            logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
+            
+            # Create Document objects from merged chunks with page metadata
+            pages = []
+            for idx, chunk_data in enumerate(merged_chunks, 1):
+                page_num = chunk_data['page']
+                # Generate page_link from page_images if available
+                page_link = None
+                if page_images and page_num <= len(page_images):
+                    page_link = page_images[page_num - 1]  # 0-indexed
+                
+                pages.append(
+                    Document(
+                        page_content=chunk_data['text'], 
+                        metadata={
+                            "chunk_id": idx, 
+                            "source": normalized_filename,
+                            "page_number": page_num,
+                            "page_link": page_link
+                        }
+                    )
+                )
 
         logging.info(
-            f"📄 Loaded {len(pages)} pages from markdown for V2 graph extraction"
+            f"📄 Prepared {len(pages)} chunks for V2 graph extraction"
         )
 
         # V2 processing_source_v2 fonksiyonunu kullan (NO chunks)
@@ -7354,6 +7571,7 @@ async def process_graph_creation_v2(
             allowedRelationship=allowedRelationship,
             additional_instructions=additional_instructions,
             max_pages=max_pages,
+            page_images=page_images,  # Pass page_images
         )
 
         # Check if processing_source_v2 failed
