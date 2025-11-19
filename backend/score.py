@@ -7116,6 +7116,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                     f"embedding_status={file_record.embedding_status}"
                 )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
@@ -7151,6 +7152,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
             # Neo4j'ye failed status sync et
             try:
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
@@ -7515,6 +7517,9 @@ async def process_graph_creation_v2(
                     f"graph_status=failed, "
                     f"embedding_status={file_record.embedding_status}"
                 )
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
+                
                 graph_connection = create_graph_database_connection(
                     uri=uri, userName=userName, password=password, database=database
                 )
@@ -7663,6 +7668,7 @@ async def process_embedding_creation(
                     f"embedding_status=failed"
                 )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     uri=uri, userName=userName, password=password, database=database

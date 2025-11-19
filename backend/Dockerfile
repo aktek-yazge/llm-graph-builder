@@ -77,4 +77,4 @@ RUN cd /code && uv sync --frozen --no-dev
 COPY . /code
 
 # Set command with UTF-8 encoding support using uv
-CMD ["uv", "run", "gunicorn", "score:app", "--workers", "8", "--threads", "8", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "300", "--preload"]
+CMD ["uv", "run", "gunicorn", "score:app", "--workers", "8", "--threads", "8", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "600", "--preload"]
