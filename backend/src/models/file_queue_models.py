@@ -109,6 +109,7 @@ class UploadedFile(Base):
     processing_started_at = Column(DateTime, nullable=True)
     processing_completed_at = Column(DateTime, nullable=True)
     processing_error = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)  # Detailed reason for status (success/failure)
 
     # Neo4j connection details used for processing
     neo4j_uri = Column(String(255), nullable=True)
@@ -146,10 +147,13 @@ class UploadedFile(Base):
             print(f"Error calculating hash for {file_path}: {e}")
             return None
 
-    def update_status(self, new_status: FileStatus, error_message: str = None):
+    def update_status(self, new_status: FileStatus, error_message: str = None, reason: str = None):
         """Update file status with appropriate timestamps"""
         self.status = new_status
         self.updated_at = datetime.utcnow()
+        
+        if reason:
+            self.reason = reason
 
         if new_status == FileStatus.PROCESSING:
             self.processing_started_at = datetime.utcnow()
@@ -184,6 +188,8 @@ class FileQueueDatabase:
 
         # Migrate: Add auto_process column if it doesn't exist
         self._migrate_add_auto_process_column()
+        # Migrate: Add reason column if it doesn't exist
+        self._migrate_add_reason_column()
 
     def _migrate_add_auto_process_column(self):
         """Add auto_process column to uploaded_files table if it doesn't exist"""
@@ -213,6 +219,35 @@ class FileQueueDatabase:
         except Exception as e:
             logging.warning(f"⚠️ Migration warning: {str(e)}")
             # Continue even if migration fails (column might already exist)
+
+    def _migrate_add_reason_column(self):
+        """Add reason column to uploaded_files table if it doesn't exist"""
+        try:
+            # Check if column exists
+            with self.engine.connect() as conn:
+                # SQLite specific: Check if column exists
+                result = conn.execute(
+                    text("PRAGMA table_info(uploaded_files)")
+                ).fetchall()
+                column_names = [row[1] for row in result]
+
+                if "reason" not in column_names:
+                    logging.info(
+                        "🔄 Migrating: Adding reason column to uploaded_files table"
+                    )
+                    # Add column
+                    conn.execute(
+                        text(
+                            "ALTER TABLE uploaded_files ADD COLUMN reason TEXT"
+                        )
+                    )
+                    conn.commit()
+                    logging.info("✅ Migration completed: reason column added")
+                else:
+                    logging.debug("ℹ️ reason column already exists")
+        except Exception as e:
+            logging.warning(f"⚠️ Migration warning (reason): {str(e)}")
+            # Continue even if migration fails
 
     def get_db_session(self) -> Session:
         """Get database session"""
@@ -344,7 +379,7 @@ class FileQueueDatabase:
             db.close()
 
     def update_file_status(
-        self, file_id: int, new_status: FileStatus, error_message: str = None
+        self, file_id: int, new_status: FileStatus, error_message: str = None, reason: str = None
     ) -> bool:
         """Update file status"""
         db = self.get_db_session()
@@ -355,7 +390,7 @@ class FileQueueDatabase:
             if not file_record:
                 return False
 
-            file_record.update_status(new_status, error_message)
+            file_record.update_status(new_status, error_message, reason)
             db.commit()
             return True
 

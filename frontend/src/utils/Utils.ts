@@ -104,6 +104,12 @@ export const statusCheck = (status: string) => {
       return 'info'; // Graph creation kuyruğunda
     case 'Processing Graph':
       return 'warning'; // Graph creation yapılıyor
+    case 'Processing Embeddings':
+      return 'warning'; // Embedding oluşturuluyor
+    case 'Completed (with Embeddings)':
+      return 'success'; // Embedding tamamlanmış
+    case 'Embedded and Ready for Graph':
+      return 'success'; // Embedding tamamlanmış, graph'e hazır
     case 'Queued':
       return 'info'; // Genel queue
     default:

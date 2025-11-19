@@ -88,54 +88,6 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const [v2ProcessingFileId, setV2ProcessingFileId] = useState<number | null>(null);
 
   // V2 Reset fonksiyonu - process'te takılan dosyaları pending'e çeker
-  const resetV2FileStage = async (
-    fileId: number,
-    fileName: string,
-    chunking_status?: string,
-    graph_status?: string,
-    embedding_status?: string
-  ) => {
-    try {
-      let resetStage = '';
-
-      // Hangi aşamada takılmışsa o aşamayı reset et
-      if (chunking_status === 'chunking') {
-        resetStage = 'chunking';
-      } else if (graph_status === 'processing') {
-        resetStage = 'graph';
-      } else if (embedding_status === 'processing') {
-        resetStage = 'graph'; // Embedding için graph reset yeterli
-      } else {
-        showErrorToast('Bu dosya process durumunda değil');
-        return;
-      }
-
-      // Mevcut resetFileStageAPI'yi kullan
-      const { resetFileStageAPI } = await import('../utils/FileAPI');
-      const response = await resetFileStageAPI(fileId, resetStage as 'upload' | 'chunking' | 'graph');
-
-      if (response.status === 'Success' || response.status === 'success') {
-        showNormalToast(`${fileName} ${resetStage} aşaması pending durumuna çekildi`);
-        // Dosya listesini yenile
-        await refreshV2FileList();
-      } else {
-        showErrorToast(`Reset işlemi başarısız: ${response.message}`);
-      }
-    } catch (error) {
-      showErrorToast('Reset işlemi sırasında hata oluştu');
-    }
-  };
-
-  // V2 dosya listesini yenileme fonksiyonu
-  const refreshV2FileList = async () => {
-    try {
-      const queuedFiles = await getQueuedFilesAPI();
-      setFilesData(queuedFiles);
-    } catch (error) {
-      // Hata durumunda sadece toast göster
-    }
-  };
-
   // V2 Queue dosyalarını yeniden yükle
   const reloadV2Files = useCallback(async () => {
     try {
@@ -148,7 +100,9 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 
           // status = "processing" kontrolü (herhangi bir işlem yapılıyor)
           if (file.status === 'processing') {
-            if (file.graph_status === 'processing') {
+            if (file.embedding_status === 'processing') {
+              status = 'Processing Embeddings'; // Embedding oluşturuluyor
+            } else if (file.graph_status === 'processing') {
               status = 'Processing Graph'; // Graph creation yapılıyor
             } else if (file.chunking_status === 'chunking') {
               status = 'Processing Chunks'; // Chunking yapılıyor
@@ -172,13 +126,26 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           }
           // status = "completed" kontrolü
           else if (file.status === 'completed' || file.graph_status === 'completed') {
-            status = 'Completed';
+            // Embedding tamamlandıysa bunu göster
+            if (file.embedding_status === 'completed') {
+              status = 'Completed (with Embeddings)';
+            } else {
+              status = 'Completed';
+            }
           }
           // pending_endorsement kontrolü (endorsement'lar için özel durum)
           else if (file.graph_status === 'pending_endorsement') {
             status = 'Pending Endorsement'; // Endorsement olarak işaretlenmiş, graph creation bekliyor
           }
           // Diğer durumlar (status = "uploaded" veya diğer)
+          else if (file.chunking_status === 'failed' || file.graph_status === 'failed' || file.embedding_status === 'failed') {
+              status = 'Failed';
+          } 
+          // Chunked ve embedding tamamlanmış ama graph bekliyor
+          else if (file.chunking_status === 'chunked' && file.embedding_status === 'completed' && file.graph_status === 'pending') {
+              status = 'Embedded and Ready for Graph';
+          }
+          // Chunked ama graph bekliyor (embedding yok)
           else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
               status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
             } else if (file.chunking_status === 'chunked') {
@@ -187,9 +154,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
             } else if (file.chunking_status === 'pending') {
               status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
-            } else if (file.chunking_status === 'failed' || file.graph_status === 'failed') {
-              status = 'Failed';
-          }
+            }
 
           return {
             id: `v2_${file.id}`, // Unique ID for V2 files
@@ -202,13 +167,24 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
             nodesCount: 0,
             relationshipsCount: 0,
             processingProgress:
-              file.chunking_status === 'chunked'
-                ? 100
-                : file.chunking_status === 'chunking'
-                  ? 50
-                  : file.chunking_status === 'extracting'
-                    ? 25
-                    : 0,
+              // Embedding processing stage
+              file.embedding_status === 'processing'
+                ? 90
+                : file.embedding_status === 'completed'
+                  ? 100
+                  // Graph processing stage
+                  : file.graph_status === 'processing'
+                    ? 75
+                    : file.graph_status === 'completed'
+                      ? 100
+                      // Chunking stage  
+                      : file.chunking_status === 'chunked'
+                        ? 100
+                        : file.chunking_status === 'chunking'
+                          ? 50
+                          : file.chunking_status === 'extracting'
+                            ? 25
+                            : 0,
             model: file.model_used || 'Not set',
             processingTotalTime: '0',
             chunkNodeCount: 0,
@@ -229,6 +205,51 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       // Failed silently
     }
   }, [setFilesData]);
+
+  // V2 Reset fonksiyonu - process'te takılan dosyaları pending'e çeker
+  const resetV2FileStage = useCallback(async (
+    fileId: number,
+    fileName: string,
+    chunking_status?: string,
+    graph_status?: string,
+    embedding_status?: string
+  ) => {
+    try {
+      let resetStage = '';
+
+      // Hangi aşamada takılmışsa o aşamayı reset et
+      if (chunking_status === 'chunking') {
+        resetStage = 'chunking';
+      } else if (graph_status === 'processing') {
+        resetStage = 'graph';
+      } else if (embedding_status === 'processing') {
+        resetStage = 'graph'; // Embedding için graph reset yeterli
+      } else if (chunking_status === 'failed') {
+        resetStage = 'chunking';
+      } else if (graph_status === 'failed') {
+        resetStage = 'graph';
+      } else {
+        showErrorToast('Bu dosya process durumunda değil');
+        return;
+      }
+
+      // Mevcut resetFileStageAPI'yi kullan
+      const { resetFileStageAPI } = await import('../utils/FileAPI');
+      const response = await resetFileStageAPI(fileId, resetStage as 'upload' | 'chunking' | 'graph');
+
+      if (response.status === 'Success' || response.status === 'success') {
+        showNormalToast(`${fileName} ${resetStage} aşaması pending durumuna çekildi`);
+        // Dosya listesini yenile
+        await reloadV2Files();
+      } else {
+        showErrorToast(`Reset işlemi başarısız: ${response.message}`);
+      }
+    } catch (error) {
+      showErrorToast('Reset işlemi sırasında hata oluştu');
+    }
+  }, [reloadV2Files]);
+
+
 
   const { updateStatusForLargeFiles } = useServerSideEvent(
     (inMinutes, time, fileName) => {
@@ -341,17 +362,24 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       columnHelper.accessor((row) => row.status, {
         id: 'status',
         cell: (info) => {
-          if (info.getValue() != 'Processing' && info.getValue() != 'Extracting') {
+          const statusValue = info.getValue();
+          const isProcessingStatus = statusValue === 'Processing' || 
+                                     statusValue === 'Extracting' || 
+                                     statusValue === 'Processing Chunks' || 
+                                     statusValue === 'Processing Graph' ||
+                                     statusValue === 'Processing Embeddings';
+          
+          if (!isProcessingStatus) {
             return (
               <div
                 className='cellClass flex! gap-1 items-center'
                 title={info.row.original?.status === 'Failed' ? info.row.original?.errorMessage : ''}
               >
                 <div>
-                  <StatusIndicator type={statusCheck(info.getValue())} />
+                  <StatusIndicator type={statusCheck(statusValue)} />
                 </div>
-                <div>{info.getValue()}</div>
-                {(info.getValue() === 'Completed' || info.getValue() === 'Failed' || info.getValue() === 'Cancelled') &&
+                <div>{statusValue}</div>
+                {(statusValue === 'Completed' || statusValue === 'Failed' || statusValue === 'Cancelled') &&
                   !isReadOnlyUser && (
                     <span className='mx-1'>
                       <IconButtonWithToolTip
@@ -360,7 +388,20 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                         size='small'
                         label='Reset to Graph Creation'
                         clean
-                        onClick={() => onRetry(info?.row?.id as string)}
+                        onClick={() => {
+                          const isV2File = info.row.original.fileSource === 'V2 Queue';
+                          if (isV2File && info.row.original.v2FileId) {
+                            resetV2FileStage(
+                              info.row.original.v2FileId,
+                              info.row.original.name as string,
+                              info.row.original.chunking_status,
+                              info.row.original.graph_status,
+                              info.row.original.embedding_status
+                            );
+                          } else {
+                            onRetry(info?.row?.id as string);
+                          }
+                        }}
                       >
                         <ArrowPathIconSolid className='n-size-token-4' />
                       </IconButtonWithToolTip>
@@ -369,16 +410,16 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               </div>
             );
           } else if (
-            (info.getValue() === 'Processing' || info.getValue() === 'Extracting') &&
+            isProcessingStatus &&
             info.row.original.processingProgress === undefined
           ) {
             return (
               <div className='cellClass flex! gap-1 items-center'>
                 <div>
-                  <StatusIndicator type={statusCheck(info.getValue())} />
+                  <StatusIndicator type={statusCheck(statusValue)} />
                 </div>
                 <div>
-                  <i>{info.getValue() === 'Extracting' ? 'Extracting' : 'Processing'}</i>
+                  <i>{statusValue === 'Extracting' ? 'Extracting' : statusValue === 'Processing Chunks' ? 'Processing Chunks' : statusValue === 'Processing Graph' ? 'Processing Graph' : statusValue === 'Processing Embeddings' ? 'Processing Embeddings' : 'Processing'}</i>
                 </div>
                 <div className='mx-1'>
                   <IconButton
@@ -403,14 +444,19 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               </div>
             );
           } else if (
-            (info.getValue() === 'Processing' || info.getValue() === 'Extracting') &&
+            isProcessingStatus &&
             info.row.original.processingProgress != undefined &&
             info.row.original.processingProgress < 100
           ) {
+            const headingText = statusValue === 'Extracting' ? 'Extracting ' : 
+                               statusValue === 'Processing Chunks' ? 'Processing Chunks ' : 
+                               statusValue === 'Processing Graph' ? 'Processing Graph ' : 
+                               statusValue === 'Processing Embeddings' ? 'Processing Embeddings ' :
+                               'Processing ';
             return (
               <div className='cellClass'>
                 <ProgressBar
-                  heading={info.getValue() === 'Extracting' ? 'Extracting ' : 'Processing '}
+                  heading={headingText}
                   size='small'
                   value={info.row.original.processingProgress}
                 ></ProgressBar>
@@ -440,9 +486,9 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           return (
             <div className='cellClass flex! gap-1'>
               <div>
-                <StatusIndicator type={statusCheck(info.getValue())} />
+                <StatusIndicator type={statusCheck(statusValue)} />
               </div>
-              <div>{info.getValue()}</div>
+              <div>{statusValue}</div>
             </div>
           );
         },
@@ -796,7 +842,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       fileSourceFilter,
       isReadOnlyUser,
       colorMode,
+      isReadOnlyUser,
+      colorMode,
       copyRow,
+      resetV2FileStage,
     ]
   );
 
@@ -938,27 +987,19 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 
     if (isV2File && currentFile?.v2FileId) {
       try {
-        // Önce background processing'i durdur
-        const stopResponse = await fetch('/api/v2/processing/stop', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
+        // V2 dosyası için file-specific cancel API'sini kullan
+        const { cancelFileProcessingAPI } = await import('../utils/FileAPI');
+        const result = await cancelFileProcessingAPI(currentFile.v2FileId);
 
-        if (stopResponse.ok) {
-          const stopResult = await stopResponse.json();
-          showNormalToast('Background processing stopped');
+        if (result.status === 'Success' || result.status === 'success') {
+          showNormalToast(`${fileName} işleme iptal edildi`);
+          // Dosya listesini yenile
+          await reloadV2Files();
+        } else {
+          showErrorToast(`İptal işlemi başarısız: ${result.message || 'Bilinmeyen hata'}`);
         }
-
-        // Sonra V2 dosyası için reset işlemi yap
-        await resetV2FileStage(
-          currentFile.v2FileId,
-          fileName,
-          currentFile.chunking_status,
-          currentFile.graph_status,
-          currentFile.embedding_status
-        );
       } catch (error) {
-        showErrorToast('İşlem durdurma sırasında hata oluştu');
+        showErrorToast('İşlem iptal sırasında hata oluştu');
       }
       return;
     }
@@ -1258,10 +1299,13 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           }
           setV2SelectedFileIds(new Set());
 
-          // 2 saniye sonra status'u güncelle
-          setTimeout(() => {
-            reloadV2Files();
-          }, 2000);
+          // İlk refresh - processing status'ünü görmek için
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          reloadV2Files();
+          
+          // İkinci refresh - emin olmak için
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          reloadV2Files();
         } catch (error) {
           showErrorToast('Failed to start graph creation');
         }

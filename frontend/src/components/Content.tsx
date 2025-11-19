@@ -12,7 +12,7 @@ import {
   useMediaQuery,
   useSpotlightContext,
 } from '@neo4j-ndl/react';
-import { ChevronDownIconOutline, ChevronUpIconOutline } from '@neo4j-ndl/react/icons';
+import { ChartBarIconOutline, ChevronDownIconOutline, ChevronUpIconOutline } from '@neo4j-ndl/react/icons';
 import axios from 'axios';
 import React, {
   lazy,
@@ -73,7 +73,9 @@ import ChunkPopUp from './Popups/ChunkPopUp';
 import DeletePopUp from './Popups/DeletePopUp/DeletePopUp';
 import GraphEnhancementDialog from './Popups/GraphEnhancementDialog';
 import PostProcessingToast from './Popups/GraphEnhancementDialog/PostProcessingCheckList/PostProcessingToast';
+
 import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
+import ProcessingStats from './ProcessingStats';
 import ButtonWithToolTip from './UI/ButtonWithToolTip';
 import DatabaseStatusIcon from './UI/DatabaseStatusIcon';
 import FallBackDialog from './UI/FallBackDialog';
@@ -108,6 +110,7 @@ const Content: React.FC<ContentProps> = ({
   const [retryLoading, setRetryLoading] = useState<boolean>(false);
   const [showRetryPopup, toggleRetryPopup] = useReducer((state) => !state, false);
   const [showChunkPopup, toggleChunkPopup] = useReducer((state) => !state, false);
+  const [showStatsModal, setShowStatsModal] = useState<boolean>(false);
   const [chunksLoading, toggleChunksLoading] = useReducer((state) => !state, false);
   const [currentPage, setCurrentPage] = useState<number>(0);
   const [totalPageCount, setTotalPageCount] = useState<number | null>(null);
@@ -686,18 +689,18 @@ const Content: React.FC<ContentProps> = ({
 
   const handleCreateEmbeddingsForV2 = async () => {
     const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
-    const completedFiles = v2Files.filter((f: CustomFile) => f.status === 'Completed');
+    const chunkedFiles = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status === 'pending');
 
-    if (!completedFiles || completedFiles.length === 0) {
-      showErrorToast('Embedding oluşturmak için completed dosya seçiniz');
+    if (!chunkedFiles || chunkedFiles.length === 0) {
+      showErrorToast('Embedding oluşturmak için chunked edilmiş dosya seçiniz');
       return;
     }
 
     try {
       setIsExtractLoading(true);
-      showNormalToast(`${completedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
+      showNormalToast(`${chunkedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
 
-      // Seçili completed dosyalar için embedding oluştur
+      // Seçili chunked dosyalar için embedding oluştur
       const processFile = async (file: CustomFile) => {
         if (!file.v2FileId) {
           return;
@@ -705,13 +708,7 @@ const Content: React.FC<ContentProps> = ({
         try {
           const response = await startEmbeddingAPI(file.v2FileId);
           if (response.status === 'Success' || response.status === 'success') {
-            showSuccessToast(`Dosya ${file.name} embedding oluşturmaya alındı`);
-
-            // Hemen status'u güncelle
-            await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 saniye bekle
-            childRef.current?.reloadV2Files?.();
-
-            // Bu dosyanın durumunu polling ile kontrol et
+            // Polling'i background'da çalıştır
             const pollStatus = async () => {
               let attempts = 0;
               const maxAttempts = 600;
@@ -731,6 +728,7 @@ const Content: React.FC<ContentProps> = ({
                   }
                   if (fileStatus === 'failed') {
                     showErrorToast(`✗ Dosya ${file.name} embedding oluşturma başarısız`);
+                    childRef.current?.reloadV2Files?.();
                     break;
                   }
                   if (elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
@@ -743,7 +741,6 @@ const Content: React.FC<ContentProps> = ({
               }
             };
 
-            // Polling'i background'da çalıştır
             pollStatus();
           } else {
             showErrorToast(
@@ -756,11 +753,20 @@ const Content: React.FC<ContentProps> = ({
         }
       };
 
-      for (const file of completedFiles) {
+      for (const file of chunkedFiles) {
         await processFile(file);
       }
 
-      showNormalToast(`✓ ${completedFiles.length} dosya için embedding oluşturma başlatıldı`);
+      // Tüm dosyalar queue'landıktan sonra file listesini yenile
+      showNormalToast(`✓ ${chunkedFiles.length} dosya için embedding oluşturma başlatıldı`);
+      
+      // İlk refresh - processing status'ünü görmek için
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      childRef.current?.reloadV2Files?.();
+      
+      // İkinci refresh - emin olmak için
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      childRef.current?.reloadV2Files?.();
     } catch (error) {
       showErrorToast('Embedding oluşturma işlemi başlatılamadı');
     } finally {
@@ -1063,7 +1069,9 @@ const Content: React.FC<ContentProps> = ({
       (f: CustomFile) => f.graph_status === 'pending_endorsement'
     ).length;
 
-    const readyForEmbedding = v2Files.filter((f: CustomFile) => f.graph_status === 'completed').length;
+    const readyForEmbedding = v2Files.filter(
+      (f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status === 'pending'
+    ).length;
 
     return { pendingChunking, readyForGraph, pendingEndorsement, readyForEmbedding, completed: 0 };
   };
@@ -1456,6 +1464,17 @@ const Content: React.FC<ContentProps> = ({
             >
               Graph Enhancement
             </ButtonWithToolTip>
+            <ButtonWithToolTip
+              placement='top'
+              text='View Processing Statistics'
+              label='View Stats'
+              className='mr-2!'
+              onClick={() => setShowStatsModal(true)}
+              disabled={!connectionStatus}
+              size={isTablet ? 'small' : 'medium'}
+            >
+              <ChartBarIconOutline className="n-size-token-6" />
+            </ButtonWithToolTip>
             {!connectionStatus ? (
               <SpotlightTarget
                 id='connectbutton'
@@ -1480,6 +1499,10 @@ const Content: React.FC<ContentProps> = ({
             )}
           </div>
         </Flex>
+
+
+
+        <ProcessingStats files={filesData} open={showStatsModal} onClose={() => setShowStatsModal(false)} />
 
         <FileTable
           connectionStatus={connectionStatus}
@@ -1692,6 +1715,13 @@ const Content: React.FC<ContentProps> = ({
                     if (response.status === 'Success' || response.status === 'success') {
                       const processedCount = response.data?.processed_count || categorized.pendingEndorsement;
                       showSuccessToast(`✓ ${processedCount} endorsement dosyası için graph oluşturma başlatıldı`);
+                      
+                      // İlk refresh - processing status'ünü görmek için
+                      await new Promise((resolve) => setTimeout(resolve, 200));
+                      childRef.current?.reloadV2Files?.();
+                      
+                      // İkinci refresh - emin olmak için
+                      await new Promise((resolve) => setTimeout(resolve, 500));
                       childRef.current?.reloadV2Files?.();
                     } else {
                       showErrorToast(`Endorsement graph oluşturma başarısız: ${response.message || 'Bilinmeyen hata'}`);
@@ -1703,9 +1733,6 @@ const Content: React.FC<ContentProps> = ({
                   showErrorToast('Endorsement graph oluşturma başlatılamadı');
                 } finally {
                   setIsExtractLoading(false);
-                  setTimeout(() => {
-                    childRef.current?.reloadV2Files?.();
-                  }, 500);
                 }
               }}
               disabled={!getV2FilesCategorized().pendingEndorsement || isReadOnlyUser || extractLoading}

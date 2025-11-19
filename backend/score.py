@@ -5509,16 +5509,17 @@ async def create_embeddings_for_file(file_id: int):
         if not file_record:
             return create_api_response("Failed", message="File not found")
 
-        # Check if graph is completed
-        if file_record.graph_status != "completed":
+        # Check if chunking is completed
+        if file_record.chunking_status != "chunked":
             return create_api_response(
                 "Failed",
-                message=f"Graph must be completed first (current status: {file_record.graph_status})",
+                message=f"Chunking must be completed first (current status: {file_record.chunking_status})",
             )
 
         # Update status to processing
         file_record.embedding_status = "processing"
         file_record.embedding_started_at = datetime.now(timezone.utc)
+        file_record.status = "processing"  # Set general status to processing
         db_session.commit()
 
         logging.info(
@@ -5609,11 +5610,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
                     file_record.upload_status = "uploading"
                     file_record.chunking_status = "pending"
                     file_record.graph_status = "pending"
+                    file_record.embedding_status = "pending"  # Reset embedding too
                     file_record.status = "uploaded"  # Reset status
                     file_record.chunking_started_at = None
                     file_record.chunking_completed_at = None
                     file_record.graph_started_at = None
                     file_record.graph_completed_at = None
+                    file_record.embedding_started_at = None
+                    file_record.embedding_completed_at = None
                     reset_count += 1
 
                 elif stage == "chunking":
@@ -5628,11 +5632,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
                         # Image extraction not completed yet, set to "pending"
                         file_record.chunking_status = "pending"
                     file_record.graph_status = "pending"
+                    file_record.embedding_status = "pending"  # Reset embedding too
                     file_record.status = "uploaded"  # Reset status
                     file_record.chunking_started_at = None
                     file_record.chunking_completed_at = None
                     file_record.graph_started_at = None
                     file_record.graph_completed_at = None
+                    file_record.embedding_started_at = None
+                    file_record.embedding_completed_at = None
                     reset_count += 1
 
                 elif stage == "graph":
@@ -5667,11 +5674,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
             file_record.upload_status = "uploading"
             file_record.chunking_status = "pending"
             file_record.graph_status = "pending"
+            file_record.embedding_status = "pending"  # Reset embedding too
             file_record.status = "uploaded"  # Reset status
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
+            file_record.embedding_started_at = None
+            file_record.embedding_completed_at = None
             logging.info(
                 f"🔄 Reset UPLOAD stage for file {file_id_int} (cascaded to all stages)"
             )
@@ -5688,11 +5698,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
                 # Image extraction not completed yet, set to "pending"
                 file_record.chunking_status = "pending"
             file_record.graph_status = "pending"
+            file_record.embedding_status = "pending"  # Reset embedding too
             file_record.status = "uploaded"  # Reset status
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
+            file_record.embedding_started_at = None
+            file_record.embedding_completed_at = None
             logging.info(
                 f"🔄 Reset CHUNKING stage for file {file_id_int} (cascaded to graph, chunking_status={file_record.chunking_status})"
             )
@@ -6356,6 +6369,65 @@ async def stop_background_processing():
             message="Failed to stop background processing",
             error=error_message,
         )
+
+
+@app.post("/api/v2/files/{file_id}/cancel")
+async def cancel_file_processing(file_id: int):
+    """Cancel processing for a specific V2 file"""
+    db_session = None
+    try:
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            return create_api_response("Failed", message="File not found")
+
+        # Check if file is actually processing
+        if file_record.status != "processing":
+            return create_api_response(
+                "Failed",
+                message=f"File is not in processing state (current status: {file_record.status})",
+            )
+
+        logging.info(
+            f"🛑 Cancelling processing for file {file_id}: {file_record.original_name}"
+        )
+
+        # Reset status based on which stage was being processed
+        if file_record.embedding_status == "processing":
+            file_record.embedding_status = "pending"
+            file_record.reason = "Embedding processing cancelled by user"
+        elif file_record.graph_status == "processing":
+            file_record.graph_status = "pending"
+            file_record.reason = "Graph processing cancelled by user"
+        elif file_record.chunking_status == "chunking":
+            file_record.chunking_status = "ready"
+            file_record.reason = "Chunking cancelled by user"
+
+        # Reset general status
+        file_record.status = "uploaded"
+        db_session.commit()
+
+        logging.info(f"✅ Cancelled processing for: {file_record.original_name}")
+
+        return create_api_response(
+            "Success",
+            message=f"Processing cancelled for {file_record.original_name}",
+            data={"file_id": file_id, "status": "cancelled"},
+        )
+
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to cancel file processing: {error_message}")
+        return create_api_response(
+            "Failed",
+            message="Failed to cancel file processing",
+            error=error_message,
+        )
+    finally:
+        if db_session:
+            db_session.close()
 
 
 @app.get("/api/v2/processing/status")
@@ -7229,6 +7301,7 @@ async def process_graph_creation_v2(
             logging.error(f"❌ Markdown file not found: {markdown_path}")
             file_record.graph_status = "failed"
             file_record.processing_error = "Markdown file not found"
+            file_record.reason = "Graph creation failed: Markdown file not found"
             db_session.commit()
             return
 
@@ -7291,6 +7364,7 @@ async def process_graph_creation_v2(
             )
             file_record.graph_status = "failed"
             file_record.processing_error = error_message[:500]
+            file_record.reason = f"Graph extraction failed: {error_message}"
             db_session.commit()
             return
 
@@ -7343,6 +7417,7 @@ async def process_graph_creation_v2(
                     logging.error(f"❌ {error_message}")
                     file_record.graph_status = "failed"
                     file_record.processing_error = error_message[:500]
+                    file_record.reason = f"Graph verification failed: {error_message}"
                     db_session.commit()
 
                     # Sync failed status to Neo4j
@@ -7375,6 +7450,7 @@ async def process_graph_creation_v2(
                 logging.error(f"❌ {error_message}")
                 file_record.graph_status = "failed"
                 file_record.processing_error = error_message[:500]
+                file_record.reason = f"Graph verification failed: {error_message}"
                 db_session.commit()
 
                 # Sync failed status to Neo4j
@@ -7458,6 +7534,7 @@ async def process_graph_creation_v2(
         file_record.node_count = node_count
         file_record.relationship_count = relationship_count
         file_record.processing_time = processing_time
+        file_record.reason = f"Graph creation completed successfully. Nodes: {node_count}, Relationships: {relationship_count}"
 
         db_session.commit()
 
@@ -7502,6 +7579,7 @@ async def process_graph_creation_v2(
         if db_session and file_record:
             file_record.graph_status = "failed"
             file_record.processing_error = str(e)[:500]  # İlk 500 karakter
+            file_record.reason = f"Graph creation failed: {str(e)}"
             db_session.commit()
 
             # Neo4j'ye failed status sync et
@@ -7577,6 +7655,7 @@ async def process_embedding_creation(
                 # Update status to failed
                 file_record.embedding_status = "failed"
                 file_record.embedding_completed_at = datetime.now(timezone.utc)
+                file_record.reason = f"Embedding creation failed: {result['error']}"
                 db_session.commit()
 
                 # Neo4j'ye failed status sync et
@@ -7607,6 +7686,8 @@ async def process_embedding_creation(
             # Update status to completed
             file_record.embedding_status = "completed"
             file_record.embedding_completed_at = datetime.now(timezone.utc)
+            file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
+            file_record.reason = f"Embedding creation completed successfully. Updated {total_chunks} chunks."
             db_session.commit()
 
             # Neo4j'ye completed status sync et
@@ -7649,6 +7730,8 @@ async def process_embedding_creation(
             # Update status to failed
             file_record.embedding_status = "failed"
             file_record.embedding_completed_at = datetime.now(timezone.utc)
+            file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
+            file_record.reason = f"Embedding creation failed: {error_msg}"
             db_session.commit()
 
             # Neo4j'ye failed status sync et

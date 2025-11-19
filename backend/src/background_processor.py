@@ -98,14 +98,14 @@ class BackgroundProcessor:
 
             if success:
                 # Mark as completed
-                self.db.update_file_status(file_to_process.id, FileStatus.COMPLETED)
+                self.db.update_file_status(file_to_process.id, FileStatus.COMPLETED, reason="Processing completed successfully")
                 logging.info(
                     f"✅ File processing completed: {file_to_process.filename}"
                 )
             else:
                 # Mark as error
                 self.db.update_file_status(
-                    file_to_process.id, FileStatus.ERROR, "Processing failed"
+                    file_to_process.id, FileStatus.ERROR, "Processing failed", reason="Processing failed during content extraction"
                 )
                 logging.error(f"❌ File processing failed: {file_to_process.filename}")
 
@@ -115,7 +115,7 @@ class BackgroundProcessor:
 
             if self.current_task_id:
                 self.db.update_file_status(
-                    self.current_task_id, FileStatus.ERROR, error_message
+                    self.current_task_id, FileStatus.ERROR, error_message, reason=f"Processing failed: {error_message}"
                 )
         finally:
             self.current_task_id = None
@@ -1197,6 +1197,7 @@ class BackgroundProcessor:
                     # Chunking tamamlandı, graph creation için queue'ya alınacak
                     # Status'u "uploaded" olarak bırak (graph creation queue'ya alınırken "queued" yapılacak)
                     # Sadece chunking_status="chunked" olduğundan emin ol
+                    file_record.reason = "Chunking completed successfully"
                     db_session.commit()
                     logging.info(
                         f"✅ V2: Chunking completed for: {file_record.original_name} (ID: {file_record.id}), will be queued for graph creation"
@@ -1220,6 +1221,7 @@ class BackgroundProcessor:
                 if file_record:
                     file_record.chunking_status = "failed"
                     file_record.processing_error = str(chunk_error)[:500]
+                    file_record.reason = f"Chunking failed: {str(chunk_error)}"
                     # Remove from queue so it doesn't block other files
                     if file_record.status in ("queued", "processing"):
                         file_record.status = "uploaded"
@@ -1567,6 +1569,7 @@ class BackgroundProcessor:
                 if file_record:
                     file_record.graph_status = "failed"
                     file_record.processing_error = str(graph_error)[:500]
+                    file_record.reason = f"Graph creation failed: {str(graph_error)}"
                     # Remove from queue so it doesn't block other files
                     if file_record.status in ("queued", "processing"):
                         file_record.status = "uploaded"
@@ -1752,10 +1755,10 @@ async def process_file_immediately(file_id: int) -> bool:
 
         # Update final status
         if success:
-            db.update_file_status(file_id, FileStatus.COMPLETED)
+            db.update_file_status(file_id, FileStatus.COMPLETED, reason="Immediate processing completed successfully")
         else:
             db.update_file_status(
-                file_id, FileStatus.ERROR, "Immediate processing failed"
+                file_id, FileStatus.ERROR, "Immediate processing failed", reason="Immediate processing failed during content extraction"
             )
 
         return success

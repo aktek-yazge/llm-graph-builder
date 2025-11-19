@@ -1,5 +1,5 @@
 import { useAuth0 } from '@auth0/auth0-react';
-import { Spotlight, SpotlightTour, useMediaQuery, useSpotlightContext } from '@neo4j-ndl/react';
+import { useMediaQuery } from '@neo4j-ndl/react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { v4 as uuidv4 } from 'uuid';
@@ -13,7 +13,7 @@ import { envConnectionAPI } from '../../services/ConnectAPI';
 import { healthStatus } from '../../services/HealthStatus';
 import { clearChatAPI } from '../../services/QnaAPI';
 import { connectionState, OptionType } from '../../types';
-import { APP_SOURCES, SKIP_AUTH } from '../../utils/Constants';
+import { APP_SOURCES } from '../../utils/Constants';
 import { showErrorToast } from '../../utils/Toasts';
 import { deduplicateByFullPattern, deduplicateNodeByValue } from '../../utils/Utils';
 import Content from '../Content';
@@ -29,123 +29,6 @@ const GCSModal = lazy(() => import('../DataSources/GCS/GCSModal'));
 const S3Modal = lazy(() => import('../DataSources/AWS/S3Modal'));
 const GenericModal = lazy(() => import('../WebSources/GenericSourceModal'));
 const ConnectionModal = lazy(() => import('../Popups/ConnectionModal/ConnectionModal'));
-const spotlightsforunauthenticated = [
-  {
-    target: 'loginbutton',
-    children: (
-      <>
-        <Spotlight.Header>Login with Neo4j</Spotlight.Header>
-        <Spotlight.Body>Using Google Account or Email Address</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'connectbutton',
-    children: (
-      <>
-        <Spotlight.Header>Connect To Graph Database</Spotlight.Header>
-        <Spotlight.Body>Fill out the neo4j credentials and click on connect</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'dropzone',
-    children: (
-      <>
-        <Spotlight.Header>Upload documents </Spotlight.Header>
-        <Spotlight.Body>Upload any unstructured files</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'llmdropdown',
-    children: (
-      <>
-        <Spotlight.Header>Choose The Desired LLM</Spotlight.Header>
-      </>
-    ),
-  },
-  {
-    target: 'generategraphbtn',
-    children: (
-      <>
-        <Spotlight.Header>Start The Extraction Process</Spotlight.Header>
-        <Spotlight.Body>Click On Generate Graph</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'visualizegraphbtn',
-    children: (
-      <>
-        <Spotlight.Header>Visualize The Knowledge Graph</Spotlight.Header>
-        <Spotlight.Body>Select At Least One or More Completed Files From The Table For Visualization</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'chatbtn',
-    children: (
-      <>
-        <Spotlight.Header>Ask Questions Related To Documents</Spotlight.Header>
-      </>
-    ),
-  },
-];
-const spotlights = [
-  {
-    target: 'connectbutton',
-    children: (
-      <>
-        <Spotlight.Header>Connect To Graph Database</Spotlight.Header>
-        <Spotlight.Body>Fill out the neo4j credentials and click on connect</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'dropzone',
-    children: (
-      <>
-        <Spotlight.Header>Upload documents </Spotlight.Header>
-        <Spotlight.Body>Upload any unstructured files</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'llmdropdown',
-    children: (
-      <>
-        <Spotlight.Header>Choose The Desired LLM</Spotlight.Header>
-      </>
-    ),
-  },
-  {
-    target: 'generategraphbtn',
-    children: (
-      <>
-        <Spotlight.Header>Start The Extraction Process</Spotlight.Header>
-        <Spotlight.Body>Click On Generate Graph</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'visualizegraphbtn',
-    children: (
-      <>
-        <Spotlight.Header>Visualize The Knowledge Graph</Spotlight.Header>
-        <Spotlight.Body>Select At Least One or More Completed Files From The Table For Visualization</Spotlight.Body>
-      </>
-    ),
-  },
-  {
-    target: 'chatbtn',
-    children: (
-      <>
-        <Spotlight.Header>Ask Questions Related To Documents</Spotlight.Header>
-      </>
-    ),
-  },
-];
 const PageLayout: React.FC = () => {
   const [openConnection, setOpenConnection] = useState<connectionState>({
     openPopUp: false,
@@ -206,7 +89,6 @@ const PageLayout: React.FC = () => {
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth0();
   const { cancel } = useSpeechSynthesis();
-  const { setActiveSpotlight } = useSpotlightContext();
   const isYoutubeOnly = useMemo(
     () => APP_SOURCES.includes('youtube') && !APP_SOURCES.includes('wiki') && !APP_SOURCES.includes('web'),
     []
@@ -220,7 +102,6 @@ const PageLayout: React.FC = () => {
     []
   );
   const { messages, setClearHistoryData, clearHistoryData, setMessages, setIsDeleteChatLoading } = useMessageContext();
-  const isFirstTimeUser = useMemo(() => localStorage.getItem('neo4j.connection') === null, []);
 
   const [combinedPatternsVal, setCombinedPatternsVal] = useState<string[]>([]);
   const [combinedNodesVal, setCombinedNodesVal] = useState<OptionType[]>([]);
@@ -305,14 +186,7 @@ const PageLayout: React.FC = () => {
       }
     }
     initializeConnection();
-    if (!isAuthenticated && isFirstTimeUser) {
-      setActiveSpotlight('loginbutton');
-    }
-
-    if ((isAuthenticated || SKIP_AUTH) && isFirstTimeUser) {
-      setActiveSpotlight('connectbutton');
-    }
-  }, [isAuthenticated, isFirstTimeUser]);
+  }, [isAuthenticated]);
 
   const toggleLeftDrawer = useCallback(() => {
     if (isLargeDesktop) {
@@ -545,37 +419,6 @@ const PageLayout: React.FC = () => {
 
   return (
     <>
-      {!isAuthenticated && !SKIP_AUTH && isFirstTimeUser ? (
-        <SpotlightTour
-          spotlights={spotlightsforunauthenticated}
-          onAction={(target, action) => {
-            if (target == 'connectbutton' && action == 'next') {
-              if (!isLeftExpanded) {
-                toggleLeftDrawer();
-              }
-            }
-            if (target === 'visualizegraphbtn' && action === 'next' && !isRightExpanded) {
-              toggleRightDrawer();
-            }
-            console.log(`Action ${action} was performed in spotlight ${target}`);
-          }}
-        />
-      ) : (isAuthenticated || SKIP_AUTH) && isFirstTimeUser ? (
-        <SpotlightTour
-          spotlights={spotlights}
-          onAction={(target, action) => {
-            if (target == 'connectbutton' && action == 'next') {
-              if (!isLeftExpanded) {
-                toggleLeftDrawer();
-              }
-            }
-            if (target === 'visualizegraphbtn' && action === 'next' && !isRightExpanded) {
-              toggleRightDrawer();
-            }
-            console.log(`Action ${action} was performed in spotlight ${target}`);
-          }}
-        />
-      ) : null}
 
       <Suspense fallback={<FallBackDialog />}>
         <ConnectionModal

@@ -349,3 +349,12 @@ export const resetFileStageAPI = async (
   return response;
 };
 
+// Cancel file processing
+export const cancelFileProcessingAPI = async (
+  fileId: number
+): Promise<any> => {
+  const urlCancel = `${url()}/api/v2/files/${fileId}/cancel`;
+  const method: Method = 'post';
+  const response = await apiCall(urlCancel, method, {});
+  return response;
+};
