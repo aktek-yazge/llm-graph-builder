@@ -158,7 +158,7 @@ except ImportError:
 from docling_core.types.doc import ImageRefMode, DocItemLabel
 from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
 
-load_dotenv(override=True)
+load_dotenv(override=False)  # Don't override environment variables set by Docker Compose
 
 from pathlib import Path
 from typing import Dict, List
@@ -4209,6 +4209,7 @@ async def backend_connection_configuration():
         database = os.getenv("NEO4J_DATABASE")
         password = os.getenv("NEO4J_PASSWORD")
         gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
+        logging.info(f"🔍 Backend connection config - NEO4J_URI from env: {uri}")
         if all([uri, username, database, password]):
             graph = Neo4jGraph()
             logging.info(f"login connection status of object: {graph}")
@@ -4220,6 +4221,7 @@ async def backend_connection_configuration():
                 )
                 result["gcs_file_cache"] = gcs_file_cache
                 result["uri"] = uri
+                logging.info(f"🔍 Backend connection config - Returning URI: {result.get('uri')}")
                 end = time.time()
                 elapsed_time = end - start
                 result["api_name"] = "backend_connection_configuration"
@@ -7186,6 +7188,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                     f"embedding_status={file_record.embedding_status}"
                 )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
@@ -7221,6 +7224,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
             # Neo4j'ye failed status sync et
             try:
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
@@ -7591,6 +7595,9 @@ async def process_graph_creation_v2(
                     f"graph_status=failed, "
                     f"embedding_status={file_record.embedding_status}"
                 )
+                from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
+                
                 graph_connection = create_graph_database_connection(
                     uri=uri, userName=userName, password=password, database=database
                 )
@@ -7744,6 +7751,7 @@ async def process_embedding_creation(
                     f"embedding_status=failed"
                 )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
+                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     uri=uri, userName=userName, password=password, database=database

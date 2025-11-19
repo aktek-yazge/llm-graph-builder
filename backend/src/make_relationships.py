@@ -797,7 +797,16 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
             MERGE (c)-[:PART_OF]->(d)
         )
     """
-    execute_graph_query(graph, query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_data})
+    # Process chunks in smaller batches to avoid memory issues and timeouts
+    chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "50"))
+    total_chunks = len(batch_data)
+    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size}")
+    
+    for batch_start in range(0, total_chunks, chunk_batch_size):
+        batch_end = min(batch_start + chunk_batch_size, total_chunks)
+        batch_subset = batch_data[batch_start:batch_end]
+        logging.info(f"   Processing batch {batch_start//chunk_batch_size + 1}: chunks {batch_start+1}-{batch_end} of {total_chunks}")
+        execute_graph_query(graph, query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_subset})
     
     # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
     first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
