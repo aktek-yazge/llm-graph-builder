@@ -6871,21 +6871,39 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                         executor, download_images
                     )
 
-                    if downloaded_images:
+                    # Check if all images were downloaded successfully
+                    # If some images failed to download (404), we need to extract locally
+                    downloaded_count = len(downloaded_images) if downloaded_images else 0
+                    expected_count = len(page_images)
+
+                    if downloaded_count == expected_count and downloaded_count > 0:
+                        # All images downloaded successfully
                         local_images = sorted(downloaded_images)
                         logging.info(
                             f"✅ Downloaded {len(local_images)} images from S3 for: {normalized_filename}"
                         )
-                    else:
+                    elif downloaded_count > 0:
+                        # Some images downloaded successfully - use what we have
+                        local_images = sorted(downloaded_images)
                         logging.warning(
-                            f"⚠️ Failed to download images from S3 for: {normalized_filename}"
+                            f"⚠️ Partially downloaded images from S3 for: {normalized_filename} "
+                            f"({downloaded_count}/{expected_count} downloaded), will use available images and extract missing ones from PDF"
                         )
+                        # Will try to extract missing images from PDF below
+                    else:
+                        # No images downloaded - extract locally
+                        logging.warning(
+                            f"⚠️ Failed to download images from S3 for: {normalized_filename} "
+                            f"({downloaded_count}/{expected_count} downloaded), will extract locally from PDF"
+                        )
+                        # Fallback: will extract from PDF below
+                        local_images = []
                 else:
                     logging.warning(
                         f"⚠️ S3 credentials not configured, cannot download images"
                     )
 
-            # 3️⃣ S3'te de yoksa, PDF'den extract et
+            # 3️⃣ S3'te de yoksa veya download başarısız olduysa, PDF'den extract et
             if not local_images:
                 logging.info(
                     f"🖼️ No images found locally or in S3, extracting from PDF: {normalized_filename}"
@@ -6919,15 +6937,54 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                         f"✅ Extracted {len(local_images)} images from PDF for: {normalized_filename}"
                     )
                 else:
-                    error_msg = f"❌ Failed to extract images from PDF: {normalized_filename}"
+                    # No images extracted - continue with chunking anyway (text-only processing)
+                    logging.warning(
+                        f"⚠️ No images extracted from PDF for: {normalized_filename}, will continue with text-only processing"
+                    )
+                    # Set local_images to empty list - chunking will continue without images
+                    local_images = []
+
+            # Final kontrol - eğer hala image yoksa PDF'den extract etmeyi dene
+            if not local_images:
+                logging.warning(
+                    f"⚠️ No images available from S3 or local, attempting final PDF extraction for: {normalized_filename}"
+                )
+                # PDF dosyasını bul
+                pdf_path = os.path.join(pdf_dir, normalized_filename)
+                if not os.path.exists(pdf_path):
+                    # Alternatif olarak merged_file_path'i dene
+                    if os.path.exists(merged_file_path):
+                        pdf_path = merged_file_path
+                    else:
+                        error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
+                        logging.error(error_msg)
+                        raise Exception(error_msg)
+
+                from src.document_sources.local_file import (
+                    generate_page_images_with_pymupdf,
+                )
+
+                def extract_images_final():
+                    return generate_page_images_with_pymupdf(pdf_path, images_dir)
+
+                extracted_images_final = await loop.run_in_executor(
+                    executor, extract_images_final
+                )
+
+                if extracted_images_final:
+                    local_images = sorted(extracted_images_final)
+                    logging.info(
+                        f"✅ Final extraction: Extracted {len(local_images)} images from PDF for: {normalized_filename}"
+                    )
+                else:
+                    # Son çare: PDF'den text extraction yap (image olmadan)
+                    logging.warning(
+                        f"⚠️ No images available for Gemini OCR: {normalized_filename}, will try text extraction from PDF"
+                    )
+                    # PDF'den direkt text extraction yapılabilir, ama şimdilik hata ver
+                    error_msg = f"❌ No images available for processing: {normalized_filename}. Please ensure PDF file exists and is valid."
                     logging.error(error_msg)
                     raise Exception(error_msg)
-
-            # Final kontrol
-            if not local_images:
-                error_msg = f"❌ No images available for Gemini OCR: {normalized_filename}"
-                logging.error(error_msg)
-                raise Exception(error_msg)
 
             logging.info(
                 f"📸 Found {len(local_images)} images for Gemini OCR (local/S3/extracted)"
