@@ -1128,6 +1128,56 @@ const Content: React.FC<ContentProps> = ({
   const handleStartBackgroundProcessor = async () => {
     try {
       setIsExtractLoading(true);
+      
+      // Önce failed dosyaları reset et
+      const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+      const failedFiles = v2Files.filter((f: CustomFile) => 
+        f.fileSource === 'V2 Queue' && 
+        (f.chunking_status === 'failed' || f.graph_status === 'failed' || f.embedding_status === 'failed')
+      );
+
+      if (failedFiles.length > 0) {
+        showNormalToast(`${failedFiles.length} failed dosya reset ediliyor...`);
+        
+        let resetCount = 0;
+        for (const file of failedFiles) {
+          if (!file.v2FileId) continue;
+          
+          try {
+            let resetStage: 'chunking' | 'graph' = 'graph';
+            
+            // Hangi aşamada failed olduysa o aşamayı reset et
+            if (file.graph_status === 'failed') {
+              // Graph failed → chunked'a dönsün
+              resetStage = 'graph';
+            } else if (file.chunking_status === 'failed') {
+              // Chunking failed → ready'e dönsün
+              resetStage = 'chunking';
+            } else if (file.embedding_status === 'failed') {
+              // Embedding failed → graph reset yeterli
+              resetStage = 'graph';
+            }
+            
+            const { resetFileStageAPI } = await import('../utils/FileAPI');
+            const response = await resetFileStageAPI(file.v2FileId, resetStage);
+            
+            if (response.status === 'Success' || response.status === 'success') {
+              resetCount++;
+            }
+          } catch (error) {
+            // Continue with other files
+            console.error(`Failed to reset file ${file.v2FileId}:`, error);
+          }
+        }
+        
+        if (resetCount > 0) {
+          showSuccessToast(`✓ ${resetCount} failed dosya reset edildi (bir önceki adıma döndü)`);
+          // Dosya listesini yenile
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          childRef.current?.reloadV2Files?.();
+        }
+      }
+
       showNormalToast('Background processor başlatılıyor...');
 
       const response = await startBackgroundProcessingAPI();

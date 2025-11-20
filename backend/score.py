@@ -5582,23 +5582,23 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
                     .all()
                 )
             elif stage == "chunking":
-                # Reset all files that have chunking_status in ["chunked", "chunking", "ready"]
+                # Reset all files that have chunking_status in ["chunked", "chunking", "ready", "failed"]
                 files_to_reset = (
                     db_session.query(UploadedFile)
                     .filter(UploadedFile.upload_status == "uploaded")
                     .filter(
                         UploadedFile.chunking_status.in_(
-                            ["chunked", "chunking", "ready"]
+                            ["chunked", "chunking", "ready", "failed"]
                         )
                     )
                     .all()
                 )
             elif stage == "graph":
-                # Reset all files that have graph_status in ["processing", "completed"]
+                # Reset all files that have graph_status in ["processing", "completed", "failed"]
                 files_to_reset = (
                     db_session.query(UploadedFile)
                     .filter(UploadedFile.upload_status == "uploaded")
-                    .filter(UploadedFile.graph_status.in_(["processing", "completed"]))
+                    .filter(UploadedFile.graph_status.in_(["processing", "completed", "failed"]))
                     .all()
                 )
             else:
@@ -5624,10 +5624,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
 
                 elif stage == "chunking":
                     # Reset chunking and graph (cascade)
-                    # If image extraction was already completed (file was chunked before),
-                    # set chunking_status to "ready" instead of "pending"
-                    # This allows chunking to be restarted immediately
-                    if file_record.chunking_status in ["chunked", "chunking", "ready"]:
+                    # If chunking failed, reset to ready state (previous stage)
+                    if file_record.chunking_status == "failed":
+                        # Chunking failed → go back to ready state
+                        file_record.chunking_status = "ready"
+                        logging.info(
+                            f"🔄 Reset CHUNKING stage for file {file_record.id} ({file_record.original_name}) - failed → ready (ready to retry)"
+                        )
+                    elif file_record.chunking_status in ["chunked", "chunking", "ready"]:
                         # Image extraction was already completed, set to "ready" for chunking
                         file_record.chunking_status = "ready"
                     else:
@@ -5646,7 +5650,19 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
 
                 elif stage == "graph":
                     # Reset only graph
-                    file_record.graph_status = "pending"
+                    # If graph failed, reset to chunked state (previous stage)
+                    if file_record.graph_status == "failed":
+                        # Graph failed → go back to chunked state
+                        file_record.graph_status = "pending"
+                        # Ensure chunking_status is "chunked" (previous successful stage)
+                        if file_record.chunking_status != "chunked":
+                            file_record.chunking_status = "chunked"
+                        logging.info(
+                            f"🔄 Reset GRAPH stage for file {file_record.id} ({file_record.original_name}) - failed → chunked (ready to retry)"
+                        )
+                    else:
+                        # Normal reset (processing or completed)
+                        file_record.graph_status = "pending"
                     file_record.status = "uploaded"  # Reset status
                     file_record.graph_started_at = None
                     file_record.graph_completed_at = None
@@ -5690,10 +5706,14 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
 
         elif stage == "chunking":
             # Reset chunking and graph (cascade)
-            # If image extraction was already completed (file was chunked before),
-            # set chunking_status to "ready" instead of "pending"
-            # This allows chunking to be restarted immediately
-            if file_record.chunking_status in ["chunked", "chunking", "ready"]:
+            # If chunking failed, reset to ready state (previous stage)
+            if file_record.chunking_status == "failed":
+                # Chunking failed → go back to ready state
+                file_record.chunking_status = "ready"
+                logging.info(
+                    f"🔄 Reset CHUNKING stage for file {file_id_int} (failed → ready, ready to retry)"
+                )
+            elif file_record.chunking_status in ["chunked", "chunking", "ready"]:
                 # Image extraction was already completed, set to "ready" for chunking
                 file_record.chunking_status = "ready"
             else:
@@ -5714,11 +5734,23 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
 
         elif stage == "graph":
             # Reset only graph
-            file_record.graph_status = "pending"
+            # If graph failed, reset to chunked state (previous stage)
+            if file_record.graph_status == "failed":
+                # Graph failed → go back to chunked state
+                file_record.graph_status = "pending"
+                # Ensure chunking_status is "chunked" (previous successful stage)
+                if file_record.chunking_status != "chunked":
+                    file_record.chunking_status = "chunked"
+                logging.info(
+                    f"🔄 Reset GRAPH stage for file {file_id_int} (failed → chunked, ready to retry)"
+                )
+            else:
+                # Normal reset (processing or completed)
+                file_record.graph_status = "pending"
+                logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
             file_record.status = "uploaded"  # Reset status
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
-            logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
 
         db_session.commit()
 
