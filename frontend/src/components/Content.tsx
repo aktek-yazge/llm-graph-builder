@@ -1129,53 +1129,49 @@ const Content: React.FC<ContentProps> = ({
     try {
       setIsExtractLoading(true);
       
-      // Önce failed dosyaları reset et
-      const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
-      const failedFiles = v2Files.filter((f: CustomFile) => 
-        f.fileSource === 'V2 Queue' && 
-        (f.chunking_status === 'failed' || f.graph_status === 'failed' || f.embedding_status === 'failed')
-      );
-
-      if (failedFiles.length > 0) {
-        showNormalToast(`${failedFiles.length} failed dosya reset ediliyor...`);
-        
-        let resetCount = 0;
-        for (const file of failedFiles) {
-          if (!file.v2FileId) continue;
-          
-          try {
-            let resetStage: 'chunking' | 'graph' = 'graph';
-            
-            // Hangi aşamada failed olduysa o aşamayı reset et
-            if (file.graph_status === 'failed') {
-              // Graph failed → chunked'a dönsün
-              resetStage = 'graph';
-            } else if (file.chunking_status === 'failed') {
-              // Chunking failed → ready'e dönsün
-              resetStage = 'chunking';
-            } else if (file.embedding_status === 'failed') {
-              // Embedding failed → graph reset yeterli
-              resetStage = 'graph';
-            }
-            
-            const { resetFileStageAPI } = await import('../utils/FileAPI');
-            const response = await resetFileStageAPI(file.v2FileId, resetStage);
-            
-            if (response.status === 'Success' || response.status === 'success') {
-              resetCount++;
-            }
-          } catch (error) {
-            // Continue with other files
-            console.error(`Failed to reset file ${file.v2FileId}:`, error);
+      // TÜM failed dosyaları reset et (dosya seçilmeden de çalışır)
+      // Backend'de "all" parametresiyle failed dosyaları reset ediyoruz
+      showNormalToast('Failed dosyalar reset ediliyor...');
+      
+      const { resetFileStageAPI } = await import('../utils/FileAPI');
+      let totalResetCount = 0;
+      
+      // Graph failed dosyalarını reset et (all parametresiyle)
+      try {
+        const graphResponse = await resetFileStageAPI('all', 'graph');
+        if (graphResponse.status === 'Success' || graphResponse.status === 'success') {
+          const graphResetCount = graphResponse.data?.reset_count || 0;
+          if (graphResetCount > 0) {
+            totalResetCount += graphResetCount;
+            console.log(`✓ ${graphResetCount} graph failed dosya reset edildi`);
           }
         }
-        
-        if (resetCount > 0) {
-          showSuccessToast(`✓ ${resetCount} failed dosya reset edildi (bir önceki adıma döndü)`);
-          // Dosya listesini yenile
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          childRef.current?.reloadV2Files?.();
+      } catch (error) {
+        console.error('Failed to reset graph failed files:', error);
+      }
+      
+      // Chunking failed dosyalarını reset et (all parametresiyle)
+      try {
+        const chunkingResponse = await resetFileStageAPI('all', 'chunking');
+        if (chunkingResponse.status === 'Success' || chunkingResponse.status === 'success') {
+          const chunkingResetCount = chunkingResponse.data?.reset_count || 0;
+          if (chunkingResetCount > 0) {
+            totalResetCount += chunkingResetCount;
+            console.log(`✓ ${chunkingResetCount} chunking failed dosya reset edildi`);
+          }
         }
+      } catch (error) {
+        console.error('Failed to reset chunking failed files:', error);
+      }
+      
+      if (totalResetCount > 0) {
+        showSuccessToast(`✓ ${totalResetCount} failed dosya reset edildi (bir önceki adıma döndü)`);
+        // Dosya listesini yenile
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        childRef.current?.reloadV2Files?.();
+      } else {
+        // Failed dosya yoksa bilgi ver
+        showNormalToast('Reset edilecek failed dosya bulunamadı');
       }
 
       showNormalToast('Background processor başlatılıyor...');
