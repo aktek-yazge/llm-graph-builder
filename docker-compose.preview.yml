@@ -30,6 +30,9 @@ services:
       # Mount directory so Docker can auto-create the file
       # Backend will use QUEUE_DB_PATH environment variable to write to this location
       - ~/sqlite-db:/code/backend/sqlite-data
+      # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
+      # Backend creates output/document_name/ structure with PDF, images, and markdown files
+      - ~/llm-graph-output:/code/backend/output
     restart: unless-stopped
     # depends_on:
     #   - jaeger
