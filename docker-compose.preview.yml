@@ -9,6 +9,12 @@ services:
       - "4318:4318" # OTLP HTTP
       - "5778:5778" # Configuration server
       - "9411:9411" # Zipkin compatible endpoint
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=jaeger-preview"
     restart: unless-stopped
 
   # Backend - preview servisi
@@ -33,6 +39,12 @@ services:
       # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
       # Backend creates output/document_name/ structure with PDF, images, and markdown files
       - ~/llm-graph-output:/code/backend/output
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=backend-preview"
     restart: unless-stopped
     # depends_on:
     #   - jaeger
@@ -51,6 +63,12 @@ services:
     container_name: frontend-preview
     ports:
       - "5173:5173" # preview port - production test
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=frontend-preview"
     restart: unless-stopped
 
   # Neo4j ve Qdrant servisleri default bridge network üzerinde mevcut

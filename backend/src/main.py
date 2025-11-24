@@ -2028,34 +2028,46 @@ def upload_file(
                         logging.info(f"✅ Generated {len(generated_images)} page images")
                         
                         if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                            # S3 prefix oluştur (dosya adı tabanlı)
-                            s3_prefix = f"documents/{doc_name}"
+                            # S3 yapısı: documents/{doc_name}/ (PDF) ve documents/{doc_name}/images/ (images)
+                            base_s3_prefix = f"documents/{doc_name}"
                             
-                            # Tüm dosyaları (document + images) upload et
-                            all_files = [doc_copy_path] + generated_images
-                            uploaded_urls, failed_files = upload_files_to_s3(
-                                all_files,
+                            # PDF'i documents/{doc_name}/ altına upload et
+                            pdf_urls, pdf_failed = upload_files_to_s3(
+                                [doc_copy_path],
                                 s3_bucket,
-                                s3_prefix,
+                                base_s3_prefix,
                                 aws_access_key_id,
                                 aws_secret_access_key,
-                                delete_local_after_upload=True  # S3 upload sonrası local dosyaları sil
+                                delete_local_after_upload=True
                             )
                             
+                            # Image'leri documents/{doc_name}/images/ altına upload et
+                            img_urls, img_failed = upload_files_to_s3(
+                                generated_images,
+                                s3_bucket,
+                                f"{base_s3_prefix}/images",
+                                aws_access_key_id,
+                                aws_secret_access_key,
+                                delete_local_after_upload=True
+                            )
+                            
+                            uploaded_urls = pdf_urls + img_urls
+                            failed_files = pdf_failed + img_failed
+                            
                             if uploaded_urls:
-                                logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3")
+                                logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3 (1 PDF + {len(img_urls)} images)")
                                 
                                 # Document link'i bul (PDF dosyası) - sadece dosya adı
-                                for url in uploaded_urls:
+                                doc_link = None
+                                for url in pdf_urls:
                                     if url.endswith(f"/{normalized_filename}"):
                                         doc_link = os.path.basename(url)  # Sadece dosya adı
                                         break
                                 
                                 # Page image link'lerini kaydet - sadece dosya adları
                                 page_images = []
-                                for url in uploaded_urls:
-                                    if url != f"s3://{s3_bucket}/{s3_prefix}/{normalized_filename}":
-                                        page_images.append(os.path.basename(url))  # Sadece dosya adı
+                                for url in img_urls:
+                                    page_images.append(os.path.basename(url))  # Sadece dosya adı
                                 
                                 logging.info(f"📄 Document file name: {doc_link}")
                                 logging.info(f"🖼️ Page image file names: {len(page_images)} images")

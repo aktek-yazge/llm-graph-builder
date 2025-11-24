@@ -1094,7 +1094,7 @@ const Content: React.FC<ContentProps> = ({
       setIsExtractLoading(true);
 
       if (isAllSelected) {
-        // Use "all" parameter
+        // Tüm dosyalar seçilmişse "all" parametresi kullan
         showNormalToast('Tüm dosyalar için chunking başlatılıyor...');
         const response = await startChunkingAPI('all');
         if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
@@ -1105,17 +1105,40 @@ const Content: React.FC<ContentProps> = ({
           showErrorToast(`Chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
         }
       } else {
-        // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
-        // Backend zaten batch batch işlemek için dosyaları işaretliyor
-        showNormalToast(`${v2FileIds.length} dosya için chunking başlatılıyor (batch batch işlenecek)...`);
-        const response = await startChunkingAPI('all');
-        if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
-          const processedCount = response.data?.processed_count || v2FileIds.length;
-          showSuccessToast(`✓ ${processedCount} dosya chunking'e alındı (batch batch işlenecek)`);
-          childRef.current?.reloadV2Files?.();
-        } else {
-          showErrorToast(`Chunking başlatılamadı: ${response.message || 'Bilinmeyen hata'}`);
+        // Aradan seçim yapılmışsa, her dosya için tek tek istek gönder
+        showNormalToast(`${v2FileIds.length} dosya için chunking başlatılıyor...`);
+        let successCount = 0;
+        let failCount = 0;
+        const failedFiles: Array<{ id: number; reason: string }> = [];
+
+        for (const fileId of v2FileIds) {
+          try {
+            const response = await startChunkingAPI(fileId);
+            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+              successCount++;
+            } else {
+              failCount++;
+              const errorMessage = response.message || response.error || 'Unknown error';
+              failedFiles.push({ id: fileId, reason: errorMessage });
+              console.error(`Failed to start chunking for file ${fileId}:`, errorMessage);
+            }
+          } catch (error: any) {
+            failCount++;
+            const errorMessage = error?.message || error?.toString() || 'Unknown error';
+            failedFiles.push({ id: fileId, reason: errorMessage });
+            console.error(`Error starting chunking for file ${fileId}:`, error);
+          }
         }
+
+        if (failCount === 0) {
+          showSuccessToast(`✓ ${successCount} dosya chunking'e alındı`);
+        } else {
+          const errorDetails = failedFiles.map((f) => `Dosya ${f.id}: ${f.reason}`).join('; ');
+          showErrorToast(
+            `${successCount} dosya chunking'e alındı, ${failCount} dosya başarısız oldu. ${errorDetails}`
+          );
+        }
+        childRef.current?.reloadV2Files?.();
       }
     } catch (error: any) {
       showErrorToast('Chunking işlemi başlatılamadı');
@@ -1130,48 +1153,29 @@ const Content: React.FC<ContentProps> = ({
       setIsExtractLoading(true);
       
       // TÜM failed dosyaları reset et (dosya seçilmeden de çalışır)
-      // Backend'de "all" parametresiyle failed dosyaları reset ediyoruz
-      showNormalToast('Failed dosyalar reset ediliyor...');
+      // Backend'de "all" parametresiyle ve "invalidate" stage ile akıllı reset yapıyoruz
+      showNormalToast('Takılan dosyalar kontrol ediliyor...');
       
       const { resetFileStageAPI } = await import('../utils/FileAPI');
-      let totalResetCount = 0;
       
-      // Graph failed dosyalarını reset et (all parametresiyle)
       try {
-        const graphResponse = await resetFileStageAPI('all', 'graph');
-        if (graphResponse.status === 'Success' || graphResponse.status === 'success') {
-          const graphResetCount = graphResponse.data?.reset_count || 0;
-          if (graphResetCount > 0) {
-            totalResetCount += graphResetCount;
-            console.log(`✓ ${graphResetCount} graph failed dosya reset edildi`);
+        // Tek bir çağrı ile tüm takılan dosyaları (chunking, graph, embedding) resetle
+        const response = await resetFileStageAPI('all', 'invalidate');
+        
+        if (response.status === 'Success' || response.status === 'success') {
+          const resetCount = response.data?.reset_count || 0;
+          if (resetCount > 0) {
+            showSuccessToast(`✓ ${resetCount} dosya reset edildi ve tekrar kuyruğa alındı`);
+            // Dosya listesini yenile
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            childRef.current?.reloadV2Files?.();
+          } else {
+            showNormalToast('Reset edilecek takılmış dosya bulunamadı');
           }
         }
       } catch (error) {
-        console.error('Failed to reset graph failed files:', error);
-      }
-      
-      // Chunking failed dosyalarını reset et (all parametresiyle)
-      try {
-        const chunkingResponse = await resetFileStageAPI('all', 'chunking');
-        if (chunkingResponse.status === 'Success' || chunkingResponse.status === 'success') {
-          const chunkingResetCount = chunkingResponse.data?.reset_count || 0;
-          if (chunkingResetCount > 0) {
-            totalResetCount += chunkingResetCount;
-            console.log(`✓ ${chunkingResetCount} chunking failed dosya reset edildi`);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to reset chunking failed files:', error);
-      }
-      
-      if (totalResetCount > 0) {
-        showSuccessToast(`✓ ${totalResetCount} failed dosya reset edildi (bir önceki adıma döndü)`);
-        // Dosya listesini yenile
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        childRef.current?.reloadV2Files?.();
-      } else {
-        // Failed dosya yoksa bilgi ver
-        showNormalToast('Reset edilecek failed dosya bulunamadı');
+        console.error('Failed to invalidate stuck files:', error);
+        showErrorToast('Reset işlemi sırasında hata oluştu');
       }
 
       showNormalToast('Background processor başlatılıyor...');
@@ -1182,7 +1186,7 @@ const Content: React.FC<ContentProps> = ({
           showNormalToast('Background processor zaten çalışıyor');
           setIsBackgroundProcessorRunning(true);
         } else {
-          showSuccessToast('Background processor başlatıldı');
+          showSuccessToast('İşlenmeyen kayıtlar Invalidate yapıldı');
           setIsBackgroundProcessorRunning(true);
         }
       } else {
@@ -1793,15 +1797,15 @@ const Content: React.FC<ContentProps> = ({
               })()}
             </ButtonWithToolTip>
             <ButtonWithToolTip
-              text={isBackgroundProcessorRunning ? 'Background processor çalışıyor' : 'Background processor başlat'}
+              text={isBackgroundProcessorRunning ? 'Background processor çalışıyor' : 'Yarıda kalan işlemleri resetle ve processor başlat'}
               placement='top'
               onClick={handleStartBackgroundProcessor}
               disabled={isBackgroundProcessorRunning || isReadOnlyUser || extractLoading}
               className='ml-0.5'
-              label='Reload Processing'
+              label='Reset Processing'
               size={isTablet ? 'small' : 'medium'}
             >
-              {isBackgroundProcessorRunning ? '🟢 Processor Running' : '🔄 Reload Processing'}
+              {isBackgroundProcessorRunning ? '🟢 Processor Running' : '🔄 Reset Processing'}
             </ButtonWithToolTip>
             <SpotlightTarget id='visualizegraphbtn'>
               <Flex flexDirection='row' gap='0'>

@@ -3501,7 +3501,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         
                         # Gemini'ye prompt gönder
                         response = client.models.generate_content(
-                            model="models/gemini-2.0-flash",
+                            model="models/gemini-2.5-flash-lite",
                             contents=[
                                 types.Part.from_text(text=prompt),
                             ],
@@ -4355,10 +4355,11 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             policy_relationship = entities_data.get("policy_relationship", {})
             relationship_type = policy_relationship.get("relationship_type", "")
             relationship_properties = policy_relationship.get("properties", {})
+            deductible_info = entities_data.get("deductible_info", {})
             policy_type = policy_data.get("type", "")
             if relationship_type:
                 self._create_policy_type_relationship(
-                    policy_id, relationship_type, policy_type, relationship_properties, model
+                    policy_id, relationship_type, policy_type, relationship_properties, deductible_info
                 )
 
             # 3. InsuranceCompany Node'u ve ilişkisini oluştur
@@ -4596,7 +4597,7 @@ KRİTİK:
                     from google.genai import types
                     
                     response = client.models.generate_content(
-                        model="models/gemini-2.0-flash",
+                        model="models/gemini-2.5-flash-lite",
                         contents=[types.Part.from_text(text=prompt)],
                     )
                     response_text = response.text.strip() if response.text else ""
@@ -4670,130 +4671,6 @@ KRİTİK:
                 "reason": f"LLM hatası: {e}",
                 "confidence": 0.0
             }
-
-    def _create_policy_type_relationship(
-        self,
-        policy_id: str,
-        relationship_type: str,
-        policy_type: str,
-        relationship_properties: dict = None,
-        model: str = "openai_gpt_4o_mini",
-        use_llm_normalization: bool = True,
-    ):
-        """
-        Customer ile Policy arasında poliçe türüne özel ilişki oluşturur.
-        
-        YENİ: LLM ile relationship type'ı normalize eder (mevcut olanları kullanır).
-        """
-        try:
-            if not relationship_type:
-                logging.warning(
-                    f"Relationship type boş, ilişki oluşturulamadı: {policy_id}"
-                )
-                return
-
-            # YENİ: LLM ile normalize et (mevcut olanları kullan)
-            normalized_relationship_type = relationship_type
-            if use_llm_normalization:
-                try:
-                    # Schema'dan mevcut relationship type'ları çek (cache'den)
-                    schema_data = self._get_cached_schema_relationship_types()
-                    existing_types = schema_data.get("relationship_types", [])
-                    
-                    # Cache kontrolü (basit in-memory cache)
-                    cache_key = f"{relationship_type}_{policy_type}"
-                    if cache_key in graphDBdataAccess._relationship_type_cache:
-                        normalized_relationship_type = graphDBdataAccess._relationship_type_cache[cache_key]
-                        logging.debug(f"📦 Relationship type cache'den alındı: {normalized_relationship_type}")
-                    else:
-                        # LLM ile normalize et
-                        normalization_result = self._normalize_relationship_type_with_llm(
-                            relationship_type,
-                            existing_types,
-                            policy_type,
-                            model
-                        )
-                        
-                        normalized_relationship_type = normalization_result["normalized_type"]
-                        matched_existing = normalization_result["matched_existing"]
-                        reason = normalization_result["reason"]
-                        confidence = normalization_result["confidence"]
-                        
-                        # Cache'e kaydet
-                        graphDBdataAccess._relationship_type_cache[cache_key] = normalized_relationship_type
-                        
-                        if normalized_relationship_type != relationship_type:
-                            logging.info(
-                                f"🔄 Relationship type normalize edildi: "
-                                f"{relationship_type} → {normalized_relationship_type} "
-                                f"(Mevcut kullanıldı: {matched_existing}, Confidence: {confidence:.2f})"
-                            )
-                            if reason:
-                                logging.info(f"   Reason: {reason}")
-                        else:
-                            logging.info(
-                                f"✅ Relationship type zaten standart: {relationship_type}"
-                            )
-                            
-                except Exception as normalization_error:
-                    logging.warning(
-                        f"⚠️ Relationship type normalization hatası: {normalization_error}. "
-                        f"Orijinal type kullanılıyor: {relationship_type}"
-                    )
-                    normalized_relationship_type = relationship_type
-
-            # Properties'i hazırla
-            properties = relationship_properties or {}
-            filtered_properties = {
-                k: v for k, v in properties.items() if v is not None and v != ""
-            }
-
-            # Normalize edilmiş relationship type ile oluştur
-            create_relationship_query = f"""
-                MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy {{id: $policy_id}})
-                WITH c, p
-                CALL apoc.create.relationship(c, $relationship_type, $properties, p) YIELD rel
-                RETURN type(rel) as relationship_created, properties(rel) as rel_properties
-            """
-
-            result = self.execute_query(
-                create_relationship_query,
-                {
-                    "policy_id": policy_id,
-                    "relationship_type": normalized_relationship_type,  # ← Normalize edilmiş
-                    "properties": filtered_properties,
-                },
-            )
-
-            if result:
-                created_type = result[0].get("relationship_created", normalized_relationship_type)
-                logging.info(f"✅ Policy relationship oluşturuldu: {created_type}")
-                if filtered_properties:
-                    logging.info(f"   Properties: {list(filtered_properties.keys())}")
-                
-                # Eğer normalize edildiyse, metadata ekle
-                if normalized_relationship_type != relationship_type:
-                    try:
-                        metadata_query = """
-                            MATCH (c:Customer)-[r]->(p:Policy {id: $policy_id})
-                            WHERE type(r) = $normalized_type
-                            SET r.original_type = $original_type,
-                                r.normalized_at = datetime()
-                            RETURN count(r) as updated
-                        """
-                        self.execute_query(
-                            metadata_query,
-                            {
-                                "policy_id": policy_id,
-                                "normalized_type": normalized_relationship_type,
-                                "original_type": relationship_type
-                            }
-                        )
-                    except Exception as metadata_error:
-                        logging.warning(f"⚠️ Metadata ekleme hatası (önemsiz): {metadata_error}")
-
-        except Exception as e:
-            logging.error(f"Policy relationship oluşturma hatası: {e}")
 
     def create_endorsement_entity(
         self, entities_data: dict, file_name: str, document_type: str = "ENDORSEMENT"
@@ -6687,19 +6564,31 @@ KRİTİK:
 
             # Policy-specific details ekle
             if policy_details:
-                for key, value in policy_details.items():
-                    if value is not None and value != "":
-                        param_name = f"detail_{key}"
-                        set_properties.append(f"r.{key} = ${param_name}")
-                        query_params[param_name] = value
+                # Tip kontrolü: dict değilse atla
+                if not isinstance(policy_details, dict):
+                    logging.warning(
+                        f"⚠️ policy_details dict değil, atlanıyor. Tip: {type(policy_details)}, Değer: {policy_details}"
+                    )
+                else:
+                    for key, value in policy_details.items():
+                        if value is not None and value != "":
+                            param_name = f"detail_{key}"
+                            set_properties.append(f"r.{key} = ${param_name}")
+                            query_params[param_name] = value
 
             # Deductible info ekle
             if deductible_info:
-                for key, value in deductible_info.items():
-                    if value is not None and value != "":
-                        param_name = f"deductible_{key}"
-                        set_properties.append(f"r.{key} = ${param_name}")
-                        query_params[param_name] = value
+                # Tip kontrolü: dict değilse atla
+                if not isinstance(deductible_info, dict):
+                    logging.warning(
+                        f"⚠️ deductible_info dict değil, atlanıyor. Tip: {type(deductible_info)}, Değer: {deductible_info}"
+                    )
+                else:
+                    for key, value in deductible_info.items():
+                        if value is not None and value != "":
+                            param_name = f"deductible_{key}"
+                            set_properties.append(f"r.{key} = ${param_name}")
+                            query_params[param_name] = value
 
             set_clause = "SET " + ",\n                    ".join(set_properties)
 

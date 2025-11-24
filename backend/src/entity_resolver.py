@@ -5,6 +5,8 @@ Benzer entity'leri tespit eder ve birleştirir
 
 import logging
 import numpy as np
+import os
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -19,7 +21,7 @@ class EntityResolver:
     def __init__(self, 
                  similarity_threshold: float = 0.6,
                  name_similarity_threshold: float = 0.6,
-                 embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"):
+                 embedding_model: str = "BAAI/bge-m3"):
         """
         Args:
             similarity_threshold: Embedding benzerlik eşiği (0-1 arası)
@@ -28,7 +30,39 @@ class EntityResolver:
         """
         self.similarity_threshold = similarity_threshold
         self.name_similarity_threshold = name_similarity_threshold
-        self.embedding_model = SentenceTransformer(embedding_model)
+        
+        # Cache klasörü ayarları
+        # SentenceTransformer default olarak ~/.cache/torch/sentence_transformers kullanır
+        # Ama özel cache klasörü de belirtebiliriz
+        cache_folder = os.getenv(
+            "HUGGINGFACE_CACHE_FOLDER",
+            None  # None ise SentenceTransformer default cache kullanır
+        )
+        
+        if cache_folder:
+            Path(cache_folder).mkdir(parents=True, exist_ok=True)
+            logging.info(f"📦 EntityResolver - Özel cache klasörü: {cache_folder}")
+        else:
+            # SentenceTransformer'ın default cache klasörü
+            default_cache = os.path.join(os.path.expanduser("~"), ".cache", "torch", "sentence_transformers")
+            logging.info(f"📦 EntityResolver - Default cache klasörü: {default_cache}")
+        
+        logging.info(f"🤖 EntityResolver - Embedding model: {embedding_model}")
+        
+        # SentenceTransformer otomatik olarak cache kullanır:
+        # - Model cache'te varsa oradan yüklenir (hızlı)
+        # - Yoksa internet'ten indirilir ve cache'lenir (ilk kullanım)
+        # - Sonraki kullanımlarda otomatik olarak cache'ten yüklenir
+        if cache_folder:
+            self.embedding_model = SentenceTransformer(
+                embedding_model,
+                cache_folder=cache_folder,
+            )
+        else:
+            # Default cache kullan (SentenceTransformer otomatik yönetir)
+            self.embedding_model = SentenceTransformer(embedding_model)
+        
+        logging.info(f"✅ EntityResolver - Model başarıyla yüklendi (cache'ten veya indirildi)")
         
     def normalize_name(self, name: str) -> str:
         """

@@ -341,7 +341,7 @@ export const startEmbeddingAPI = async (
 // Reset file to a specific stage
 export const resetFileStageAPI = async (
   fileId: number | string,
-  stage: 'upload' | 'chunking' | 'graph' = 'upload'
+  stage: 'upload' | 'chunking' | 'graph' | 'auto' | 'invalidate' = 'upload'
 ): Promise<any> => {
   const urlReset = `${url()}/api/v2/files/${fileId}/reset?stage=${stage}`;
   const method: Method = 'post';

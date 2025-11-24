@@ -80,14 +80,44 @@ const V2FileQueue: React.FC = () => {
       const fileIds = Array.from(selectedFileIds);
       console.log(`🔄 Starting chunking for ${fileIds.length} files`);
 
-      // Use "all" parameter for batch processing (backend will handle batching)
-      const response = await startChunkingAPI('all');
+      // Check if all files are selected
+      const allFiles = files.map((f) => f.id);
+      const isAllSelected = allFiles.length > 0 && fileIds.length === allFiles.length;
 
-      if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
-        const processedCount = response.data?.processed_count || fileIds.length;
-        showSuccessToast(`Started chunking for ${processedCount} file(s) (batch processing)`);
+      if (isAllSelected) {
+        // Tüm dosyalar seçilmişse "all" parametresi kullan
+        const response = await startChunkingAPI('all');
+        if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+          const processedCount = response.data?.processed_count || fileIds.length;
+          showSuccessToast(`Started chunking for ${processedCount} file(s)`);
+        } else {
+          showErrorToast(`Failed to start chunking: ${response?.message || 'Unknown error'}`);
+        }
       } else {
-        showErrorToast(`Failed to start chunking: ${response?.message || 'Unknown error'}`);
+        // Aradan seçim yapılmışsa, her dosya için tek tek istek gönder
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const fileId of fileIds) {
+          try {
+            const response = await startChunkingAPI(fileId);
+            if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+              successCount++;
+            } else {
+              failCount++;
+              console.error(`Failed to start chunking for file ${fileId}:`, response?.message);
+            }
+          } catch (error) {
+            failCount++;
+            console.error(`Error starting chunking for file ${fileId}:`, error);
+          }
+        }
+
+        if (failCount === 0) {
+          showSuccessToast(`Started chunking for ${successCount} file(s)`);
+        } else {
+          showErrorToast(`Started chunking for ${successCount} file(s), failed for ${failCount} file(s)`);
+        }
       }
 
       setSelectedFileIds(new Set());

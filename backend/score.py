@@ -17,7 +17,7 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer)
 
-from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
@@ -129,6 +129,15 @@ class HTTPLoggingMiddleware:
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
         client_ip = scope.get("client", ["unknown", 0])[0]
+
+        # Skip logging for V2 list and status endpoints (too frequent)
+        skip_paths = [
+            "/api/v2/files/list",
+            "/api/v2/files/status",
+        ]
+        
+        if path in skip_paths:
+            return
 
         # Create log message
         log_message = f"🌐 HTTP {method} {path} - {response_status} ({duration:.3f}s)"
@@ -4513,6 +4522,92 @@ UPLOAD_DIR = Path(__file__).parent / "upload"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
+def _upload_file_sync_operations(
+    normalized_filename: str,
+    content: bytes,
+    originalname: str,
+    auto_process_bool: bool,
+):
+    """Synchronous helper function for file upload operations (runs in executor)"""
+    from src.document_sources.s3_upload_utils import (
+        create_document_output_structure,
+    )
+    from src.models.status_sync import sync_queue_db_status_to_neo4j
+    from src.shared.common_fn import create_graph_database_connection
+
+    # Create output directory structure
+    document_dir, pdf_dir, images_dir = create_document_output_structure(
+        normalized_filename, "output"
+    )
+
+    # Save file to document directory structure
+    file_path = os.path.join(pdf_dir, normalized_filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    file_size = len(content)
+    logging.info(
+        f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
+    )
+
+    # Add to database
+    db = get_file_queue_db()
+
+    # Check for existing file by hash to prevent duplicates
+    file_hash = UploadedFile.calculate_file_hash(str(file_path))
+    existing_file = db.get_file_by_hash(file_hash) if file_hash else None
+
+    if existing_file:
+        logging.info(
+            f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
+        )
+        return {
+            "success": True,
+            "duplicate": True,
+            "file": existing_file,
+        }
+
+    # Add new file to queue
+    uploaded_file = db.add_file(
+        filename=normalized_filename,
+        original_name=originalname,
+        file_path=str(file_path),
+        file_size=file_size,
+        auto_process=auto_process_bool,
+    )
+
+    # Neo4j'ye initial sync et (upload başarılı)
+    try:
+        graph_connection = create_graph_database_connection(
+            os.environ.get("NEO4J_URI"),
+            os.environ.get("NEO4J_USERNAME"),
+            os.environ.get("NEO4J_PASSWORD"),
+            os.environ.get("NEO4J_DATABASE", "neo4j"),
+        )
+        sync_queue_db_status_to_neo4j(
+            graph=graph_connection,
+            file_name=uploaded_file.filename,
+            upload_status=uploaded_file.upload_status,
+            chunking_status=uploaded_file.chunking_status,
+            graph_status=uploaded_file.graph_status,
+            embedding_status=uploaded_file.embedding_status,
+            database=os.environ.get("NEO4J_DATABASE", "neo4j"),
+        )
+        logging.info(
+            f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
+        )
+    except Exception as sync_error:
+        logging.warning(
+            f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
+        )
+
+    return {
+        "success": True,
+        "duplicate": False,
+        "file": uploaded_file,
+    }
+
+
 @app.post("/api/v2/files/upload")
 async def upload_file_to_queue(
     file: UploadFile = File(...),
@@ -4538,44 +4633,30 @@ async def upload_file_to_queue(
             f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}"
         )
 
-        # Create output directory structure
-        from src.document_sources.s3_upload_utils import (
-            create_document_output_structure,
-        )
-
-        document_dir, pdf_dir, images_dir = create_document_output_structure(
-            normalized_filename, "output"
-        )
-
-        # Save file to document directory structure
-        file_path = os.path.join(pdf_dir, normalized_filename)
+        # Read file content
         content = await file.read()
 
-        with open(file_path, "wb") as f:
-            f.write(content)
-
-        file_size = len(content)
-        logging.info(
-            f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
+        # Convert auto_process string to boolean
+        auto_process_bool = (
+            auto_process.lower() in ("true", "1", "yes", "on")
+            if auto_process
+            else False
         )
 
-        # Image extraction will be done in background processor (20-file batches)
-        # Upload endpoint only saves the file and returns immediately
-        logging.info(
-            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
-        )
-
-        # Add to database
-        db = get_file_queue_db()
-
-        # Check for existing file by hash to prevent duplicates
-        file_hash = UploadedFile.calculate_file_hash(str(file_path))
-        existing_file = db.get_file_by_hash(file_hash) if file_hash else None
-
-        if existing_file:
-            logging.info(
-                f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
+        # Run blocking operations in executor
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(
+                executor,
+                _upload_file_sync_operations,
+                normalized_filename,
+                content,
+                originalname or file.filename,
+                auto_process_bool,
             )
+
+        if result["duplicate"]:
+            existing_file = result["file"]
             return create_api_response(
                 "Success",
                 message="File already exists in queue",
@@ -4591,56 +4672,18 @@ async def upload_file_to_queue(
                 },
             )
 
-        # Convert auto_process string to boolean
-        auto_process_bool = (
-            auto_process.lower() in ("true", "1", "yes", "on")
-            if auto_process
-            else False
-        )
+        uploaded_file = result["file"]
 
-        # Add new file to queue
-        uploaded_file = db.add_file(
-            filename=normalized_filename,
-            original_name=originalname or file.filename,
-            file_path=str(file_path),
-            file_size=file_size,
-            auto_process=auto_process_bool,
+        # Image extraction will be done in background processor (20-file batches)
+        # Upload endpoint only saves the file and returns immediately
+        logging.info(
+            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
         )
-
-        # Image extraction and S3 upload will be done in background processor
-        # No metadata update needed here
 
         elapsed_time = time.time() - start
         logging.info(
             f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)"
         )
-
-        # Neo4j'ye initial sync et (upload başarılı)
-        try:
-            from src.models.status_sync import sync_queue_db_status_to_neo4j
-
-            graph_connection = create_graph_database_connection(
-                os.environ.get("NEO4J_URI"),
-                os.environ.get("NEO4J_USERNAME"),
-                os.environ.get("NEO4J_PASSWORD"),
-                os.environ.get("NEO4J_DATABASE", "neo4j"),
-            )
-            sync_queue_db_status_to_neo4j(
-                graph=graph_connection,
-                file_name=uploaded_file.filename,
-                upload_status=uploaded_file.upload_status,
-                chunking_status=uploaded_file.chunking_status,
-                graph_status=uploaded_file.graph_status,
-                embedding_status=uploaded_file.embedding_status,
-                database=os.environ.get("NEO4J_DATABASE", "neo4j"),
-            )
-            logging.info(
-                f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
-            )
-        except Exception as sync_error:
-            logging.warning(
-                f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
-            )
 
         # Background processor'ı otomatik başlat (eğer çalışmıyorsa)
         try:
@@ -4918,8 +4961,27 @@ async def start_chunking(file_id: str):
                 data={"file_id": file_id_int, "chunking_status": "chunked"},
             )
 
+        # Check if file is ready for chunking
+        if file_record.chunking_status != "ready":
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message=f"File is not ready for chunking. Current status: {file_record.chunking_status}. Expected: ready",
+                data={"file_id": file_id_int, "chunking_status": file_record.chunking_status},
+            )
+
+        # Check if upload_status is uploaded
+        if file_record.upload_status != "uploaded":
+            db_session.close()
+            return create_api_response(
+                "Failed",
+                message=f"File upload is not completed. Current status: {file_record.upload_status}. Expected: uploaded",
+                data={"file_id": file_id_int, "upload_status": file_record.upload_status},
+            )
+
         # Update status to chunking
         file_record.chunking_status = "chunking"
+        file_record.status = "processing"  # Ana status'ü de güncelle
         file_record.chunking_started_at = datetime.now(timezone.utc)
         db_session.commit()
 
@@ -4931,12 +4993,144 @@ async def start_chunking(file_id: str):
         file_path = file_record.file_path
 
         if not os.path.exists(file_path):
-            file_record.chunking_status = "failed"
-            db_session.commit()
-            db_session.close()
-            return create_api_response(
-                "Failed", message=f"File not found at: {file_path}"
+            # Dosya local'de yok, S3'ten indirmeyi dene
+            logging.warning(
+                f"⚠️ File not found locally: {file_path}. Attempting to download from S3 and extract images..."
             )
+
+            s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+            aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+            if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                try:
+                    import boto3
+                    from botocore.exceptions import ClientError
+                    from pathlib import Path
+
+                    # S3 key'ini oluştur (documents/{doc_name}/{filename})
+                    normalized_filename = file_record.filename
+                    doc_name = Path(normalized_filename).stem
+                    s3_key = f"documents/{doc_name}/{normalized_filename}"
+
+                    # S3 client oluştur
+                    s3_client = boto3.client(
+                        "s3",
+                        aws_access_key_id=aws_access_key_id,
+                        aws_secret_access_key=aws_secret_access_key,
+                    )
+
+                    # S3'te dosya var mı kontrol et
+                    try:
+                        s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
+                        logging.info(f"✅ File found in S3: s3://{s3_bucket}/{s3_key}")
+
+                        # Local dizini oluştur
+                        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+                        # PDF'i S3'ten indir
+                        logging.info(f"📥 Downloading PDF from S3: {s3_key}")
+                        s3_client.download_file(s3_bucket, s3_key, file_path)
+                        logging.info(f"✅ PDF downloaded successfully to: {file_path}")
+
+                        # Dosya indirildi, şimdi image extraction yapılması için status'ü güncelle
+                        # Image extraction yapılması için chunking_status'ü "ready" yap ve upload_status'ü kontrol et
+                        file_record.chunking_status = "ready"  # Image extraction yapılacak
+                        file_record.upload_status = "uploaded"  # PDF indirildi
+                        file_record.status = "uploaded"  # Ana status'ü güncelle
+                        db_session.commit()
+                        db_session.close()
+
+                        # Image extraction için background processor'ı tetikle
+                        from src.background_processor import get_background_processor
+
+                        processor = get_background_processor()
+                        # Image extraction işlemini başlat (background'da)
+                        # File record'ı database'den yeniden al (session kapandı)
+                        db_session_refresh = db.get_db_session()
+                        try:
+                            file_record_refresh = (
+                                db_session_refresh.query(UploadedFile)
+                                .filter_by(id=file_id_int)
+                                .first()
+                            )
+                            if file_record_refresh:
+                                asyncio.create_task(
+                                    processor._process_single_file_extraction(
+                                        file_record_refresh
+                                    )
+                                )
+                        finally:
+                            db_session_refresh.close()
+
+                        logging.info(
+                            f"🔄 PDF downloaded from S3, image extraction started for file {file_id_int}"
+                        )
+
+                        return create_api_response(
+                            "Success",
+                            message=f"File downloaded from S3. Image extraction started. Chunking will begin after image extraction completes.",
+                            data={
+                                "file_id": file_id_int,
+                                "status": "downloaded_from_s3",
+                                "chunking_status": "ready",
+                            },
+                        )
+
+                    except ClientError as e:
+                        if e.response["Error"]["Code"] == "404" or e.response["Error"]["Code"] == "NoSuchKey":
+                            # S3'te de yok, dosyanın tekrar upload edilmesi gerekiyor
+                            error_message = f"File not found locally and not found in S3. Please re-upload the file: {file_record.original_name}"
+                            file_record.chunking_status = "failed"
+                            file_record.processing_error = error_message[:500]
+                            file_record.reason = f"Chunking failed: {error_message}"
+                            db_session.commit()
+                            db_session.close()
+                            logging.error(f"❌ {error_message}")
+                            return create_api_response(
+                                "Failed",
+                                message=error_message,
+                                data={
+                                    "file_id": file_id_int,
+                                    "requires_reupload": True,
+                                },
+                            )
+                        else:
+                            raise
+
+                except Exception as s3_error:
+                    error_message = f"Failed to download file from S3: {str(s3_error)}. Please re-upload the file: {file_record.original_name}"
+                    file_record.chunking_status = "failed"
+                    file_record.processing_error = error_message[:500]
+                    file_record.reason = f"Chunking failed: {error_message}"
+                    db_session.commit()
+                    db_session.close()
+                    logging.error(f"❌ {error_message}")
+                    return create_api_response(
+                        "Failed",
+                        message=error_message,
+                        data={
+                            "file_id": file_id_int,
+                            "requires_reupload": True,
+                        },
+                    )
+            else:
+                # S3 credentials yok
+                error_message = f"File not found locally and S3 credentials not configured. Please re-upload the file: {file_record.original_name}"
+                file_record.chunking_status = "failed"
+                file_record.processing_error = error_message[:500]
+                file_record.reason = f"Chunking failed: {error_message}"
+                db_session.commit()
+                db_session.close()
+                logging.error(f"❌ {error_message}")
+                return create_api_response(
+                    "Failed",
+                    message=error_message,
+                    data={
+                        "file_id": file_id_int,
+                        "requires_reupload": True,
+                    },
+                )
 
         # Chunking işlemini background'da çalıştır
         asyncio.create_task(
@@ -5559,13 +5753,14 @@ async def create_embeddings_for_file(file_id: int):
 
 
 @app.post("/api/v2/files/{file_id}/reset")
-async def reset_file_stage(file_id: str, stage: str = "upload"):
+async def reset_file_stage(file_id: str, stage: str = "invalidate"):
     """Reset file to a specific stage (cascading: upload→chunking→graph)
 
-    If file_id is "all", resets all files based on their current status and the stage parameter.
+    If file_id is "all", resets all files based on the stage parameter.
+    If stage is "invalidate", intelligently resets a SINGLE file based on its stuck/failed status.
     """
     try:
-        if stage not in ["upload", "chunking", "graph"]:
+        if stage not in ["upload", "chunking", "graph", "invalidate"]:
             return create_api_response("Failed", message="Invalid stage parameter")
 
         db = get_file_queue_db()
@@ -5573,7 +5768,57 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
 
         # Handle "all" parameter
         if file_id.lower() == "all":
-            # Get all files based on stage
+            reset_count = 0  # Initialize reset_count for all stages
+            if stage == "invalidate":
+                 # Invalidate logic for ALL files
+                files_to_check = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.upload_status == "uploaded")
+                    .filter(
+                        (UploadedFile.chunking_status.in_(["chunking", "failed"])) |
+                        (UploadedFile.graph_status.in_(["processing", "failed"])) |
+                        (UploadedFile.embedding_status.in_(["processing", "failed"]))
+                    )
+                    .all()
+                )
+                
+                for file_record in files_to_check:
+                    reset_performed = False
+                    
+                    # Check Chunking Status
+                    if file_record.chunking_status in ["chunking", "failed"]:
+                        file_record.chunking_status = "ready"
+                        file_record.chunking_started_at = None
+                        file_record.chunking_completed_at = None
+                        file_record.status = "uploaded"  # Reset status when chunking is reset
+                        reset_performed = True
+                        logging.info(f"🔄 Invalidate: File {file_record.id} chunking reset to ready, status reset to uploaded")
+                        
+                    # Check Graph Status (only if chunking is okay or already reset)
+                    if file_record.graph_status in ["processing", "failed"]:
+                        file_record.graph_status = "pending"
+                        file_record.graph_started_at = None
+                        file_record.graph_completed_at = None
+                        # Ensure chunking is marked as chunked if we are resetting graph
+                        if file_record.chunking_status != "ready" and file_record.chunking_status != "chunked":
+                             file_record.chunking_status = "chunked"
+                        file_record.status = "uploaded"  # Reset status when graph is reset
+                        reset_performed = True
+                        logging.info(f"🔄 Invalidate: File {file_record.id} graph reset to pending, status reset to uploaded")
+
+                    # Check Embedding Status
+                    if file_record.embedding_status in ["processing", "failed"]:
+                        file_record.embedding_status = "pending"
+                        file_record.embedding_started_at = None
+                        file_record.embedding_completed_at = None
+                        file_record.status = "uploaded"  # Reset status when embedding is reset
+                        reset_performed = True
+                        logging.info(f"🔄 Invalidate: File {file_record.id} embedding reset to pending, status reset to uploaded")
+                    
+                    if reset_performed:
+                        file_record.status = "uploaded"
+                        reset_count += 1
+            
             if stage == "upload":
                 # Reset all uploaded files
                 files_to_reset = (
@@ -5604,7 +5849,6 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
             else:
                 files_to_reset = []
 
-            reset_count = 0
             for file_record in files_to_reset:
                 # Reset logic with cascading
                 if stage == "upload":
@@ -5687,7 +5931,47 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
             return create_api_response("Failed", message="File not found")
 
         # Reset logic with cascading
-        if stage == "upload":
+        if stage == "invalidate":
+             # Invalidate logic for SINGLE file
+            reset_performed = False
+            
+            # Check Chunking Status
+            if file_record.chunking_status in ["chunking", "failed"]:
+                file_record.chunking_status = "ready"
+                file_record.chunking_started_at = None
+                file_record.chunking_completed_at = None
+                file_record.status = "uploaded"  # Reset status when chunking is reset
+                reset_performed = True
+                logging.info(f"🔄 Invalidate: File {file_record.id} chunking reset to ready, status reset to uploaded")
+                
+            # Check Graph Status (only if chunking is okay or already reset)
+            if file_record.graph_status in ["processing", "failed"]:
+                file_record.graph_status = "pending"
+                file_record.graph_started_at = None
+                file_record.graph_completed_at = None
+                # Ensure chunking is marked as chunked if we are resetting graph
+                if file_record.chunking_status != "ready" and file_record.chunking_status != "chunked":
+                        file_record.chunking_status = "chunked"
+                file_record.status = "uploaded"  # Reset status when graph is reset
+                reset_performed = True
+                logging.info(f"🔄 Invalidate: File {file_record.id} graph reset to pending, status reset to uploaded")
+
+            # Check Embedding Status
+            if file_record.embedding_status in ["processing", "failed"]:
+                file_record.embedding_status = "pending"
+                file_record.embedding_started_at = None
+                file_record.embedding_completed_at = None
+                file_record.status = "uploaded"  # Reset status when embedding is reset
+                reset_performed = True
+                logging.info(f"🔄 Invalidate: File {file_record.id} embedding reset to pending, status reset to uploaded")
+            
+            if reset_performed:
+                file_record.status = "uploaded"
+                logging.info(f"🔄 Invalidate: File {file_id_int} reset successfully")
+            else:
+                logging.info(f"ℹ️ Invalidate: File {file_id_int} did not need resetting")
+
+        elif stage == "upload":
             # Reset everything
             file_record.upload_status = "uploading"
             file_record.chunking_status = "pending"
@@ -5747,31 +6031,20 @@ async def reset_file_stage(file_id: str, stage: str = "upload"):
             else:
                 # Normal reset (processing or completed)
                 file_record.graph_status = "pending"
-                logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
             file_record.status = "uploaded"  # Reset status
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
+            logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
 
-        db_session.commit()
-
-        # Neo4j'ye sync et (reset sonrası status güncelle)
+        # Sync status to Neo4j
         try:
-            logging.info(
-                f"📤 Syncing reset status to Neo4j: file_name={file_record.filename}, "
-                f"upload_status={file_record.upload_status}, "
-                f"chunking_status={file_record.chunking_status}, "
-                f"graph_status={file_record.graph_status}, "
-                f"embedding_status={file_record.embedding_status}"
-            )
-
+            # Get graph credentials
             from src.models.status_sync import sync_queue_db_status_to_neo4j
             from src.shared.common_fn import create_graph_database_connection
 
-            # Neo4j bağlantı bilgileri
+            # Neo4j connection details
             neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
-            neo4j_database = file_record.neo4j_database or os.environ.get(
-                "NEO4J_DATABASE", "neo4j"
-            )
+            neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
 
             if neo4j_uri:
                 graph_connection = create_graph_database_connection(
@@ -5898,17 +6171,286 @@ async def get_queue_status():
         )
 
 
+async def delete_file_background_task(
+    file_ids: list,
+    batch_size: int = 10,
+):
+    """
+    Background task to delete files in batches
+    Prevents blocking the API endpoint
+    """
+    db = get_file_queue_db()
+    deleted_count = 0
+    failed_count = 0
+    
+    try:
+        from src.shared.common_fn import create_graph_database_connection
+        
+        # Process files in batches
+        for i in range(0, len(file_ids), batch_size):
+            batch = file_ids[i:i + batch_size]
+            logging.info(f"🗑️ Processing deletion batch {i//batch_size + 1}: {len(batch)} files")
+            
+            # Neo4j bağlantısını batch seviyesinde kur (tüm batch için tek bağlantı)
+            graph_connection = None
+            neo4j_uri = os.environ.get("NEO4J_URI")
+            neo4j_username = os.environ.get("NEO4J_USERNAME")
+            neo4j_password = os.environ.get("NEO4J_PASSWORD")
+            neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
+            
+            # Batch başında Neo4j bağlantısını kur (eğer URI varsa)
+            if neo4j_uri:
+                try:
+                    graph_connection = create_graph_database_connection(
+                        uri=neo4j_uri,
+                        userName=neo4j_username,
+                        password=neo4j_password,
+                        database=neo4j_database,
+                    )
+                    logging.info(f"🔗 Neo4j connection established for batch {i//batch_size + 1}")
+                except Exception as conn_error:
+                    logging.error(f"❌ Failed to establish Neo4j connection for batch: {str(conn_error)}")
+                    graph_connection = None
+            
+            # Process each file in the batch
+            try:
+                for file_id_int in batch:
+                    try:
+                        db_session = db.get_db_session()
+                        file_record = db.get_file_by_id(file_id_int)
+                        
+                        if not file_record:
+                            logging.warning(f"⚠️ File not found: ID={file_id_int}")
+                            failed_count += 1
+                            db_session.close()
+                            continue
+                        
+                        file_path = Path(file_record.file_path)
+                        original_name = file_record.original_name
+                        filename = file_record.filename
+
+                        # Neo4j'den Document ve ilişkili node'ları sil
+                        neo4j_deleted = False
+                        try:
+                            # Dosya kaydında özel Neo4j URI varsa kullan, yoksa batch bağlantısını kullan
+                            file_neo4j_uri = file_record.neo4j_uri or neo4j_uri
+                            file_neo4j_database = file_record.neo4j_database or neo4j_database
+                            
+                            # Eğer dosya farklı URI/database kullanıyorsa, özel bağlantı kur
+                            if file_neo4j_uri and (file_neo4j_uri != neo4j_uri or file_neo4j_database != neo4j_database):
+                                # Dosya özel Neo4j kullanıyor, özel bağlantı kur
+                                file_graph_connection = create_graph_database_connection(
+                                    uri=file_neo4j_uri,
+                                    userName=neo4j_username,
+                                    password=neo4j_password,
+                                    database=file_neo4j_database,
+                                )
+                                use_connection = file_graph_connection
+                                use_database = file_neo4j_database
+                            elif graph_connection:
+                                # Batch bağlantısını kullan
+                                use_connection = graph_connection
+                                use_database = neo4j_database
+                            else:
+                                # Neo4j yapılandırılmamış
+                                use_connection = None
+                                use_database = None
+
+                            if use_connection:
+
+                                # V2 Document deletion query
+                                delete_query = """
+                                    MATCH (d:Document {fileName: $filename})
+                                    
+                                    // 1. Document'a bağlı Chunk node'ları topla
+                                    OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                                    
+                                    // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
+                                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
+                                    
+                                    // 3. Document'a DOCUMENTED_IN ile bağlı Endorsement node'ları topla
+                                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(e:Endorsement)
+                                    
+                                    // 4. Policy'den -> yönünde bağlı tüm node'ları topla
+                                    OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
+                                    WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
+                                          relatedNodes:PolicyType OR relatedNodes:Customer OR
+                                          relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
+                                          relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
+                                    
+                                    // 5. Policy'den bağlı Endorsement node'ları topla (FIRST_ENDORSEMENT, NEXT_ENDORSEMENT)
+                                    OPTIONAL MATCH (p)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(policyEndorsements:Endorsement)
+                                    
+                                    // 6. Endorsement'lardan bağlı node'ları topla
+                                    OPTIONAL MATCH (e)-[*1..2]->(endorsementRelatedNodes)
+                                    WHERE endorsementRelatedNodes:Premium OR endorsementRelatedNodes:Coverage OR
+                                          endorsementRelatedNodes:Clause OR endorsementRelatedNodes:Payment OR
+                                          endorsementRelatedNodes:Address OR endorsementRelatedNodes:Phone OR
+                                          endorsementRelatedNodes:Email
+                                    
+                                    OPTIONAL MATCH (policyEndorsements)-[*1..2]->(policyEndorsementRelatedNodes)
+                                    WHERE policyEndorsementRelatedNodes:Premium OR policyEndorsementRelatedNodes:Coverage OR
+                                          policyEndorsementRelatedNodes:Clause OR policyEndorsementRelatedNodes:Payment OR
+                                          policyEndorsementRelatedNodes:Address OR policyEndorsementRelatedNodes:Phone OR
+                                          policyEndorsementRelatedNodes:Email
+                                    
+                                    // 7. Sadece başka Document'larda kullanılmayan node'ları sil
+                                    WITH d, 
+                                         COLLECT(DISTINCT c) AS chunks,
+                                         COLLECT(DISTINCT p) AS policies,
+                                         COLLECT(DISTINCT e) + COLLECT(DISTINCT policyEndorsements) AS allEndorsements,
+                                         COLLECT(DISTINCT relatedNodes) AS relatedNodesList,
+                                         COLLECT(DISTINCT endorsementRelatedNodes) + COLLECT(DISTINCT policyEndorsementRelatedNodes) AS endorsementRelatedNodesList
+                                    
+                                    // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
+                                    WITH d, chunks,
+                                         [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
+                                             MATCH (d2:Document)
+                                             WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
+                                         }] AS safePolicies,
+                                         [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
+                                             MATCH (d2:Document)
+                                             WHERE d2 <> d AND (
+                                                 (d2)<-[:DOCUMENTED_IN]-(endorsement) OR
+                                                 (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
+                                             )
+                                         }] AS safeEndorsements,
+                                         [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
+                                             MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
+                                             WHERE d2 <> d AND (
+                                                 (p2)-[*1..2]->(node) OR
+                                                 (p2)<-[:HAS_DOC]-(node) OR
+                                                 (p2)<-[:DOCUMENTED_IN]-(node)
+                                             )
+                                         }] AS safeRelatedNodes,
+                                         [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
+                                             MATCH (d2:Document)
+                                             WHERE d2 <> d AND (
+                                                 (d2)<-[:DOCUMENTED_IN]-(:Endorsement)-[*1..2]->(node) OR
+                                                 (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
+                                             )
+                                         }] AS safeEndorsementRelatedNodes
+                                    
+                                    // 8. Silme işlemi
+                                    FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                                    FOREACH (endorsement IN safeEndorsements | 
+                                        FOREACH (relNode IN safeEndorsementRelatedNodes | DETACH DELETE relNode)
+                                    )
+                                    FOREACH (endorsement IN safeEndorsements | DETACH DELETE endorsement)
+                                    FOREACH (policy IN safePolicies | 
+                                        FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
+                                    )
+                                    FOREACH (policy IN safePolicies | DETACH DELETE policy)
+                                    DETACH DELETE d
+                                    
+                                    RETURN count(d) AS deletedDocuments
+                                """
+
+                                session_params = {}
+                                if use_database:
+                                    session_params["database"] = use_database
+
+                                result = use_connection.query(
+                                    delete_query,
+                                    {"filename": filename},
+                                    session_params=session_params,
+                                )
+                                
+                                # Özel bağlantı kullanıldıysa kapat
+                                if use_connection != graph_connection and hasattr(use_connection, 'close'):
+                                    try:
+                                        use_connection.close()
+                                    except:
+                                        pass
+
+                                if result and len(result) > 0:
+                                    deleted_count_neo4j = result[0]["deletedDocuments"]
+                                    logging.info(
+                                        f"✅ Deleted {deleted_count_neo4j} Document nodes from Neo4j for: {original_name}"
+                                    )
+                                    neo4j_deleted = True
+                                else:
+                                    neo4j_deleted = True  # Not an error if document doesn't exist
+                            else:
+                                neo4j_deleted = True  # Not an error if Neo4j is not configured
+
+                        except Exception as neo4j_error:
+                            logging.error(
+                                f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
+                            )
+                            neo4j_deleted = False
+                            failed_count += 1
+                            db_session.close()
+                            continue
+
+                        if not neo4j_deleted:
+                            failed_count += 1
+                            db_session.close()
+                            continue
+
+                        # Delete file from filesystem if exists
+                        if file_path.exists():
+                            file_path.unlink()
+                            logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
+
+                        # Delete from SQLite database
+                        success = db.delete_file(file_id_int)
+                        if success:
+                            logging.info(
+                                f"✅ File deleted from queue: ID={file_id_int}, Name={original_name}"
+                            )
+                            deleted_count += 1
+                        else:
+                            logging.warning(
+                                f"⚠️ Failed to delete file from database: ID={file_id_int}, Name={original_name}"
+                            )
+                            failed_count += 1
+                        
+                        db_session.close()
+                        
+                        # Small delay between files to prevent overwhelming the system
+                        await asyncio.sleep(0.1)
+                        
+                    except Exception as file_error:
+                        logging.error(
+                            f"❌ Failed to delete file {file_id_int}: {str(file_error)}"
+                        )
+                        failed_count += 1
+                        continue
+                
+            finally:
+                # Batch sonunda Neo4j bağlantısını kapat
+                if graph_connection:
+                    try:
+                        if hasattr(graph_connection, 'close'):
+                            graph_connection.close()
+                        logging.info(f"🔌 Neo4j connection closed for batch {i//batch_size + 1}")
+                    except Exception as close_error:
+                        logging.warning(f"⚠️ Error closing Neo4j connection: {str(close_error)}")
+            
+            # Delay between batches
+            if i + batch_size < len(file_ids):
+                await asyncio.sleep(0.5)
+        
+        logging.info(
+            f"✅ Background deletion completed: {deleted_count} deleted, {failed_count} failed"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Background deletion task error: {str(e)}")
+
+
 @app.delete("/api/v2/files/{file_id}")
-async def delete_queued_file(file_id: str):
+async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
     """Delete a file or all files from queue, filesystem, and Neo4j database
 
-    If file_id is "all", deletes all files from the database
+    If file_id is "all", deletes all files from the database asynchronously in batches
     """
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
 
-        # Handle "all" parameter
+        # Handle "all" parameter - run as background task
         if file_id.lower() == "all":
             # Get all files
             all_files = db_session.query(UploadedFile).all()
@@ -5921,223 +6463,35 @@ async def delete_queued_file(file_id: str):
                     data={"deleted_count": 0},
                 )
 
-            deleted_count = 0
-            failed_count = 0
-
-            for file_record in all_files:
-                try:
-                    file_path = Path(file_record.file_path)
-                    original_name = file_record.original_name
-                    filename = file_record.filename
-                    file_id_int = file_record.id
-
-                    # Neo4j'den Document ve ilişkili node'ları sil
-                    neo4j_deleted = False
-                    try:
-                        from src.shared.common_fn import (
-                            create_graph_database_connection,
-                        )
-
-                        # Neo4j bağlantı bilgilerini al (file_record'dan veya environment variable'lardan)
-                        neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
-                        neo4j_username = os.environ.get("NEO4J_USERNAME")
-                        neo4j_password = os.environ.get("NEO4J_PASSWORD")
-                        neo4j_database = file_record.neo4j_database or os.environ.get(
-                            "NEO4J_DATABASE", "neo4j"
-                        )
-
-                        if neo4j_uri:
-                            logging.info(
-                                f"🗑️ Deleting Neo4j nodes for file: {original_name} (URI: {neo4j_uri})"
-                            )
-
-                            graph_connection = create_graph_database_connection(
-                                uri=neo4j_uri,
-                                userName=neo4j_username,
-                                password=neo4j_password,
-                                database=neo4j_database,
-                            )
-
-                            # V2 Document deletion query
-                            delete_query = """
-                                MATCH (d:Document {fileName: $filename})
-                                
-                                // 1. Document'a bağlı Chunk node'ları topla
-                                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                                
-                                // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
-                                OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
-                                
-                                // 3. Document'a DOCUMENTED_IN ile bağlı Endorsement node'ları topla
-                                OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(e:Endorsement)
-                                
-                                // 4. Policy'den -> yönünde bağlı tüm node'ları topla
-                                OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
-                                WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
-                                      relatedNodes:PolicyType OR relatedNodes:Customer OR
-                                      relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
-                                      relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
-                                
-                                // 5. Policy'den bağlı Endorsement node'ları topla (FIRST_ENDORSEMENT, NEXT_ENDORSEMENT)
-                                OPTIONAL MATCH (p)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(policyEndorsements:Endorsement)
-                                
-                                // 6. Endorsement'lardan bağlı node'ları topla
-                                OPTIONAL MATCH (e)-[*1..2]->(endorsementRelatedNodes)
-                                WHERE endorsementRelatedNodes:Premium OR endorsementRelatedNodes:Coverage OR
-                                      endorsementRelatedNodes:Clause OR endorsementRelatedNodes:Payment OR
-                                      endorsementRelatedNodes:Address OR endorsementRelatedNodes:Phone OR
-                                      endorsementRelatedNodes:Email
-                                
-                                OPTIONAL MATCH (policyEndorsements)-[*1..2]->(policyEndorsementRelatedNodes)
-                                WHERE policyEndorsementRelatedNodes:Premium OR policyEndorsementRelatedNodes:Coverage OR
-                                      policyEndorsementRelatedNodes:Clause OR policyEndorsementRelatedNodes:Payment OR
-                                      policyEndorsementRelatedNodes:Address OR policyEndorsementRelatedNodes:Phone OR
-                                      policyEndorsementRelatedNodes:Email
-                                
-                                // 7. Sadece başka Document'larda kullanılmayan node'ları sil
-                                WITH d, 
-                                     COLLECT(DISTINCT c) AS chunks,
-                                     COLLECT(DISTINCT p) AS policies,
-                                     COLLECT(DISTINCT e) + COLLECT(DISTINCT policyEndorsements) AS allEndorsements,
-                                     COLLECT(DISTINCT relatedNodes) AS relatedNodesList,
-                                     COLLECT(DISTINCT endorsementRelatedNodes) + COLLECT(DISTINCT policyEndorsementRelatedNodes) AS endorsementRelatedNodesList
-                                
-                                // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
-                                WITH d, chunks,
-                                     [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
-                                         MATCH (d2:Document)
-                                         WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
-                                     }] AS safePolicies,
-                                     [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
-                                         MATCH (d2:Document)
-                                         WHERE d2 <> d AND (
-                                             (d2)<-[:DOCUMENTED_IN]-(endorsement) OR
-                                             (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
-                                         )
-                                     }] AS safeEndorsements,
-                                     [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                         MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
-                                         WHERE d2 <> d AND (
-                                             (p2)-[*1..2]->(node) OR
-                                             (p2)<-[:HAS_DOC]-(node) OR
-                                             (p2)<-[:DOCUMENTED_IN]-(node)
-                                         )
-                                     }] AS safeRelatedNodes,
-                                     [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                         MATCH (d2:Document)
-                                         WHERE d2 <> d AND (
-                                             (d2)<-[:DOCUMENTED_IN]-(:Endorsement)-[*1..2]->(node) OR
-                                             (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
-                                         )
-                                     }] AS safeEndorsementRelatedNodes
-                                
-                                // 8. Silme işlemi
-                                FOREACH (chunk IN chunks | DETACH DELETE chunk)
-                                FOREACH (endorsement IN safeEndorsements | 
-                                    FOREACH (relNode IN safeEndorsementRelatedNodes | DETACH DELETE relNode)
-                                )
-                                FOREACH (endorsement IN safeEndorsements | DETACH DELETE endorsement)
-                                FOREACH (policy IN safePolicies | 
-                                    FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
-                                )
-                                FOREACH (policy IN safePolicies | DETACH DELETE policy)
-                                DETACH DELETE d
-                                
-                                RETURN count(d) AS deletedDocuments
-                            """
-
-                            session_params = {}
-                            if neo4j_database:
-                                session_params["database"] = neo4j_database
-
-                            result = graph_connection.query(
-                                delete_query,
-                                {"filename": filename},
-                                session_params=session_params,
-                            )
-
-                            if result and len(result) > 0:
-                                deleted_count_neo4j = result[0]["deletedDocuments"]
-                                logging.info(
-                                    f"✅ Deleted {deleted_count_neo4j} Document nodes from Neo4j for: {original_name}"
-                                )
-                                neo4j_deleted = True
-                            else:
-                                logging.warning(
-                                    f"⚠️ No Document nodes found in Neo4j for: {original_name}"
-                                )
-                                neo4j_deleted = (
-                                    True  # Not an error if document doesn't exist
-                                )
-                        else:
-                            logging.warning(
-                                f"⚠️ No Neo4j URI configured, skipping Neo4j deletion for: {original_name}"
-                            )
-                            neo4j_deleted = (
-                                True  # Not an error if Neo4j is not configured
-                            )
-
-                    except Exception as neo4j_error:
-                        logging.error(
-                            f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
-                        )
-                        neo4j_deleted = False
-                        # Neo4j silme başarısız olduğu için bu dosyayı atla
-                        logging.warning(
-                            f"⚠️ Skipping deletion of {original_name} from SQLite/filesystem due to Neo4j deletion failure"
-                        )
-                        failed_count += 1
-                        continue  # Bu dosyayı atla, bir sonrakine geç
-
-                    # Neo4j silme başarılı olmalı (veya Neo4j yapılandırılmamış olmalı)
-                    if not neo4j_deleted:
-                        logging.warning(
-                            f"⚠️ Skipping deletion of {original_name} from SQLite/filesystem due to Neo4j deletion failure"
-                        )
-                        failed_count += 1
-                        continue  # Bu dosyayı atla, bir sonrakine geç
-
-                    # Delete file from filesystem if exists
-                    if file_path.exists():
-                        file_path.unlink()
-                        logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
-
-                    # Delete from SQLite database
-                    success = db.delete_file(file_id_int)
-                    if success:
-                        logging.info(
-                            f"✅ File deleted from queue: ID={file_id_int}, Name={original_name}"
-                        )
-                        deleted_count += 1
-                    else:
-                        logging.warning(
-                            f"⚠️ Failed to delete file from database: ID={file_id_int}, Name={original_name}"
-                        )
-                        failed_count += 1
-
-                except Exception as file_error:
-                    logging.error(
-                        f"❌ Failed to delete file {file_record.id}: {str(file_error)}"
-                    )
-                    failed_count += 1
-                    continue
-
+            # Get file IDs for background task
+            file_ids = [f.id for f in all_files]
+            total_files = len(file_ids)
+            
             db_session.close()
-
-            result_message = f"Deleted {deleted_count} file(s) successfully"
-            if failed_count > 0:
-                result_message += f", {failed_count} file(s) failed"
-
+            
+            # Start background deletion task
+            batch_size = int(os.environ.get("DELETE_BATCH_SIZE", "10"))
+            background_tasks.add_task(
+                delete_file_background_task,
+                file_ids=file_ids,
+                batch_size=batch_size,
+            )
+            
+            logging.info(
+                f"🗑️ Started background deletion for {total_files} files (batch size: {batch_size})"
+            )
+            
             return create_api_response(
                 "Success",
-                message=result_message,
+                message=f"Deletion started in background for {total_files} file(s). Processing in batches of {batch_size}.",
                 data={
-                    "deleted_count": deleted_count,
-                    "failed_count": failed_count,
+                    "total_files": total_files,
+                    "batch_size": batch_size,
+                    "status": "processing",
                 },
             )
 
-        # Single file processing
+        # Single file processing - also run as background task for consistency
         try:
             file_id_int = int(file_id)
         except ValueError:
@@ -6152,155 +6506,29 @@ async def delete_queued_file(file_id: str):
                 "Failed", message="File not found", error="File ID not in database"
             )
 
-        file_path = Path(file_record.file_path)
-        original_name = file_record.original_name
-        filename = file_record.filename
+        db_session.close()
+        
+        # Start background deletion task for single file
+        background_tasks.add_task(
+            delete_file_background_task,
+            file_ids=[file_id_int],
+            batch_size=1,
+        )
+        
+        logging.info(f"🗑️ Started background deletion for file ID: {file_id_int}")
+        
+        return create_api_response(
+            "Success",
+            message="File deletion started in background",
+            data={"file_id": file_id_int, "status": "processing"},
+        )
 
-        # Neo4j'den Document ve ilişkili node'ları sil
-        neo4j_deleted = False
-        try:
-            from src.shared.common_fn import create_graph_database_connection
-
-            # Neo4j bağlantı bilgilerini al (file_record'dan veya environment variable'lardan)
-            neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
-            neo4j_username = os.environ.get("NEO4J_USERNAME")
-            neo4j_password = os.environ.get("NEO4J_PASSWORD")
-            neo4j_database = file_record.neo4j_database or os.environ.get(
-                "NEO4J_DATABASE", "neo4j"
-            )
-
-            if neo4j_uri:
-                logging.info(
-                    f"🗑️ Deleting Neo4j nodes for file: {original_name} (URI: {neo4j_uri})"
-                )
-
-                graph_connection = create_graph_database_connection(
-                    uri=neo4j_uri,
-                    userName=neo4j_username,
-                    password=neo4j_password,
-                    database=neo4j_database,
-                )
-
-                # V2 Document deletion query
-                delete_query = """
-                    MATCH (d:Document {fileName: $filename})
-                    
-                    // 1. Document'a bağlı Chunk node'ları topla
-                    OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                    
-                    // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
-                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
-                    
-                    // 3. Policy'den -> yönünde bağlı tüm node'ları topla
-                    OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
-                    WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
-                          relatedNodes:PolicyType OR relatedNodes:Customer OR
-                          relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
-                          relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
-                    
-                    // 4. Sadece başka Document'larda kullanılmayan node'ları sil
-                    WITH d, 
-                         COLLECT(DISTINCT c) AS chunks,
-                         COLLECT(DISTINCT p) AS policies,
-                         COLLECT(DISTINCT relatedNodes) AS relatedNodesList
-                    
-                    // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
-                    WITH d, chunks,
-                         [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
-                             MATCH (d2:Document)
-                             WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
-                         }] AS safePolicies,
-                         [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                             MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
-                             WHERE d2 <> d AND (
-                                 (p2)-[*1..2]->(node) OR
-                                 (p2)<-[:HAS_DOC]-(node) OR
-                                 (p2)<-[:DOCUMENTED_IN]-(node)
-                             )
-                         }] AS safeRelatedNodes
-                    
-                    // 5. Silme işlemi
-                    FOREACH (chunk IN chunks | DETACH DELETE chunk)
-                    FOREACH (policy IN safePolicies | 
-                        FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
-                    )
-                    FOREACH (policy IN safePolicies | DETACH DELETE policy)
-                    DETACH DELETE d
-                    
-                    RETURN count(d) AS deletedDocuments
-                """
-
-                session_params = {}
-                if neo4j_database:
-                    session_params["database"] = neo4j_database
-
-                result = graph_connection.query(
-                    delete_query, {"filename": filename}, session_params=session_params
-                )
-
-                if result and len(result) > 0:
-                    deleted_count = result[0]["deletedDocuments"]
-                    logging.info(
-                        f"✅ Deleted {deleted_count} Document nodes from Neo4j for: {original_name}"
-                    )
-                    neo4j_deleted = True
-                else:
-                    logging.warning(
-                        f"⚠️ No Document nodes found in Neo4j for: {original_name}"
-                    )
-                    neo4j_deleted = True  # Not an error if document doesn't exist
-            else:
-                logging.warning(
-                    f"⚠️ No Neo4j URI configured (neither in file record nor environment), skipping Neo4j deletion for: {original_name}"
-                )
-                neo4j_deleted = True  # Not an error if Neo4j is not configured
-
-        except Exception as neo4j_error:
-            logging.error(
-                f"❌ Failed to delete from Neo4j for {original_name}: {str(neo4j_error)}"
-            )
-            neo4j_deleted = False
-            # Neo4j silme başarısız olduğu için SQLite ve filesystem'den de silme
-            db_session.close()
-            return create_api_response(
-                "Failed",
-                message=f"Failed to delete from Neo4j: {str(neo4j_error)}. File not deleted from database.",
-                error=str(neo4j_error),
-            )
-
-        # Neo4j silme başarılı olmalı (veya Neo4j yapılandırılmamış olmalı)
-        if not neo4j_deleted:
-            db_session.close()
-            return create_api_response(
-                "Failed",
-                message="Neo4j deletion failed. File not deleted from database.",
-            )
-
-        # Delete file from filesystem if exists
-        if file_path.exists():
-            file_path.unlink()
-            logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
-
-        # Delete from SQLite database
-        success = db.delete_file(file_id_int)
-        if success:
-            logging.info(f"✅ File deleted from queue: ID={file_id_int}")
-
-            result_message = "File deleted successfully"
-            if neo4j_deleted:
-                result_message += " (including Neo4j nodes)"
-
-            db_session.close()
-            return create_api_response(
-                "Success",
-                message=result_message,
-                data={"file_id": file_id_int, "neo4j_deleted": neo4j_deleted},
-            )
-        else:
-            db_session.close()
-            return create_api_response(
-                "Failed", message="Failed to delete file from database"
-            )
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to delete file {file_id}: {error_message}")
+        return create_api_response(
+            "Failed", message="Failed to delete file", error=error_message
+        )
 
     except Exception as e:
         error_message = str(e)
@@ -6326,28 +6554,113 @@ background_task = None
 
 @app.post("/api/v2/processing/start")
 async def start_background_processing():
-    """Start background file processing"""
+    """Start background file processing and reset stuck processing files"""
     global background_task
 
     try:
-        processor = get_background_processor()
+        from src.models.file_queue_models import get_file_queue_db, UploadedFile
 
-        if processor.is_processing:
-            return create_api_response(
-                "Success",
-                message="Background processing already running",
-                data={"status": "already_running"},
+        # Önce yarıda kalan işlemleri resetle
+        db = get_file_queue_db()
+        db_session = db.get_db_session()
+        reset_count = 0
+
+        try:
+            from sqlalchemy import or_, and_
+
+            # Reset kriterleri: Sadece gerçekten takılmış kayıtları resetle
+            # İşlem sırası: 1) Upload/Image Extraction → 2) Chunking → 3) Embedding/Graph (bağımsız)
+            # - status = 'uploaded' VEYA status = 'processing' olanlar VE
+            # - (
+            #     (chunking_status = 'processing'/'chunking'/'failed') VEYA
+            #     (chunking_status = 'chunked' VE embedding_status = 'processing'/'failed') VEYA
+            #     (chunking_status = 'chunked' VE graph_status = 'processing'/'failed')
+            #   )
+            files_to_reset = (
+                db_session.query(UploadedFile)
+                .filter(
+                    or_(
+                        UploadedFile.status == "uploaded",
+                        UploadedFile.status == "processing",
+                    )
+                )
+                .filter(
+                    or_(
+                        # Chunking takılmış (processing, chunking, veya failed) -> resetle
+                        or_(
+                            UploadedFile.chunking_status == "processing",
+                            UploadedFile.chunking_status == "chunking",
+                            UploadedFile.chunking_status == "failed",
+                        ),
+                        # Chunking başarılı ama embedding takılmış -> resetle (embedding bağımsız)
+                        and_(
+                            UploadedFile.chunking_status == "chunked",
+                            or_(
+                                UploadedFile.embedding_status == "processing",
+                                UploadedFile.embedding_status == "failed",
+                            ),
+                        ),
+                        # Chunking başarılı ama graph takılmış -> resetle (graph bağımsız)
+                        and_(
+                            UploadedFile.chunking_status == "chunked",
+                            or_(
+                                UploadedFile.graph_status == "processing",
+                                UploadedFile.graph_status == "failed",
+                            ),
+                        ),
+                    )
+                )
+                .all()
             )
 
-        # Start background task
-        background_task = asyncio.create_task(start_processing_loop())
+            for file in files_to_reset:
+                # Sadece takılan adımı resetle, önceki adımları koru
+                original_chunking = file.chunking_status
+                original_graph = file.graph_status
+                original_embedding = file.embedding_status
+                
+                # Chunking takılmışsa sadece onu resetle
+                if original_chunking in ["processing", "chunking", "failed"]:
+                    file.chunking_status = "ready"
+                    file.status = "uploaded"  # Status'u da güncelle
+                    logging.debug(f"🔄 File {file.id}: Reset chunking_status from {original_chunking} to ready")
+                
+                # Chunking başarılı ama embedding takılmışsa sadece embedding'i resetle
+                elif original_chunking == "chunked" and original_embedding in ["processing", "failed"]:
+                    file.embedding_status = "pending"
+                    logging.debug(f"🔄 File {file.id}: Reset embedding_status from {original_embedding} to pending")
+                
+                # Chunking başarılı ama graph takılmışsa sadece graph'ı resetle
+                elif original_chunking == "chunked" and original_graph in ["processing", "failed"]:
+                    file.graph_status = "pending"
+                    logging.debug(f"🔄 File {file.id}: Reset graph_status from {original_graph} to pending")
+                
+                reset_count += 1
 
-        logging.info("🚀 Background processing started via API")
+            if reset_count > 0:
+                db_session.commit()
+                logging.info(
+                    f"🔄 {reset_count} adet yarıda kalan işlem resetlendi (status=uploaded/processing ve graph/embedding/chunking status=processing/failed)"
+                )
+            else:
+                logging.info("ℹ️ Resetlenecek yarıda kalan işlem bulunamadı")
+
+        except Exception as reset_error:
+            db_session.rollback()
+            logging.error(f"⚠️ Reset işlemi sırasında hata: {reset_error}")
+        finally:
+            db_session.close()
+
+        # Background processor otomatik başlatılmıyor - kullanıcı manuel olarak yönetecek
+        logging.info("🔄 Reset işlemi tamamlandı. Background processor otomatik başlatılmadı.")
 
         return create_api_response(
             "Success",
-            message="Background processing started successfully",
-            data={"status": "started"},
+            message="Processing files reset successfully. Background processor not started automatically.",
+            data={
+                "status": "reset_completed",
+                "reset_count": reset_count,
+            },
         )
 
     except Exception as e:
@@ -6582,7 +6895,7 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                 logging.info(f"🔍 Sending {len(images_to_analyze)} image(s) to Gemini for document type detection...")
                 
                 doc_type_response = client.models.generate_content(
-                    model="models/gemini-2.0-flash",
+                    model="models/gemini-2.5-flash-lite",
                     contents=parts,
                 )
                 
@@ -6700,7 +7013,7 @@ CONTEXT HANDLING:
 Return ONLY the markdown content with <CHUNK> tags, nothing else."""
 
                 response = client.models.generate_content(
-                    model="models/gemini-2.0-flash",
+                    model="models/gemini-2.5-flash-lite",
                     contents=[
                         types.Part.from_text(text=prompt_text),
                         types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
@@ -7066,6 +7379,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                             from src.document_sources.s3_upload_utils import (
                                 upload_files_to_s3_with_structure,
                             )
+                            from pathlib import Path
 
                             doc_name = Path(normalized_filename).stem
                             md_s3_prefix = (
@@ -7429,10 +7743,19 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
             logging.info(f"✅ V2 Chunking completed for: {original_name}")
 
         except Exception as chunk_error:
+            error_message = str(chunk_error)
             logging.error(
-                f"❌ V2 Chunking failed for {normalized_filename}: {chunk_error}"
+                f"❌ V2 Chunking failed for {normalized_filename}: {error_message}"
             )
+            import traceback
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            
             file_record.chunking_status = "failed"
+            file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
+            file_record.reason = f"Chunking failed: {error_message}"
+            # Remove from queue so it doesn't block other files
+            if file_record.status in ("queued", "processing"):
+                file_record.status = "uploaded"
             db_session.commit()
 
             # Neo4j'ye failed status sync et
@@ -7463,9 +7786,18 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                 )
 
     except Exception as e:
-        logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {str(e)}")
+        error_message = str(e)
+        logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {error_message}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        
         if db_session and file_record:
             file_record.chunking_status = "failed"
+            file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
+            file_record.reason = f"Chunking failed: {error_message}"
+            # Remove from queue so it doesn't block other files
+            if file_record.status in ("queued", "processing"):
+                file_record.status = "uploaded"
             db_session.commit()
     finally:
         if db_session:
@@ -8058,7 +8390,6 @@ async def process_embedding_creation(
                     f"embedding_status=failed"
                 )
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
-                from src.shared.common_fn import create_graph_database_connection
 
                 graph_connection = create_graph_database_connection(
                     uri=uri, userName=userName, password=password, database=database

@@ -21,6 +21,12 @@ services:
       # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
       # Backend creates output/document_name/ structure with PDF, images, and markdown files
       - ~/llm-graph-output:/code/backend/output
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=backend-staging"
     networks:
       - workspace_llm-graph-builder_net # DevContainer network kullan
     restart: unless-stopped
@@ -39,6 +45,12 @@ services:
     container_name: frontend-staging
     ports:
       - "8080:8080" # Staging port - production test
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=frontend-staging"
     networks:
       - workspace_llm-graph-builder_net # DevContainer network kullan
     restart: unless-stopped

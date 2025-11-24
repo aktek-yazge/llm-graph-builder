@@ -135,11 +135,39 @@ def load_embedding_model(embedding_model_name: str):
         dimension = 1536
         logging.info(f"Embedding: Using bedrock titan Embeddings , Dimension:{dimension}")
     else:
+        # HuggingFace model için local cache klasörü ayarla
+        # Environment variable'dan al veya default kullan
+        cache_folder = os.getenv(
+            "HUGGINGFACE_CACHE_FOLDER",
+            os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "models")
+        )
+        
+        # Cache klasörünü oluştur (yoksa)
+        Path(cache_folder).mkdir(parents=True, exist_ok=True)
+        
+        # Model adını environment variable'dan al veya default kullan
+        hf_model_name = os.getenv("HUGGINGFACE_MODEL_NAME", "BAAI/bge-m3")
+        
+        logging.info(f"📦 HuggingFace model cache klasörü: {cache_folder}")
+        logging.info(f"🤖 HuggingFace model adı: {hf_model_name}")
+        
+        # HuggingFaceEmbeddings otomatik olarak cache kullanır:
+        # - Model cache'te varsa oradan yüklenir (hızlı)
+        # - Yoksa internet'ten indirilir ve cache'lenir (ilk kullanım)
+        # - Sonraki kullanımlarda otomatik olarak cache'ten yüklenir
         embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2"#, cache_folder="/embedding_model"
+            model_name=hf_model_name,
+            cache_folder=cache_folder,
+            # Model'i local'de tutmak için ek parametreler
+            model_kwargs={
+                "cache_dir": cache_folder,
+            },
+            encode_kwargs={
+                "normalize_embeddings": True,  # Embedding'leri normalize et
+            }
         )
         dimension = 384
-        logging.info(f"Embedding: Using Langchain HuggingFaceEmbeddings , Dimension:{dimension}")
+        logging.info(f"✅ Embedding: Using Langchain HuggingFaceEmbeddings (cached locally), Dimension:{dimension}")
     return embeddings, dimension
 
 def save_graphDocuments_in_neo4j(graph: Neo4jGraph, graph_document_list: List[GraphDocument], max_retries=3, delay=1):

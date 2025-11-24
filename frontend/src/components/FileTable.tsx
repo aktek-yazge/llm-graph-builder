@@ -129,6 +129,8 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
             // Embedding tamamlandıysa bunu göster
             if (file.embedding_status === 'completed') {
               status = 'Completed (with Embeddings)';
+            } else if (file.embedding_status === 'failed') {
+              status = 'Completed (Failed Embedding)';
             } else {
               status = 'Completed';
             }
@@ -233,9 +235,11 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         return;
       }
 
+      console.log(`🔄 Resetting processing for file ${fileId} (stage: invalidate)`);
+
       // Mevcut resetFileStageAPI'yi kullan
       const { resetFileStageAPI } = await import('../utils/FileAPI');
-      const response = await resetFileStageAPI(fileId, resetStage as 'upload' | 'chunking' | 'graph');
+      const response = await resetFileStageAPI(fileId, 'invalidate');
 
       if (response.status === 'Success' || response.status === 'success') {
         showNormalToast(`${fileName} ${resetStage} aşaması pending durumuna çekildi`);
@@ -1202,7 +1206,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 
         try {
           if (isAllSelected) {
-            // Use "all" parameter
+            // Tüm dosyalar seçilmişse "all" parametresi kullan
             const response = await startChunkingAPI('all');
             if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
               const processedCount = response.data?.processed_count || selected.length;
@@ -1211,15 +1215,38 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
               showErrorToast(`Failed to start chunking: ${response.message || 'Unknown error'}`);
             }
           } else {
-            // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
-            // Backend zaten batch batch işlemek için dosyaları işaretliyor
-            showNormalToast(`${selected.length} dosya için chunking başlatılıyor (batch batch işlenecek)...`);
-            const response = await startChunkingAPI('all');
-            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
-              const processedCount = response.data?.processed_count || selected.length;
-              showNormalToast(`✓ Chunking started for ${processedCount} file(s) (batch batch işlenecek)`);
+            // Aradan seçim yapılmışsa, her dosya için tek tek istek gönder
+            showNormalToast(`${selected.length} dosya için chunking başlatılıyor...`);
+            let successCount = 0;
+            let failCount = 0;
+            const failedFiles: Array<{ id: number; reason: string }> = [];
+
+            for (const fileId of selected) {
+              try {
+                const response = await startChunkingAPI(fileId);
+                if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+                  successCount++;
+                } else {
+                  failCount++;
+                  const errorMessage = response.message || response.error || 'Unknown error';
+                  failedFiles.push({ id: fileId, reason: errorMessage });
+                  console.error(`Failed to start chunking for file ${fileId}:`, errorMessage);
+                }
+              } catch (error: any) {
+                failCount++;
+                const errorMessage = error?.message || error?.toString() || 'Unknown error';
+                failedFiles.push({ id: fileId, reason: errorMessage });
+                console.error(`Error starting chunking for file ${fileId}:`, error);
+              }
+            }
+
+            if (failCount === 0) {
+              showNormalToast(`✓ Chunking started for ${successCount} file(s)`);
             } else {
-              showErrorToast(`Failed to start chunking: ${response.message || 'Unknown error'}`);
+              const errorDetails = failedFiles.map((f) => `File ${f.id}: ${f.reason}`).join('; ');
+              showErrorToast(
+                `Chunking started for ${successCount} file(s), failed for ${failCount} file(s). ${errorDetails}`
+              );
             }
           }
           setV2SelectedFileIds(new Set());

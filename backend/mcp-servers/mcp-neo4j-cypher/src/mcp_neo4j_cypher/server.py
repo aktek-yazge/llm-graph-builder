@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 import re
+import sys
 from typing import Any, Literal, Optional
 
 from fastmcp.exceptions import ToolError
@@ -17,6 +19,34 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .utils import _truncate_string_to_tokens, _value_sanitize
 
 logger = logging.getLogger("mcp_neo4j_cypher")
+
+# Backend modüllerini import etmek için path'i ayarla
+_backend_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "src"
+)
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
+
+# Embedding ve normalization fonksiyonlarını import et
+try:
+    from shared.common_fn import load_embedding_model
+    from utf8_utils import normalize_unicode_text
+except ImportError:
+    # Fallback: Eğer backend modülleri bulunamazsa, basit bir fallback kullan
+    logger.warning("Backend modülleri bulunamadı, embedding fonksiyonları kullanılamayabilir")
+    
+    def load_embedding_model(model_name: str):
+        """Fallback embedding model loader"""
+        try:
+            from langchain_openai import OpenAIEmbeddings
+            return OpenAIEmbeddings(), 1536
+        except ImportError:
+            raise ImportError("OpenAI embeddings not available")
+    
+    def normalize_unicode_text(text: str) -> str:
+        """Fallback normalize function"""
+        return text.strip() if text else ""
 
 
 def _create_direct_schema_format(nodes_result, rels_result):
@@ -524,6 +554,154 @@ def create_mcp_server(
         except Exception as e:
             logger.error(f"Error executing read query: {e}\n{query}\n{params}")
             raise ToolError(f"Error: {e}\n{query}\n{params}")
+
+    @mcp.tool(
+        name=namespace_prefix + "read_neo4j_cypher_with_embedding",
+        annotations=ToolAnnotations(
+            title="Read Neo4j Cypher with Embedding",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
+    async def read_neo4j_cypher_with_embedding(
+        query_text: str = Field(
+            ...,
+            description=(
+                "The text query for semantic search. This will be converted to an embedding vector. "
+                "Use ONLY content keywords (e.g., 'payment plan', 'policy details', 'coverage information'), "
+                "NOT metadata like customer names, dates, or specific codes."
+            ),
+        ),
+        cypher_query: str = Field(
+            ...,
+            description=(
+                "The Cypher query to execute. MUST include $embedding_vector parameter in the query. "
+                "Example: 'MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 "
+                "RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC'"
+            ),
+        ),
+        params: dict[str, Any] = Field(
+            dict(),
+            description=(
+                "Additional parameters to pass to the Cypher query (optional). "
+                "Note: $embedding_vector will be automatically added to params."
+            ),
+        ),
+    ) -> list[ToolResult]:
+        """
+        Execute a read Cypher query with automatic embedding generation for semantic search.
+        
+        This tool is designed for semantic search scenarios where you need to:
+        1. Generate an embedding from a text query
+        2. Use that embedding in a Cypher query for vector similarity search
+        
+        Workflow:
+        - You provide a text query (e.g., "payment plan details")
+        - You provide a Cypher query that uses $embedding_vector parameter
+        - This tool automatically:
+          * Generates embedding from the text query
+          * Binds the embedding to $embedding_vector parameter
+          * Executes the Cypher query
+          * Returns the results
+        
+        Example usage:
+        - query_text: "taksit ödeme planı"
+        - cypher_query: "MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC LIMIT 10"
+        - params: {} (optional additional parameters)
+        """
+
+        # Validate that cypher_query contains $embedding_vector parameter
+        if "$embedding_vector" not in cypher_query:
+            raise ToolError(
+                "Cypher query must include $embedding_vector parameter. "
+                "Example: 'MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c'"
+            )
+
+        # Validate that query is not a write query
+        if _is_write_query(cypher_query):
+            raise ToolError("Only MATCH queries are allowed for read-query with embedding")
+
+        try:
+            # Step 1: Load embedding model
+            logger.info(f"🧠 Embedding model yükleniyor...")
+            embedding_model_name = os.getenv("EMBEDDING_MODEL", "openai")
+            embedding_model, embedding_dimension = load_embedding_model(embedding_model_name)
+            logger.info(f"✅ Embedding model yüklendi: {embedding_model_name} (dimension: {embedding_dimension})")
+
+            # Step 2: Normalize query text
+            normalized_text = normalize_unicode_text(query_text)
+            logger.info(f"🧹 Normalize edilmiş text: {normalized_text[:100]}...")
+
+            # Step 3: Generate embedding
+            logger.info(f"🔢 Embedding oluşturuluyor...")
+            embedding_vector = embedding_model.embed_query(normalized_text)
+            logger.info(f"✅ {len(embedding_vector)} boyutlu embedding oluşturuldu")
+
+            # Step 4: Add embedding to params
+            params_with_embedding = params.copy()
+            params_with_embedding["embedding_vector"] = embedding_vector
+
+            # Step 5: Execute Cypher query
+            logger.info(f"🔍 Cypher sorgusu çalıştırılıyor...")
+            query_obj = Query(cypher_query, timeout=float(read_timeout))
+            results = await neo4j_driver.execute_query(
+                query_obj,
+                parameters_=params_with_embedding,
+                routing_control=RoutingControl.READ,
+                database_=database,
+                result_transformer_=lambda r: r.data(),
+            )
+
+            # Step 6: Process results (same as read_neo4j_cypher)
+            datetime_handled_results = [
+                _handle_datetime_in_record(el) for el in results
+            ]
+            sanitized_results = [_value_sanitize(el) for el in datetime_handled_results]
+
+            # Minimal format'a çevir
+            minimal_results = _to_minimal_data_format(sanitized_results)
+
+            if token_limit:
+                minimal_results = _truncate_string_to_tokens(
+                    minimal_results, token_limit
+                )
+
+            logger.info(
+                f"✅ Semantic arama tamamlandı: {len(results)} sonuç bulundu, "
+                f"minimal format: {len(minimal_results)} karakter"
+            )
+
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Semantic search completed. Found {len(results)} results.\n\n{minimal_results}",
+                    )
+                ]
+            )
+
+        except ImportError as e:
+            error_msg = f"Embedding model import hatası: {e}. Lütfen backend modüllerinin doğru yüklendiğinden emin olun."
+            logger.error(error_msg)
+            raise ToolError(error_msg)
+
+        except Neo4jError as e:
+            logger.error(
+                f"Neo4j Error executing semantic search query: {e}\n"
+                f"Query text: {query_text}\nCypher query: {cypher_query}\nParams: {params}"
+            )
+            raise ToolError(
+                f"Neo4j Error: {e}\nQuery text: {query_text}\nCypher query: {cypher_query}"
+            )
+
+        except Exception as e:
+            error_msg = f"Embedding oluşturma veya sorgu çalıştırma hatası: {e}"
+            logger.error(
+                f"{error_msg}\nQuery text: {query_text}\nCypher query: {cypher_query}\nParams: {params}"
+            )
+            raise ToolError(f"{error_msg}\nQuery text: {query_text}\nCypher query: {cypher_query}")
 
     @mcp.tool(
         name=namespace_prefix + "write_neo4j_cypher",

@@ -21,6 +21,12 @@ services:
       # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
       # Backend creates output/document_name/ structure with PDF, images, and markdown files
       - llm-graph-output-prod:/code/backend/output
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=backend-prod"
     networks:
       - llm-graph-builder_prod
     restart: unless-stopped
@@ -39,6 +45,12 @@ services:
     container_name: frontend-prod
     ports:
       - "8080:8080" # Production port
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=frontend-prod"
     networks:
       - llm-graph-builder_prod
     restart: unless-stopped
@@ -50,6 +62,12 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage_prod:/qdrant/storage
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=qdrant-service-prod"
     deploy:
       resources:
         limits:
@@ -87,6 +105,12 @@ services:
       - neo4j_data_prod:/data
       - neo4j_plugins_prod:/plugins
       - neo4j_import_prod:/var/lib/neo4j/import
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=neo4j-service-prod"
     networks:
       - llm-graph-builder_prod
 
@@ -119,6 +143,12 @@ services:
       - neo4j_data_prod_2:/data
       - neo4j_plugins_prod_2:/plugins
       - neo4j_import_prod_2:/var/lib/neo4j/import
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=neo4j-service-prod-2"
     networks:
       - llm-graph-builder_prod
 
