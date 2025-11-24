@@ -14,6 +14,7 @@ from langchain_neo4j import Neo4jVector
 import json
 from src.shared.constants import CHUNK_CONTINUATION_PROMPT
 from src.llm import get_llm
+import asyncio
 
 logging.basicConfig(format='%(asctime)s - %(message)s',level='INFO')
 
@@ -620,9 +621,10 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
     return results
 
 
-def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generate_embedding=False):
+async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generate_embedding=False):
     """
     Upload aşamasında chunk node'ları oluştur (extract'a uyumlu yapı)
+    Async versiyonu - execute_graph_query çağrıları thread pool'da çalışır
     
     Args:
         graph: Neo4j graph connection
@@ -645,7 +647,7 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         MATCH (c:Chunk {fileName: $file_name})
         RETURN count(c) as existing_count
     """
-    existing_result = execute_graph_query(graph, existing_check_query, params={"file_name": file_name})
+    existing_result = await asyncio.to_thread(execute_graph_query, graph, existing_check_query, {"file_name": file_name})
     existing_count = existing_result[0]['existing_count'] if existing_result else 0
     
     if existing_count > 0:
@@ -800,13 +802,49 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
     # Process chunks in smaller batches to avoid memory issues and timeouts
     chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "50"))
     total_chunks = len(batch_data)
-    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size}")
+    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} for file: {file_name}")
+    
+    # Prepare all batch tasks for parallel execution
+    batch_tasks = []
+    batch_count = (total_chunks + chunk_batch_size - 1) // chunk_batch_size
+    
+    # Create async task function (defined outside loop to avoid closure issues)
+    async def process_batch(batch_subset_data, batch_number, batch_start_idx, batch_end_idx, file_name_param, total_chunks_param):
+        try:
+            logging.info(f"   🚀 Starting batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
+            result = await asyncio.to_thread(
+                execute_graph_query, 
+                graph, 
+                query_to_create_chunk_and_PART_OF_relation, 
+                {"batch_data": batch_subset_data}
+            )
+            logging.info(f"   ✅ Completed batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
+            return result
+        except Exception as e:
+            logging.error(f"   ❌ Error in batch {batch_number} for file {file_name_param}: {e}")
+            raise
     
     for batch_start in range(0, total_chunks, chunk_batch_size):
         batch_end = min(batch_start + chunk_batch_size, total_chunks)
-        batch_subset = batch_data[batch_start:batch_end]
-        logging.info(f"   Processing batch {batch_start//chunk_batch_size + 1}: chunks {batch_start+1}-{batch_end} of {total_chunks}")
-        execute_graph_query(graph, query_to_create_chunk_and_PART_OF_relation, params={"batch_data": batch_subset})
+        batch_subset = batch_data[batch_start:batch_end].copy()  # Copy to avoid reference issues
+        batch_num = batch_start//chunk_batch_size + 1
+        
+        # Create task with all parameters passed explicitly
+        batch_tasks.append(process_batch(batch_subset, batch_num, batch_start, batch_end, file_name, total_chunks))
+    
+    # Execute all batches in parallel
+    logging.info(f"🔄 Starting {batch_count} batches in parallel for file: {file_name}")
+    results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+    
+    # Check for errors
+    error_count = sum(1 for r in results if isinstance(r, Exception))
+    if error_count > 0:
+        logging.warning(f"⚠️ {error_count} out of {batch_count} batches failed for file: {file_name}")
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logging.error(f"   ❌ Batch {i+1} error: {result}")
+    else:
+        logging.info(f"✅ All {batch_count} batches completed successfully for file: {file_name}")
     
     # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
     first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
@@ -818,11 +856,11 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
                 MERGE (d)-[:FIRST_CHUNK]->(c))
         """
-    execute_graph_query(graph, query_to_create_FIRST_relation, params={"f_name": file_name, "relationships": relationships})
+    await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": relationships})
     
     # Debug: FIRST_CHUNK ilişkilerini kontrol et
     first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
-    first_check_result = execute_graph_query(graph, first_check_query, params={"file_name": file_name})
+    first_check_result = await asyncio.to_thread(execute_graph_query, graph, first_check_query, {"file_name": file_name})
     logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
     
     # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
@@ -834,7 +872,7 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         RETURN c.position as position, c.id as chunk_id
         ORDER BY c.position
     """
-    existing_positions = execute_graph_query(graph, position_check_query, params={"file_name": file_name})
+    existing_positions = await asyncio.to_thread(execute_graph_query, graph, position_check_query, {"file_name": file_name})
     
     if existing_positions:
         logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
@@ -850,7 +888,7 @@ def create_chunks_for_upload(graph, chunks, file_name, page_images=None, generat
         MERGE (c1)-[:NEXT_CHUNK]->(c2)
         RETURN count(*) as created_count
     """
-    next_result = execute_graph_query(graph, query_to_create_NEXT_relation, params={"file_name": file_name})
+    next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
     logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using position-based approach")
     
     # Embedding'leri oluştur (eğer isteniyorsa)

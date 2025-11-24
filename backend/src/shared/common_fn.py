@@ -5,7 +5,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_vertexai import VertexAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_neo4j import Neo4jGraph
-from neo4j.exceptions import TransientError
+from neo4j.exceptions import TransientError, ClientError
 from langchain_community.graphs.graph_document import GraphDocument
 from typing import List
 import re
@@ -88,7 +88,9 @@ def create_graph_database_connection(uri, userName, password, database):
   read_timeout = int(os.environ.get("NEO4J_READ_TIMEOUT", "120"))
   write_timeout = int(os.environ.get("NEO4J_WRITE_TIMEOUT", "120"))
   max_connection_lifetime = int(os.environ.get("NEO4J_MAX_CONNECTION_LIFETIME", "300"))
-  max_connection_pool_size = int(os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", "50"))
+  # Default pool size: 50, but for V2 batch processing with 40 files and parallel batches, increase to 100
+  # Each file can have multiple parallel batch queries, so we need more connections
+  max_connection_pool_size = int(os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", "100"))
   connection_acquisition_timeout = int(os.environ.get("NEO4J_CONNECTION_ACQUISITION_TIMEOUT", "60"))
   
   # SSL kullanımını devre dışı bırak - her zaman encrypted=False
@@ -240,18 +242,40 @@ def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDo
 
 def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=3, delay=2):
    retries = 0
+   current_delay = delay
    while retries < max_retries:
        try:
            return graph.query(query, params) 
        except TransientError as e:
            if "DeadlockDetected" in str(e):
                retries += 1
-               logging.info(f"Deadlock detected. Retrying {retries}/{max_retries} in {delay} seconds...")
-               time.sleep(delay)  # Wait before retrying
+               if retries < max_retries:
+                   logging.warning(f"⚠️ Deadlock detected. Retrying {retries}/{max_retries} in {current_delay} seconds...")
+                   time.sleep(current_delay)
+                   current_delay *= 2  # Exponential backoff
+               else:
+                   logging.error("❌ Failed to execute query after maximum retries due to persistent deadlocks.")
+                   raise
            else:
                raise 
-   logging.error("Failed to execute query after maximum retries due to persistent deadlocks.")
-   raise RuntimeError("Query execution failed after multiple retries due to deadlock.")
+       except ClientError as e:
+           # Transaction timeout hataları için retry
+           error_str = str(e)
+           if "TransactionTimedOut" in error_str or ("Transaction" in error_str and "Timeout" in error_str):
+               retries += 1
+               if retries < max_retries:
+                   logging.warning(f"⚠️ Transaction timeout detected. Retrying {retries}/{max_retries} in {current_delay} seconds...")
+                   time.sleep(current_delay)
+                   current_delay *= 2  # Exponential backoff
+               else:
+                   logging.error(f"❌ Transaction timeout after {max_retries} retries. Query: {query[:100]}...")
+                   raise
+           else:
+               # Diğer ClientError'ları direkt fırlat
+               raise
+   
+   logging.error("❌ Failed to execute query after maximum retries.")
+   raise RuntimeError("Query execution failed after multiple retries.")
 
 def delete_uploaded_local_file(merged_file_path, file_name):
   file_path = Path(merged_file_path)

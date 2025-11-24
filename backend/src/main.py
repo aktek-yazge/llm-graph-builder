@@ -1260,12 +1260,13 @@ async def processing_source_v2(
         if pages:
             logging.info(f"🧩 Creating {len(pages)} chunks for V2 file: {file_name}")
             # create_chunks_for_upload imported via src.make_relationships import *
-            create_chunks_for_upload(graph, pages, file_name, page_images=page_images)
-            logging.info(f"✅ Chunks created successfully")
+            logging.info(f"🔄 V2: Starting create_chunks_for_upload for: {file_name} (async, non-blocking)")
+            await create_chunks_for_upload(graph, pages, file_name, page_images=page_images)
+            logging.info(f"✅ Chunks created successfully for: {file_name}")
         
-        # Document status kontrolü (node zaten chunking'de oluşturuldu)
+        # Document status kontrolü (node zaten chunking'de oluşturuldu) - async
         start_status_check = time.time()
-        result = graphDb_data_Access.get_current_status_document_node(file_name)
+        result = await asyncio.to_thread(graphDb_data_Access.get_current_status_document_node, file_name)
         elapsed_status_check = time.time() - start_status_check
         uri_latency["status_check"] = f"{elapsed_status_check:.2f}"
         
@@ -1288,7 +1289,7 @@ async def processing_source_v2(
         else:
             logging.info(f"📋 Current file status: {current_status} for {file_name}")
         
-        # Status'u Processing olarak güncelle
+        # Status'u Processing olarak güncelle - async
         obj_source_node = sourceNode()
         obj_source_node.file_name = normalize_file_name(file_name)
         obj_source_node.status = "Processing"
@@ -1297,39 +1298,86 @@ async def processing_source_v2(
         obj_source_node.total_chunks = len(pages)  # Page sayısı
         
         start_update_status = time.time()
-        graphDb_data_Access.update_source_node(obj_source_node)
+        await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
         elapsed_update_status = time.time() - start_update_status
         uri_latency["update_status_to_processing"] = f"{elapsed_update_status:.2f}"
         
         logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
         
         # Policy-specific Entity Extraction (LLM çağrısı - tek LLM call)
+        # Retry mekanizması ile LLM extraction hatalarını yönet
         start_extraction = time.time()
         logging.info(f"🚀 Policy-specific entity extraction başlıyor...")
         
-        try:
-            # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
-            # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
-            # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
-            await asyncio.to_thread(
-                graphDb_data_Access._create_document_related_nodes,
-                file_name,
-                "auto",
-                None,
-                model
-            )
-            
-            elapsed_extraction = time.time() - start_extraction
-            uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
-            logging.info(f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s")
-            
-        except Exception as extraction_error:
+        max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
+        retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
+        retries = 0
+        current_delay = retry_delay
+        extraction_successful = False
+        last_error = None
+        
+        while retries < max_retries and not extraction_successful:
+            try:
+                # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
+                # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
+                # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
+                await asyncio.to_thread(
+                    graphDb_data_Access._create_document_related_nodes,
+                    file_name,
+                    "auto",
+                    None,
+                    model
+                )
+                
+                extraction_successful = True
+                elapsed_extraction = time.time() - start_extraction
+                uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
+                if retries > 0:
+                    logging.info(f"✅ Policy entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s")
+                else:
+                    logging.info(f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s")
+                
+            except Exception as extraction_error:
+                retries += 1
+                last_error = extraction_error
+                error_str = str(extraction_error)
+                
+                # LLM extraction hatalarını kontrol et
+                is_llm_error = (
+                    "varlık çıkarımı başarısız" in error_str.lower() or
+                    "llm extraction hatası" in error_str.lower() or
+                    "extraction" in error_str.lower() or
+                    "entity" in error_str.lower() or
+                    "policy" in error_str.lower()
+                )
+                
+                if retries < max_retries and is_llm_error:
+                    logging.warning(
+                        f"⚠️ LLM extraction hatası (deneme {retries}/{max_retries}): {error_str[:200]}... "
+                        f"{current_delay} saniye bekleyip tekrar denenecek..."
+                    )
+                    await asyncio.sleep(current_delay)
+                    current_delay *= 2  # Exponential backoff
+                else:
+                    # Retry limit'e ulaşıldı veya LLM hatası değil
+                    elapsed_extraction = time.time() - start_extraction
+                    uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
+                    if retries >= max_retries:
+                        logging.error(
+                            f"❌ Policy entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
+                        )
+                    else:
+                        logging.error(f"❌ Policy entity extraction hatası (retry yapılmayacak): {error_str[:500]}")
+                    # Dosya durumunu Failed yap ve işlemi sonlandır - async
+                    await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
+                    raise last_error
+        
+        if not extraction_successful:
             elapsed_extraction = time.time() - start_extraction
             uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
-            logging.error(f"❌ Policy entity extraction hatası: {extraction_error}")
-            # Dosya durumunu Failed yap ve işlemi sonlandır
-            graphDb_data_Access.update_exception_db(file_name, str(extraction_error))
-            raise extraction_error
+            logging.error(f"❌ Policy entity extraction başarısız: {last_error}")
+            await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
+            raise last_error
         
         # Policy-Entity Relationships
         # start_policy_rel = time.time()
@@ -1343,10 +1391,10 @@ async def processing_source_v2(
         #     uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
         #     logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
         
-        # Final counts update
+        # Final counts update - async
         start_count_update = time.time()
         try:
-            counts = graphDb_data_Access.update_node_relationship_count(file_name)
+            counts = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
             node_count = counts[file_name].get("nodeCount", 0)
             rel_count = counts[file_name].get("relationshipCount", 0)
             elapsed_count_update = time.time() - start_count_update
@@ -1372,7 +1420,8 @@ async def processing_source_v2(
         obj_source_node.relationship_count = rel_count
         obj_source_node.processed_chunk = len(pages)  # Tüm pages işlendi
         
-        graphDb_data_Access.update_source_node(obj_source_node)
+        # Final status update - async
+        await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
         
         total_processing_time = time.time() - start_time.timestamp()
         uri_latency["total_processing_time"] = f"{total_processing_time:.2f}"
@@ -1399,13 +1448,13 @@ async def processing_source_v2(
         import traceback
         logging.error(f"Traceback: {traceback.format_exc()}")
         
-        # Status'u Failed olarak güncelle
+        # Status'u Failed olarak güncelle - async
         try:
             obj_source_node = sourceNode()
             obj_source_node.file_name = normalize_file_name(file_name)
             obj_source_node.status = "Failed"
             obj_source_node.processing_error = str(e)[:500]
-            graphDb_data_Access.update_source_node(obj_source_node)
+            await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
         except:
             pass
         
@@ -1655,14 +1704,42 @@ def get_chunkId_chunkDoc_list(
                             if chunks:
                                 # Chunk node'ları veritabanına kaydet
                                 from src.make_relationships import create_chunks_for_upload
+                                import asyncio
                                 
-                                created_chunks = create_chunks_for_upload(
-                                    graph=graph,
-                                    chunks=chunks, 
-                                    file_name=file_name,
-                                    page_images=page_images if page_images else [],
-                                    generate_embedding=False  # Emergency durumda embedding oluşturma
-                                )
+                                # create_chunks_for_upload artık async, event loop içinde çalıştır
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        # Eğer loop zaten çalışıyorsa, thread pool'da çalıştır
+                                        import concurrent.futures
+                                        async def run_create_chunks():
+                                            return await create_chunks_for_upload(
+                                                graph=graph,
+                                                chunks=chunks, 
+                                                file_name=file_name,
+                                                page_images=page_images if page_images else [],
+                                                generate_embedding=False  # Emergency durumda embedding oluşturma
+                                            )
+                                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                                            future = executor.submit(asyncio.run, run_create_chunks())
+                                            created_chunks = future.result()
+                                    else:
+                                        created_chunks = loop.run_until_complete(create_chunks_for_upload(
+                                            graph=graph,
+                                            chunks=chunks, 
+                                            file_name=file_name,
+                                            page_images=page_images if page_images else [],
+                                            generate_embedding=False  # Emergency durumda embedding oluşturma
+                                        ))
+                                except RuntimeError:
+                                    # Event loop yoksa, yeni bir tane oluştur
+                                    created_chunks = asyncio.run(create_chunks_for_upload(
+                                        graph=graph,
+                                        chunks=chunks, 
+                                        file_name=file_name,
+                                        page_images=page_images if page_images else [],
+                                        generate_embedding=False  # Emergency durumda embedding oluşturma
+                                    ))
                                 
                                 logging.info(f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created")
                                 
@@ -2149,17 +2226,45 @@ def upload_file(
                     if chunks:
                         # Chunk node'ları veritabanına kaydet (extract-compatible format)
                         from src.make_relationships import create_chunks_for_upload
+                        import asyncio
                         
                         # generate_embedding kontrolü - varsayılan false (manuel embedding)
                         should_generate_embedding = generate_embedding and generate_embedding.lower() in ['true', '1', 'yes']
                         
-                        chunkId_chunkDoc_list = create_chunks_for_upload(
-                            graph=graph,
-                            chunks=chunks, 
-                            file_name=originalname,
-                            page_images=page_images if page_images else [],
-                            generate_embedding=should_generate_embedding
-                        )
+                        # create_chunks_for_upload artık async, event loop içinde çalıştır
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                # Eğer loop zaten çalışıyorsa, thread pool'da çalıştır
+                                import concurrent.futures
+                                async def run_create_chunks():
+                                    return await create_chunks_for_upload(
+                                        graph=graph,
+                                        chunks=chunks, 
+                                        file_name=originalname,
+                                        page_images=page_images if page_images else [],
+                                        generate_embedding=should_generate_embedding
+                                    )
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = executor.submit(asyncio.run, run_create_chunks())
+                                    chunkId_chunkDoc_list = future.result()
+                            else:
+                                chunkId_chunkDoc_list = loop.run_until_complete(create_chunks_for_upload(
+                                    graph=graph,
+                                    chunks=chunks, 
+                                    file_name=originalname,
+                                    page_images=page_images if page_images else [],
+                                    generate_embedding=should_generate_embedding
+                                ))
+                        except RuntimeError:
+                            # Event loop yoksa, yeni bir tane oluştur
+                            chunkId_chunkDoc_list = asyncio.run(create_chunks_for_upload(
+                                graph=graph,
+                                chunks=chunks, 
+                                file_name=originalname,
+                                page_images=page_images if page_images else [],
+                                generate_embedding=should_generate_embedding
+                            ))
                         
                         # Source node'daki chunk sayısını güncelle
                         obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)

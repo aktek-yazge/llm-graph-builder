@@ -1346,25 +1346,23 @@ class BackgroundProcessor:
             finally:
                 db_session.close()
 
-            # Call process_graph_creation_v2 asynchronously in background
-            # This prevents blocking the server during long-running LLM operations
-            asyncio.create_task(
-                score_module.process_graph_creation_v2(
-                    file_id=file_record.id,
-                    original_name=file_record.original_name,
-                    markdown_path=file_record.markdown_path,
-                    file_path=file_record.file_path,
-                    model=model,  # Use provided model
-                    uri=uri,
-                    userName=userName,
-                    password=password,
-                    database=database,
-                    generate_embedding=generate_embedding,  # Use provided generate_embedding
-                )
+            # Call process_graph_creation_v2 asynchronously (await edilerek eş zamanlı çalışması sağlanıyor)
+            logging.info(f"🔄 V2: Calling process_graph_creation_v2 for: {file_record.original_name} (ID: {file_record.id})")
+            await score_module.process_graph_creation_v2(
+                file_id=file_record.id,
+                original_name=file_record.original_name,
+                markdown_path=file_record.markdown_path,
+                file_path=file_record.file_path,
+                model=model,  # Use provided model
+                uri=uri,
+                userName=userName,
+                password=password,
+                database=database,
+                generate_embedding=generate_embedding,  # Use provided generate_embedding
             )
 
             logging.info(
-                f"✅ V2: Graph creation started in background for: {file_record.original_name} (ID: {file_record.id})"
+                f"✅ V2: Graph creation completed for: {file_record.original_name} (ID: {file_record.id})"
             )
 
         except Exception as e:
@@ -1375,21 +1373,37 @@ class BackgroundProcessor:
 
     async def process_v2_graph_creation_batch(self, files: list):
         """Process graph creation for a batch of files (eş zamanlı olarak)"""
+        file_ids = [f.id for f in files]
+        file_names = [f.original_name for f in files]
         logging.info(
             f"🎨 V2: Starting graph creation batch for {len(files)} files (eş zamanlı)"
         )
+        logging.info(f"📋 Batch file IDs: {file_ids}")
+        logging.info(f"📋 Batch file names: {file_names[:5]}{'...' if len(file_names) > 5 else ''}")
 
         # Process all files concurrently using asyncio.gather
         tasks = [
             self._process_single_file_graph_creation(file_record)
             for file_record in files
         ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        logging.info(f"✅ V2: Graph creation batch completed for {len(files)} files")
+        logging.info(f"✅ V2: Created {len(tasks)} concurrent tasks, starting execution...")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Log results
+        success_count = sum(1 for r in results if not isinstance(r, Exception))
+        error_count = sum(1 for r in results if isinstance(r, Exception))
+        logging.info(f"✅ V2: Graph creation batch completed - Success: {success_count}, Errors: {error_count}")
+        
+        # Log any errors
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logging.error(f"❌ V2: Error processing file {file_ids[i]} ({file_names[i]}): {result}")
 
     async def _process_single_file_graph_creation(self, file_record: UploadedFile):
         """Process graph creation for a single file (used for concurrent processing)"""
+        file_id = file_record.id
+        file_name = file_record.original_name
+        logging.info(f"🚀 V2: _process_single_file_graph_creation başladı - File ID: {file_id}, Name: {file_name}")
         try:
             db_session = self.db.get_db_session()
             try:
@@ -1398,6 +1412,7 @@ class BackgroundProcessor:
                     db_session.query(UploadedFile).filter_by(id=file_record.id).first()
                 )
                 if not file_record:
+                    logging.warning(f"⚠️ V2: File record not found for ID: {file_id}")
                     return
 
                 # Check if already processed
@@ -1541,18 +1556,14 @@ class BackgroundProcessor:
                     f"🎨 V2: Starting graph creation for: {file_record.original_name} (ID: {file_record.id}), Model: {model}"
                 )
 
-                # Process graph creation asynchronously in background
-                # This prevents blocking the server during long-running LLM operations
-                # The status will be updated by process_graph_creation_v2 when it completes
+                # Process graph creation asynchronously (await edilerek eş zamanlı çalışması sağlanıyor)
                 # Model ve generate_embedding parametrelerini geç
-                asyncio.create_task(
-                    self.process_v2_graph_creation(
-                        file_record, model=model, generate_embedding=generate_embedding
-                    )
+                await self.process_v2_graph_creation(
+                    file_record, model=model, generate_embedding=generate_embedding
                 )
 
                 logging.info(
-                    f"✅ V2: Graph creation started in background for: {file_record.original_name} (ID: {file_record.id})"
+                    f"✅ V2: Graph creation completed for: {file_record.original_name} (ID: {file_record.id})"
                 )
 
             except Exception as graph_error:

@@ -134,6 +134,7 @@ class HTTPLoggingMiddleware:
         skip_paths = [
             "/api/v2/files/list",
             "/api/v2/files/status",
+            "/api/v2/processing/status",
         ]
         
         if path in skip_paths:
@@ -686,6 +687,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Uvicorn access logger'ını kapat (HTTP request logları - çok gürültülü)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # Add HTTP logging middleware for OpenTelemetry integration
 app.add_middleware(HTTPLoggingMiddleware)
@@ -4522,92 +4526,6 @@ UPLOAD_DIR = Path(__file__).parent / "upload"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
-def _upload_file_sync_operations(
-    normalized_filename: str,
-    content: bytes,
-    originalname: str,
-    auto_process_bool: bool,
-):
-    """Synchronous helper function for file upload operations (runs in executor)"""
-    from src.document_sources.s3_upload_utils import (
-        create_document_output_structure,
-    )
-    from src.models.status_sync import sync_queue_db_status_to_neo4j
-    from src.shared.common_fn import create_graph_database_connection
-
-    # Create output directory structure
-    document_dir, pdf_dir, images_dir = create_document_output_structure(
-        normalized_filename, "output"
-    )
-
-    # Save file to document directory structure
-    file_path = os.path.join(pdf_dir, normalized_filename)
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    file_size = len(content)
-    logging.info(
-        f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
-    )
-
-    # Add to database
-    db = get_file_queue_db()
-
-    # Check for existing file by hash to prevent duplicates
-    file_hash = UploadedFile.calculate_file_hash(str(file_path))
-    existing_file = db.get_file_by_hash(file_hash) if file_hash else None
-
-    if existing_file:
-        logging.info(
-            f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
-        )
-        return {
-            "success": True,
-            "duplicate": True,
-            "file": existing_file,
-        }
-
-    # Add new file to queue
-    uploaded_file = db.add_file(
-        filename=normalized_filename,
-        original_name=originalname,
-        file_path=str(file_path),
-        file_size=file_size,
-        auto_process=auto_process_bool,
-    )
-
-    # Neo4j'ye initial sync et (upload başarılı)
-    try:
-        graph_connection = create_graph_database_connection(
-            os.environ.get("NEO4J_URI"),
-            os.environ.get("NEO4J_USERNAME"),
-            os.environ.get("NEO4J_PASSWORD"),
-            os.environ.get("NEO4J_DATABASE", "neo4j"),
-        )
-        sync_queue_db_status_to_neo4j(
-            graph=graph_connection,
-            file_name=uploaded_file.filename,
-            upload_status=uploaded_file.upload_status,
-            chunking_status=uploaded_file.chunking_status,
-            graph_status=uploaded_file.graph_status,
-            embedding_status=uploaded_file.embedding_status,
-            database=os.environ.get("NEO4J_DATABASE", "neo4j"),
-        )
-        logging.info(
-            f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
-        )
-    except Exception as sync_error:
-        logging.warning(
-            f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
-        )
-
-    return {
-        "success": True,
-        "duplicate": False,
-        "file": uploaded_file,
-    }
-
-
 @app.post("/api/v2/files/upload")
 async def upload_file_to_queue(
     file: UploadFile = File(...),
@@ -4633,30 +4551,44 @@ async def upload_file_to_queue(
             f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}"
         )
 
-        # Read file content
-        content = await file.read()
-
-        # Convert auto_process string to boolean
-        auto_process_bool = (
-            auto_process.lower() in ("true", "1", "yes", "on")
-            if auto_process
-            else False
+        # Create output directory structure
+        from src.document_sources.s3_upload_utils import (
+            create_document_output_structure,
         )
 
-        # Run blocking operations in executor
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            result = await loop.run_in_executor(
-                executor,
-                _upload_file_sync_operations,
-                normalized_filename,
-                content,
-                originalname or file.filename,
-                auto_process_bool,
-            )
+        document_dir, pdf_dir, images_dir = create_document_output_structure(
+            normalized_filename, "output"
+        )
 
-        if result["duplicate"]:
-            existing_file = result["file"]
+        # Save file to document directory structure
+        file_path = os.path.join(pdf_dir, normalized_filename)
+        content = await file.read()
+
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        file_size = len(content)
+        logging.info(
+            f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
+        )
+
+        # Image extraction will be done in background processor (20-file batches)
+        # Upload endpoint only saves the file and returns immediately
+        logging.info(
+            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
+        )
+
+        # Add to database
+        db = get_file_queue_db()
+
+        # Check for existing file by hash to prevent duplicates
+        file_hash = UploadedFile.calculate_file_hash(str(file_path))
+        existing_file = db.get_file_by_hash(file_hash) if file_hash else None
+
+        if existing_file:
+            logging.info(
+                f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
+            )
             return create_api_response(
                 "Success",
                 message="File already exists in queue",
@@ -4672,18 +4604,56 @@ async def upload_file_to_queue(
                 },
             )
 
-        uploaded_file = result["file"]
-
-        # Image extraction will be done in background processor (20-file batches)
-        # Upload endpoint only saves the file and returns immediately
-        logging.info(
-            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
+        # Convert auto_process string to boolean
+        auto_process_bool = (
+            auto_process.lower() in ("true", "1", "yes", "on")
+            if auto_process
+            else False
         )
+
+        # Add new file to queue
+        uploaded_file = db.add_file(
+            filename=normalized_filename,
+            original_name=originalname or file.filename,
+            file_path=str(file_path),
+            file_size=file_size,
+            auto_process=auto_process_bool,
+        )
+
+        # Image extraction and S3 upload will be done in background processor
+        # No metadata update needed here
 
         elapsed_time = time.time() - start
         logging.info(
             f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)"
         )
+
+        # Neo4j'ye initial sync et (upload başarılı)
+        try:
+            from src.models.status_sync import sync_queue_db_status_to_neo4j
+
+            graph_connection = create_graph_database_connection(
+                os.environ.get("NEO4J_URI"),
+                os.environ.get("NEO4J_USERNAME"),
+                os.environ.get("NEO4J_PASSWORD"),
+                os.environ.get("NEO4J_DATABASE", "neo4j"),
+            )
+            sync_queue_db_status_to_neo4j(
+                graph=graph_connection,
+                file_name=uploaded_file.filename,
+                upload_status=uploaded_file.upload_status,
+                chunking_status=uploaded_file.chunking_status,
+                graph_status=uploaded_file.graph_status,
+                embedding_status=uploaded_file.embedding_status,
+                database=os.environ.get("NEO4J_DATABASE", "neo4j"),
+            )
+            logging.info(
+                f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
+            )
+        except Exception as sync_error:
+            logging.warning(
+                f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
+            )
 
         # Background processor'ı otomatik başlat (eğer çalışmıyorsa)
         try:
@@ -7587,7 +7557,7 @@ async def process_chunking_v2(file_id: int, original_name: str, merged_file_path
                             # 3️⃣ Chunk node'ları veritabanına kaydet
                             from src.make_relationships import create_chunks_for_upload
 
-                            chunkId_chunkDoc_list = create_chunks_for_upload(
+                            chunkId_chunkDoc_list = await create_chunks_for_upload(
                                 graph=graph,
                                 chunks=chunks,
                                 file_name=normalized_filename,
@@ -8024,10 +7994,12 @@ async def process_graph_creation_v2(
         # Check if Policy node was created in Neo4j
         # If no Policy node exists, mark as failed
         try:
+            import asyncio
             from src.main import create_graph_database_connection
 
-            graph_connection = create_graph_database_connection(
-                uri=uri, userName=userName, password=password, database=database
+            graph_connection = await asyncio.to_thread(
+                create_graph_database_connection,
+                uri, userName, password, database
             )
 
             # Check if Policy or Endorsement node exists for this document
@@ -8041,9 +8013,10 @@ async def process_graph_creation_v2(
             RETURN count(p) as policy_count, count(e) as endorsement_count, d.docType as doc_type
             """
 
-            node_result = graph_connection.query(
+            node_result = await asyncio.to_thread(
+                graph_connection.query,
                 node_check_query,
-                params={"file_name": normalized_filename},
+                {"file_name": normalized_filename}
             )
 
             policy_count = node_result[0]["policy_count"] if node_result else 0
@@ -8063,18 +8036,20 @@ async def process_graph_creation_v2(
                     file_record.reason = f"Graph verification failed: {error_message}"
                     db_session.commit()
 
-                    # Sync failed status to Neo4j
+                    # Sync failed status to Neo4j - async
                     try:
+                        import asyncio
                         from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                        sync_queue_db_status_to_neo4j(
-                            graph=graph_connection,
-                            file_name=normalized_filename,
-                            upload_status=file_record.upload_status,
-                            chunking_status=file_record.chunking_status,
-                            graph_status="failed",
-                            embedding_status=file_record.embedding_status,
-                            database=database,
+                        await asyncio.to_thread(
+                            sync_queue_db_status_to_neo4j,
+                            graph_connection,
+                            normalized_filename,
+                            file_record.upload_status,
+                            file_record.chunking_status,
+                            "failed",
+                            file_record.embedding_status,
+                            database
                         )
                     except Exception as sync_error:
                         logging.warning(
@@ -8096,18 +8071,20 @@ async def process_graph_creation_v2(
                 file_record.reason = f"Graph verification failed: {error_message}"
                 db_session.commit()
 
-                # Sync failed status to Neo4j
+                # Sync failed status to Neo4j - async
                 try:
+                    import asyncio
                     from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                    sync_queue_db_status_to_neo4j(
-                        graph=graph_connection,
-                        file_name=normalized_filename,
-                        upload_status=file_record.upload_status,
-                        chunking_status=file_record.chunking_status,
-                        graph_status="failed",
-                        embedding_status=file_record.embedding_status,
-                        database=database,
+                    await asyncio.to_thread(
+                        sync_queue_db_status_to_neo4j,
+                        graph_connection,
+                        normalized_filename,
+                        file_record.upload_status,
+                        file_record.chunking_status,
+                        "failed",
+                        file_record.embedding_status,
+                        database
                     )
                 except Exception as sync_error:
                     logging.warning(
@@ -8129,19 +8106,22 @@ async def process_graph_creation_v2(
 
             logging.error(f"Traceback: {traceback.format_exc()}")
 
-        # Embedding oluştur (eğer isteniyorsa)
+        # Embedding oluştur (eğer isteniyorsa) - async
         if generate_embedding:
             try:
                 logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
+                import asyncio
                 from src.graphDB_dataAccess import graphDBdataAccess
 
-                graph = create_graph_database_connection(
+                graph = await asyncio.to_thread(
+                    create_graph_database_connection,
                     uri, userName, password, database
                 )
                 graphDb_data_Access = graphDBdataAccess(graph)
 
-                # Document için embedding oluştur
-                embedding_result = graphDb_data_Access.create_embeddings_for_documents(
+                # Document için embedding oluştur - async
+                embedding_result = await asyncio.to_thread(
+                    graphDb_data_Access.create_embeddings_for_documents,
                     [normalized_filename]
                 )
                 if embedding_result and not embedding_result.get("error"):
@@ -8181,7 +8161,7 @@ async def process_graph_creation_v2(
 
         db_session.commit()
 
-        # Neo4j'ye sync et
+        # Neo4j'ye sync et - async
         try:
             logging.info(
                 f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
@@ -8190,17 +8170,20 @@ async def process_graph_creation_v2(
                 f"graph_status={file_record.graph_status}, "
                 f"embedding_status={file_record.embedding_status}"
             )
-            graph_connection = create_graph_database_connection(
-                uri=uri, userName=userName, password=password, database=database
+            import asyncio
+            graph_connection = await asyncio.to_thread(
+                create_graph_database_connection,
+                uri, userName, password, database
             )
-            sync_queue_db_status_to_neo4j(
-                graph=graph_connection,
-                file_name=original_name,
-                upload_status=file_record.upload_status,
-                chunking_status=file_record.chunking_status,
-                graph_status=file_record.graph_status,
-                embedding_status=file_record.embedding_status,
-                database=database,
+            await asyncio.to_thread(
+                sync_queue_db_status_to_neo4j,
+                graph_connection,
+                original_name,
+                file_record.upload_status,
+                file_record.chunking_status,
+                file_record.graph_status,
+                file_record.embedding_status,
+                database
             )
         except Exception as sync_error:
             logging.warning(
@@ -8225,7 +8208,7 @@ async def process_graph_creation_v2(
             file_record.reason = f"Graph creation failed: {str(e)}"
             db_session.commit()
 
-            # Neo4j'ye failed status sync et
+            # Neo4j'ye failed status sync et - async
             try:
                 logging.info(
                     f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
@@ -8234,20 +8217,23 @@ async def process_graph_creation_v2(
                     f"graph_status=failed, "
                     f"embedding_status={file_record.embedding_status}"
                 )
+                import asyncio
                 from src.models.status_sync import sync_queue_db_status_to_neo4j
                 from src.shared.common_fn import create_graph_database_connection
                 
-                graph_connection = create_graph_database_connection(
-                    uri=uri, userName=userName, password=password, database=database
+                graph_connection = await asyncio.to_thread(
+                    create_graph_database_connection,
+                    uri, userName, password, database
                 )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=original_name,
-                    upload_status=file_record.upload_status,
-                    chunking_status=file_record.chunking_status,
-                    graph_status="failed",
-                    embedding_status=file_record.embedding_status,
-                    database=database,
+                await asyncio.to_thread(
+                    sync_queue_db_status_to_neo4j,
+                    graph_connection,
+                    original_name,
+                    file_record.upload_status,
+                    file_record.chunking_status,
+                    "failed",
+                    file_record.embedding_status,
+                    database
                 )
             except Exception as sync_error:
                 logging.warning(
@@ -8448,4 +8434,6 @@ async def process_file_now(file_id: int):
 
 
 if __name__ == "__main__":
+    # Uvicorn access logger'ını kapat (HTTP request logları)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     uvicorn.run(app)

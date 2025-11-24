@@ -1381,8 +1381,12 @@ class graphDBdataAccess:
                 self.create_comprehensive_policy_entities(entities_data, file_name, model)
 
             # Document'a docType ve metadata ekle (sadece docType kullanıyoruz, document_type kaldırıldı)
-            policy_data = entities_data.get("policy", {})
-            dates_data = entities_data.get("dates", {})
+            policy_data = entities_data.get("policy")
+            if policy_data is None:
+                policy_data = {}
+            dates_data = entities_data.get("dates")
+            if dates_data is None:
+                dates_data = {}
 
             update_document_query = """
                 MATCH (d:Document {fileName: $file_name})
@@ -3155,6 +3159,14 @@ Sadece JSON formatında yanıt ver, başka açıklama ekleme:
             # Eğer çok uzunsa, otomatik olarak önemli bölümleri seçer
             document_content_for_llm = document_content if document_content else ""
 
+            # İlk 5 chunk'ın içeriğini logla (debug için)
+            if document_content_for_llm:
+                chunks_for_log = document_content_for_llm.split('\n')[:5]
+                logging.info(f"📄 LLM extraction için kullanılan ilk 5 chunk içeriği ({file_name}):")
+                for i, chunk_text in enumerate(chunks_for_log, 1):
+                    chunk_preview = chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text
+                    logging.info(f"   Chunk {i}: {chunk_preview}")
+
             # Kapsamlı extraction prompt'u
             prompt = f"""
 Verilen sigorta poliçesi belgesinden aşağıdaki bilgileri çıkar ve JSON formatında döndür.
@@ -3168,10 +3180,16 @@ Belge İçeriği:
 
 Çıkarılacak bilgiler (tüm alanlar opsiyonel, varsa doldur):
 
-1. CUSTOMER (Müşteri):
+1. CUSTOMER (Müşteri) - ÖNEMLİ:
    - name: Müşteri adı (kişi adı veya şirket adı)
    - type: "Individual" veya "Corporate"
    - responsible_person: Sorumlu kişi (şirketi ise)
+   
+   MÜŞTERİ ADI BULMA KURALLARI:
+   - "Sigortalı", "Müşteri", "Sigorta Ettiren" başlıklarından sonraki isim müşteri adıdır
+   - "Ünvanı", "Adı", "Ad Soyad" etiketlerinden sonraki metin müşteri adıdır
+   - Şirket adları "A.Ş.", "LTD. ŞTİ.", "ANONİM ŞİRKETİ" gibi kelimelerle biter
+   - Belgede açıkça belirtilmemişse boş bırak, UYDURMA
 
 2. INSURANCE_COMPANY (Sigorta Şirketi):
    - name: Şirket adı
@@ -3499,13 +3517,29 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         
                         logging.info("✅ Using Gemini 2.0 Flash for entity extraction")
                         
-                        # Gemini'ye prompt gönder
-                        response = client.models.generate_content(
-                            model="models/gemini-2.5-flash-lite",
-                            contents=[
-                                types.Part.from_text(text=prompt),
-                            ],
-                        )
+                        # Gemini'ye prompt gönder - max output tokens ayarla
+                        try:
+                            # generation_config = types.GenerationConfig(
+                            #     max_output_tokens=65000,  # JSON response için yeterli token limit
+                            #     temperature=0.1,  # Daha tutarlı JSON için düşük temperature
+                            # )
+                            
+                            response = client.models.generate_content(
+                                model="models/gemini-2.5-flash-lite",
+                                contents=[
+                                    types.Part.from_text(text=prompt),
+                                ],
+                                # config=generation_config,
+                            )
+                        except Exception as config_error:
+                            # GenerationConfig hatası varsa, config olmadan dene
+                            logging.warning(f"⚠️ GenerationConfig hatası: {config_error}, config olmadan deneniyor...")
+                            response = client.models.generate_content(
+                                model="models/gemini-2.5-flash-lite",
+                                contents=[
+                                    types.Part.from_text(text=prompt),
+                                ],
+                            )
                         
                         response_text = response.text.strip() if response.text else ""
                         logging.info(f"🔍 Gemini entity extraction response length: {len(response_text)} chars")
@@ -3531,7 +3565,84 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     start_idx = response_text.find("{")
                     end_idx = response_text.rfind("}") + 1
                     json_text = response_text[start_idx:end_idx]
-                    entities_data = json.loads(json_text)
+                    
+                    # JSON parse dene
+                    try:
+                        entities_data = json.loads(json_text)
+                    except json.JSONDecodeError as json_error:
+                        # Escape karakteri hatalarını düzeltmeye çalış
+                        logging.warning(f"⚠️ JSON parse hatası (escape karakteri sorunu olabilir): {json_error}")
+                        logging.info("🔄 JSON'u düzeltmeye çalışıyoruz...")
+                        
+                        # Geçersiz escape karakterlerini ve control character'ları düzelt
+                        # Önce markdown code block'ları temizle
+                        json_text_cleaned = json_text
+                        if json_text_cleaned.startswith("```json"):
+                            json_text_cleaned = json_text_cleaned.replace("```json", "").replace("```", "").strip()
+                        elif json_text_cleaned.startswith("```"):
+                            json_text_cleaned = json_text_cleaned.replace("```", "").strip()
+                        
+                        # Control character'ları temizle (JSON'da geçersiz: \x00-\x1F arası, \x7F hariç \n, \t, \r)
+                        import re
+                        import string
+                        # JSON'da geçerli control character'lar: \n (0x0A), \t (0x09), \r (0x0D)
+                        # Diğer control character'ları (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F) temizle
+                        def remove_control_characters(text):
+                            # Geçerli control character'ları koru: \n, \t, \r
+                            # Diğerlerini boşluk veya kaldır
+                            result = []
+                            for char in text:
+                                code = ord(char)
+                                # Geçerli control character'lar: \n (10), \t (9), \r (13)
+                                if code in [9, 10, 13]:
+                                    result.append(char)
+                                # Geçersiz control character'lar: 0-8, 11-12, 14-31, 127
+                                elif code < 32 or code == 127:
+                                    # Boşluk ile değiştir (JSON parse için daha güvenli)
+                                    result.append(' ')
+                                else:
+                                    result.append(char)
+                            return ''.join(result)
+                        
+                        json_text_cleaned = remove_control_characters(json_text_cleaned)
+                        
+                        # Geçersiz escape karakterlerini düzelt
+                        # Python'da geçerli escape karakterleri: \\, \", \', \n, \t, \r, \b, \f
+                        # Geçersiz olanları (örn: \K, \A) düzelt
+                        def fix_invalid_escapes(text):
+                            # Geçerli escape karakterleri: \\, \", \', \n, \t, \r, \b, \f, \uXXXX, \xXX
+                            # Geçersiz escape karakterlerini bul (örn: \K, \A, \1, vb.)
+                            # Pattern: backslash + karakter, ama geçerli escape değilse
+                            # Geçerli escape'ler: \\, \", \', \n, \t, \r, \b, \f, \u (4 hex), \x (2 hex)
+                            pattern = r'\\(?![\\"\'ntrbfux0-9])'
+                            # Geçersiz escape karakterlerini sadece backslash'i kaldırarak düzelt
+                            # Yani \K -> K, \A -> A (backslash kaldırılır)
+                            fixed = re.sub(pattern, '', text)
+                            return fixed
+                        
+                        json_text_cleaned = fix_invalid_escapes(json_text_cleaned)
+                        
+                        # Tekrar parse dene
+                        try:
+                            entities_data = json.loads(json_text_cleaned)
+                            logging.info("✅ JSON düzeltme başarılı, parse edildi")
+                        except json.JSONDecodeError as retry_error:
+                            # Hala parse edilemiyorsa, daha agresif temizleme yap
+                            logging.warning(f"⚠️ İlk düzeltme başarısız, daha agresif temizleme deneniyor: {retry_error}")
+                            
+                            # Tüm backslash'leri temizle (son çare)
+                            json_text_cleaned = json_text_cleaned.replace('\\', '')
+                            
+                            try:
+                                entities_data = json.loads(json_text_cleaned)
+                                logging.info("✅ Agresif temizleme başarılı, JSON parse edildi")
+                            except json.JSONDecodeError as final_error:
+                                # Son çare: sadece hata mesajını logla ve exception fırlat (retry için)
+                                error_msg = f"LLM yanıtı JSON parse edilemedi: {final_error}. İlk hata: {json_error}"
+                                logging.error(f"❌ {error_msg}")
+                                logging.error(f"Response text (first 1000 chars): {response_text[:1000]}")
+                                # Exception fırlat ki retry mekanizması çalışsın
+                                raise ValueError(error_msg) from final_error
 
                     # OCR hatalarını düzelt ve filename'den fallback kullan
                     entities_data = self._validate_and_fix_customer_name(
@@ -3544,14 +3655,19 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     )
                     return entities_data
                 else:
-                    logging.error("LLM yanıtında JSON formatı bulunamadı")
+                    error_msg = "LLM yanıtında JSON formatı bulunamadı"
+                    logging.error(error_msg)
                     logging.error(f"Response text (first 500 chars): {response_text[:500]}")
-                    return {}
+                    # Exception fırlat ki retry mekanizması çalışsın
+                    raise ValueError(error_msg)
 
-            except json.JSONDecodeError as e:
-                logging.error(f"LLM yanıtı JSON parse edilemedi: {e}")
-                logging.error(f"Response text (first 500 chars): {response_text[:500]}")
-                return {}
+            except (json.JSONDecodeError, ValueError) as e:
+                # JSON parse hatası veya ValueError - retry için exception fırlat
+                error_msg = f"LLM yanıtı JSON parse edilemedi: {e}"
+                logging.error(f"❌ {error_msg}")
+                logging.error(f"Response text (first 1000 chars): {response_text[:1000]}")
+                # Exception fırlat ki retry mekanizması çalışsın
+                raise ValueError(error_msg) from e
 
         except Exception as e:
             logging.error(f"Kapsamlı varlık çıkarma hatası: {e}")
@@ -3564,8 +3680,11 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         LLM extraction'ı öncelikli kullanır, hatalı/eksikse filename'den fallback yapar
         """
         try:
-            customer_data = entities_data.get("customer", {})
-            extracted_name = customer_data.get("name", "").strip()
+            customer_data = entities_data.get("customer")
+            # customer None olabilir, bu durumda boş dict kullan
+            if customer_data is None:
+                customer_data = {}
+            extracted_name = customer_data.get("name", "").strip() if customer_data else ""
 
             # Filename'den müşteri adını çıkar (fallback için)
             filename_customer = self._extract_customer_name_from_filename(file_name)
@@ -4310,16 +4429,21 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 return
 
             # Policy ID'yi LLM'den gelen customer name ile oluştur (eğer var ise)
-            customer_data = entities_data.get("customer", {})
-            customer_name = customer_data.get("name", "").strip()
+            customer_data = entities_data.get("customer")
+            # customer None olabilir, bu durumda boş dict kullan
+            if customer_data is None:
+                customer_data = {}
+            customer_name = customer_data.get("name", "").strip() if customer_data else ""
 
             if customer_name:
                 # Customer name'den safe ID oluştur (filename bilgisi eklenmez)
                 safe_customer_name = normalize_file_name(customer_name)
                 # Policy verilerinden daha spesifik ID oluştur
-                policy_data = entities_data.get("policy", {})
-                policy_type = policy_data.get("policyType", "")
-                year = policy_data.get("year", "")
+                policy_data = entities_data.get("policy")
+                if policy_data is None:
+                    policy_data = {}
+                policy_type = policy_data.get("policyType", "") if policy_data else ""
+                year = policy_data.get("year", "") if policy_data else ""
 
                 if policy_type and year:
                     policy_id = f"policy_{safe_customer_name}_{normalize_file_name(policy_type)}_{year}".replace(
@@ -4337,7 +4461,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 # Fallback: filename'den oluştur
                 policy_id = f"policy_{normalize_file_name(file_name).replace('.', '_')}"
 
-            policy_data = entities_data.get("policy", {})
+            policy_data = entities_data.get("policy")
+            if policy_data is None:
+                policy_data = {}
             if not policy_data.get("policyNumber"):
                 policy_data["policyNumber"] = policy_id
 
@@ -4345,40 +4471,55 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             self._create_policy_node_comprehensive(policy_id, policy_data, file_name)
 
             # 2. Customer Node'u ve ilişkisini oluştur (önce HAS_POLICY yaratılmalı)
-            customer_data = entities_data.get("customer", {})
+            customer_data = entities_data.get("customer")
+            # customer None olabilir, bu durumda boş dict kullan
+            if customer_data is None:
+                customer_data = {}
             if customer_data.get("name"):
                 self._create_customer_node_comprehensive(
                     customer_data, policy_id, file_name
                 )
 
             # 2.5. Policy İlişki Türünü Oluştur (LLM'den gelen ilişki tipi ile - Customer bağlandıktan sonra)
-            policy_relationship = entities_data.get("policy_relationship", {})
-            relationship_type = policy_relationship.get("relationship_type", "")
-            relationship_properties = policy_relationship.get("properties", {})
-            deductible_info = entities_data.get("deductible_info", {})
-            policy_type = policy_data.get("type", "")
+            policy_relationship = entities_data.get("policy_relationship")
+            if policy_relationship is None:
+                policy_relationship = {}
+            relationship_type = policy_relationship.get("relationship_type", "") if policy_relationship else ""
+            relationship_properties = policy_relationship.get("properties", {}) if policy_relationship else {}
+            deductible_info = entities_data.get("deductible_info")
+            if deductible_info is None:
+                deductible_info = {}
+            policy_type = policy_data.get("type", "") if policy_data else ""
             if relationship_type:
                 self._create_policy_type_relationship(
                     policy_id, relationship_type, policy_type, relationship_properties, deductible_info
                 )
 
             # 3. InsuranceCompany Node'u ve ilişkisini oluştur
-            company_data = entities_data.get("insurance_company", {})
+            company_data = entities_data.get("insurance_company")
+            if company_data is None:
+                company_data = {}
             if company_data.get("name"):
                 self._create_insurance_company_node(company_data, policy_id)
 
             # 4. Date Node'larını (start/end) oluştur
-            dates_data = entities_data.get("dates", {})
+            dates_data = entities_data.get("dates")
+            if dates_data is None:
+                dates_data = {}
             if dates_data:
                 self._create_date_nodes_for_policy(dates_data, policy_id)
 
             # 5. Premium Node'u oluştur
-            premium_data = entities_data.get("premium", {})
+            premium_data = entities_data.get("premium")
+            if premium_data is None:
+                premium_data = {}
             if premium_data.get("amount") is not None:
                 self._create_premium_node(premium_data, policy_id)
 
             # 6. Coverage Node'u oluştur
-            coverage_data = entities_data.get("coverage", {})
+            coverage_data = entities_data.get("coverage")
+            if coverage_data is None:
+                coverage_data = {}
             if coverage_data:
                 self._create_coverage_node(coverage_data, policy_id)
 
@@ -4403,32 +4544,44 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 self._create_endorsement_nodes(endorsements, policy_id)
 
             # 11. Payment Node'u oluştur
-            payment_data = entities_data.get("payment", {})
+            payment_data = entities_data.get("payment")
+            if payment_data is None:
+                payment_data = {}
             if payment_data.get("amount") is not None:
                 self._create_payment_node(payment_data, policy_id)
 
             # 12. Address Node'u oluştur
-            address_data = entities_data.get("address", {})
+            address_data = entities_data.get("address")
+            if address_data is None:
+                address_data = {}
             if address_data.get("address") or address_data.get("city"):
                 self._create_risk_address_node(address_data, policy_id)
 
             # 13. InsuredProperty Node'u oluştur (yeni alan)
-            insured_property_data = entities_data.get("insured_property", {})
+            insured_property_data = entities_data.get("insured_property")
+            if insured_property_data is None:
+                insured_property_data = {}
             if insured_property_data.get("address") or insured_property_data.get("city") or insured_property_data.get("damageStatus"):
                 self._create_insured_property_node(insured_property_data, policy_id)
 
             # 14. InsuredPerson Node'u oluştur (yeni alan)
-            insured_person_data = entities_data.get("insured_person", {})
+            insured_person_data = entities_data.get("insured_person")
+            if insured_person_data is None:
+                insured_person_data = {}
             if insured_person_data.get("name"):
                 self._create_insured_person_node(insured_person_data, policy_id)
 
             # 15. Policyholder Node'u oluştur (yeni alan)
-            policyholder_data = entities_data.get("policyholder", {})
+            policyholder_data = entities_data.get("policyholder")
+            if policyholder_data is None:
+                policyholder_data = {}
             if policyholder_data.get("name"):
                 self._create_policyholder_node(policyholder_data, policy_id)
 
             # 16. InsuranceAmount bilgilerini Coverage ve Premium'a aktar (yeni alan)
-            insurance_amount_data = entities_data.get("insurance_amount", {})
+            insurance_amount_data = entities_data.get("insurance_amount")
+            if insurance_amount_data is None:
+                insurance_amount_data = {}
             if insurance_amount_data:
                 # Coverage ve Premium node'larına insurance_amount bilgilerini ekle
                 self._update_coverage_premium_from_insurance_amount(
