@@ -62,6 +62,8 @@ from src.utils.log_helpers import (
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import markdown_to_json
+from src.models.file_queue_models import get_file_queue_db, UploadedFile, FileStatus
+from src.tasks import process_file_pipeline
 
 import pandas as pd
 import re
@@ -2020,6 +2022,7 @@ def upload_file(
             )
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
+        merged_file_path = os.path.join(merged_dir, normalized_filename)
         
         # ✨ ÖNCE: Upload öncesi otomatik temizlik yap (dosya varsa temizle)
         log_upload(f"🧹 Starting pre-upload cleanup check for: {normalized_filename}")
@@ -2029,144 +2032,6 @@ def upload_file(
             log_upload(f"✅ Pre-upload cleanup completed successfully")
         else:
             log_upload(f"ℹ️ No cleanup needed or cleanup skipped")
-        
-        # Desteklenen belge formatları için hem text hem image extraction (tek seferde)
-        merged_file_path = os.path.join(merged_dir, normalized_filename)
-        doc_link = None
-        page_images = []
-        pages = []
-        
-        # Docling desteklenen formatlar: PDF, DOCX, PPTX, HTML, CSV, Markdown
-        file_extension = normalized_filename.split(".")[-1].lower()
-        docling_supported_formats = ["pdf", "docx", "pptx", "html", "csv", "md"]
-        
-        if file_extension in docling_supported_formats and os.path.exists(merged_file_path):
-                try:
-                    logging.info(f"🖼️ Starting combined content & image extraction for {file_extension.upper()}: {normalized_filename}")
-                    
-                    # Output klasör yapısını oluştur
-                    document_dir, pdf_dir, images_dir = create_document_output_structure(
-                        normalized_filename, "output"
-                    )
-                    
-                    # Belgeyi ilgili klasöre kopyala
-                    doc_copy_path = os.path.join(pdf_dir, normalized_filename)
-                    shutil.copy2(merged_file_path, doc_copy_path)
-                    logging.info(f"📄 Document copied to: {doc_copy_path}")
-                    
-                    # Tek seferde hem text hem image extraction
-                    from src.document_sources.local_file import load_document_content
-                    
-                    # S3'te page image'lar var mı kontrol et
-                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
-                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-                    doc_name = Path(normalized_filename).stem
-                    
-                    existing_images_in_s3 = False
-                    existing_image_names = []
-                    
-                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                        from src.document_sources.s3_upload_utils import check_document_images_exist_in_s3
-                        existing_images_in_s3, existing_image_names = check_document_images_exist_in_s3(
-                            doc_name, s3_bucket, aws_access_key_id, aws_secret_access_key
-                        )
-                    
-                    if existing_images_in_s3:
-                        # S3'te image'lar zaten var, tekrar generate etme
-                        logging.info(f"📸 Page images already exist in S3 for {doc_name}, skipping generation")
-                        generated_images = []
-                        page_images = existing_image_names
-                        
-                        # Sadece text extraction yap
-                        loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
-                        pages = loader.load()
-                        logging.info(f"📖 {file_extension.upper()} processed: Text only (images exist in S3)")
-                        
-                    else:
-                        # S3'te image'lar yok, generate et
-                        logging.info(f"📸 No page images found in S3 for {doc_name}, generating new images")
-                        
-                        if file_extension == "pdf":
-                            # PDF için: PyMuPDF image + DoclingLoader text (optimize edilmiş)
-                            generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
-                            loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
-                            pages = loader.load()
-                            logging.info(f"📖 PDF processed: PyMuPDF images + Docling text")
-                        else:
-                            # Diğer formatlar için: Docling hem text hem image (tek çağrı)
-                            loader, encoding_flag, generated_images = load_document_content(
-                                merged_file_path, generate_images=True, output_dir=images_dir
-                            )
-                            pages = loader.load()
-                            logging.info(f"📖 {file_extension.upper()} processed: Docling combined text+images")
-                    
-                    if generated_images:
-                        logging.info(f"✅ Generated {len(generated_images)} page images")
-                        
-                        if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                            # S3 yapısı: documents/{doc_name}/ (PDF) ve documents/{doc_name}/images/ (images)
-                            base_s3_prefix = f"documents/{doc_name}"
-                            
-                            # PDF'i documents/{doc_name}/ altına upload et
-                            pdf_urls, pdf_failed = upload_files_to_s3(
-                                [doc_copy_path],
-                                s3_bucket,
-                                base_s3_prefix,
-                                aws_access_key_id,
-                                aws_secret_access_key,
-                                delete_local_after_upload=True
-                            )
-                            
-                            # Image'leri documents/{doc_name}/images/ altına upload et
-                            img_urls, img_failed = upload_files_to_s3(
-                                generated_images,
-                                s3_bucket,
-                                f"{base_s3_prefix}/images",
-                                aws_access_key_id,
-                                aws_secret_access_key,
-                                delete_local_after_upload=True
-                            )
-                            
-                            uploaded_urls = pdf_urls + img_urls
-                            failed_files = pdf_failed + img_failed
-                            
-                            if uploaded_urls:
-                                logging.info(f"✅ Uploaded {len(uploaded_urls)} files to S3 (1 PDF + {len(img_urls)} images)")
-                                
-                                # Document link'i bul (PDF dosyası) - sadece dosya adı
-                                doc_link = None
-                                for url in pdf_urls:
-                                    if url.endswith(f"/{normalized_filename}"):
-                                        doc_link = os.path.basename(url)  # Sadece dosya adı
-                                        break
-                                
-                                # Page image link'lerini kaydet - sadece dosya adları
-                                page_images = []
-                                for url in img_urls:
-                                    page_images.append(os.path.basename(url))  # Sadece dosya adı
-                                
-                                logging.info(f"📄 Document file name: {doc_link}")
-                                logging.info(f"🖼️ Page image file names: {len(page_images)} images")
-                                
-                                # Local output klasörünü temizle
-                                cleanup_local_files(document_dir)
-                            
-                            if failed_files:
-                                logging.warning(f"⚠️ Failed to upload {len(failed_files)} files to S3")
-                        else:
-                            logging.warning("⚠️ S3 credentials not configured, skipping S3 upload")
-                            page_images = []
-                    elif existing_images_in_s3:
-                        # S3'ten mevcut image isimlerini kullan
-                        logging.info(f"🔄 Using existing {len(page_images)} page images from S3")
-                    else:
-                        logging.warning(f"⚠️ No page images generated for: {normalized_filename}")
-                        page_images = []
-                        
-                except Exception as image_error:
-                    logging.error(f"❌ Combined content & image extraction failed for {normalized_filename}: {image_error}")
-                    # Continue with normal processing even if extraction fails
         
         # Source node oluştur
         log_upload(f"Creating source node for file: {originalname} (size: {file_size} bytes)")
@@ -2190,144 +2055,6 @@ def upload_file(
         obj_source_node.node_count = 0
         obj_source_node.relationship_count = 0
         obj_source_node.processing_time = 0
-        
-        # S3 document link'i ve page images'ı ekle
-        if doc_link:
-            obj_source_node.doc_link = doc_link
-            log_upload(f"Document link added to source node: {doc_link}")
-            logging.info(f"📄 Added doc_link to source node: {doc_link}")
-        
-        if page_images:
-            obj_source_node.page_images = page_images
-            log_upload(f"Added {len(page_images)} page images to source node")
-            logging.info(f"🖼️ Added {len(page_images)} page_images to source node")
-        
-        # Desteklenen belge formatları için chunk node'ları da oluştur (sadece pages varsa)
-        if file_extension.lower() in docling_supported_formats and pages:
-            try:
-                log_upload(f"Starting chunk creation for supported format: {file_extension}")
-                logging.info(f"🔄 Creating chunk nodes for: {originalname} (using already extracted pages)")
-                
-                # Zaten extract edilmiş pages'leri kullan (tekrar extract etme)
-                if pages:
-                    # Chunk'ları oluştur
-                    from src.create_chunks import CreateChunksofDocument
-                    create_chunks_obj = CreateChunksofDocument(pages, graph)
-                    
-                    # Varsayılan chunk parametreleri
-                    token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
-                    chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
-                    
-                    chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                        chunk_size=token_chunk_size, 
-                        chunk_overlap=chunk_overlap
-                    )
-                    
-                    if chunks:
-                        # Chunk node'ları veritabanına kaydet (extract-compatible format)
-                        from src.make_relationships import create_chunks_for_upload
-                        import asyncio
-                        
-                        # generate_embedding kontrolü - varsayılan false (manuel embedding)
-                        should_generate_embedding = generate_embedding and generate_embedding.lower() in ['true', '1', 'yes']
-                        
-                        # create_chunks_for_upload artık async, event loop içinde çalıştır
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                # Eğer loop zaten çalışıyorsa, thread pool'da çalıştır
-                                import concurrent.futures
-                                async def run_create_chunks():
-                                    return await create_chunks_for_upload(
-                                        graph=graph,
-                                        chunks=chunks, 
-                                        file_name=originalname,
-                                        page_images=page_images if page_images else [],
-                                        generate_embedding=should_generate_embedding
-                                    )
-                                with concurrent.futures.ThreadPoolExecutor() as executor:
-                                    future = executor.submit(asyncio.run, run_create_chunks())
-                                    chunkId_chunkDoc_list = future.result()
-                            else:
-                                chunkId_chunkDoc_list = loop.run_until_complete(create_chunks_for_upload(
-                                    graph=graph,
-                                    chunks=chunks, 
-                                    file_name=originalname,
-                                    page_images=page_images if page_images else [],
-                                    generate_embedding=should_generate_embedding
-                                ))
-                        except RuntimeError:
-                            # Event loop yoksa, yeni bir tane oluştur
-                            chunkId_chunkDoc_list = asyncio.run(create_chunks_for_upload(
-                                graph=graph,
-                                chunks=chunks, 
-                                file_name=originalname,
-                                page_images=page_images if page_images else [],
-                                generate_embedding=should_generate_embedding
-                            ))
-                        
-                        # Source node'daki chunk sayısını güncelle
-                        obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
-                        obj_source_node.total_chunks = len(chunks)  # Toplam chunk sayısı
-                        obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)  # İşlenen chunk sayısı
-                        
-                        # Vector index oluştur/kontrol et (embedding varsa)
-                        if should_generate_embedding:
-                            try:
-                                from src.make_relationships import create_chunk_vector_index
-                                create_chunk_vector_index(graph)
-                                log_upload(f"Vector index checked/created after chunk creation")
-                                logging.info(f"✅ Vector index checked/created for embeddings")
-                            except Exception as vector_error:
-                                log_upload(f"Vector index creation warning: {vector_error}", "warning")
-                                logging.warning(f"⚠️ Vector index creation warning: {vector_error}")
-                        
-                        if should_generate_embedding:
-                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings")
-                            logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes with embeddings for: {originalname}")
-                        else:
-                            log_upload(f"Successfully created {len(chunkId_chunkDoc_list)} chunk nodes (embeddings will be created manually)")
-                            logging.info(f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes for: {originalname}")
-                            logging.info(f"ℹ️ Embedding oluşturma atlandı - manuel olarak /create_embeddings endpoint'i ile oluşturulacak")
-                            logging.info(f"📊 Embedding'leri manuel olarak oluşturmak için /create_embeddings endpoint'ini kullanın")
-                        
-                        logging.info(f"📊 Upload created chunks ready for extract processing")
-                    else:
-                        log_upload(f"No chunks created during upload", "warning")
-                        logging.warning(f"⚠️ No chunks created for: {originalname}")
-                else:
-                    log_upload(f"No pages available for chunking", "warning")
-                    logging.warning(f"⚠️ No pages available for chunking: {originalname}")
-                    
-            except Exception as chunk_error:
-                log_upload(f"Failed to create chunk nodes: {chunk_error}", "error")
-                logging.error(f"❌ Failed to create chunk nodes for {originalname}: {chunk_error}")
-                # Continue without chunk creation
-        
-        # Source node'u veritabanına kaydet (temizlik zaten yapıldı)
-        graphDb_data_Access.create_source_node(obj_source_node, model=model)
-        log_upload(f"Source node successfully created in database for: {originalname}")
-        logging.info(f"📋 Source node created in database for: {originalname}")
-        
-        # Chunk'ları Document'e bağla (eğer chunk'lar oluşturulmuşsa)
-        if file_extension.lower() in docling_supported_formats and pages:
-            try:
-                from src.make_relationships import link_chunks_to_document
-                linked_count = link_chunks_to_document(graph, originalname)
-                if linked_count > 0:
-                    logging.info(f"🔗 Successfully linked {linked_count} relationships between chunks and Document")
-                else:
-                    logging.info(f"ℹ️ Chunks were already linked to Document")
-            except Exception as link_error:
-                logging.error(f"❌ Failed to link chunks to Document: {link_error}")
-        
-        # Dosyanın gerçekten merged_dir'de oluşturulup oluşturulmadığını kontrol et
-        if not gcs_file_cache or gcs_file_cache != "True":
-            if os.path.exists(merged_file_path):
-                actual_file_size = os.path.getsize(merged_file_path)
-                logging.info(f"✅ File verification successful - File exists at: {merged_file_path}, Size: {actual_file_size} bytes")
-            else:
-                logging.error(f"❌ File verification failed - File NOT found at: {merged_file_path}")
         
         return {
             "file_size": file_size,

@@ -169,15 +169,19 @@ class UploadedFile(Base):
 class FileQueueDatabase:
     """Database manager for file queue operations"""
 
-    def __init__(self, db_path: str = "queue.db"):
+    def __init__(self, db_path: str = "queue.db", db_url: str = None):
         """Initialize database connection"""
-        self.db_path = Path(db_path)
-        self.db_url = f"sqlite:///{self.db_path}"
+        if db_url:
+            self.db_url = db_url
+        else:
+            self.db_path = Path(db_path)
+            self.db_url = f"sqlite:///{self.db_path}"
+            
         self.engine = create_engine(
             self.db_url,
-            connect_args={"check_same_thread": False},
-            echo=False,  # Set to True for SQL debugging
-            poolclass=StaticPool,
+            # connect_args={"check_same_thread": False}, # Only for SQLite
+            echo=False,
+            poolclass=StaticPool if "sqlite" in self.db_url else None, # StaticPool for SQLite
         )
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
@@ -536,16 +540,24 @@ def get_file_queue_db(db_path: str = None) -> FileQueueDatabase:
     global _db_instance
 
     if _db_instance is None:
-        if db_path is None:
-            # Check environment variable first
-            env_db_path = os.getenv("QUEUE_DB_PATH")
-            if env_db_path:
-                db_path = env_db_path
-            else:
-                # Default path: backend/queue.db
-                current_dir = Path(__file__).parent.parent.parent  # backend/
-                db_path = current_dir / "queue.db"
-
-        _db_instance = FileQueueDatabase(str(db_path))
-
+        # Check environment variable for full URL first (PostgreSQL)
+        db_url = os.getenv("QUEUE_DB_URL")
+        
+        if not db_url:
+            if db_path is None:
+                # Check environment variable first
+                env_db_path = os.getenv("QUEUE_DB_PATH")
+                if env_db_path:
+                    db_path = env_db_path
+                else:
+                    # Default path: backend/queue.db
+                    current_dir = Path(__file__).parent.parent.parent  # backend/
+                    db_path = current_dir / "queue.db"
+            
+            # SQLite fallback
+            _db_instance = FileQueueDatabase(db_path=str(db_path))
+        else:
+            # PostgreSQL or other URL based DB
+            _db_instance = FileQueueDatabase(db_url=db_url)
+            
     return _db_instance
