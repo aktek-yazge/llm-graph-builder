@@ -8,8 +8,16 @@ import numpy as np
 import os
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+# sentence_transformers is only needed for embeddings, which is done in celery_worker
+try:
+    from sentence_transformers import SentenceTransformer
+except (ImportError, ModuleNotFoundError):
+    SentenceTransformer = None  # Embeddings are in celery_worker
+# sklearn is only needed for similarity calculations, which is done in celery_worker
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+except (ImportError, ModuleNotFoundError):
+    cosine_similarity = None  # Similarity calculations are in celery_worker
 import difflib
 import re
 
@@ -48,6 +56,10 @@ class EntityResolver:
             logging.info(f"📦 EntityResolver - Default cache klasörü: {default_cache}")
         
         logging.info(f"🤖 EntityResolver - Embedding model: {embedding_model}")
+        
+        # SentenceTransformer is only available in celery_worker
+        if SentenceTransformer is None:
+            raise NotImplementedError("EntityResolver requires sentence_transformers, which is only available in celery_worker")
         
         # SentenceTransformer otomatik olarak cache kullanır:
         # - Model cache'te varsa oradan yüklenir (hızlı)
@@ -418,8 +430,15 @@ class EntityResolver:
             logging.error(f"❌ Relationship recreation hatası: {e}")
 
 
-# Global entity resolver instance
-entity_resolver = EntityResolver()
+# Global entity resolver instance - only create if sentence_transformers is available
+# This is only needed in celery_worker, not in backend
+entity_resolver = None
+try:
+    if SentenceTransformer is not None:
+        entity_resolver = EntityResolver()
+except (NotImplementedError, Exception):
+    # EntityResolver requires sentence_transformers, which is only available in celery_worker
+    entity_resolver = None
 
 def resolve_entity_before_creation(new_entity: Dict, graph, entity_type: str = "Person") -> Optional[str]:
     """
@@ -434,6 +453,11 @@ def resolve_entity_before_creation(new_entity: Dict, graph, entity_type: str = "
     Returns:
         Mevcut entity'nin element ID'si (varsa) veya None
     """
+    # Entity resolver is only available in celery_worker
+    if entity_resolver is None:
+        logging.debug("EntityResolver not available (only in celery_worker), skipping entity resolution")
+        return None
+    
     try:
         # Mevcut benzer entity'leri ara - sadece belirtilen entity_type için
         query = f"""

@@ -83,10 +83,10 @@ services:
   # Celery Worker - Background Tasks
   celery_worker:
     build:
-      context: ./backend
+      context: ./celery_worker
       dockerfile: Dockerfile
     container_name: celery-worker-prod
-    command: celery -A src.celery_app worker --loglevel=info --concurrency=4
+    command: uv run celery -A src.celery_app worker --loglevel=info --concurrency=4
     env_file:
       - ./backend/.env
     environment:

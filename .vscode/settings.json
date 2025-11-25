@@ -15,11 +15,25 @@
     }
   },
   "terminal.integrated.shell.linux": "/usr/bin/zsh",
-  "python.defaultInterpreterPath": "/usr/local/bin/python",
   "python.terminal.activateEnvironment": false,
   "editor.formatOnSave": true,
   "editor.codeActionsOnSave": {
     "source.organizeImports": "explicit"
   },
-  "cSpell.enabled": false
+  "cSpell.enabled": false,
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python",
+  "[python]": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python"
+  },
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/backend/src",
+    "${workspaceFolder}/celery_worker/src"
+  ],
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.analysis.stubPath": "${workspaceFolder}/typings",
+  "python.analysis.venvPath": "${workspaceFolder}",
+  "python.analysis.venv": ".venv"
 }

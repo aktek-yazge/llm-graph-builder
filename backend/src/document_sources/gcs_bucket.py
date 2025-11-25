@@ -3,12 +3,20 @@ import logging
 from google.cloud import storage
 from langchain_community.document_loaders import GCSFileLoader
 from langchain_core.documents import Document
-from PyPDF2 import PdfReader
+# PyPDF2 is only needed for PDF processing, which is done in celery_worker
+try:
+    from PyPDF2 import PdfReader
+except (ImportError, ModuleNotFoundError):
+    PdfReader = None  # PDF processing is in celery_worker
 import io
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 from google.oauth2.credentials import Credentials
 import time
-import nltk
+# nltk is only needed for text processing, which is done in celery_worker
+try:
+    import nltk
+except (ImportError, ModuleNotFoundError):
+    nltk = None  # Text processing is in celery_worker
 from .local_file import load_document_content
 
 def get_gcs_bucket_files_info(gcs_project_id, gcs_bucket_name, gcs_bucket_folder, creds):
@@ -77,6 +85,8 @@ def get_documents_from_gcs(gcs_project_id, gcs_bucket_name, gcs_bucket_folder, g
     if blob.exists():
       content = blob.download_as_bytes()
       pdf_file = io.BytesIO(content)
+      if PdfReader is None:
+          raise NotImplementedError("PDF processing is only available in celery_worker")
       pdf_reader = PdfReader(pdf_file)
       # Extract text from all pages
       text = ""

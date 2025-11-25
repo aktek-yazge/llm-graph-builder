@@ -1,7 +1,15 @@
 from langchain.docstore.document import Document
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
-from youtube_transcript_api import YouTubeTranscriptApi 
-from youtube_transcript_api.proxies import GenericProxyConfig
+# youtube_transcript_api is only needed for YouTube processing, which is done in celery_worker
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+except (ImportError, ModuleNotFoundError):
+    YouTubeTranscriptApi = None  # YouTube processing is in celery_worker 
+# GenericProxyConfig is only needed for YouTube processing, which is done in celery_worker
+try:
+    from youtube_transcript_api.proxies import GenericProxyConfig
+except (ImportError, ModuleNotFoundError):
+    GenericProxyConfig = None  # YouTube processing is in celery_worker
 import logging
 from urllib.parse import urlparse,parse_qs
 from difflib import SequenceMatcher

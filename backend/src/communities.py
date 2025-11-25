@@ -1,5 +1,9 @@
 import logging
-from graphdatascience import GraphDataScience
+# graphdatascience is only needed for graph analytics, which is done in celery_worker
+try:
+    from graphdatascience import GraphDataScience
+except (ImportError, ModuleNotFoundError):
+    GraphDataScience = None  # Graph analytics is in celery_worker
 from src.llm import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser 

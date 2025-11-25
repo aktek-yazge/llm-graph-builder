@@ -3,10 +3,18 @@ Apple Silicon / Metal Performance Shaders (MPS) Device Detection Utility
 Bu modül Apple Silicon Mac'lerde Metal GPU acceleration'ı etkinleştirir
 """
 
-import torch
+# torch is only needed for ML processing, which is done in celery_worker
+try:
+    import torch
+except (ImportError, ModuleNotFoundError):
+    torch = None  # ML processing is in celery_worker
 import logging
 import os
-import psutil
+# psutil is optional - only needed for system monitoring
+try:
+    import psutil
+except (ImportError, ModuleNotFoundError):
+    psutil = None  # System monitoring is optional
 import platform
 
 logger = logging.getLogger(__name__)
@@ -43,6 +51,10 @@ def optimize_for_apple_silicon():
     """
     Apple Silicon için PyTorch optimizasyonları
     """
+    if torch is None:
+        logger.warning("⚠️ PyTorch not available (only in celery_worker), skipping optimizations")
+        return
+    
     if torch.backends.mps.is_available():
         # MPS optimizasyonları
         logger.info("🍎 Apple Silicon MPS optimizasyonları etkinleştiriliyor...")
@@ -62,6 +74,10 @@ def print_device_info():
     print("🔧 PyTorch Device Information")
     print("=" * 50)
     
+    if torch is None:
+        print("⚠️ PyTorch not available (only in celery_worker)")
+        return
+    
     print(f"PyTorch Version: {torch.__version__}")
     
     # Platform info
@@ -75,14 +91,17 @@ def print_device_info():
     print(f"Processor: {platform.processor()}")
     
     # CPU Information
-    print(f"CPU Cores (Physical): {psutil.cpu_count(logical=False)}")
-    print(f"CPU Cores (Logical): {psutil.cpu_count(logical=True)}")
-    
-    # Memory Information
-    memory = psutil.virtual_memory()
-    print(f"Total Memory: {memory.total / (1024**3):.2f} GB")
-    print(f"Available Memory: {memory.available / (1024**3):.2f} GB")
-    print(f"Memory Usage: {memory.percent:.1f}%")
+    if psutil is not None:
+        print(f"CPU Cores (Physical): {psutil.cpu_count(logical=False)}")
+        print(f"CPU Cores (Logical): {psutil.cpu_count(logical=True)}")
+        
+        # Memory Information
+        memory = psutil.virtual_memory()
+        print(f"Total Memory: {memory.total / (1024**3):.2f} GB")
+        print(f"Available Memory: {memory.available / (1024**3):.2f} GB")
+        print(f"Memory Usage: {memory.percent:.1f}%")
+    else:
+        print("⚠️ psutil not available for system info")
     
     # MPS (Metal) support
     if hasattr(torch.backends, 'mps'):

@@ -1,27 +1,56 @@
 import logging
 from pathlib import Path
 from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_docling import DoclingLoader
-from langchain_docling.loader import ExportType
-from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
+# Docling is only needed for document processing, which is done in celery_worker
+try:
+    from langchain_docling import DoclingLoader
+    from langchain_docling.loader import ExportType
+    from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+except (ImportError, ModuleNotFoundError):
+    # Document processing is in celery_worker
+    DoclingLoader = None
+    ExportType = None
+    ImageRefMode = None
+    PictureItem = None
+    TableItem = None
+    InputFormat = None
+    PdfPipelineOptions = None
+    DocumentConverter = None
+    PdfFormatOption = None
 from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_core.documents import Document
-import chardet
+# chardet is only needed for encoding detection, which is done in celery_worker
+try:
+    import chardet
+except (ImportError, ModuleNotFoundError):
+    chardet = None  # Encoding detection is in celery_worker
 from langchain_core.document_loaders import BaseLoader
-from docling_core.types.doc import DocItemLabel
-from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+# docling_core is only needed for document processing, which is done in celery_worker
+try:
+    from docling_core.types.doc import DocItemLabel
+    from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+except (ImportError, ModuleNotFoundError):
+    DocItemLabel = None
+    DEFAULT_EXPORT_LABELS = None
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import csv
 import io
 import os
 import time
 from pathlib import Path
-from bs4 import BeautifulSoup
-from bs4.element import NavigableString, Tag
-from markdown import markdown as md_to_html
+# BeautifulSoup and markdown are only needed for document processing, which is done in celery_worker
+try:
+    from bs4 import BeautifulSoup
+    from bs4.element import NavigableString, Tag
+    from markdown import markdown as md_to_html
+except (ImportError, ModuleNotFoundError):
+    BeautifulSoup = None
+    NavigableString = None
+    Tag = None
+    md_to_html = None
 try:
     import fitz  # PyMuPDF
 except ImportError:
@@ -286,6 +315,8 @@ def detect_encoding(file_path):
     """Detects the file encoding to avoid UnicodeDecodeError."""
     with open(file_path, "rb") as f:
         raw_data = f.read(4096)
+        if chardet is None:
+            return "utf-8"  # Default encoding if chardet not available
         result = chardet.detect(raw_data)
         return result["encoding"] or "utf-8"
 

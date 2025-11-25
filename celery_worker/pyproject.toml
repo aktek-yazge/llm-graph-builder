@@ -1,0 +1,93 @@
+[project]
+name = "celery-worker"
+version = "0.1.0"
+description = "Celery Worker for LLM Graph Builder"
+readme = "README.md"
+requires-python = ">=3.13.5"
+dependencies = [
+    # Core
+    "celery==5.4.0",
+    "flower==2.0.1",
+    "python-dotenv==1.1.0",
+    "sqlalchemy==2.0.41",
+    "psycopg2-binary==2.9.10",
+    "pydantic==2.11.7",
+    "pydantic-settings==2.10.1",
+    
+    # AI & ML
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "transformers>=4.56.0,<4.57.0",
+    "sentence-transformers==5.1.1",
+    "scikit-learn==1.7.2",
+    "scikit-image==0.25.2",
+    "timm==1.0.19",
+    "opencv-python==4.11.0.86",
+    "pillow==11.3.0",
+    
+    # LangChain Ecosystem
+    "langchain==0.3.27",
+    "langchain-core>=0.3.78",
+    "langchain-community==0.3.30",
+    "langchain-openai==0.3.35",
+    "langchain-anthropic==0.3.17",
+    "langchain-google-vertexai==2.1.2",
+    "langchain-groq==0.3.8",
+    "langchain-huggingface==0.3.1",
+    "langchain-neo4j==0.4.0",
+    "langchain-text-splitters==0.3.11",
+    "langchain-docling==1.1.0",
+    "langchain-experimental==0.3.4",
+    
+    # LLM Clients
+    "openai==2.1.0",
+    "anthropic==0.69.0",
+    "groq==0.30.0",
+    "google-genai==1.36.0",
+    "google-cloud-aiplatform==1.113.0",
+    
+    # Graph DB
+    "neo4j==5.28.1",
+    "neo4j-graphrag==1.8.0",
+    "graphdatascience==1.14",
+    "networkx==3.5",
+    
+    # Document Processing
+    "youtube-transcript-api",
+    "unstructured==0.17.2",
+    "unstructured-client==0.36.0",
+    "unstructured-inference==1.0.5",
+    "unstructured-pytesseract==0.3.15",
+    "docling==2.43.0",
+    "docling-core==2.44.0",
+    "docling-parse==4.1.0",
+    "easyocr==1.7.2",
+    "pdf2image==1.17.0",
+    "pdfminer-six==20250506",
+    "pypdf==5.9.0",
+    "pymupdf==1.26.1",
+    "python-docx==1.2.0",
+    "python-pptx==1.0.2",
+    "openpyxl==3.1.5",
+    "xlrd==2.0.2",
+    "xlsxwriter==3.2.5",
+    
+    # Utilities
+    "requests==2.32.5",
+    "httpx==0.28.1",
+    "aiohttp==3.12.15",
+    "aiofiles==24.1.0",
+    "tenacity==9.1.2",
+    "tqdm==4.67.1",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "pyyaml==6.0.3",
+    "beautifulsoup4==4.13.4",
+    "markdown==3.7",
+    "boto3==1.38.36",
+    "azure-identity==1.25.0",
+    "azure-core==1.35.1",
+    
+    # MCP (If needed in worker)
+    "mcp-neo4j-cypher @ git+https://github.com/aktek-yazge/llm-graph-builder.git@d2ce091dc735413ee0fcfd1fc58f01d6e77c1b21#subdirectory=backend/mcp-servers/mcp-neo4j-cypher",
+]

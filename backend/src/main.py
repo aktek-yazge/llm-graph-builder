@@ -61,11 +61,19 @@ from src.utils.log_helpers import (
 )
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
-import markdown_to_json
+# markdown_to_json is only needed for document processing, which is done in celery_worker
+try:
+    import markdown_to_json
+except (ImportError, ModuleNotFoundError):
+    markdown_to_json = None  # Document processing is in celery_worker
 from src.models.file_queue_models import get_file_queue_db, UploadedFile, FileStatus
-from src.tasks import process_file_pipeline
+# from src.tasks import process_file_pipeline  # Moved to celery_worker
 
-import pandas as pd
+# pandas is only needed for data processing, which is done in celery_worker
+try:
+    import pandas as pd
+except (ImportError, ModuleNotFoundError):
+    pd = None  # Data processing is in celery_worker
 import re
 from io import StringIO
 import time
@@ -1695,13 +1703,11 @@ def get_chunkId_chunkDoc_list(
                         
                         if pages:
                             # Chunk'ları oluştur
-                            from src.create_chunks import CreateChunksofDocument
-                            create_chunks_obj = CreateChunksofDocument(pages, graph)
-                            
-                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                                chunk_size=int(token_chunk_size), 
-                                chunk_overlap=int(chunk_overlap)
-                            )
+                            # CreateChunksofDocument is now in celery_worker
+                            # For backward compatibility, use simple page-based chunks
+                            logging.warning("CreateChunksofDocument is deprecated in backend - use celery_worker for chunking")
+                            # Use pages directly as chunks
+                            chunks = [{"page_content": page.get("page_content", ""), "metadata": page.get("metadata", {})} for page in pages]
                             
                             if chunks:
                                 # Chunk node'ları veritabanına kaydet

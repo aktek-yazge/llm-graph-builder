@@ -1,6 +1,12 @@
 import hashlib
 import logging
-from src.document_sources.youtube import create_youtube_url
+# YouTube functions moved to celery_worker - import optionally
+try:
+    from src.document_sources.youtube import create_youtube_url
+except (ImportError, ModuleNotFoundError):
+    # Stub function for backend (YouTube processing is in celery_worker)
+    def create_youtube_url(*args, **kwargs):
+        raise NotImplementedError("YouTube functions are only available in celery_worker")
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_vertexai import VertexAIEmbeddings
 from langchain_openai import OpenAIEmbeddings

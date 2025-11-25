@@ -30,7 +30,11 @@ from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
-from sklearn.metrics.pairwise import cosine_similarity
+# sklearn is only needed for similarity calculations, which is done in celery_worker
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+except (ImportError, ModuleNotFoundError):
+    cosine_similarity = None  # Similarity calculations are in celery_worker
 import numpy as np
 
 # Load environment variables

@@ -22,7 +22,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from src.main import *
+# Import only necessary functions from src.main (not * to avoid loading processing dependencies)
+from src.main import (
+    create_source_node_graph_url_s3,
+    create_source_node_graph_url_gcs,
+    create_source_node_graph_url_youtube,
+    create_source_node_graph_url_wikipedia,
+    create_source_node_graph_web_url,
+    get_source_list_from_graph,
+    update_graph,
+    connection_check_and_get_vector_dimensions,
+    get_labels_and_relationtypes,
+    manually_cancelled_job,
+    populate_graph_schema_from_text,
+    set_status_retry,
+)
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
@@ -64,6 +78,8 @@ import re
 from urllib.parse import unquote
 from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
+from src.celery_client import celery_app
+from src.models.file_queue_models import get_file_queue_db
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -80,8 +96,14 @@ from src.device_utils import (
 from datetime import datetime, timezone
 import time
 import gc
-from Secweb.XContentTypeOptions import XContentTypeOptions
-from Secweb.XFrameOptions import XFrame
+# Secweb is optional - only needed for security headers
+try:
+    from Secweb.XContentTypeOptions import XContentTypeOptions
+    from Secweb.XFrameOptions import XFrame
+except (ImportError, ModuleNotFoundError):
+    # Security headers are optional
+    XContentTypeOptions = None
+    XFrame = None
 from fastapi.middleware.gzip import GZipMiddleware
 from src.ragas_eval import *
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -165,8 +187,17 @@ try:
 except ImportError:
     DOCLING_AVAILABLE = False
 
-from docling_core.types.doc import ImageRefMode, DocItemLabel
-from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+# docling_core is only needed for document processing, which is done in celery_worker
+try:
+    from docling_core.types.doc import ImageRefMode, DocItemLabel
+except (ImportError, ModuleNotFoundError):
+    ImageRefMode = None
+    DocItemLabel = None  # Document processing is in celery_worker
+# DEFAULT_EXPORT_LABELS is only needed for document processing, which is done in celery_worker
+try:
+    from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
+except (ImportError, ModuleNotFoundError):
+    DEFAULT_EXPORT_LABELS = None  # Document processing is in celery_worker
 
 load_dotenv(override=False)  # Don't override environment variables set by Docker Compose
 
@@ -175,8 +206,16 @@ from typing import Dict, List
 import requests
 import shutil
 import subprocess
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_path
+# PyPDF2 is only needed for PDF processing, which is done in celery_worker
+try:
+    from PyPDF2 import PdfReader
+except (ImportError, ModuleNotFoundError):
+    PdfReader = None  # PDF processing is in celery_worker
+# pdf2image is only needed for PDF processing, which is done in celery_worker
+try:
+    from pdf2image import convert_from_path
+except (ImportError, ModuleNotFoundError):
+    convert_from_path = None  # PDF processing is in celery_worker
 
 logger = CustomLogger()
 
@@ -672,10 +711,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown - here you can add cleanup code if needed
     try:
-        from src.background_processor import stop_processing_loop
-
-        stop_processing_loop()
-        logging.info("⏹️ V2 Background processor stopped on server shutdown")
+        # Celery worker runs independently - no need to stop
+        logging.info("⏹️ Server shutdown - celery worker continues running independently")
     except asyncio.CancelledError:
         # Cancellation durumunda sessizce geç (normal shutdown)
         logging.info(
@@ -695,8 +732,11 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 app.add_middleware(HTTPLoggingMiddleware)
 
 app.add_middleware(UTF8JSONResponse)
-app.add_middleware(XContentTypeOptions)
-app.add_middleware(XFrame, Option={"X-Frame-Options": "DENY"})
+# Security headers are optional
+if XContentTypeOptions is not None:
+    app.add_middleware(XContentTypeOptions)
+if XFrame is not None:
+    app.add_middleware(XFrame, Option={"X-Frame-Options": "DENY"})
 app.add_middleware(
     CustomGZipMiddleware,
     minimum_size=1000,
@@ -1705,6 +1745,13 @@ async def convert_to_markdown(file: UploadFile = File(...)):
             tmp_file_path = tmp_file.name
 
         try:
+            # docling is only available in celery_worker
+            if DEFAULT_EXPORT_LABELS is None or DocItemLabel is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail="Docling processing is only available in celery_worker. Use V2 endpoints for document processing."
+                )
+            
             labels = [
                 label
                 for label in DEFAULT_EXPORT_LABELS
@@ -3102,6 +3149,31 @@ async def upload_large_file_into_chunks(
             logging.info(
                 f"🎉 Final chunk processed for {originalname} - Upload complete!"
             )
+            
+            # Create record in Queue DB and trigger Celery Task
+            try:
+                queue_db = get_file_queue_db()
+                file_record = queue_db.add_file(
+                    filename=result["file_name"],
+                    original_name=originalname,
+                    file_path=os.path.join(MERGED_DIR, result["file_name"]),
+                    file_size=result["file_size"],
+                    neo4j_uri=uri,
+                    neo4j_database=database,
+                    model=model,
+                    generate_embedding=generateEmbedding,
+                    auto_process=True
+                )
+                logging.info(f"✅ File added to Queue DB: ID={file_record.id}")
+                
+                # Trigger Celery Task
+                task_result = celery_app.send_task("src.tasks.process_file_pipeline", args=[file_record.id])
+                logging.info(f"🚀 Celery task triggered: {task_result.id}")
+                
+            except Exception as queue_error:
+                logging.error(f"❌ Failed to queue file for processing: {queue_error}")
+                # Don't fail the upload response, but log the error
+
             json_obj = {
                 "api_name": "upload",
                 "db_url": uri,
@@ -4655,28 +4727,13 @@ async def upload_file_to_queue(
                 f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
             )
 
-        # Background processor'ı otomatik başlat (eğer çalışmıyorsa)
+        # Trigger celery task for image extraction and processing
         try:
-            from src.background_processor import (
-                get_background_processor,
-                start_processing_loop,
-            )
-
-            processor = get_background_processor()
-            if not processor.is_processing:
-                # Background processor çalışmıyor, başlat
-                # background_task global değişkeni BACKGROUND PROCESSING ENDPOINTS bölümünde tanımlı
-                # Burada doğrudan asyncio.create_task kullanarak başlatıyoruz
-                asyncio.create_task(start_processing_loop())
-                logging.info(
-                    "🚀 Background processor otomatik olarak başlatıldı (upload sonrası)"
-                )
-            else:
-                logging.info(
-                    "ℹ️ Background processor zaten çalışıyor, yeniden başlatmaya gerek yok"
-                )
-        except Exception as bg_error:
-            logging.warning(f"⚠️ Background processor başlatılamadı: {str(bg_error)}")
+            celery_app.send_task("src.tasks.process_file_pipeline", args=[uploaded_file.id])
+            logging.info(f"✅ Celery task triggered for file ID: {uploaded_file.id}")
+        except Exception as celery_error:
+            logging.warning(f"⚠️ Failed to trigger celery task: {celery_error}")
+            # Continue anyway - celery worker will pick it up from queue
 
         return create_api_response(
             "Success",
@@ -4812,11 +4869,7 @@ async def start_chunking(file_id: str):
                     data={"processed_count": 0},
                 )
 
-            # Process files in batches - Image extraction'daki mantık gibi
-            # Background processor'daki batch mantığını kullan
-            from src.background_processor import get_background_processor
-
-            processor = get_background_processor()
+            # Process files in batches using celery tasks
             batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
             processed_count = 0
 
@@ -4880,9 +4933,9 @@ async def start_chunking(file_id: str):
                     f"📦 Chunking batch seçildi: {len(batch_files)} dosya işlenmeye başlanıyor (ID'ler: {batch_file_ids})"
                 )
 
-                # Background processor'daki batch processing fonksiyonunu kullan
-                # Bu fonksiyon zaten batch'ler halinde işlem yapıyor
-                await processor.process_v2_chunking_batch(batch_files)
+                # Queue celery tasks for chunking
+                for file_record in batch_files:
+                    celery_app.send_task("src.tasks.chunk_file_task", args=[file_record.id])
                 processed_count += len(batch_files)
 
                 # Wait before processing next batch (eğer daha fazla dosya varsa)
@@ -5011,11 +5064,9 @@ async def start_chunking(file_id: str):
                         db_session.commit()
                         db_session.close()
 
-                        # Image extraction için background processor'ı tetikle
-                        from src.background_processor import get_background_processor
-
-                        processor = get_background_processor()
-                        # Image extraction işlemini başlat (background'da)
+                        # Image extraction için celery task'i tetikle
+                        celery_app.send_task("src.tasks.extract_images_task", args=[file_id_int])
+                        # Image extraction işlemi celery worker'da başlatıldı
                         # File record'ı database'den yeniden al (session kapandı)
                         db_session_refresh = db.get_db_session()
                         try:
@@ -5102,10 +5153,8 @@ async def start_chunking(file_id: str):
                     },
                 )
 
-        # Chunking işlemini background'da çalıştır
-        asyncio.create_task(
-            process_chunking_v2(file_id_int, file_record.original_name, file_path)
-        )
+        # Chunking işlemini celery task'e yönlendir
+        celery_app.send_task("src.tasks.chunk_file_task", args=[file_id_int])
 
         db_session.close()
         return create_api_response(
@@ -5247,21 +5296,8 @@ async def start_endorsement_graph_creation(
                     )
                     db_session.commit()
 
-                    # Start graph creation in background
-                    asyncio.create_task(
-                        process_graph_creation_v2(
-                            file_id=file_record.id,
-                            original_name=file_record.original_name,
-                            markdown_path=file_record.markdown_path,
-                            file_path=file_record.file_path,
-                            model=model,
-                            uri=uri,
-                            userName=userName,
-                            password=password,
-                            database=database,
-                            generate_embedding=generate_embedding,
-                        )
-                    )
+                    # Start graph creation via celery task
+                    celery_app.send_task("src.tasks.create_graph_task", args=[file_record.id])
                     processed_count += 1
                     logging.info(
                         f"✅ Endorsement graph creation started for: {file_record.original_name} (ID: {file_record.id})"
@@ -5338,21 +5374,8 @@ async def start_endorsement_graph_creation(
             f"🎨 Starting endorsement graph creation for file {file_id_int}: {file_record.original_name}, Model: {model}"
         )
 
-        # Graph creation işlemini background'da çalıştır
-        asyncio.create_task(
-            process_graph_creation_v2(
-                file_id=file_id_int,
-                original_name=file_record.original_name,
-                markdown_path=file_record.markdown_path,
-                file_path=file_record.file_path,
-                model=model,
-                uri=uri,
-                userName=userName,
-                password=password,
-                database=database,
-                generate_embedding=generate_embedding,
-            )
-        )
+        # Graph creation işlemini celery task'e yönlendir
+        celery_app.send_task("src.tasks.create_graph_task", args=[file_id_int])
 
         db_session.close()
         return create_api_response(
@@ -5514,18 +5537,9 @@ async def start_graph_creation(
                 )
                 db_session.commit()
 
-                # Background processor'daki batch processing fonksiyonunu kullan
-                # (Image extraction ve chunking'deki mantık gibi)
-                from src.background_processor import get_background_processor
-
-                processor = get_background_processor()
-
-                # Batch'teki dosyaları refresh et (güncellenmiş bilgileri almak için)
+                # Queue celery tasks for graph creation
                 for file_record in batch_files:
-                    db_session.refresh(file_record)
-
-                # Background processor'daki batch processing fonksiyonunu kullan
-                await processor.process_v2_graph_creation_batch(batch_files)
+                    celery_app.send_task("src.tasks.create_graph_task", args=[file_record.id])
                 processed_count += len(batch_files)
 
                 # Wait before starting next batch (eğer daha fazla dosya varsa)
@@ -5613,21 +5627,8 @@ async def start_graph_creation(
             f"✨ Started graph creation for file {file_id_int}: {file_record.original_name}, Model: {model}"
         )
 
-        # Graph creation işlemini background'da çalıştır
-        asyncio.create_task(
-            process_graph_creation_v2(
-                file_id=file_id_int,
-                original_name=file_record.original_name,
-                markdown_path=file_record.markdown_path,
-                file_path=file_record.file_path,
-                model=model,
-                uri=uri,
-                userName=userName,
-                password=password,
-                database=database,
-                generate_embedding=generate_embedding,
-            )
-        )
+        # Graph creation işlemini celery task'e yönlendir
+        celery_app.send_task("src.tasks.create_graph_task", args=[file_id_int])
 
         db_session.close()
         return create_api_response(
@@ -5692,17 +5693,8 @@ async def create_embeddings_for_file(file_id: int):
             f"🔄 Started embedding creation for file {file_id}: {file_record.original_name}"
         )
 
-        # Embedding işlemini background'da çalıştır
-        asyncio.create_task(
-            process_embedding_creation(
-                file_id=file_id,
-                original_name=file_record.original_name,
-                uri=uri,
-                userName=userName,
-                password=password,
-                database=database,
-            )
-        )
+        # Embedding işlemini Celery task'e yönlendir
+        celery_app.send_task("src.tasks.create_embeddings_task", args=[file_id])
 
         return create_api_response(
             "Success",
@@ -6363,7 +6355,7 @@ async def delete_file_background_task(
                             file_path.unlink()
                             logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
 
-                        # Delete from SQLite database
+                        # Delete from database (PostgreSQL or SQLite)
                         success = db.delete_file(file_id_int)
                         if success:
                             logging.info(
@@ -6439,13 +6431,12 @@ async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
             
             db_session.close()
             
-            # Start background deletion task
+            # Start deletion via Celery task
             batch_size = int(os.environ.get("DELETE_BATCH_SIZE", "10"))
-            background_tasks.add_task(
-                delete_file_background_task,
-                file_ids=file_ids,
-                batch_size=batch_size,
-            )
+            # Process files in batches via Celery
+            for i in range(0, len(file_ids), batch_size):
+                batch = file_ids[i:i + batch_size]
+                celery_app.send_task("src.tasks.delete_files_task", args=[batch])
             
             logging.info(
                 f"🗑️ Started background deletion for {total_files} files (batch size: {batch_size})"
@@ -6478,12 +6469,8 @@ async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
 
         db_session.close()
         
-        # Start background deletion task for single file
-        background_tasks.add_task(
-            delete_file_background_task,
-            file_ids=[file_id_int],
-            batch_size=1,
-        )
+        # Start deletion via Celery task for single file
+        celery_app.send_task("src.tasks.delete_files_task", args=[[file_id_int]])
         
         logging.info(f"🗑️ Started background deletion for file ID: {file_id_int}")
         
@@ -6500,35 +6487,27 @@ async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
             "Failed", message="Failed to delete file", error=error_message
         )
 
-    except Exception as e:
-        error_message = str(e)
-        logging.error(f"❌ Failed to delete file {file_id}: {error_message}")
-        return create_api_response(
-            "Failed", message="Failed to delete file", error=error_message
-        )
-
 
 # ==========================================
 # BACKGROUND PROCESSING ENDPOINTS
 # ==========================================
 
-from src.background_processor import (
-    get_background_processor,
-    start_processing_loop,
-    process_file_immediately,
-)
+# Background processor removed - using celery tasks instead
+# from src.background_processor import (
+#     get_background_processor,
+#     start_processing_loop,
+#     process_file_immediately,
+# )
 
-# Global background task
-background_task = None
+# Celery worker runs independently - no background task needed
 
 
 @app.post("/api/v2/processing/start")
 async def start_background_processing():
-    """Start background file processing and reset stuck processing files"""
-    global background_task
-
+    """Reset stuck processing files (celery worker runs independently)"""
     try:
         from src.models.file_queue_models import get_file_queue_db, UploadedFile
+        from sqlalchemy import or_, and_
 
         # Önce yarıda kalan işlemleri resetle
         db = get_file_queue_db()
@@ -6536,16 +6515,7 @@ async def start_background_processing():
         reset_count = 0
 
         try:
-            from sqlalchemy import or_, and_
-
             # Reset kriterleri: Sadece gerçekten takılmış kayıtları resetle
-            # İşlem sırası: 1) Upload/Image Extraction → 2) Chunking → 3) Embedding/Graph (bağımsız)
-            # - status = 'uploaded' VEYA status = 'processing' olanlar VE
-            # - (
-            #     (chunking_status = 'processing'/'chunking'/'failed') VEYA
-            #     (chunking_status = 'chunked' VE embedding_status = 'processing'/'failed') VEYA
-            #     (chunking_status = 'chunked' VE graph_status = 'processing'/'failed')
-            #   )
             files_to_reset = (
                 db_session.query(UploadedFile)
                 .filter(
@@ -6556,13 +6526,11 @@ async def start_background_processing():
                 )
                 .filter(
                     or_(
-                        # Chunking takılmış (processing, chunking, veya failed) -> resetle
                         or_(
                             UploadedFile.chunking_status == "processing",
                             UploadedFile.chunking_status == "chunking",
                             UploadedFile.chunking_status == "failed",
                         ),
-                        # Chunking başarılı ama embedding takılmış -> resetle (embedding bağımsız)
                         and_(
                             UploadedFile.chunking_status == "chunked",
                             or_(
@@ -6570,7 +6538,6 @@ async def start_background_processing():
                                 UploadedFile.embedding_status == "failed",
                             ),
                         ),
-                        # Chunking başarılı ama graph takılmış -> resetle (graph bağımsız)
                         and_(
                             UploadedFile.chunking_status == "chunked",
                             or_(
@@ -6584,34 +6551,23 @@ async def start_background_processing():
             )
 
             for file in files_to_reset:
-                # Sadece takılan adımı resetle, önceki adımları koru
                 original_chunking = file.chunking_status
                 original_graph = file.graph_status
                 original_embedding = file.embedding_status
                 
-                # Chunking takılmışsa sadece onu resetle
                 if original_chunking in ["processing", "chunking", "failed"]:
                     file.chunking_status = "ready"
-                    file.status = "uploaded"  # Status'u da güncelle
-                    logging.debug(f"🔄 File {file.id}: Reset chunking_status from {original_chunking} to ready")
-                
-                # Chunking başarılı ama embedding takılmışsa sadece embedding'i resetle
+                    file.status = "uploaded"
                 elif original_chunking == "chunked" and original_embedding in ["processing", "failed"]:
                     file.embedding_status = "pending"
-                    logging.debug(f"🔄 File {file.id}: Reset embedding_status from {original_embedding} to pending")
-                
-                # Chunking başarılı ama graph takılmışsa sadece graph'ı resetle
                 elif original_chunking == "chunked" and original_graph in ["processing", "failed"]:
                     file.graph_status = "pending"
-                    logging.debug(f"🔄 File {file.id}: Reset graph_status from {original_graph} to pending")
                 
                 reset_count += 1
 
             if reset_count > 0:
                 db_session.commit()
-                logging.info(
-                    f"🔄 {reset_count} adet yarıda kalan işlem resetlendi (status=uploaded/processing ve graph/embedding/chunking status=processing/failed)"
-                )
+                logging.info(f"🔄 {reset_count} adet yarıda kalan işlem resetlendi")
             else:
                 logging.info("ℹ️ Resetlenecek yarıda kalan işlem bulunamadı")
 
@@ -6621,12 +6577,9 @@ async def start_background_processing():
         finally:
             db_session.close()
 
-        # Background processor otomatik başlatılmıyor - kullanıcı manuel olarak yönetecek
-        logging.info("🔄 Reset işlemi tamamlandı. Background processor otomatik başlatılmadı.")
-
         return create_api_response(
             "Success",
-            message="Processing files reset successfully. Background processor not started automatically.",
+            message="Processing files reset successfully. Celery worker will process them automatically.",
             data={
                 "status": "reset_completed",
                 "reset_count": reset_count,
@@ -6635,57 +6588,23 @@ async def start_background_processing():
 
     except Exception as e:
         error_message = str(e)
-        logging.error(f"❌ Failed to start background processing: {error_message}")
+        logging.error(f"❌ Failed to reset processing: {error_message}")
         return create_api_response(
             "Failed",
-            message="Failed to start background processing",
+            message="Failed to reset processing",
             error=error_message,
         )
 
 
 @app.post("/api/v2/processing/stop")
 async def stop_background_processing():
-    """Stop background file processing"""
-    global background_task
-
-    try:
-        processor = get_background_processor()
-
-        if not processor.is_processing:
-            return create_api_response(
-                "Success",
-                message="Background processing not running",
-                data={"status": "not_running"},
-            )
-
-        # Stop processor
-        processor.stop_background_processing()
-
-        # Cancel background task if exists
-        if background_task and not background_task.done():
-            background_task.cancel()
-            try:
-                await background_task
-            except asyncio.CancelledError:
-                pass
-            background_task = None
-
-        logging.info("⏹️ Background processing stopped via API")
-
-        return create_api_response(
-            "Success",
-            message="Background processing stopped successfully",
-            data={"status": "stopped"},
-        )
-
-    except Exception as e:
-        error_message = str(e)
-        logging.error(f"❌ Failed to stop background processing: {error_message}")
-        return create_api_response(
-            "Failed",
-            message="Failed to stop background processing",
-            error=error_message,
-        )
+    """Stop background file processing (deprecated - celery worker runs independently)"""
+    # Celery worker runs independently - this endpoint is kept for backward compatibility
+    return create_api_response(
+        "Success",
+        message="Celery worker runs independently and cannot be stopped from API",
+        data={"status": "celery_worker_independent"},
+    )
 
 
 @app.post("/api/v2/files/{file_id}/cancel")
@@ -6749,21 +6668,18 @@ async def cancel_file_processing(file_id: int):
 
 @app.get("/api/v2/processing/status")
 async def get_processing_status():
-    """Get background processing status"""
-    try:
-        processor = get_background_processor()
-        status = processor.get_processing_status()
-
-        return create_api_response("Success", data={"processing_status": status})
-
-    except Exception as e:
-        error_message = str(e)
-        logging.error(f"❌ Failed to get processing status: {error_message}")
-        return create_api_response(
-            "Failed", message="Failed to get processing status", error=error_message
-        )
+    """Get processing status (celery worker runs independently)"""
+    # Celery worker status can be checked via flower or celery inspect
+    return create_api_response(
+        "Success",
+        message="Celery worker runs independently - check flower dashboard for status",
+        data={"status": "celery_worker_independent", "flower_url": "http://localhost:5555"},
+    )
 
 
+# process_gemini_ocr, process_chunking_v2, and process_graph_creation_v2 
+# are now in celery_worker/src/processing_utils.py
+# These functions are removed from backend to avoid celery_worker dependencies
 def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     """
     Gemini 2.0 Flash ile image'ları markdown'a çevirme ve belge tipini tespit etme (sync function for executor)
@@ -7029,1408 +6945,1402 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
     return result
 
 
-async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
-    """
-    V2 Chunking Process: Uses pre-extracted images to create markdown with Gemini OCR + Creates Chunk Nodes
-    Image extraction and S3 upload are already done in upload endpoint
-    """
-    import json
+# process_chunking_v2 is now in celery_worker/src/processing_utils.py
+# This function is removed from backend to avoid celery_worker dependencies
+# V2 endpoints now use celery task: chunk_file_task
+# async def process_chunking_v2(file_id: int, original_name: str, merged_file_path: str):
+#     """
+#     V2 Chunking Process: Uses pre-extracted images to create markdown with Gemini OCR + Creates Chunk Nodes
+#     Image extraction and S3 upload are already done in upload endpoint
+#     """
+#     import json
 
-    db = None
-    db_session = None
-    loop = asyncio.get_event_loop()
-    executor = None
+    #db = None
+    #db_session = None
+    #loop = asyncio.get_event_loop()
+    #executor = None
 
-    try:
+    #try:
         # Thread pool executor'ı oluştur (Gemini OCR için)
-        from concurrent.futures import ThreadPoolExecutor
+        #from concurrent.futures import ThreadPoolExecutor
 
-        executor = ThreadPoolExecutor(max_workers=1)
+        #executor = ThreadPoolExecutor(max_workers=1)
 
-        db = get_file_queue_db()
-        db_session = db.get_db_session()
+        #db = get_file_queue_db()
+        #db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
-        if not file_record:
-            logging.error(f"❌ File record not found for ID: {file_id}")
-            return
+        #file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        #if not file_record:
+            #logging.error(f"❌ File record not found for ID: {file_id}")
+            #return
 
-        logging.info(
-            f"📖 Starting V2 chunking (Gemini OCR + Chunking) for: {original_name}"
-        )
+        #logging.info(
+            #f"📖 Starting V2 chunking (Gemini OCR + Chunking) for: {original_name}"
+        #)
 
         # Normalize filename
-        from src.utf8_utils import normalize_file_name
+        #from src.utf8_utils import normalize_file_name
 
-        normalized_filename = normalize_file_name(original_name)
+        #normalized_filename = normalize_file_name(original_name)
 
         # Output klasör yapısını oluştur (local dosya yolları için)
-        from src.document_sources.s3_upload_utils import (
-            create_document_output_structure,
-        )
+        #from src.document_sources.s3_upload_utils import (
+            #create_document_output_structure,
+        #)
 
-        document_dir, pdf_dir, images_dir = create_document_output_structure(
-            normalized_filename, "output"
-        )
+        #document_dir, pdf_dir, images_dir = create_document_output_structure(
+            #normalized_filename, "output"
+        #)
 
         # Database'den page images ve doc link bilgisini al (upload sırasında kaydedildi)
-        page_images = []
-        doc_link = (
-            file_record.doc_link
-            if hasattr(file_record, "doc_link") and file_record.doc_link
-            else None
-        )
+        #page_images = []
+        #doc_link = (
+            #file_record.doc_link
+            #if hasattr(file_record, "doc_link") and file_record.doc_link
+            #else None
+        #)
 
-        if file_record.page_images:
-            try:
-                page_images = json.loads(file_record.page_images)
-                logging.info(
-                    f"📸 Using {len(page_images)} page images from upload step"
-                )
-            except:
-                logging.warning("⚠️ Failed to parse page_images from database")
+        #if file_record.page_images:
+            #try:
+                #page_images = json.loads(file_record.page_images)
+                #logging.info(
+                    #f"📸 Using {len(page_images)} page images from upload step"
+                #)
+            #except:
+                #logging.warning("⚠️ Failed to parse page_images from database")
 
-        pages = []
+        #pages = []
 
         # V2 Chunking: Sadece pre-extracted images ile Gemini OCR
-        try:
+        #try:
             # ✨ Markdown dosyası zaten var mı kontrol et
-            markdown_filename = f"{normalized_filename}.md"
-            markdown_path = os.path.join(document_dir, markdown_filename)
+            #markdown_filename = f"{normalized_filename}.md"
+            #markdown_path = os.path.join(document_dir, markdown_filename)
 
             # ⚠️ Her chunking başlatıldığında markdown'ı yeniden oluştur
-            if os.path.exists(markdown_path):
-                logging.info(
-                    f"� Deleting existing markdown for re-extraction: {markdown_path}"
-                )
-                os.remove(markdown_path)
+            #if os.path.exists(markdown_path):
+                #logging.info(
+                    #f"� Deleting existing markdown for re-extraction: {markdown_path}"
+                #)
+                #os.remove(markdown_path)
 
             # ✅ SADECE PRE-EXTRACTED IMAGES İLE GEMİNİ OCR YAPACAK
-            logging.info(
-                f"📝 Creating markdown using pre-extracted images for: {normalized_filename}"
-            )
+            #logging.info(
+                #f"📝 Creating markdown using pre-extracted images for: {normalized_filename}"
+            #)
 
             # 1️⃣ Local images_dir'de PNG dosyaları kontrol et
-            local_images = []
-            if os.path.exists(images_dir):
-                local_images = [
-                    os.path.join(images_dir, f)
-                    for f in os.listdir(images_dir)
-                    if f.endswith(".png")
-                ]
-                local_images.sort()  # Sayfa sırasını koru
+            #local_images = []
+            #if os.path.exists(images_dir):
+                #local_images = [
+                    #os.path.join(images_dir, f)
+                    #for f in os.listdir(images_dir)
+                    #if f.endswith(".png")
+                #]
+                #local_images.sort()  # Sayfa sırasını koru
 
             # 2️⃣ Local'de yoksa, S3'ten download et
-            if not local_images and page_images:
-                logging.info(
-                    f"📥 Local images not found, attempting to download from S3 for: {normalized_filename}"
-                )
+            #if not local_images and page_images:
+                #logging.info(
+                    #f"📥 Local images not found, attempting to download from S3 for: {normalized_filename}"
+                #)
                 
-                s3_bucket = os.environ.get(
-                    "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
-                )
-                aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                #s3_bucket = os.environ.get(
+                    #"S3_BACKUP_BUCKET", "llm-graph-builder-backup"
+                #)
+                #aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                #aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
-                if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                    from src.document_sources.s3_upload_utils import (
-                        download_images_from_s3,
-                    )
-                    from pathlib import Path
+                #if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                    #from src.document_sources.s3_upload_utils import (
+                        #download_images_from_s3,
+                    #)
+                    #from pathlib import Path
 
-                    doc_name = Path(normalized_filename).stem
+                    #doc_name = Path(normalized_filename).stem
 
-                    def download_images():
-                        return download_images_from_s3(
-                            page_images,  # Database'deki image isimleri
-                            s3_bucket,
-                            doc_name,
-                            images_dir,
-                            aws_access_key_id,
-                            aws_secret_access_key,
-                        )
+                    #def download_images():
+                        #return download_images_from_s3(
+                            #page_images,  # Database'deki image isimleri
+                            #s3_bucket,
+                            #doc_name,
+                            #images_dir,
+                            #aws_access_key_id,
+                            #aws_secret_access_key,
+                        #)
 
-                    downloaded_images = await loop.run_in_executor(
-                        executor, download_images
-                    )
+                    #downloaded_images = await loop.run_in_executor(
+                        #executor, download_images
+                    #)
 
                     # Check if all images were downloaded successfully
                     # If some images failed to download (404), we need to extract locally
-                    downloaded_count = len(downloaded_images) if downloaded_images else 0
-                    expected_count = len(page_images)
+                    #downloaded_count = len(downloaded_images) if downloaded_images else 0
+                    #expected_count = len(page_images)
 
-                    if downloaded_count == expected_count and downloaded_count > 0:
+                    #if downloaded_count == expected_count and downloaded_count > 0:
                         # All images downloaded successfully
-                        local_images = sorted(downloaded_images)
-                        logging.info(
-                            f"✅ Downloaded {len(local_images)} images from S3 for: {normalized_filename}"
-                        )
-                    elif downloaded_count > 0:
+                        #local_images = sorted(downloaded_images)
+                        #logging.info(
+                            #f"✅ Downloaded {len(local_images)} images from S3 for: {normalized_filename}"
+                        #)
+                    #elif downloaded_count > 0:
                         # Some images downloaded successfully - use what we have
-                        local_images = sorted(downloaded_images)
-                        logging.warning(
-                            f"⚠️ Partially downloaded images from S3 for: {normalized_filename} "
-                            f"({downloaded_count}/{expected_count} downloaded), will use available images and extract missing ones from PDF"
-                        )
+                        #local_images = sorted(downloaded_images)
+                        #logging.warning(
+                            #f"⚠️ Partially downloaded images from S3 for: {normalized_filename} "
+                            #f"({downloaded_count}/{expected_count} downloaded), will use available images and extract missing ones from PDF"
+                        #)
                         # Will try to extract missing images from PDF below
-                    else:
+                    #else:
                         # No images downloaded - extract locally
-                        logging.warning(
-                            f"⚠️ Failed to download images from S3 for: {normalized_filename} "
-                            f"({downloaded_count}/{expected_count} downloaded), will extract locally from PDF"
-                        )
+                        #logging.warning(
+                            #f"⚠️ Failed to download images from S3 for: {normalized_filename} "
+                            #f"({downloaded_count}/{expected_count} downloaded), will extract locally from PDF"
+                        #)
                         # Fallback: will extract from PDF below
-                        local_images = []
-                else:
-                    logging.warning(
-                        f"⚠️ S3 credentials not configured, cannot download images"
-                    )
+                        #local_images = []
+                #else:
+                    #logging.warning(
+                        #f"⚠️ S3 credentials not configured, cannot download images"
+                    #)
 
             # 3️⃣ S3'te de yoksa veya download başarısız olduysa, PDF'den extract et
-            if not local_images:
-                logging.info(
-                    f"🖼️ No images found locally or in S3, extracting from PDF: {normalized_filename}"
-                )
+            #if not local_images:
+                #logging.info(
+                    #f"🖼️ No images found locally or in S3, extracting from PDF: {normalized_filename}"
+                #)
                 
                 # PDF dosyasını bul
-                pdf_path = os.path.join(pdf_dir, normalized_filename)
-                if not os.path.exists(pdf_path):
+                #pdf_path = os.path.join(pdf_dir, normalized_filename)
+                #if not os.path.exists(pdf_path):
                     # Alternatif olarak merged_file_path'i dene
-                    if os.path.exists(merged_file_path):
-                        pdf_path = merged_file_path
-                    else:
-                        error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
-                        logging.error(error_msg)
-                        raise Exception(error_msg)
+                    #if os.path.exists(merged_file_path):
+                        #pdf_path = merged_file_path
+                    #else:
+                        #error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
+                        #logging.error(error_msg)
+                        #raise Exception(error_msg)
 
-                from src.document_sources.local_file import (
-                    generate_page_images_with_pymupdf,
-                )
+                #from src.document_sources.local_file import (
+                    #generate_page_images_with_pymupdf,
+                #)
 
-                def extract_images():
-                    return generate_page_images_with_pymupdf(pdf_path, images_dir)
+                #def extract_images():
+                    #return generate_page_images_with_pymupdf(pdf_path, images_dir)
 
-                extracted_images = await loop.run_in_executor(
-                    executor, extract_images
-                )
+                #extracted_images = await loop.run_in_executor(
+                    #executor, extract_images
+                #)
 
-                if extracted_images:
-                    local_images = sorted(extracted_images)
-                    logging.info(
-                        f"✅ Extracted {len(local_images)} images from PDF for: {normalized_filename}"
-                    )
-                else:
+                #if extracted_images:
+                    #local_images = sorted(extracted_images)
+                    #logging.info(
+                        #f"✅ Extracted {len(local_images)} images from PDF for: {normalized_filename}"
+                    #)
+                #else:
                     # No images extracted - continue with chunking anyway (text-only processing)
-                    logging.warning(
-                        f"⚠️ No images extracted from PDF for: {normalized_filename}, will continue with text-only processing"
-                    )
+                    #logging.warning(
+                        #f"⚠️ No images extracted from PDF for: {normalized_filename}, will continue with text-only processing"
+                    #)
                     # Set local_images to empty list - chunking will continue without images
-                    local_images = []
+                    #local_images = []
 
             # Final kontrol - eğer hala image yoksa PDF'den extract etmeyi dene
-            if not local_images:
-                logging.warning(
-                    f"⚠️ No images available from S3 or local, attempting final PDF extraction for: {normalized_filename}"
-                )
+            #if not local_images:
+                #logging.warning(
+                    #f"⚠️ No images available from S3 or local, attempting final PDF extraction for: {normalized_filename}"
+                #)
                 # PDF dosyasını bul
-                pdf_path = os.path.join(pdf_dir, normalized_filename)
-                if not os.path.exists(pdf_path):
+                #pdf_path = os.path.join(pdf_dir, normalized_filename)
+                #if not os.path.exists(pdf_path):
                     # Alternatif olarak merged_file_path'i dene
-                    if os.path.exists(merged_file_path):
-                        pdf_path = merged_file_path
-                    else:
-                        error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
-                        logging.error(error_msg)
-                        raise Exception(error_msg)
+                    #if os.path.exists(merged_file_path):
+                        #pdf_path = merged_file_path
+                    #else:
+                        #error_msg = f"❌ PDF file not found: {pdf_path} or {merged_file_path}"
+                        #logging.error(error_msg)
+                        #raise Exception(error_msg)
 
-                from src.document_sources.local_file import (
-                    generate_page_images_with_pymupdf,
-                )
+                #from src.document_sources.local_file import (
+                    #generate_page_images_with_pymupdf,
+                #)
 
-                def extract_images_final():
-                    return generate_page_images_with_pymupdf(pdf_path, images_dir)
+                #def extract_images_final():
+                    #return generate_page_images_with_pymupdf(pdf_path, images_dir)
 
-                extracted_images_final = await loop.run_in_executor(
-                    executor, extract_images_final
-                )
+                #extracted_images_final = await loop.run_in_executor(
+                    #executor, extract_images_final
+                #)
 
-                if extracted_images_final:
-                    local_images = sorted(extracted_images_final)
-                    logging.info(
-                        f"✅ Final extraction: Extracted {len(local_images)} images from PDF for: {normalized_filename}"
-                    )
-                else:
+                #if extracted_images_final:
+                    #local_images = sorted(extracted_images_final)
+                    #logging.info(
+                        #f"✅ Final extraction: Extracted {len(local_images)} images from PDF for: {normalized_filename}"
+                    #)
+                #else:
                     # Son çare: PDF'den text extraction yap (image olmadan)
-                    logging.warning(
-                        f"⚠️ No images available for Gemini OCR: {normalized_filename}, will try text extraction from PDF"
-                    )
+                    #logging.warning(
+                        #f"⚠️ No images available for Gemini OCR: {normalized_filename}, will try text extraction from PDF"
+                    #)
                     # PDF'den direkt text extraction yapılabilir, ama şimdilik hata ver
-                    error_msg = f"❌ No images available for processing: {normalized_filename}. Please ensure PDF file exists and is valid."
-                    logging.error(error_msg)
-                    raise Exception(error_msg)
+                    #error_msg = f"❌ No images available for processing: {normalized_filename}. Please ensure PDF file exists and is valid."
+                    #logging.error(error_msg)
+                    #raise Exception(error_msg)
 
-            logging.info(
-                f"📸 Found {len(local_images)} images for Gemini OCR (local/S3/extracted)"
-            )
+            #logging.info(
+                #f"📸 Found {len(local_images)} images for Gemini OCR (local/S3/extracted)"
+            #)
 
             # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR (metadata + markdown)
-            from langchain_core.documents import Document
+            #from langchain_core.documents import Document
 
-            ocr_result = await loop.run_in_executor(
-                executor, lambda: process_gemini_ocr(local_images, "generated")
-            )
+            #ocr_result = await loop.run_in_executor(
+                #executor, lambda: process_gemini_ocr(local_images, "generated")
+            #)
 
             # OCR sonucunu kontrol et
-            if not ocr_result or not isinstance(ocr_result, dict):
-                error_msg = f"❌ Gemini OCR returned invalid result format"
-                logging.error(error_msg)
-                raise Exception(error_msg)
+            #if not ocr_result or not isinstance(ocr_result, dict):
+                #error_msg = f"❌ Gemini OCR returned invalid result format"
+                #logging.error(error_msg)
+                #raise Exception(error_msg)
 
-            markdown_text = ocr_result.get("markdown", "")
-            metadata = ocr_result.get("metadata", {})
-            doc_type = metadata.get("docType", "MAIN_POLICY")
+            #markdown_text = ocr_result.get("markdown", "")
+            #metadata = ocr_result.get("metadata", {})
+            #doc_type = metadata.get("docType", "MAIN_POLICY")
 
             # Gemini başarısız olduysa hata fırlat
-            if not markdown_text or not markdown_text.strip():
-                error_msg = f"❌ Gemini OCR failed to generate markdown from {len(local_images)} pre-extracted images"
-                logging.error(error_msg)
-                raise Exception(error_msg)
+            #if not markdown_text or not markdown_text.strip():
+                #error_msg = f"❌ Gemini OCR failed to generate markdown from {len(local_images)} pre-extracted images"
+                #logging.error(error_msg)
+                #raise Exception(error_msg)
 
-            pages = [Document(page_content=markdown_text)]
-            logging.info(
-                f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images, detected docType: {doc_type}"
-            )
+            #pages = [Document(page_content=markdown_text)]
+            #logging.info(
+                #f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images, detected docType: {doc_type}"
+            #)
 
             # Markdown dosyasını oluştur ve kaydet
-            markdown_content = ""
-            if pages:
-                for idx, page in enumerate(pages, start=1):
-                    page_text = (
-                        page.page_content
-                        if hasattr(page, "page_content")
-                        else str(page)
-                    )
+            #markdown_content = ""
+            #if pages:
+                #for idx, page in enumerate(pages, start=1):
+                    #page_text = (
+                        #page.page_content
+                        #if hasattr(page, "page_content")
+                        #else str(page)
+                    #)
                     # Son sayfa değilse PAGE BREAK ekle
-                    if idx < len(pages):
-                        markdown_content += f"{page_text}\n\n[PAGE BREAK]\n\n"
-                    else:
+                    #if idx < len(pages):
+                        #markdown_content += f"{page_text}\n\n[PAGE BREAK]\n\n"
+                    #else:
                         # Son sayfa - PAGE BREAK ekleme
-                        markdown_content += page_text
+                        #markdown_content += page_text
 
                 # Markdown dosyasını document klasörüne kaydet
-                markdown_filename = f"{normalized_filename}.md"
-                markdown_path = os.path.join(document_dir, markdown_filename)
+                #markdown_filename = f"{normalized_filename}.md"
+                #markdown_path = os.path.join(document_dir, markdown_filename)
 
-                with open(markdown_path, "w", encoding="utf-8") as md_file:
-                    md_file.write(markdown_content.strip())
+                #with open(markdown_path, "w", encoding="utf-8") as md_file:
+                    #md_file.write(markdown_content.strip())
 
-                logging.info(
-                    f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)"
-                )
+                #logging.info(
+                    #f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)"
+                #)
 
                 # Markdown path'i kaydet
-                file_record.markdown_path = markdown_path
+                #file_record.markdown_path = markdown_path
 
                 # ☁️ MARKDOWN DOSYASINI S3'E UPLOAD ET
-                try:
-                    s3_bucket = os.environ.get(
-                        "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
-                    )
-                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                #try:
+                    #s3_bucket = os.environ.get(
+                        #"S3_BACKUP_BUCKET", "llm-graph-builder-backup"
+                    #)
+                    #aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    #aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
-                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                        logging.info(
-                            f"☁️ Uploading markdown file to S3: {markdown_filename}"
-                        )
+                    #if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        #logging.info(
+                            #f"☁️ Uploading markdown file to S3: {markdown_filename}"
+                        #)
 
                         # S3 upload - markdown dosyası için ayrı executor (organized structure)
-                        with ThreadPoolExecutor(max_workers=1) as md_executor:
-                            from src.document_sources.s3_upload_utils import (
-                                upload_files_to_s3_with_structure,
-                            )
-                            from pathlib import Path
+                        #with ThreadPoolExecutor(max_workers=1) as md_executor:
+                            #from src.document_sources.s3_upload_utils import (
+                                #upload_files_to_s3_with_structure,
+                            #)
+                            #from pathlib import Path
 
-                            doc_name = Path(normalized_filename).stem
-                            md_s3_prefix = (
-                                f"documents/{doc_name}/md"  # documents/{doc_name}/md/
-                            )
+                            #doc_name = Path(normalized_filename).stem
+                            #md_s3_prefix = (
+                                #f"documents/{doc_name}/md"  # documents/{doc_name}/md/
+                            #)
 
-                            def upload_markdown_to_s3():
-                                urls, failed = upload_files_to_s3_with_structure(
-                                    [markdown_path],  # Sadece markdown dosyası
-                                    s3_bucket,
-                                    md_s3_prefix,
-                                    aws_access_key_id,
-                                    aws_secret_access_key,
-                                    delete_local_after_upload=False,  # Local dosyayı sakla
-                                )
-                                return urls, failed
+                            #def upload_markdown_to_s3():
+                                #urls, failed = upload_files_to_s3_with_structure(
+                                    #[markdown_path],  # Sadece markdown dosyası
+                                    #s3_bucket,
+                                    #md_s3_prefix,
+                                    #aws_access_key_id,
+                                    #aws_secret_access_key,
+                                    #delete_local_after_upload=False,  # Local dosyayı sakla
+                                #)
+                                #return urls, failed
 
-                            md_urls, md_failed = await loop.run_in_executor(
-                                md_executor, upload_markdown_to_s3
-                            )
+                            #md_urls, md_failed = await loop.run_in_executor(
+                                #md_executor, upload_markdown_to_s3
+                            #)
 
-                        if md_urls:
-                            logging.info(
-                                f"✅ Markdown uploaded to S3: {len(md_urls)} file"
-                            )
+                        #if md_urls:
+                            #logging.info(
+                                #f"✅ Markdown uploaded to S3: {len(md_urls)} file"
+                            #)
                             # Markdown S3 URL'ini database'e kaydet (opsiyonel)
-                            for url in md_urls:
-                                if url.endswith(f"/{markdown_filename}"):
-                                    file_record.markdown_s3_url = url
-                                    logging.info(f"📄 Markdown S3 URL: {url}")
-                                    break
-                        else:
-                            logging.warning(f"⚠️ Failed to upload markdown to S3")
-                    else:
-                        logging.info(
-                            f"ℹ️ S3 credentials not configured, markdown saved locally only"
-                        )
+                            #for url in md_urls:
+                                #if url.endswith(f"/{markdown_filename}"):
+                                    #file_record.markdown_s3_url = url
+                                    #logging.info(f"📄 Markdown S3 URL: {url}")
+                                    #break
+                        #else:
+                            #logging.warning(f"⚠️ Failed to upload markdown to S3")
+                    #else:
+                        #logging.info(
+                            #f"ℹ️ S3 credentials not configured, markdown saved locally only"
+                        #)
 
-                except Exception as s3_error:
-                    logging.warning(f"⚠️ S3 upload failed for markdown: {s3_error}")
+                #except Exception as s3_error:
+                    #logging.warning(f"⚠️ S3 upload failed for markdown: {s3_error}")
                     # Continue with processing even if S3 upload fails
 
                 # ✨ CHUNK NODE'LARI OLUŞTUR (tıpkı upload_file gibi)
-                try:
-                    logging.info(f"🔄 Creating chunk nodes for: {normalized_filename}")
+                #try:
+                    #logging.info(f"🔄 Creating chunk nodes for: {normalized_filename}")
 
                     # Neo4j bağlantısı kur
-                    uri = os.environ.get("NEO4J_URI")
-                    userName = os.environ.get("NEO4J_USERNAME")
-                    password = os.environ.get("NEO4J_PASSWORD")
-                    database = os.environ.get("NEO4J_DATABASE", "neo4j")
+                    #uri = os.environ.get("NEO4J_URI")
+                    #userName = os.environ.get("NEO4J_USERNAME")
+                    #password = os.environ.get("NEO4J_PASSWORD")
+                    #database = os.environ.get("NEO4J_DATABASE", "neo4j")
 
-                    if uri and userName and password:
-                        from src.shared.common_fn import (
-                            create_graph_database_connection,
-                        )
-                        from src.graphDB_dataAccess import graphDBdataAccess
-                        from src.entities.source_node import sourceNode
+                    #if uri and userName and password:
+                        #from src.shared.common_fn import (
+                            #create_graph_database_connection,
+                        #)
+                        #from src.graphDB_dataAccess import graphDBdataAccess
+                        #from src.entities.source_node import sourceNode
 
-                        graph = create_graph_database_connection(
-                            uri, userName, password, database
-                        )
-                        graphDb_data_Access = graphDBdataAccess(graph)
+                        #graph = create_graph_database_connection(
+                            #uri, userName, password, database
+                        #)
+                        #graphDb_data_Access = graphDBdataAccess(graph)
 
                         # 🧹 ÖNCE: Upload öncesi otomatik temizlik yap (duplicate prevention)
-                        logging.info(
-                            f"🧹 Starting pre-chunking cleanup check for: {normalized_filename}"
-                        )
-                        cleanup_result = (
-                            graphDb_data_Access.auto_clean_existing_file_data(
-                                normalized_filename
-                            )
-                        )
-                        if cleanup_result:
-                            logging.info(
-                                f"✅ Pre-chunking cleanup completed successfully"
-                            )
-                        else:
-                            logging.info(f"ℹ️ No cleanup needed or cleanup skipped")
+                        #logging.info(
+                            #f"🧹 Starting pre-chunking cleanup check for: {normalized_filename}"
+                        #)
+                        #cleanup_result = (
+                            #graphDb_data_Access.auto_clean_existing_file_data(
+                                #normalized_filename
+                            #)
+                        #)
+                        #if cleanup_result:
+                            #logging.info(
+                                #f"✅ Pre-chunking cleanup completed successfully"
+                            #)
+                        #else:
+                            #logging.info(f"ℹ️ No cleanup needed or cleanup skipped")
 
                         # 1️⃣ Source node objesi oluştur (henüz kaydetme - upload_file gibi)
-                        obj_source_node = sourceNode()
-                        obj_source_node.file_name = normalized_filename
-                        obj_source_node.file_type = normalized_filename.split(".")[
-                            -1
-                        ].lower()
-                        obj_source_node.file_size = (
-                            file_record.file_size if file_record.file_size else 0
-                        )
-                        obj_source_node.file_source = "local file"
-                        obj_source_node.model = "openai_gpt_4o_mini"
-                        obj_source_node.created_at = datetime.now()
-                        obj_source_node.chunkNodeCount = 0
-                        obj_source_node.chunkRelCount = 0
-                        obj_source_node.entityNodeCount = 0
-                        obj_source_node.entityEntityRelCount = 0
-                        obj_source_node.communityNodeCount = 0
-                        obj_source_node.communityRelCount = 0
-                        obj_source_node.total_chunks = 0
-                        obj_source_node.processed_chunk = 0
-                        obj_source_node.node_count = 0
-                        obj_source_node.relationship_count = 0
-                        obj_source_node.processing_time = 0
+                        #obj_source_node = sourceNode()
+                        #obj_source_node.file_name = normalized_filename
+                        #obj_source_node.file_type = normalized_filename.split(".")[
+                            #-1
+                        #].lower()
+                        #obj_source_node.file_size = (
+                            #file_record.file_size if file_record.file_size else 0
+                        #)
+                        #obj_source_node.file_source = "local file"
+                        #obj_source_node.model = "openai_gpt_4o_mini"
+                        #obj_source_node.created_at = datetime.now()
+                        #obj_source_node.chunkNodeCount = 0
+                        #obj_source_node.chunkRelCount = 0
+                        #obj_source_node.entityNodeCount = 0
+                        #obj_source_node.entityEntityRelCount = 0
+                        #obj_source_node.communityNodeCount = 0
+                        #obj_source_node.communityRelCount = 0
+                        #obj_source_node.total_chunks = 0
+                        #obj_source_node.processed_chunk = 0
+                        #obj_source_node.node_count = 0
+                        #obj_source_node.relationship_count = 0
+                        #obj_source_node.processing_time = 0
 
                         # Page images ve doc link'i ekle
-                        if doc_link:
-                            obj_source_node.doc_link = doc_link
-                        if page_images:
-                            obj_source_node.page_images = page_images
+                        #if doc_link:
+                            #obj_source_node.doc_link = doc_link
+                        #if page_images:
+                            #obj_source_node.page_images = page_images
 
                         # 2️⃣ Chunk'ları oluştur (Semantic Chunking)
-                        import re
-                        chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
-                        raw_chunks = chunk_pattern.findall(markdown_text)
+                        #import re
+                        #chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+                        #raw_chunks = chunk_pattern.findall(markdown_text)
                         
-                        chunks = []
-                        if not raw_chunks:
-                            # Fallback to token splitting if no <CHUNK> tags
-                            logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, falling back to token splitting")
-                            from src.create_chunks import CreateChunksofDocument
-                            create_chunks_obj = CreateChunksofDocument(pages, graph)
-                            
-                            token_chunk_size = int(os.environ.get("CHUNK_SIZE", "1000"))
-                            chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "200"))
-                            
-                            chunks = create_chunks_obj.split_file_into_chunks_recursive(
-                                chunk_size=token_chunk_size, chunk_overlap=chunk_overlap
-                            )
-                        else:
+                        #chunks = []
+                        #if not raw_chunks:
+                            # Fallback: If no <CHUNK> tags found, use simple page-based chunks
+                            # Note: Full chunking with CreateChunksofDocument is now handled by celery_worker
+                            #logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, using page-based chunks")
+                            # Use pages directly as chunks (each page is a chunk)
+                            #chunks = [{"page_content": page.get("page_content", ""), "metadata": page.get("metadata", {})} for page in pages]
+                        #else:
                             # Merge small chunks (< 150 chars) with page tracking
-                            merged_chunks = []
-                            current_chunk_text = ""
-                            current_chunk_page = 1  # Start from page 1
+                            #merged_chunks = []
+                            #current_chunk_text = ""
+                            #current_chunk_page = 1  # Start from page 1
                             
                             # Split markdown by [PAGE BREAK] to track pages
-                            page_sections = markdown_text.split('[PAGE BREAK]')
+                            #page_sections = markdown_text.split('[PAGE BREAK]')
                             
-                            for page_idx, page_section in enumerate(page_sections, start=1):
+                            #for page_idx, page_section in enumerate(page_sections, start=1):
                                 # Extract chunks from this page section
-                                page_raw_chunks = chunk_pattern.findall(page_section)
+                                #page_raw_chunks = chunk_pattern.findall(page_section)
                                 
-                                for chunk_text in page_raw_chunks:
-                                    chunk_text = chunk_text.strip()
-                                    if not chunk_text:
-                                        continue
+                                #for chunk_text in page_raw_chunks:
+                                    #chunk_text = chunk_text.strip()
+                                    #if not chunk_text:
+                                        #continue
                                         
-                                    if not current_chunk_text:
-                                        current_chunk_text = chunk_text
-                                        current_chunk_page = page_idx
-                                    else:
+                                    #if not current_chunk_text:
+                                        #current_chunk_text = chunk_text
+                                        #current_chunk_page = page_idx
+                                    #else:
                                         # Check if adding this chunk keeps it under limit or if current is too small
-                                        if len(current_chunk_text) < 150:
+                                        #if len(current_chunk_text) < 150:
                                             # Current is small.
                                             # Check if the INCOMING chunk is big (>150) AND we have a previous chunk
-                                            if len(chunk_text) > 150 and merged_chunks:
+                                            #if len(chunk_text) > 150 and merged_chunks:
                                                 # User Rule: Current is small, Next is Big -> Merge Current to Previous
-                                                merged_chunks[-1]['text'] += "\n" + current_chunk_text
+                                                #merged_chunks[-1]['text'] += "\n" + current_chunk_text
                                                 # Set incoming (big) as new current
-                                                current_chunk_text = chunk_text
-                                                current_chunk_page = page_idx
-                                            else:
+                                                #current_chunk_text = chunk_text
+                                                #current_chunk_page = page_idx
+                                            #else:
                                                 # Standard: Merge incoming into current
-                                                current_chunk_text += "\n" + chunk_text
-                                        else:
+                                                #current_chunk_text += "\n" + chunk_text
+                                        #else:
                                             # Current chunk is big enough, save it and start new
-                                            merged_chunks.append({
-                                                'text': current_chunk_text,
-                                                'page': current_chunk_page
-                                            })
-                                            current_chunk_text = chunk_text
-                                            current_chunk_page = page_idx
+                                            #merged_chunks.append({
+                                                #'text': current_chunk_text,
+                                                #'page': current_chunk_page
+                                            #})
+                                            #current_chunk_text = chunk_text
+                                            #current_chunk_page = page_idx
                             
                             # Add the last chunk
-                            if current_chunk_text:
-                                merged_chunks.append({
-                                    'text': current_chunk_text,
-                                    'page': current_chunk_page
-                                })
+                            #if current_chunk_text:
+                                #merged_chunks.append({
+                                    #'text': current_chunk_text,
+                                    #'page': current_chunk_page
+                                #})
                                 
-                            logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
+                            #logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
                             
                             # Create Document objects from merged chunks with page metadata
-                            from langchain_core.documents import Document
-                            chunks = []
-                            for idx, chunk_data in enumerate(merged_chunks, 1):
-                                page_num = chunk_data['page']
+                            #from langchain_core.documents import Document
+                            #chunks = []
+                            #for idx, chunk_data in enumerate(merged_chunks, 1):
+                                #page_num = chunk_data['page']
                                 # Generate page_link from page_images if available
-                                page_link = None
-                                if page_images and page_num <= len(page_images):
-                                    page_link = page_images[page_num - 1]  # 0-indexed
+                                #page_link = None
+                                #if page_images and page_num <= len(page_images):
+                                    #page_link = page_images[page_num - 1]  # 0-indexed
                                 
-                                chunks.append(
-                                    Document(
-                                        page_content=chunk_data['text'], 
-                                        metadata={
-                                            "chunk_id": idx, 
-                                            "source": normalized_filename,
-                                            "page_number": page_num,
-                                            "page_link": page_link
-                                        }
-                                    )
-                                )
+                                #chunks.append(
+                                    #Document(
+                                        #page_content=chunk_data['text'], 
+                                        #metadata={
+                                            #"chunk_id": idx, 
+                                            #"source": normalized_filename,
+                                            #"page_number": page_num,
+                                            #"page_link": page_link
+                                        #}
+                                    #)
+                                #)
 
-                        if chunks:
+                        #if chunks:
                             # 3️⃣ Chunk node'ları veritabanına kaydet
-                            from src.make_relationships import create_chunks_for_upload
+                            #from src.make_relationships import create_chunks_for_upload
 
-                            chunkId_chunkDoc_list = await create_chunks_for_upload(
-                                graph=graph,
-                                chunks=chunks,
-                                file_name=normalized_filename,
-                                page_images=page_images if page_images else [],
-                                generate_embedding=False,
-                            )
+                            #chunkId_chunkDoc_list = await create_chunks_for_upload(
+                                #graph=graph,
+                                #chunks=chunks,
+                                #file_name=normalized_filename,
+                                #page_images=page_images if page_images else [],
+                                #generate_embedding=False,
+                            #)
 
-                            logging.info(
-                                f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes in Neo4j"
-                            )
+                            #logging.info(
+                                #f"✅ Created {len(chunkId_chunkDoc_list)} chunk nodes in Neo4j"
+                            #)
 
                             # 4️⃣ Source node'a chunk count'ları ekle (upload_file gibi)
-                            obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
-                            obj_source_node.total_chunks = len(chunks)
-                            obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)
+                            #obj_source_node.chunkNodeCount = len(chunkId_chunkDoc_list)
+                            #obj_source_node.total_chunks = len(chunks)
+                            #obj_source_node.processed_chunk = len(chunkId_chunkDoc_list)
 
                             # 5️⃣ Vector index oluştur/kontrol et
-                            try:
-                                from src.make_relationships import (
-                                    create_chunk_vector_index,
-                                )
+                            #try:
+                                #from src.make_relationships import (
+                                    #create_chunk_vector_index,
+                                #)
 
-                                create_chunk_vector_index(graph)
-                                logging.info(f"✅ Vector index checked/created")
-                            except Exception as vector_error:
-                                logging.warning(
-                                    f"⚠️ Vector index warning: {vector_error}"
-                                )
-                        else:
-                            logging.warning(
-                                f"⚠️ No chunks created for: {normalized_filename}"
-                            )
+                                #create_chunk_vector_index(graph)
+                                #logging.info(f"✅ Vector index checked/created")
+                            #except Exception as vector_error:
+                                #logging.warning(
+                                    #f"⚠️ Vector index warning: {vector_error}"
+                                #)
+                        #else:
+                            #logging.warning(
+                                #f"⚠️ No chunks created for: {normalized_filename}"
+                            #)
 
                         # 6️⃣ Source node'u veritabanına kaydet (chunk count'larıyla birlikte - TEK SEFERDE)
                         # ⚠️ V2 Chunking: Entity extraction'ı atla (sadece Document ve Chunk node'ları oluştur)
                         # Entity extraction graph-create aşamasında yapılacak
-                        graphDb_data_Access.create_source_node(
-                            obj_source_node,
-                            model="openai_gpt_4o_mini",
-                            skip_entity_extraction=True,  # V2: Entity extraction'ı atla
-                        )
-                        logging.info(
-                            f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)"
-                        )
+                        #graphDb_data_Access.create_source_node(
+                            #obj_source_node,
+                            #model="openai_gpt_4o_mini",
+                            #skip_entity_extraction=True,  # V2: Entity extraction'ı atla
+                        #)
+                        #logging.info(
+                            #f"✅ Document node created with chunk counts: {obj_source_node.chunkNodeCount} chunks (entity extraction skipped for V2)"
+                        #)
 
                         # 6️⃣.5️⃣ Document node'una metadata'yı kaydet (sadece docType kullanıyoruz)
-                        try:
-                            update_query = """
-                            MATCH (d:Document {fileName: $file_name})
-                            SET d.docType = $doc_type
-                            RETURN d
-                            """
-                            graph.query(
-                                update_query,
-                                params={
-                                    "file_name": normalized_filename,
-                                    "doc_type": doc_type
-                                }
-                            )
-                            logging.info(
-                                f"✅ Document metadata updated: docType={doc_type} for {normalized_filename}"
-                            )
-                        except Exception as metadata_error:
-                            logging.warning(
-                                f"⚠️ Failed to update document metadata: {metadata_error}"
-                            )
+                        #try:
+                            #update_query = """
+                            #MATCH (d:Document {fileName: $file_name})
+                            #SET d.docType = $doc_type
+                            #RETURN d
+                            #"""
+                            #graph.query(
+                                #update_query,
+                                #params={
+                                    #"file_name": normalized_filename,
+                                    #"doc_type": doc_type
+                                #}
+                            #)
+                            #logging.info(
+                                #f"✅ Document metadata updated: docType={doc_type} for {normalized_filename}"
+                            #)
+                        #except Exception as metadata_error:
+                            #logging.warning(
+                                #f"⚠️ Failed to update document metadata: {metadata_error}"
+                            #)
 
                         # 7️⃣ Chunk'ları Document'e bağla
-                        if chunks:
-                            from src.make_relationships import link_chunks_to_document
+                        #if chunks:
+                            #from src.make_relationships import link_chunks_to_document
 
-                            linked_count = link_chunks_to_document(
-                                graph, normalized_filename
-                            )
-                            if linked_count > 0:
-                                logging.info(
-                                    f"🔗 Linked {linked_count} chunks to Document"
-                                )
-                            else:
-                                logging.info(f"ℹ️ Chunks already linked to Document")
+                            #linked_count = link_chunks_to_document(
+                                #graph, normalized_filename
+                            #)
+                            #if linked_count > 0:
+                                #logging.info(
+                                    #f"🔗 Linked {linked_count} chunks to Document"
+                                #)
+                            #else:
+                                #logging.info(f"ℹ️ Chunks already linked to Document")
 
                         # Graph connection'ı kapat
-                        if (
-                            graph
-                            and hasattr(graph, "_driver")
-                            and not graph._driver._closed
-                        ):
-                            graph._driver.close()
-                            logging.info("🔌 Neo4j connection closed")
-                    else:
-                        logging.warning(
-                            "⚠️ Neo4j credentials not configured, skipping chunk node creation"
-                        )
+                        #if (
+                            #graph
+                            #and hasattr(graph, "_driver")
+                            #and not graph._driver._closed
+                        #):
+                            #graph._driver.close()
+                            #logging.info("🔌 Neo4j connection closed")
+                    #else:
+                        #logging.warning(
+                            #"⚠️ Neo4j credentials not configured, skipping chunk node creation"
+                        #)
 
-                except Exception as chunk_node_error:
-                    logging.error(
-                        f"❌ Failed to create chunk nodes: {chunk_node_error}"
-                    )
-                    import traceback
+                #except Exception as chunk_node_error:
+                    #logging.error(
+                        #f"❌ Failed to create chunk nodes: {chunk_node_error}"
+                    #)
+                    #import traceback
 
-                    logging.error(f"Traceback: {traceback.format_exc()}")
-            else:
-                logging.warning(
-                    f"⚠️ No pages extracted for markdown creation: {normalized_filename}"
-                )
+                    #logging.error(f"Traceback: {traceback.format_exc()}")
+            #else:
+                #logging.warning(
+                    #f"⚠️ No pages extracted for markdown creation: {normalized_filename}"
+                #)
 
             # Chunking tamamlandı, status güncelle
-            file_record.chunking_status = "chunked"
-            file_record.chunking_completed_at = datetime.now(timezone.utc)
-            file_record.status = (
-                "uploaded"  # Chunking tamamlandı, status'u "uploaded" olarak güncelle
-            )
+            #file_record.chunking_status = "chunked"
+            #file_record.chunking_completed_at = datetime.now(timezone.utc)
+            #file_record.status = (
+                #"uploaded"  # Chunking tamamlandı, status'u "uploaded" olarak güncelle
+            #)
 
             # Metadata zaten upload sırasında kaydedildi, sadece markdown path ekle
             # doc_link ve page_images zaten database'de mevcut
 
-            db_session.commit()
+            #db_session.commit()
 
             # Neo4j'ye sync et (Neo4j bağlantısı varsa)
-            try:
-                logging.info(
-                    f"📤 Attempting Neo4j sync: file_name={normalized_filename}, "
-                    f"upload_status={file_record.upload_status}, "
-                    f"chunking_status={file_record.chunking_status}, "
-                    f"graph_status={file_record.graph_status}, "
-                    f"embedding_status={file_record.embedding_status}"
-                )
-                from src.models.status_sync import sync_queue_db_status_to_neo4j
-                from src.shared.common_fn import create_graph_database_connection
+            #try:
+                #logging.info(
+                    #f"📤 Attempting Neo4j sync: file_name={normalized_filename}, "
+                    #f"upload_status={file_record.upload_status}, "
+                    #f"chunking_status={file_record.chunking_status}, "
+                    #f"graph_status={file_record.graph_status}, "
+                    #f"embedding_status={file_record.embedding_status}"
+                #)
+                #from src.models.status_sync import sync_queue_db_status_to_neo4j
+                #from src.shared.common_fn import create_graph_database_connection
 
-                graph_connection = create_graph_database_connection(
-                    file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
-                    os.environ.get("NEO4J_USERNAME"),
-                    os.environ.get("NEO4J_PASSWORD"),
-                    file_record.neo4j_database
-                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
-                )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=normalized_filename,
-                    upload_status=file_record.upload_status,
-                    chunking_status=file_record.chunking_status,
-                    graph_status=file_record.graph_status,
-                    embedding_status=file_record.embedding_status,
-                    database=file_record.neo4j_database
-                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
-                )
-            except Exception as sync_error:
-                logging.warning(
-                    f"⚠️ Could not sync chunking status to Neo4j: {str(sync_error)}"
-                )
+                #graph_connection = create_graph_database_connection(
+                    #file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
+                    #os.environ.get("NEO4J_USERNAME"),
+                    #os.environ.get("NEO4J_PASSWORD"),
+                    #file_record.neo4j_database
+                    #or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                #)
+                #sync_queue_db_status_to_neo4j(
+                    #graph=graph_connection,
+                    #file_name=normalized_filename,
+                    #upload_status=file_record.upload_status,
+                    #chunking_status=file_record.chunking_status,
+                    #graph_status=file_record.graph_status,
+                    #embedding_status=file_record.embedding_status,
+                    #database=file_record.neo4j_database
+                    #or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                #)
+            #except Exception as sync_error:
+                #logging.warning(
+                    #f"⚠️ Could not sync chunking status to Neo4j: {str(sync_error)}"
+                #)
 
-            logging.info(f"✅ V2 Chunking completed for: {original_name}")
+            #logging.info(f"✅ V2 Chunking completed for: {original_name}")
 
-        except Exception as chunk_error:
-            error_message = str(chunk_error)
-            logging.error(
-                f"❌ V2 Chunking failed for {normalized_filename}: {error_message}"
-            )
-            import traceback
-            logging.error(f"Traceback: {traceback.format_exc()}")
+        #except Exception as chunk_error:
+            #error_message = str(chunk_error)
+            #logging.error(
+                #f"❌ V2 Chunking failed for {normalized_filename}: {error_message}"
+            #)
+            #import traceback
+            #logging.error(f"Traceback: {traceback.format_exc()}")
             
-            file_record.chunking_status = "failed"
-            file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
-            file_record.reason = f"Chunking failed: {error_message}"
+            #file_record.chunking_status = "failed"
+            #file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
+            #file_record.reason = f"Chunking failed: {error_message}"
             # Remove from queue so it doesn't block other files
-            if file_record.status in ("queued", "processing"):
-                file_record.status = "uploaded"
-            db_session.commit()
+            #if file_record.status in ("queued", "processing"):
+                #file_record.status = "uploaded"
+            #db_session.commit()
 
             # Neo4j'ye failed status sync et
-            try:
-                from src.models.status_sync import sync_queue_db_status_to_neo4j
-                from src.shared.common_fn import create_graph_database_connection
+            #try:
+                #from src.models.status_sync import sync_queue_db_status_to_neo4j
+                #from src.shared.common_fn import create_graph_database_connection
 
-                graph_connection = create_graph_database_connection(
-                    file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
-                    os.environ.get("NEO4J_USERNAME"),
-                    os.environ.get("NEO4J_PASSWORD"),
-                    file_record.neo4j_database
-                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
-                )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=normalized_filename,
-                    upload_status=file_record.upload_status,
-                    chunking_status="failed",
-                    graph_status=file_record.graph_status,
-                    embedding_status=file_record.embedding_status,
-                    database=file_record.neo4j_database
-                    or os.environ.get("NEO4J_DATABASE", "neo4j"),
-                )
-            except Exception as sync_error:
-                logging.warning(
-                    f"⚠️ Could not sync chunking failure to Neo4j: {str(sync_error)}"
-                )
+                #graph_connection = create_graph_database_connection(
+                    #file_record.neo4j_uri or os.environ.get("NEO4J_URI"),
+                    #os.environ.get("NEO4J_USERNAME"),
+                    #os.environ.get("NEO4J_PASSWORD"),
+                    #file_record.neo4j_database
+                    #or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                #)
+                #sync_queue_db_status_to_neo4j(
+                    #graph=graph_connection,
+                    #file_name=normalized_filename,
+                    #upload_status=file_record.upload_status,
+                    #chunking_status="failed",
+                    #graph_status=file_record.graph_status,
+                    #embedding_status=file_record.embedding_status,
+                    #database=file_record.neo4j_database
+                    #or os.environ.get("NEO4J_DATABASE", "neo4j"),
+                #)
+            #except Exception as sync_error:
+                #logging.warning(
+                    #f"⚠️ Could not sync chunking failure to Neo4j: {str(sync_error)}"
+                #)
 
-    except Exception as e:
-        error_message = str(e)
-        logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {error_message}")
-        import traceback
-        logging.error(f"Traceback: {traceback.format_exc()}")
+    #except Exception as e:
+        #error_message = str(e)
+        #logging.error(f"❌ process_chunking_v2 failed for file {file_id}: {error_message}")
+        #import traceback
+        #logging.error(f"Traceback: {traceback.format_exc()}")
         
-        if db_session and file_record:
-            file_record.chunking_status = "failed"
-            file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
-            file_record.reason = f"Chunking failed: {error_message}"
+        #if db_session and file_record:
+            #file_record.chunking_status = "failed"
+            #file_record.processing_error = error_message[:500] if len(error_message) > 500 else error_message
+            #file_record.reason = f"Chunking failed: {error_message}"
             # Remove from queue so it doesn't block other files
-            if file_record.status in ("queued", "processing"):
-                file_record.status = "uploaded"
-            db_session.commit()
-    finally:
-        if db_session:
-            db_session.close()
+            #if file_record.status in ("queued", "processing"):
+                #file_record.status = "uploaded"
+            #db_session.commit()
+    #finally:
+        #if db_session:
+            #db_session.close()
         # Executor'ı kapat
-        if executor:
-            executor.shutdown(wait=False)
+        #if executor:
+            #executor.shutdown(wait=False)
 
 
-async def process_graph_creation_v2(
-    file_id: int,
-    original_name: str,
-    markdown_path: str,
-    file_path: str,
-    model: str,
-    uri: str,
-    userName: str,
-    password: str,
-    database: str,
-    generate_embedding: bool = False,
-):
-    """
-    V2 Graph Creation Process: Extract entities and relationships from markdown
-    Uses processing_source_v2 for pages-based extraction (NO chunks)
-    """
+# process_graph_creation_v2 is now in celery_worker/src/processing_utils.py
+# This function is removed from backend to avoid celery_worker dependencies
+# V2 endpoints now use celery task: create_graph_task
+# async def process_graph_creation_v2(
+    #file_id: int,
+    #original_name: str,
+    #markdown_path: str,
+    #file_path: str,
+    #model: str,
+    #uri: str,
+    #userName: str,
+    #password: str,
+    #database: str,
+    #generate_embedding: bool = False,
+#):
+    #"""
+    #V2 Graph Creation Process: Extract entities and relationships from markdown
+    #Uses processing_source_v2 for pages-based extraction (NO chunks)
+    #"""
     # Import'ları fonksiyonun başında yap
-    from src.shared.common_fn import create_graph_database_connection
-    from src.models.status_sync import sync_queue_db_status_to_neo4j
+    #from src.shared.common_fn import create_graph_database_connection
+    #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-    db = None
-    db_session = None
+    #db = None
+    #db_session = None
 
-    try:
-        db = get_file_queue_db()
-        db_session = db.get_db_session()
+    #try:
+        #db = get_file_queue_db()
+        #db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
-        if not file_record:
-            logging.error(f"❌ File record not found for ID: {file_id}")
-            return
+        #file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        #if not file_record:
+            #logging.error(f"❌ File record not found for ID: {file_id}")
+            #return
 
-        logging.info(f"🎨 Starting V2 graph creation for: {original_name}")
+        #logging.info(f"🎨 Starting V2 graph creation for: {original_name}")
 
         # Normalize filename
-        from src.utf8_utils import normalize_file_name
+        #from src.utf8_utils import normalize_file_name
 
-        normalized_filename = normalize_file_name(original_name)
+        #normalized_filename = normalize_file_name(original_name)
 
         # Markdown dosyasını oku
-        if not os.path.exists(markdown_path):
-            logging.error(f"❌ Markdown file not found: {markdown_path}")
-            file_record.graph_status = "failed"
-            file_record.processing_error = "Markdown file not found"
-            file_record.reason = "Graph creation failed: Markdown file not found"
-            db_session.commit()
-            return
+        #if not os.path.exists(markdown_path):
+            #logging.error(f"❌ Markdown file not found: {markdown_path}")
+            #file_record.graph_status = "failed"
+            #file_record.processing_error = "Markdown file not found"
+            #file_record.reason = "Graph creation failed: Markdown file not found"
+            #db_session.commit()
+            #return
 
         # Markdown'ı pages olarak yükle
-        from langchain_core.documents import Document
+        #from langchain_core.documents import Document
 
-        with open(markdown_path, "r", encoding="utf-8") as md_file:
-            markdown_content = md_file.read()
+        #with open(markdown_path, "r", encoding="utf-8") as md_file:
+            #markdown_content = md_file.read()
 
         # Retrieve page_images from file_record BEFORE chunk parsing
-        page_images = []
-        if file_record.page_images:
-            try:
-                import json
-                page_images = json.loads(file_record.page_images)
-                logging.info(f"🖼️ Retrieved {len(page_images)} page images from file record")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to parse page_images from file record: {e}")
+        #page_images = []
+        #if file_record.page_images:
+            #try:
+                #import json
+                #page_images = json.loads(file_record.page_images)
+                #logging.info(f"🖼️ Retrieved {len(page_images)} page images from file record")
+            #except Exception as e:
+                #logging.warning(f"⚠️ Failed to parse page_images from file record: {e}")
 
         # Page break'lere göre sayfalara bölmek yerine CHUNK'ları parse et
-        import re
+        #import re
         
         # Regex to find content within <CHUNK> tags
-        chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
-        raw_chunks = chunk_pattern.findall(markdown_content)
+        #chunk_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+        #raw_chunks = chunk_pattern.findall(markdown_content)
         
-        if not raw_chunks:
+        #if not raw_chunks:
             # Fallback to page splitting if no chunks found
-            logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, falling back to page splitting")
-            page_texts = markdown_content.split("[PAGE BREAK]")
-            pages = [
-                Document(page_content=text.strip(), metadata={"page": idx, "chunk_id": idx})
-                for idx, text in enumerate(page_texts, 1)
-                if text.strip()
-            ]
-        else:
+            #logging.warning(f"⚠️ No <CHUNK> tags found in markdown for {normalized_filename}, falling back to page splitting")
+            #page_texts = markdown_content.split("[PAGE BREAK]")
+            #pages = [
+                #Document(page_content=text.strip(), metadata={"page": idx, "chunk_id": idx})
+                #for idx, text in enumerate(page_texts, 1)
+                #if text.strip()
+            #]
+        #else:
             # Merge small chunks (< 150 chars) with page tracking
-            merged_chunks = []
-            current_chunk_text = ""
-            current_chunk_page = 1  # Start from page 1
+            #merged_chunks = []
+            #current_chunk_text = ""
+            #current_chunk_page = 1  # Start from page 1
             
             # Split markdown by [PAGE BREAK] to track pages
-            page_sections = markdown_content.split('[PAGE BREAK]')
+            #page_sections = markdown_content.split('[PAGE BREAK]')
             
-            for page_idx, page_section in enumerate(page_sections, start=1):
+            #for page_idx, page_section in enumerate(page_sections, start=1):
                 # Extract chunks from this page section
-                page_raw_chunks = chunk_pattern.findall(page_section)
+                #page_raw_chunks = chunk_pattern.findall(page_section)
                 
-                for chunk_text in page_raw_chunks:
-                    chunk_text = chunk_text.strip()
-                    if not chunk_text:
-                        continue
+                #for chunk_text in page_raw_chunks:
+                    #chunk_text = chunk_text.strip()
+                    #if not chunk_text:
+                        #continue
                         
-                    if not current_chunk_text:
-                        current_chunk_text = chunk_text
-                        current_chunk_page = page_idx
-                    else:
+                    #if not current_chunk_text:
+                        #current_chunk_text = chunk_text
+                        #current_chunk_page = page_idx
+                    #else:
                         # Check if adding this chunk keeps it under limit or if current is too small
-                        if len(current_chunk_text) < 150:
+                        #if len(current_chunk_text) < 150:
                             # Current is small.
                             # Check if the INCOMING chunk is big (>150) AND we have a previous chunk
-                            if len(chunk_text) > 150 and merged_chunks:
+                            #if len(chunk_text) > 150 and merged_chunks:
                                 # User Rule: Current is small, Next is Big -> Merge Current to Previous
-                                merged_chunks[-1]['text'] += "\n" + current_chunk_text
+                                #merged_chunks[-1]['text'] += "\n" + current_chunk_text
                                 # Set incoming (big) as new current
-                                current_chunk_text = chunk_text
-                                current_chunk_page = page_idx
-                            else:
+                                #current_chunk_text = chunk_text
+                                #current_chunk_page = page_idx
+                            #else:
                                 # Standard: Merge incoming into current
-                                current_chunk_text += "\n" + chunk_text
-                        else:
+                                #current_chunk_text += "\n" + chunk_text
+                        #else:
                             # Current chunk is big enough, save it and start new
-                            merged_chunks.append({
-                                'text': current_chunk_text,
-                                'page': current_chunk_page
-                            })
-                            current_chunk_text = chunk_text
-                            current_chunk_page = page_idx
+                            #merged_chunks.append({
+                                #'text': current_chunk_text,
+                                #'page': current_chunk_page
+                            #})
+                            #current_chunk_text = chunk_text
+                            #current_chunk_page = page_idx
             
             # Add the last chunk
-            if current_chunk_text:
-                merged_chunks.append({
-                    'text': current_chunk_text,
-                    'page': current_chunk_page
-                })
+            #if current_chunk_text:
+                #merged_chunks.append({
+                    #'text': current_chunk_text,
+                    #'page': current_chunk_page
+                #})
                 
-            logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
+            #logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min 150 chars)")
             
             # Create Document objects from merged chunks with page metadata
-            pages = []
-            for idx, chunk_data in enumerate(merged_chunks, 1):
-                page_num = chunk_data['page']
+            #pages = []
+            #for idx, chunk_data in enumerate(merged_chunks, 1):
+                #page_num = chunk_data['page']
                 # Generate page_link from page_images if available
-                page_link = None
-                if page_images and page_num <= len(page_images):
-                    page_link = page_images[page_num - 1]  # 0-indexed
+                #page_link = None
+                #if page_images and page_num <= len(page_images):
+                    #page_link = page_images[page_num - 1]  # 0-indexed
                 
-                pages.append(
-                    Document(
-                        page_content=chunk_data['text'], 
-                        metadata={
-                            "chunk_id": idx, 
-                            "source": normalized_filename,
-                            "page_number": page_num,
-                            "page_link": page_link
-                        }
-                    )
-                )
+                #pages.append(
+                    #Document(
+                        #page_content=chunk_data['text'], 
+                        #metadata={
+                            #"chunk_id": idx, 
+                            #"source": normalized_filename,
+                            #"page_number": page_num,
+                            #"page_link": page_link
+                        #}
+                    #)
+                #)
 
-        logging.info(
-            f"📄 Prepared {len(pages)} chunks for V2 graph extraction"
-        )
+        #logging.info(
+            #f"📄 Prepared {len(pages)} chunks for V2 graph extraction"
+        #)
 
         # V2 processing_source_v2 fonksiyonunu kullan (NO chunks)
-        from src.main import processing_source_v2
+        #from src.main import processing_source_v2
 
         # Parametreler
-        allowedNodes = []  # Boş = tüm node'lar
-        allowedRelationship = []  # Boş = tüm relationship'ler
-        additional_instructions = None
-        max_pages = None
+        #allowedNodes = []  # Boş = tüm node'lar
+        #allowedRelationship = []  # Boş = tüm relationship'ler
+        #additional_instructions = None
+        #max_pages = None
 
-        logging.info(f"🔄 Calling processing_source_v2 for: {normalized_filename}")
-        logging.info(
-            f"✨ V2 Mode: Pages-based extraction (NO chunks, NO embeddings, NO chunk-entity linking)"
-        )
+        #logging.info(f"🔄 Calling processing_source_v2 for: {normalized_filename}")
+        #logging.info(
+            #f"✨ V2 Mode: Pages-based extraction (NO chunks, NO embeddings, NO chunk-entity linking)"
+        #)
 
         # V2 Graph extraction - pages-based, chunk'sız
-        latency, response = await processing_source_v2(
-            uri=uri,
-            userName=userName,
-            password=password,
-            database=database,
-            model=model,
-            file_name=normalized_filename,
-            pages=pages,
-            allowedNodes=allowedNodes,
-            allowedRelationship=allowedRelationship,
-            additional_instructions=additional_instructions,
-            max_pages=max_pages,
-            page_images=page_images,  # Pass page_images
-        )
+        #latency, response = await processing_source_v2(
+            #uri=uri,
+            #userName=userName,
+            #password=password,
+            #database=database,
+            #model=model,
+            #file_name=normalized_filename,
+            #pages=pages,
+            #allowedNodes=allowedNodes,
+            #allowedRelationship=allowedRelationship,
+            #additional_instructions=additional_instructions,
+            #max_pages=max_pages,
+            #page_images=page_images,  # Pass page_images
+        #)
 
         # Check if processing_source_v2 failed
-        if not response or response.get("status") == "Failed":
-            error_message = (
-                response.get("error", "Unknown error")
-                if response
-                else "No response from processing_source_v2"
-            )
-            logging.error(
-                f"❌ V2 Graph extraction failed for: {normalized_filename} - {error_message}"
-            )
-            file_record.graph_status = "failed"
-            file_record.processing_error = error_message[:500]
-            file_record.reason = f"Graph extraction failed: {error_message}"
-            db_session.commit()
-            return
+        #if not response or response.get("status") == "Failed":
+            #error_message = (
+                #response.get("error", "Unknown error")
+                #if response
+                #else "No response from processing_source_v2"
+            #)
+            #logging.error(
+                #f"❌ V2 Graph extraction failed for: {normalized_filename} - {error_message}"
+            #)
+            #file_record.graph_status = "failed"
+            #file_record.processing_error = error_message[:500]
+            #file_record.reason = f"Graph extraction failed: {error_message}"
+            #db_session.commit()
+            #return
 
         # Note: "Already Processing" status check removed
         # processing_source_v2 now continues even if Neo4j status is "Processing"
-        # This handles restart scenarios where SQLite was reset but Neo4j wasn't
+        # This handles restart scenarios where database was reset but Neo4j wasn't
 
-        logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
-        logging.info(
-            f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships"
-        )
-        logging.info(f"⏱️ Latency details: {latency}")
+        #logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
+        #logging.info(
+            #f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships"
+        #)
+        #logging.info(f"⏱️ Latency details: {latency}")
 
         # Check if Policy node was created in Neo4j
         # If no Policy node exists, mark as failed
-        try:
-            import asyncio
-            from src.main import create_graph_database_connection
+        #try:
+            #import asyncio
+            #from src.main import create_graph_database_connection
 
-            graph_connection = await asyncio.to_thread(
-                create_graph_database_connection,
-                uri, userName, password, database
-            )
+            #graph_connection = await asyncio.to_thread(
+                #create_graph_database_connection,
+                #uri, userName, password, database
+            #)
 
             # Check if Policy or Endorsement node exists for this document
             # Endorsement dosyaları için Endorsement node, ana poliçeler için Policy node kontrol edilmeli
             # NOT: DOCUMENTED_IN hem Policy hem Endorsement için kullanılır (hangi Document'ta dokümante edildiğini gösterir)
             # HAS_ENDORSEMENT ise Policy'den Endorsement'a olan bağlantıdır (Policy node'unun bir Endorsement'a sahip olduğunu gösterir)
-            node_check_query = """
-            MATCH (d:Document {fileName: $file_name})
-            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-            OPTIONAL MATCH (e:Endorsement)-[:DOCUMENTED_IN]->(d)
-            RETURN count(p) as policy_count, count(e) as endorsement_count, d.docType as doc_type
-            """
+            #node_check_query = """
+            #MATCH (d:Document {fileName: $file_name})
+            #OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+            #OPTIONAL MATCH (e:Endorsement)-[:DOCUMENTED_IN]->(d)
+            #RETURN count(p) as policy_count, count(e) as endorsement_count, d.docType as doc_type
+            #"""
 
-            node_result = await asyncio.to_thread(
-                graph_connection.query,
-                node_check_query,
-                {"file_name": normalized_filename}
-            )
+            #node_result = await asyncio.to_thread(
+                #graph_connection.query,
+                #node_check_query,
+                #{"file_name": normalized_filename}
+            #)
 
-            policy_count = node_result[0]["policy_count"] if node_result else 0
-            endorsement_count = (
-                node_result[0]["endorsement_count"] if node_result else 0
-            )
-            doc_type = node_result[0].get("doc_type", "") if node_result else ""
+            #policy_count = node_result[0]["policy_count"] if node_result else 0
+            #endorsement_count = (
+                #node_result[0]["endorsement_count"] if node_result else 0
+            #)
+            #doc_type = node_result[0].get("doc_type", "") if node_result else ""
 
             # Endorsement dosyaları için Endorsement node kontrolü yap
             # Ana poliçeler için Policy node kontrolü yap
-            if doc_type in ["ENDORSEMENT", "RENEWAL", "CANCELLATION"]:
-                if endorsement_count == 0:
-                    error_message = f"Endorsement node was not created for document: {normalized_filename}"
-                    logging.error(f"❌ {error_message}")
-                    file_record.graph_status = "failed"
-                    file_record.processing_error = error_message[:500]
-                    file_record.reason = f"Graph verification failed: {error_message}"
-                    db_session.commit()
+            #if doc_type in ["ENDORSEMENT", "RENEWAL", "CANCELLATION"]:
+                #if endorsement_count == 0:
+                    #error_message = f"Endorsement node was not created for document: {normalized_filename}"
+                    #logging.error(f"❌ {error_message}")
+                    #file_record.graph_status = "failed"
+                    #file_record.processing_error = error_message[:500]
+                    #file_record.reason = f"Graph verification failed: {error_message}"
+                    #db_session.commit()
 
                     # Sync failed status to Neo4j - async
-                    try:
-                        import asyncio
-                        from src.models.status_sync import sync_queue_db_status_to_neo4j
+                    #try:
+                        #import asyncio
+                        #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                        await asyncio.to_thread(
-                            sync_queue_db_status_to_neo4j,
-                            graph_connection,
-                            normalized_filename,
-                            file_record.upload_status,
-                            file_record.chunking_status,
-                            "failed",
-                            file_record.embedding_status,
-                            database
-                        )
-                    except Exception as sync_error:
-                        logging.warning(
-                            f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
-                        )
+                        #await asyncio.to_thread(
+                            #sync_queue_db_status_to_neo4j,
+                            #graph_connection,
+                            #normalized_filename,
+                            #file_record.upload_status,
+                            #file_record.chunking_status,
+                            #"failed",
+                            #file_record.embedding_status,
+                            #database
+                        #)
+                    #except Exception as sync_error:
+                        #logging.warning(
+                            #f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
+                        #)
 
-                    return
-                else:
-                    logging.info(
-                        f"✅ Endorsement node found for document: {normalized_filename} (count: {endorsement_count})"
-                    )
-            elif policy_count == 0:
-                error_message = (
-                    f"Policy node was not created for document: {normalized_filename}"
-                )
-                logging.error(f"❌ {error_message}")
-                file_record.graph_status = "failed"
-                file_record.processing_error = error_message[:500]
-                file_record.reason = f"Graph verification failed: {error_message}"
-                db_session.commit()
+                    #return
+                #else:
+                    #logging.info(
+                        #f"✅ Endorsement node found for document: {normalized_filename} (count: {endorsement_count})"
+                    #)
+            #elif policy_count == 0:
+                #error_message = (
+                    #f"Policy node was not created for document: {normalized_filename}"
+                #)
+                #logging.error(f"❌ {error_message}")
+                #file_record.graph_status = "failed"
+                #file_record.processing_error = error_message[:500]
+                #file_record.reason = f"Graph verification failed: {error_message}"
+                #db_session.commit()
 
                 # Sync failed status to Neo4j - async
-                try:
-                    import asyncio
-                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+                #try:
+                    #import asyncio
+                    #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                    await asyncio.to_thread(
-                        sync_queue_db_status_to_neo4j,
-                        graph_connection,
-                        normalized_filename,
-                        file_record.upload_status,
-                        file_record.chunking_status,
-                        "failed",
-                        file_record.embedding_status,
-                        database
-                    )
-                except Exception as sync_error:
-                    logging.warning(
-                        f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
-                    )
+                    #await asyncio.to_thread(
+                        #sync_queue_db_status_to_neo4j,
+                        #graph_connection,
+                        #normalized_filename,
+                        #file_record.upload_status,
+                        #file_record.chunking_status,
+                        #"failed",
+                        #file_record.embedding_status,
+                        #database
+                    #)
+                #except Exception as sync_error:
+                    #logging.warning(
+                        #f"⚠️ Could not sync failed status to Neo4j: {str(sync_error)}"
+                    #)
 
-                return
-            else:
-                logging.info(
-                    f"✅ Policy node verified: {policy_count} Policy node(s) found for {normalized_filename}"
-                )
-        except Exception as policy_check_error:
-            logging.error(
-                f"❌ Error checking Policy node for {normalized_filename}: {str(policy_check_error)}"
-            )
+                #return
+            #else:
+                #logging.info(
+                    #f"✅ Policy node verified: {policy_count} Policy node(s) found for {normalized_filename}"
+                #)
+        #except Exception as policy_check_error:
+            #logging.error(
+                #f"❌ Error checking Policy node for {normalized_filename}: {str(policy_check_error)}"
+            #)
             # Don't fail the entire process if policy check fails
             # But log the error for investigation
-            import traceback
+            #import traceback
 
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            #logging.error(f"Traceback: {traceback.format_exc()}")
 
         # Embedding oluştur (eğer isteniyorsa) - async
-        if generate_embedding:
-            try:
-                logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
-                import asyncio
-                from src.graphDB_dataAccess import graphDBdataAccess
+        #if generate_embedding:
+            #try:
+                #logging.info(f"🔄 Creating embeddings for: {normalized_filename}")
+                #import asyncio
+                #from src.graphDB_dataAccess import graphDBdataAccess
 
-                graph = await asyncio.to_thread(
-                    create_graph_database_connection,
-                    uri, userName, password, database
-                )
-                graphDb_data_Access = graphDBdataAccess(graph)
+                #graph = await asyncio.to_thread(
+                    #create_graph_database_connection,
+                    #uri, userName, password, database
+                #)
+                #graphDb_data_Access = graphDBdataAccess(graph)
 
                 # Document için embedding oluştur - async
-                embedding_result = await asyncio.to_thread(
-                    graphDb_data_Access.create_embeddings_for_documents,
-                    [normalized_filename]
-                )
-                if embedding_result and not embedding_result.get("error"):
-                    logging.info(
-                        f"✅ Embeddings created successfully for: {normalized_filename}"
-                    )
-                else:
-                    logging.warning(
-                        f"⚠️ Embedding creation warning: {embedding_result.get('error', 'Unknown error')}"
-                    )
-            except Exception as emb_error:
-                logging.error(f"❌ Embedding creation failed: {emb_error}")
+                #embedding_result = await asyncio.to_thread(
+                    #graphDb_data_Access.create_embeddings_for_documents,
+                    #[normalized_filename]
+                #)
+                #if embedding_result and not embedding_result.get("error"):
+                    #logging.info(
+                        #f"✅ Embeddings created successfully for: {normalized_filename}"
+                    #)
+                #else:
+                    #logging.warning(
+                        #f"⚠️ Embedding creation warning: {embedding_result.get('error', 'Unknown error')}"
+                    #)
+            #except Exception as emb_error:
+                #logging.error(f"❌ Embedding creation failed: {emb_error}")
                 # Continue without embeddings
 
         # Response'tan istatistikleri al
-        node_count = response.get("nodeCount", 0) if response else 0
-        relationship_count = response.get("relationshipCount", 0) if response else 0
-        processing_time = response.get("total_processing_time", 0) if response else 0
+        #node_count = response.get("nodeCount", 0) if response else 0
+        #relationship_count = response.get("relationshipCount", 0) if response else 0
+        #processing_time = response.get("total_processing_time", 0) if response else 0
 
         # Check if graph creation actually created nodes and relationships
         # If both are 0, the processing might have failed silently
-        if node_count == 0 and relationship_count == 0:
-            logging.warning(
-                f"⚠️ V2 Graph extraction completed but no nodes or relationships created for: {normalized_filename}"
-            )
+        #if node_count == 0 and relationship_count == 0:
+            #logging.warning(
+                #f"⚠️ V2 Graph extraction completed but no nodes or relationships created for: {normalized_filename}"
+            #)
             # Still mark as completed, but log a warning
             # This might be a valid case for some documents
 
         # Graph creation tamamlandı, status güncelle
-        file_record.graph_status = "completed"
-        file_record.graph_completed_at = datetime.now(timezone.utc)
-        file_record.status = "completed"  # Graph creation tamamlandı, status'u "completed" olarak güncelle
-        file_record.node_count = node_count
-        file_record.relationship_count = relationship_count
-        file_record.processing_time = processing_time
-        file_record.reason = f"Graph creation completed successfully. Nodes: {node_count}, Relationships: {relationship_count}"
+        #file_record.graph_status = "completed"
+        #file_record.graph_completed_at = datetime.now(timezone.utc)
+        #file_record.status = "completed"  # Graph creation tamamlandı, status'u "completed" olarak güncelle
+        #file_record.node_count = node_count
+        #file_record.relationship_count = relationship_count
+        #file_record.processing_time = processing_time
+        #file_record.reason = f"Graph creation completed successfully. Nodes: {node_count}, Relationships: {relationship_count}"
 
-        db_session.commit()
+        #db_session.commit()
 
         # Neo4j'ye sync et - async
-        try:
-            logging.info(
-                f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
-                f"upload_status={file_record.upload_status}, "
-                f"chunking_status={file_record.chunking_status}, "
-                f"graph_status={file_record.graph_status}, "
-                f"embedding_status={file_record.embedding_status}"
-            )
-            import asyncio
-            graph_connection = await asyncio.to_thread(
-                create_graph_database_connection,
-                uri, userName, password, database
-            )
-            await asyncio.to_thread(
-                sync_queue_db_status_to_neo4j,
-                graph_connection,
-                original_name,
-                file_record.upload_status,
-                file_record.chunking_status,
-                file_record.graph_status,
-                file_record.embedding_status,
-                database
-            )
-        except Exception as sync_error:
-            logging.warning(
-                f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}"
-            )
+        #try:
+            #logging.info(
+                #f"📤 Attempting Neo4j sync for graph_creation: file_name={original_name}, "
+                #f"upload_status={file_record.upload_status}, "
+                #f"chunking_status={file_record.chunking_status}, "
+                #f"graph_status={file_record.graph_status}, "
+                #f"embedding_status={file_record.embedding_status}"
+            #)
+            #import asyncio
+            #graph_connection = await asyncio.to_thread(
+                #create_graph_database_connection,
+                #uri, userName, password, database
+            #)
+            #await asyncio.to_thread(
+                #sync_queue_db_status_to_neo4j,
+                #graph_connection,
+                #original_name,
+                #file_record.upload_status,
+                #file_record.chunking_status,
+                #file_record.graph_status,
+                #file_record.embedding_status,
+                #database
+            #)
+        #except Exception as sync_error:
+            #logging.warning(
+                #f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}"
+            #)
 
-        logging.info(
-            f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}"
-        )
+        #logging.info(
+            #f"✅ V2 Graph creation completed for: {original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}"
+        #)
 
-    except Exception as e:
-        logging.error(
-            f"❌ process_graph_creation_v2 failed for file {file_id}: {str(e)}"
-        )
-        import traceback
+    #except Exception as e:
+        #logging.error(
+            #f"❌ process_graph_creation_v2 failed for file {file_id}: {str(e)}"
+        #)
+        #import traceback
 
-        logging.error(f"Traceback: {traceback.format_exc()}")
+        #logging.error(f"Traceback: {traceback.format_exc()}")
 
-        if db_session and file_record:
-            file_record.graph_status = "failed"
-            file_record.processing_error = str(e)[:500]  # İlk 500 karakter
-            file_record.reason = f"Graph creation failed: {str(e)}"
-            db_session.commit()
+        #if db_session and file_record:
+            #file_record.graph_status = "failed"
+            #file_record.processing_error = str(e)[:500]  # İlk 500 karakter
+            #file_record.reason = f"Graph creation failed: {str(e)}"
+            #db_session.commit()
 
             # Neo4j'ye failed status sync et - async
-            try:
-                logging.info(
-                    f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
-                    f"upload_status={file_record.upload_status}, "
-                    f"chunking_status={file_record.chunking_status}, "
-                    f"graph_status=failed, "
-                    f"embedding_status={file_record.embedding_status}"
-                )
-                import asyncio
-                from src.models.status_sync import sync_queue_db_status_to_neo4j
-                from src.shared.common_fn import create_graph_database_connection
+            #try:
+                #logging.info(
+                    #f"📤 Attempting Neo4j sync for graph_creation FAILURE: file_name={original_name}, "
+                    #f"upload_status={file_record.upload_status}, "
+                    #f"chunking_status={file_record.chunking_status}, "
+                    #f"graph_status=failed, "
+                    #f"embedding_status={file_record.embedding_status}"
+                #)
+                #import asyncio
+                #from src.models.status_sync import sync_queue_db_status_to_neo4j
+                #from src.shared.common_fn import create_graph_database_connection
                 
-                graph_connection = await asyncio.to_thread(
-                    create_graph_database_connection,
-                    uri, userName, password, database
-                )
-                await asyncio.to_thread(
-                    sync_queue_db_status_to_neo4j,
-                    graph_connection,
-                    original_name,
-                    file_record.upload_status,
-                    file_record.chunking_status,
-                    "failed",
-                    file_record.embedding_status,
-                    database
-                )
-            except Exception as sync_error:
-                logging.warning(
-                    f"⚠️ Could not sync graph failure to Neo4j: {str(sync_error)}"
-                )
-    finally:
-        if db_session:
-            db_session.close()
+                #graph_connection = await asyncio.to_thread(
+                    #create_graph_database_connection,
+                    #uri, userName, password, database
+                #)
+                #await asyncio.to_thread(
+                    #sync_queue_db_status_to_neo4j,
+                    #graph_connection,
+                    #original_name,
+                    #file_record.upload_status,
+                    #file_record.chunking_status,
+                    #"failed",
+                    #file_record.embedding_status,
+                    #database
+                #)
+            #except Exception as sync_error:
+                #logging.warning(
+                    #f"⚠️ Could not sync graph failure to Neo4j: {str(sync_error)}"
+                #)
+    #finally:
+        #if db_session:
+            #db_session.close()
 
 
-async def process_embedding_creation(
-    file_id: int,
-    original_name: str,
-    uri: str,
-    userName: str,
-    password: str,
-    database: str,
-):
-    """
-    V2 Embedding Creation Process - Background Task
-    Creates embeddings for chunks of a completed file
-    """
-    db = None
-    db_session = None
+#async def process_embedding_creation(
+    #file_id: int,
+    #original_name: str,
+    #uri: str,
+    #userName: str,
+    #password: str,
+    #database: str,
+#):
+    #"""
+    #V2 Embedding Creation Process - Background Task
+    #Creates embeddings for chunks of a completed file
+    #"""
+    #db = None
+    #db_session = None
 
-    try:
-        db = get_file_queue_db()
-        db_session = db.get_db_session()
+    #try:
+        #db = get_file_queue_db()
+        #db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
-        if not file_record:
-            logging.error(f"❌ File record not found for ID: {file_id}")
-            return
+        #file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        #if not file_record:
+            #logging.error(f"❌ File record not found for ID: {file_id}")
+            #return
 
-        logging.info(f"📊 Starting embedding creation for: {original_name}")
+        #logging.info(f"📊 Starting embedding creation for: {original_name}")
 
-        try:
+        #try:
             # Get graph connection
-            graph = create_graph_database_connection(uri, userName, password, database)
-            graphDb_data_Access = graphDBdataAccess(graph)
+            #graph = create_graph_database_connection(uri, userName, password, database)
+            #graphDb_data_Access = graphDBdataAccess(graph)
 
             # Create embeddings for chunks of this file
-            result = graphDb_data_Access.create_embeddings_for_documents(
-                [original_name]
-            )
+            #result = graphDb_data_Access.create_embeddings_for_documents(
+                #[original_name]
+            #)
 
-            if result.get("error"):
-                error_msg = f"Embedding creation failed: {result['error']}"
-                logging.error(f"❌ {error_msg}")
+            #if result.get("error"):
+                #error_msg = f"Embedding creation failed: {result['error']}"
+                #logging.error(f"❌ {error_msg}")
 
                 # Update status to failed
-                file_record.embedding_status = "failed"
-                file_record.embedding_completed_at = datetime.now(timezone.utc)
-                file_record.reason = f"Embedding creation failed: {result['error']}"
-                db_session.commit()
+                #file_record.embedding_status = "failed"
+                #file_record.embedding_completed_at = datetime.now(timezone.utc)
+                #file_record.reason = f"Embedding creation failed: {result['error']}"
+                #db_session.commit()
 
                 # Neo4j'ye failed status sync et
-                try:
-                    from src.models.status_sync import sync_queue_db_status_to_neo4j
+                #try:
+                    #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                    graph_connection = create_graph_database_connection(
-                        uri=uri, userName=userName, password=password, database=database
-                    )
-                    sync_queue_db_status_to_neo4j(
-                        graph=graph_connection,
-                        file_name=original_name,
-                        upload_status=file_record.upload_status,
-                        chunking_status=file_record.chunking_status,
-                        graph_status=file_record.graph_status,
-                        embedding_status="failed",
-                        database=database,
-                    )
-                except Exception as sync_error:
-                    logging.warning(
-                        f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
-                    )
-                return
+                    #graph_connection = create_graph_database_connection(
+                        #uri=uri, userName=userName, password=password, database=database
+                    #)
+                    #sync_queue_db_status_to_neo4j(
+                        #graph=graph_connection,
+                        #file_name=original_name,
+                        #upload_status=file_record.upload_status,
+                        #chunking_status=file_record.chunking_status,
+                        #graph_status=file_record.graph_status,
+                        #embedding_status="failed",
+                        #database=database,
+                    #)
+                #except Exception as sync_error:
+                    #logging.warning(
+                        #f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
+                    #)
+                #return
 
-            total_chunks = result.get("total_chunks_updated", 0)
-            embedding_model = result.get("embedding_model", "Unknown")
+            #total_chunks = result.get("total_chunks_updated", 0)
+            #embedding_model = result.get("embedding_model", "Unknown")
 
             # Update status to completed
-            file_record.embedding_status = "completed"
-            file_record.embedding_completed_at = datetime.now(timezone.utc)
-            file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
-            file_record.reason = f"Embedding creation completed successfully. Updated {total_chunks} chunks."
-            db_session.commit()
+            #file_record.embedding_status = "completed"
+            #file_record.embedding_completed_at = datetime.now(timezone.utc)
+            #file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
+            #file_record.reason = f"Embedding creation completed successfully. Updated {total_chunks} chunks."
+            #db_session.commit()
 
             # Neo4j'ye completed status sync et
-            try:
-                logging.info(
-                    f"📤 Attempting Neo4j sync for embedding completion: file_name={original_name}, "
-                    f"upload_status={file_record.upload_status}, "
-                    f"chunking_status={file_record.chunking_status}, "
-                    f"graph_status={file_record.graph_status}, "
-                    f"embedding_status={file_record.embedding_status}"
-                )
-                from src.models.status_sync import sync_queue_db_status_to_neo4j
+            #try:
+                #logging.info(
+                    #f"📤 Attempting Neo4j sync for embedding completion: file_name={original_name}, "
+                    #f"upload_status={file_record.upload_status}, "
+                    #f"chunking_status={file_record.chunking_status}, "
+                    #f"graph_status={file_record.graph_status}, "
+                    #f"embedding_status={file_record.embedding_status}"
+                #)
+                #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                graph_connection = create_graph_database_connection(
-                    uri=uri, userName=userName, password=password, database=database
-                )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=original_name,
-                    upload_status=file_record.upload_status,
-                    chunking_status=file_record.chunking_status,
-                    graph_status=file_record.graph_status,
-                    embedding_status=file_record.embedding_status,
-                    database=database,
-                )
-            except Exception as sync_error:
-                logging.warning(
-                    f"⚠️ Could not sync embedding status to Neo4j: {str(sync_error)}"
-                )
+                #graph_connection = create_graph_database_connection(
+                    #uri=uri, userName=userName, password=password, database=database
+                #)
+                #sync_queue_db_status_to_neo4j(
+                    #graph=graph_connection,
+                    #file_name=original_name,
+                    #upload_status=file_record.upload_status,
+                    #chunking_status=file_record.chunking_status,
+                    #graph_status=file_record.graph_status,
+                    #embedding_status=file_record.embedding_status,
+                    #database=database,
+                #)
+            #except Exception as sync_error:
+                #logging.warning(
+                    #f"⚠️ Could not sync embedding status to Neo4j: {str(sync_error)}"
+                #)
 
-            logging.info(f"✅ Embedding creation completed for: {original_name}")
-            logging.info(
-                f"📊 Updated {total_chunks} chunks with {embedding_model} embeddings"
-            )
+            #logging.info(f"✅ Embedding creation completed for: {original_name}")
+            #logging.info(
+                #f"📊 Updated {total_chunks} chunks with {embedding_model} embeddings"
+            #)
 
-        except Exception as process_error:
-            error_msg = str(process_error)
-            logging.error(f"❌ Embedding creation error: {error_msg}")
+        #except Exception as process_error:
+            #error_msg = str(process_error)
+            #logging.error(f"❌ Embedding creation error: {error_msg}")
 
             # Update status to failed
-            file_record.embedding_status = "failed"
-            file_record.embedding_completed_at = datetime.now(timezone.utc)
-            file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
-            file_record.reason = f"Embedding creation failed: {error_msg}"
-            db_session.commit()
+            #file_record.embedding_status = "failed"
+            #file_record.embedding_completed_at = datetime.now(timezone.utc)
+            #file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
+            #file_record.reason = f"Embedding creation failed: {error_msg}"
+            #db_session.commit()
 
             # Neo4j'ye failed status sync et
-            try:
-                logging.info(
-                    f"📤 Attempting Neo4j sync for embedding FAILURE: file_name={original_name}, "
-                    f"upload_status={file_record.upload_status}, "
-                    f"chunking_status={file_record.chunking_status}, "
-                    f"graph_status={file_record.graph_status}, "
-                    f"embedding_status=failed"
-                )
-                from src.models.status_sync import sync_queue_db_status_to_neo4j
+            #try:
+                #logging.info(
+                    #f"📤 Attempting Neo4j sync for embedding FAILURE: file_name={original_name}, "
+                    #f"upload_status={file_record.upload_status}, "
+                    #f"chunking_status={file_record.chunking_status}, "
+                    #f"graph_status={file_record.graph_status}, "
+                    #f"embedding_status=failed"
+                #)
+                #from src.models.status_sync import sync_queue_db_status_to_neo4j
 
-                graph_connection = create_graph_database_connection(
-                    uri=uri, userName=userName, password=password, database=database
-                )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=original_name,
-                    upload_status=file_record.upload_status,
-                    chunking_status=file_record.chunking_status,
-                    graph_status=file_record.graph_status,
-                    embedding_status="failed",
-                    database=database,
-                )
-            except Exception as sync_error:
-                logging.warning(
-                    f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
-                )
+                #graph_connection = create_graph_database_connection(
+                    #uri=uri, userName=userName, password=password, database=database
+                #)
+                #sync_queue_db_status_to_neo4j(
+                    #graph=graph_connection,
+                    #file_name=original_name,
+                    #upload_status=file_record.upload_status,
+                    #chunking_status=file_record.chunking_status,
+                    #graph_status=file_record.graph_status,
+                    #embedding_status="failed",
+                    #database=database,
+                #)
+            #except Exception as sync_error:
+                #logging.warning(
+                    #f"⚠️ Could not sync embedding failure to Neo4j: {str(sync_error)}"
+                #)
 
-    except Exception as e:
-        error_message = str(e)
-        logging.error(
-            f"❌ Background embedding creation failed for file {file_id}: {error_message}"
-        )
-    finally:
-        if db_session:
-            db_session.close()
+    #except Exception as e:
+        #error_message = str(e)
+        #logging.error(
+            #f"❌ Background embedding creation failed for file {file_id}: {error_message}"
+        #)
+    #finally:
+        #if db_session:
+            #db_session.close()
 
 
-@app.post("/api/v2/files/{file_id}/process-immediately")
-async def process_file_now(file_id: int):
-    """Process a specific file immediately (bypass queue)"""
-    try:
-        success = await process_file_immediately(file_id)
+#@app.post("/api/v2/files/{file_id}/process-immediately")
+#async def process_file_now(file_id: int):
+    #"""Process a specific file immediately using celery task"""
+    #try:
+        # Queue celery pipeline task
+        #celery_app.send_task("src.tasks.process_file_pipeline", args=[file_id])
+        
+        #return create_api_response(
+            #"Success",
+            #message="File processing started via celery worker",
+            #data={"file_id": file_id, "status": "queued"},
+        #)
 
-        if success:
-            return create_api_response(
-                "Success",
-                message="File processed successfully",
-                data={"file_id": file_id, "status": "completed"},
-            )
-        else:
-            return create_api_response(
-                "Failed",
-                message="File processing failed",
-                data={"file_id": file_id, "status": "error"},
-            )
-
-    except Exception as e:
-        error_message = str(e)
-        logging.error(
-            f"❌ Immediate processing failed for file {file_id}: {error_message}"
-        )
-        return create_api_response(
-            "Failed", message="Immediate processing failed", error=error_message
-        )
+    #except Exception as e:
+        #error_message = str(e)
+        #logging.error(
+            #f"❌ Immediate processing failed for file {file_id}: {error_message}"
+        #)
+        #return create_api_response(
+            #"Failed", message="Immediate processing failed", error=error_message
+        #)
 
 
 if __name__ == "__main__":

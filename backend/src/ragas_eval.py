@@ -2,21 +2,46 @@ import os
 import logging
 import time
 from src.llm import get_llm
-from datasets import Dataset
-from dotenv import load_dotenv
-from ragas import evaluate
-from ragas.metrics import answer_relevancy, faithfulness,context_entity_recall
-from src.shared.common_fn import load_embedding_model 
-from ragas.dataset_schema import SingleTurnSample
-from ragas.metrics import RougeScore, SemanticSimilarity, ContextEntityRecall
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
-import nltk
-
+# datasets is only needed for RAGAS evaluation, which is done in celery_worker
 try:
-    nltk.download('punkt', quiet=True)
-except Exception as e:
-    print(f"NLTK punkt download failed: {e}")
+    from datasets import Dataset
+except (ImportError, ModuleNotFoundError):
+    Dataset = None  # RAGAS evaluation is in celery_worker
+from dotenv import load_dotenv
+# ragas is only needed for RAGAS evaluation, which is done in celery_worker
+try:
+    from ragas import evaluate
+    from ragas.metrics import answer_relevancy, faithfulness,context_entity_recall
+    from ragas.dataset_schema import SingleTurnSample
+    from ragas.metrics import RougeScore, SemanticSimilarity, ContextEntityRecall
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+except (ImportError, ModuleNotFoundError):
+    # RAGAS evaluation is in celery_worker
+    evaluate = None
+    answer_relevancy = None
+    faithfulness = None
+    context_entity_recall = None
+    SingleTurnSample = None
+    RougeScore = None
+    SemanticSimilarity = None
+    ContextEntityRecall = None
+    LangchainLLMWrapper = None
+    LangchainEmbeddingsWrapper = None
+
+from src.shared.common_fn import load_embedding_model 
+# nltk is only needed for text processing, which is done in celery_worker
+try:
+    import nltk
+except (ImportError, ModuleNotFoundError):
+    nltk = None  # Text processing is in celery_worker
+
+# nltk download is only needed if nltk is available
+if nltk is not None:
+    try:
+        nltk.download('punkt', quiet=True)
+    except Exception as e:
+        print(f"NLTK punkt download failed: {e}")
     
 load_dotenv()
 

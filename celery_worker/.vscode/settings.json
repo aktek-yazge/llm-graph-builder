@@ -1,0 +1,15 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/celery_worker/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/celery_worker/src",
+    "${workspaceFolder}/backend/src"
+  ],
+  "python.analysis.venvPath": "${workspaceFolder}/celery_worker",
+  "python.analysis.venv": ".venv",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.terminal.activateEnvironment": true
+}
+
+

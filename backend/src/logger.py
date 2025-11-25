@@ -2,17 +2,25 @@ import os
 import logging
 import json
 from datetime import datetime, timezone
-from google.cloud import logging as gclogger
+# google.cloud.logging is optional - only needed if GCP logging is configured
+try:
+    from google.cloud import logging as gclogger
+except (ImportError, ModuleNotFoundError):
+    gclogger = None  # GCP logging is optional
 
 class CustomLogger:
     def __init__(self):
         self.is_gcp_log_enabled = os.environ.get("GCP_LOG_METRICS_ENABLED", "False").lower() in ("true", "1", "yes")
         
         # Initialize GCP logging if enabled
-        if self.is_gcp_log_enabled:
-            self.logging_client = gclogger.Client()
-            self.logger_name = "llm_experiments_metrics"
-            self.gcp_logger = self.logging_client.logger(self.logger_name)
+        if self.is_gcp_log_enabled and gclogger is not None:
+            try:
+                self.logging_client = gclogger.Client()
+                self.logger_name = "llm_experiments_metrics"
+                self.gcp_logger = self.logging_client.logger(self.logger_name)
+            except Exception as e:
+                logging.warning(f"⚠️ GCP logging initialization failed: {e}")
+                self.gcp_logger = None
         else:
             self.gcp_logger = None
             

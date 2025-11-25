@@ -4,7 +4,17 @@ from langchain_neo4j import Neo4jGraph
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.text_splitter import MarkdownTextSplitter
 import logging
-from src.document_sources.youtube import get_chunks_with_timestamps, get_calculated_timestamps
+# YouTube transcript functions moved to celery_worker
+# Backend should not import youtube_transcript_api
+try:
+    from src.document_sources.youtube import get_chunks_with_timestamps, get_calculated_timestamps
+except (ImportError, ModuleNotFoundError):
+    # These functions are only available in celery_worker
+    # Define stubs to avoid errors
+    def get_chunks_with_timestamps(*args, **kwargs):
+        raise NotImplementedError("YouTube transcript functions are only available in celery_worker")
+    def get_calculated_timestamps(*args, **kwargs):
+        raise NotImplementedError("YouTube transcript functions are only available in celery_worker")
 from src.utils.log_helpers import log_chunking
 import re
 import os
