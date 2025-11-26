@@ -5963,7 +5963,26 @@ KRİTİK:
     def _create_coverage_type_nodes(self, coverage_types: list, policy_id: str):
         """CoverageType node'larını oluşturur"""
         try:
+            # Eğer coverage_types None ise veya boş liste ise, erken çık
+            if not coverage_types:
+                return
+                
             for coverage_type in coverage_types:
+                # Eğer coverage_type bir liste ise (nested list durumu), düzleştir
+                if isinstance(coverage_type, list):
+                    # Nested list'i düzleştir ve her item için tekrar çağır
+                    self._create_coverage_type_nodes(coverage_type, policy_id)
+                    continue
+                
+                # Eğer coverage_type bir string ise, dict'e dönüştür
+                if isinstance(coverage_type, str):
+                    coverage_type = {"name": coverage_type}
+                
+                # Artık coverage_type bir dict olmalı
+                if not isinstance(coverage_type, dict):
+                    logging.warning(f"⚠️ Geçersiz coverage_type formatı (type: {type(coverage_type)}): {coverage_type}")
+                    continue
+                
                 name = coverage_type.get("name", "").strip()
                 if not name:
                     continue
@@ -5998,7 +6017,24 @@ KRİTİK:
     def _create_guarantee_nodes(self, guarantees: list, policy_id: str):
         """Guarantee node'larını oluşturur"""
         try:
+            if not guarantees:
+                return
+                
             for guarantee in guarantees:
+                # Handle nested lists
+                if isinstance(guarantee, list):
+                    self._create_guarantee_nodes(guarantee, policy_id)
+                    continue
+                
+                # Handle strings
+                if isinstance(guarantee, str):
+                    guarantee = {"name": guarantee}
+                
+                # Validate dict
+                if not isinstance(guarantee, dict):
+                    logging.warning(f"⚠️ Geçersiz guarantee formatı: {guarantee}")
+                    continue
+                
                 name = guarantee.get("name", "").strip()
                 if not name:
                     continue
@@ -6045,7 +6081,24 @@ KRİTİK:
     def _create_clause_nodes(self, clauses: list, policy_id: str):
         """Clause node'larını oluşturur"""
         try:
+            if not clauses:
+                return
+                
             for clause in clauses:
+                # Handle nested lists
+                if isinstance(clause, list):
+                    self._create_clause_nodes(clause, policy_id)
+                    continue
+                
+                # Handle strings
+                if isinstance(clause, str):
+                    clause = {"name": clause}
+                
+                # Validate dict
+                if not isinstance(clause, dict):
+                    logging.warning(f"⚠️ Geçersiz clause formatı: {clause}")
+                    continue
+                
                 name = clause.get("name", "").strip()
                 if not name:
                     continue

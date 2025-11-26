@@ -3,7 +3,7 @@ import logging
 from google.cloud import storage
 from langchain_community.document_loaders import GCSFileLoader
 from langchain_core.documents import Document
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 import io
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 from google.oauth2.credentials import Credentials

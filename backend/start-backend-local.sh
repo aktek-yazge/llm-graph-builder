@@ -21,8 +21,8 @@ echo "📡 API will be available at: http://0.0.0.0:8000"
 echo "📊 API docs will be available at: http://0.0.0.0:8000/docs"
 echo ""
 
-# Start uvicorn
-uv run uvicorn score:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+# Start uvicorn (port 8001 to match your current setup)
+uv run uvicorn score:app --host 0.0.0.0 --port 8001 --reload --log-level debug
 
 
 

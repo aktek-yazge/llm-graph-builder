@@ -357,6 +357,7 @@ dependencies = [
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
+    { name = "langchain-aws" },
     { name = "langchain-community" },
     { name = "langchain-core" },
     { name = "langchain-docling" },
@@ -431,6 +432,7 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "langchain", specifier = "==0.3.27" },
     { name = "langchain-anthropic", specifier = "==0.3.17" },
+    { name = "langchain-aws", specifier = "==0.2.12" },
     { name = "langchain-community", specifier = "==0.3.30" },
     { name = "langchain-core", specifier = ">=0.3.78" },
     { name = "langchain-docling", specifier = "==1.1.0" },
@@ -2022,6 +2024,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e6/f7/991cefafa798c4f868637ea5733a62d15932a15d031898fcb3462253d60f/langchain_anthropic-0.3.17.tar.gz", hash = "sha256:f2c2a0382ed7992204d790ff8538448f5243f4dbb1e798256ef790c9a69033e4", size = 55831, upload-time = "2025-07-03T17:41:53.292Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/8e/055c65bdb3c240297676d57d705bee6d472f47ace6e28b009f0faf5c6970/langchain_anthropic-0.3.17-py3-none-any.whl", hash = "sha256:6df784615b93aab0336fbd6a50ca2bd16a704ef01c9488c36a4fa7aad2faf2d6", size = 29239, upload-time = "2025-07-03T17:41:52.202Z" },
+]
+
+[[package]]
+name = "langchain-aws"
+version = "0.2.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "boto3" },
+    { name = "langchain-core" },
+    { name = "numpy" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/06/e8/7b6adbf0d922889da98905a6052819d17dd6501e370b6f115e0e4e074452/langchain_aws-0.2.12.tar.gz", hash = "sha256:98122987923b5f7933d62611efa632465de1ba335736e67ff09a6f9f18f285f8", size = 80069, upload-time = "2025-01-31T22:57:10.368Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/d9/34239d9d6b92dd87fb36d48435639a3862d3decc124fd6419d36144b8739/langchain_aws-0.2.12-py3-none-any.whl", hash = "sha256:1ed3713aa9cd68016b29af1f6eba74c705d2d3e4b6b1fd92cd359cb69eb06851", size = 96705, upload-time = "2025-01-31T22:57:09.219Z" },
 ]
 
 [[package]]
