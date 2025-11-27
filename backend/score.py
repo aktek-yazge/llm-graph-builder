@@ -3153,10 +3153,13 @@ async def upload_large_file_into_chunks(
             # Create record in Queue DB and trigger Celery Task
             try:
                 queue_db = get_file_queue_db()
+                # Use S3 key if available, otherwise fallback to local path
+                file_path_for_db = result.get("s3_key") if result.get("s3_key") else os.path.join(MERGED_DIR, result["file_name"])
+                
                 file_record = queue_db.add_file(
                     filename=result["file_name"],
                     original_name=originalname,
-                    file_path=os.path.join(MERGED_DIR, result["file_name"]),
+                    file_path=file_path_for_db,
                     file_size=result["file_size"],
                     neo4j_uri=uri,
                     neo4j_database=database,

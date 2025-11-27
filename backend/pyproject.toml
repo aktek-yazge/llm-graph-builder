@@ -57,4 +57,7 @@ dependencies = [
     "langchain-text-splitters==0.3.11",
     "langchain-experimental==0.3.4",
     "langserve",
+    
+    # FastAgent MCP
+    "fast-agent-mcp",
 ]

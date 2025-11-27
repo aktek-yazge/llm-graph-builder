@@ -55,7 +55,9 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         
         Neo4j veritabanı şema bilgisi prompt'a eklenmiştir. Bu şema bilgisini kullanarak tool çağrıları yap.
         
-        **STRING NORMALİZASYON**: String karşılaştırmalarında mutlaka kullan: toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
+        **STRING NORMALİZASYON**: String karşılaştırmalarında sadece toLower() kullan (apoc.text.clean KULLANMA - yanlış eşleşmelere sebep olur!):
+        - ✅ Doğru: toLower(field) CONTAINS toLower('value')
+        - ❌ Yanlış: apoc.text.clean() - boşlukları kaldırır ve yanlış substring eşleşmelerine sebep olur (örn: "TÜLAY" içinde "ayca" bulur)
        
         Şema bilgisine göre tool çağrıları yaparak sonuca ulaşmaya çalış.
         
@@ -87,10 +89,38 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         - Chunk'larda text araması YAPMA! Entity'ler relationship üzerinden sorgulanır!
         - Şemadan öğrendiğin node türleri ve relationship'leri kullanarak sorgunu oluştur!
         
-        **CONTENT SORULARI için APOC ile text araması (SADECE İÇERİK TERİMLERİ)**: 
-        - Soruda "plan", "tablo", "detay", "açıklama", "tutar" gibi içerik terimleri varsa VE şemada bu terimlere karşılık gelen node türü YOKSA
-        - Chunk node'larında text alanında APOC ile clean contains araması yap
-        - STRING NORMALİZASYON kullan: toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
+        **CONTENT/SEMANTIC SORULARI için EMBEDDING ARAMA (KRİTİK - HER ZAMAN DENE!)**: 
+        - Soruda "taksit", "plan", "tablo", "detay", "açıklama", "tutar", "prim", "teminat", "ödeme", "ne kadar", "kaç" gibi içerik terimleri varsa
+        - **MUTLAKA `read_neo4j_cypher_with_embedding` TOOL'UNU KULLAN!**
+        - Entity araması sonuç vermezse veya detaylı bilgi gerekiyorsa → EMBEDDING ARAMA YAP!
+        
+        **⚠️ ZORUNLU KURAL**: "taksit", "prim", "tutar", "ne kadar" gibi sorularda:
+        1. ÖNCE entity araması yap (Customer, Policy bul)
+        2. Entity bulunsa bile detaylı bilgi (taksit tutarları vb.) için → `read_neo4j_cypher_with_embedding` KULLAN!
+        3. Entity bulunamazsa → `read_neo4j_cypher_with_embedding` ile Chunk'larda ara!
+        
+        **EMBEDDING ARAMA KULLANIMI (KRİTİK)**:
+        - `read_neo4j_cypher_with_embedding` tool'u TEK ÇAĞRIDA hem embedding oluşturur hem sorgu çalıştırır
+        - `query_text`: SADECE içerik kavramları (müşteri adı, tarih, kod EKLEME!)
+          - ✅ Doğru: "taksit ödeme planı", "prim tutarları", "teminat bilgileri", "DASK taksit"
+          - ❌ Yanlış: "ayça hanım 2020 taksit", "POL123 prim"
+        - `cypher_query`: $embedding_vector parametresi ZORUNLU!
+        
+        **EMBEDDING SORGU ÖRNEĞİ (MÜŞTERİ FİLTRELİ)**:
+        ```
+        query_text: "DASK taksit ödeme planı tutarları"
+        cypher_query: "MATCH (c:Chunk)-[:PART_OF]->(d:Document) WHERE c.embedding IS NOT NULL AND toLower(d.fileName) CONTAINS toLower('ayça') WITH c, d, gds.similarity.cosine(c.embedding, $embedding_vector) AS score WHERE score > 0.5 RETURN c.text, c.page_link, d.fileName, score ORDER BY score DESC LIMIT 10"
+        ```
+        
+        **EMBEDDING SORGU ÖRNEĞİ (FİLTRESİZ)**:
+        ```
+        query_text: "taksit ödeme planı tutarları"
+        cypher_query: "MATCH (c:Chunk)-[:PART_OF]->(d:Document) WHERE c.embedding IS NOT NULL WITH c, d, gds.similarity.cosine(c.embedding, $embedding_vector) AS score WHERE score > 0.5 RETURN c.text, c.page_link, d.fileName, score ORDER BY score DESC LIMIT 10"
+        ```
+        
+        **FALLBACK - TEXT ARAMA**: Embedding araması başarısız olursa text araması yap
+        - STRING NORMALİZASYON kullan: toLower(field) CONTAINS toLower('value')
+        - ❌ apoc.text.clean() KULLANMA - yanlış eşleşmelere sebep olur!
         
         **ÖNEMLİ KURALLAR**:
         1. **ŞEMADAN ÖĞREN (EN ÖNEMLİSİ)**: 
@@ -200,7 +230,7 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         **ÖRNEK KÖTÜ CEVAP (YAPMA)**:
         "Yaptığım sorgulamalar (şemaya uygun relationship'ler kullanılarak): Müşteri -> Policy (Customer)-[:HAS_POLICY]->(Policy) ile poliçe bulundu. Policy -> Payment (Policy)-[:HAS_PAYMENT]->(Payment) ilişkisi üzerinden ödeme kayıtları kontrol edildi. Nasıl devam edeyim?"
         """,
-        servers=["neo4j-database", "embedding"],
+        servers=["neo4j-database"],
         request_params=RequestParams(
             max_iterations=15,
         ),
@@ -368,6 +398,9 @@ class FastAgentIntegration:
             properties = (
                 node_data.get("properties", []) if isinstance(node_data, dict) else []
             )
+            # properties None olabilir, boş liste yap
+            if properties is None:
+                properties = []
 
             # İlk 6 property'yi kısa tip bilgisiyle al
             props_with_types = []

@@ -36,10 +36,10 @@ def process_file_pipeline(self, file_id: int):
         # Each task receives file_id and returns it for the next task
         from celery import chain
         
-        # Create chain: each task returns file_id, next task receives it as first argument
+        # Create chain: chunk_file -> create_graph
+        # Each task returns file_id, next task receives it as first argument
         workflow = chain(
-            extract_images_task.s(file_id),  # Returns file_id
-            chunk_file_task.s(),              # Receives file_id from previous task's return value
+            chunk_file_task.s(file_id),       # First task: Chunking (handles download if needed)
             create_graph_task.s()             # Receives file_id from previous task's return value
         )
         
@@ -55,73 +55,7 @@ def process_file_pipeline(self, file_id: int):
         logging.error(f"Traceback: {traceback.format_exc()}")
         raise
 
-@app.task(bind=True, name="src.tasks.extract_images_task")
-def extract_images_task(self, file_id: int):
-    """
-    Task to extract images from PDF
-    """
-    db = get_db()
-    db_session = db.get_db_session()
-    try:
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
-        if not file_record:
-            logging.error(f"File {file_id} not found")
-            return file_id  # Return file_id even if not found to keep chain working
 
-        logging.info(f"🖼️ Starting image extraction for file {file_id}")
-        
-        # Update status
-        file_record.chunking_status = "extracting"
-        file_record.status = "processing"
-        db_session.commit()
-
-        # Logic from background_processor.py (simplified)
-        # In a real migration, we would move the logic to a shared utility
-        # For now, I'll instantiate the processor just to use its method if possible, 
-        # OR better, re-implement the specific extraction logic here to avoid the class overhead.
-        
-        # Re-implementing core extraction logic:
-        # Lazy import to avoid SIGSEGV
-        from src.processing_utils import FileProcessor
-        processor = FileProcessor()
-        
-        # We need to run the async method in this sync task
-        # Use get_event_loop() instead of new_event_loop() to avoid SIGSEGV
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        try:
-            loop.run_until_complete(processor._process_single_file_extraction(file_record))
-        finally:
-            # Don't close the loop - it might be reused
-            pass
-        
-        # Check if successful (status should be updated by the method or we update it here)
-        # The _process_single_file_extraction method updates the DB.
-        
-        # Refresh record
-        db_session.refresh(file_record)
-        if file_record.chunking_status == "ready":
-             logging.info(f"✅ Image extraction completed for file {file_id}")
-             return file_id # Pass to next task
-        else:
-             # If it failed or didn't finish, we might raise an error
-             # But _process_single_file_extraction handles errors gracefully usually
-             return file_id
-
-    except Exception as e:
-        logging.error(f"❌ Image extraction failed: {e}")
-        # Update DB
-        if file_record:
-            file_record.chunking_status = "failed"
-            file_record.processing_error = str(e)
-            db_session.commit()
-        raise self.retry(exc=e, countdown=60, max_retries=3)
-    finally:
-        db_session.close()
 
 @app.task(bind=True, name="src.tasks.chunk_file_task")
 def chunk_file_task(self, file_id: int):

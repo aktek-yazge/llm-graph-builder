@@ -2042,11 +2042,103 @@ def upload_file(
         # Source node oluştur
         log_upload(f"Creating source node for file: {originalname} (size: {file_size} bytes)")
         file_extension = normalized_filename.split(".")[-1]
-        obj_source_node = sourceNode()
+        
+        # S3 Upload Logic
+        s3_url = None
+        s3_key = None
+        
+        # Check if S3 credentials are available
+        s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        
+        if s3_bucket and aws_access_key_id and aws_secret_access_key:
+            try:
+                log_upload(f"☁️ Starting S3 upload for merged file: {normalized_filename}")
+                
+                # S3 Key: documents/{filename}/{filename} (to match existing structure)
+                # Note: We use the file name as the folder name too
+                doc_name = Path(normalized_filename).stem
+                s3_key = f"documents/{doc_name}/{normalized_filename}"
+                
+                # Extract images from PDF before uploading (for distributed workers)
+                generated_images = []
+                if file_extension.lower() == "pdf":
+                    try:
+                        log_upload(f"🖼️ Starting image extraction for PDF: {normalized_filename}")
+                        
+                        # Create output directory for images
+                        images_dir = os.path.join(merged_dir, "../output", doc_name, "images")
+                        os.makedirs(images_dir, exist_ok=True)
+                        
+                        # Extract images using PyMuPDF
+                        generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
+                        
+                        if generated_images:
+                            log_upload(f"✅ Extracted {len(generated_images)} page images")
+                        else:
+                            log_upload(f"⚠️ No images extracted from PDF", "warning")
+                            
+                    except Exception as img_error:
+                        log_upload(f"❌ Image extraction failed: {img_error}", "error")
+                        # Continue with upload even if image extraction fails
+                
+                # Upload PDF to S3
+                s3_url = upload_single_file_to_s3(
+                    file_path=merged_file_path,
+                    bucket_name=s3_bucket,
+                    s3_key=s3_key,
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    delete_local_after_upload=True  # Delete local file after successful upload
+                )
+                
+                # Upload images to S3 if any were extracted
+                if generated_images and s3_url:
+                    try:
+                        log_upload(f"☁️ Uploading {len(generated_images)} images to S3")
+                        
+                        uploaded_urls, failed_files = upload_files_to_s3(
+                            file_paths=generated_images,
+                            bucket_name=s3_bucket,
+                            s3_prefix=f"documents/{doc_name}/images",
+                            aws_access_key_id=aws_access_key_id,
+                            aws_secret_access_key=aws_secret_access_key,
+                            delete_local_after_upload=True  # Delete local images after upload
+                        )
+                        
+                        if uploaded_urls:
+                            log_upload(f"✅ Uploaded {len(uploaded_urls)} images to S3")
+                        if failed_files:
+                            log_upload(f"⚠️ Failed to upload {len(failed_files)} images", "warning")
+                            
+                    except Exception as img_upload_error:
+                        log_upload(f"❌ Image upload to S3 failed: {img_upload_error}", "error")
+                
+                if s3_url:
+                    log_upload(f"✅ Successfully uploaded to S3: {s3_url}")
+                    # Update file source to S3
+                    obj_source_node = sourceNode()
+                    obj_source_node.file_source = "s3"
+                    obj_source_node.awsAccessKeyId = aws_access_key_id # Store key ID for reference if needed
+                else:
+                    log_upload(f"❌ S3 upload failed, keeping local file", "error")
+                    # Fallback to local file
+                    obj_source_node = sourceNode()
+                    obj_source_node.file_source = "local file"
+            except Exception as s3_error:
+                log_upload(f"❌ S3 upload exception: {s3_error}", "error")
+                # Fallback to local file
+                obj_source_node = sourceNode()
+                obj_source_node.file_source = "local file"
+        else:
+            log_upload(f"ℹ️ S3 credentials not found, skipping S3 upload")
+            obj_source_node = sourceNode()
+            obj_source_node.file_source = "local file"
+
         obj_source_node.file_name = normalized_filename  # Already normalized
         obj_source_node.file_type = file_extension
         obj_source_node.file_size = file_size
-        obj_source_node.file_source = "local file"
         obj_source_node.model = model
         obj_source_node.created_at = datetime.now()
         obj_source_node.chunkNodeCount = 0
