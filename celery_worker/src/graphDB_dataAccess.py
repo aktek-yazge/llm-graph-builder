@@ -3525,7 +3525,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                             # )
                             
                             response = client.models.generate_content(
-                                model="models/gemini-2.5-flash-lite",
+                                model="models/gemini-2.0-flash",
                                 contents=[
                                     types.Part.from_text(text=prompt),
                                 ],
@@ -4559,28 +4559,48 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
             # 13. InsuredProperty Node'u oluştur (yeni alan)
             insured_property_data = entities_data.get("insured_property")
-            if insured_property_data is None:
+            if isinstance(insured_property_data, list):
+                if len(insured_property_data) > 0 and isinstance(insured_property_data[0], dict):
+                    insured_property_data = insured_property_data[0]
+                else:
+                    insured_property_data = {}
+            elif insured_property_data is None:
                 insured_property_data = {}
             if insured_property_data.get("address") or insured_property_data.get("city") or insured_property_data.get("damageStatus"):
                 self._create_insured_property_node(insured_property_data, policy_id)
 
             # 14. InsuredPerson Node'u oluştur (yeni alan)
             insured_person_data = entities_data.get("insured_person")
-            if insured_person_data is None:
+            if isinstance(insured_person_data, list):
+                if len(insured_person_data) > 0 and isinstance(insured_person_data[0], dict):
+                    insured_person_data = insured_person_data[0]
+                else:
+                    insured_person_data = {}
+            elif insured_person_data is None:
                 insured_person_data = {}
             if insured_person_data.get("name"):
                 self._create_insured_person_node(insured_person_data, policy_id)
 
             # 15. Policyholder Node'u oluştur (yeni alan)
             policyholder_data = entities_data.get("policyholder")
-            if policyholder_data is None:
+            if isinstance(policyholder_data, list):
+                if len(policyholder_data) > 0 and isinstance(policyholder_data[0], dict):
+                    policyholder_data = policyholder_data[0]
+                else:
+                    policyholder_data = {}
+            elif policyholder_data is None:
                 policyholder_data = {}
             if policyholder_data.get("name"):
                 self._create_policyholder_node(policyholder_data, policy_id)
 
             # 16. InsuranceAmount bilgilerini Coverage ve Premium'a aktar (yeni alan)
             insurance_amount_data = entities_data.get("insurance_amount")
-            if insurance_amount_data is None:
+            if isinstance(insurance_amount_data, list):
+                if len(insurance_amount_data) > 0 and isinstance(insurance_amount_data[0], dict):
+                    insurance_amount_data = insurance_amount_data[0]
+                else:
+                    insurance_amount_data = {}
+            elif insurance_amount_data is None:
                 insurance_amount_data = {}
             if insurance_amount_data:
                 # Coverage ve Premium node'larına insurance_amount bilgilerini ekle
@@ -4750,7 +4770,7 @@ KRİTİK:
                     from google.genai import types
                     
                     response = client.models.generate_content(
-                        model="models/gemini-2.5-flash-lite",
+                        model="models/gemini-2.0-flash",
                         contents=[types.Part.from_text(text=prompt)],
                     )
                     response_text = response.text.strip() if response.text else ""
@@ -6318,11 +6338,11 @@ KRİTİK:
     def _create_insured_property_node(self, insured_property_data: dict, policy_id: str):
         """InsuredProperty node'u oluşturur (sigortalanan yer bilgileri)"""
         try:
-            address = insured_property_data.get("address", "").strip()
-            city = insured_property_data.get("city", "").strip()
-            district = insured_property_data.get("district", "").strip()
-            neighborhood = insured_property_data.get("neighborhood", "").strip()
-            damage_status = insured_property_data.get("damageStatus", "").strip()
+            address = (insured_property_data.get("address") or "").strip()
+            city = (insured_property_data.get("city") or "").strip()
+            district = (insured_property_data.get("district") or "").strip()
+            neighborhood = (insured_property_data.get("neighborhood") or "").strip()
+            damage_status = (insured_property_data.get("damageStatus") or "").strip()
 
             if not (address or city or damage_status):
                 return

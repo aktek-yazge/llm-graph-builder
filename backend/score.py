@@ -5789,7 +5789,8 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     .all()
                 )
             elif stage == "chunking":
-                # Reset all files that have chunking_status in ["chunked", "chunking", "ready", "failed"]
+                # Reset files that need chunking reset (exclude graph_status="completed")
+                # Only reset files where graph creation is NOT completed
                 files_to_reset = (
                     db_session.query(UploadedFile)
                     .filter(UploadedFile.upload_status == "uploaded")
@@ -5797,6 +5798,9 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                         UploadedFile.chunking_status.in_(
                             ["chunked", "chunking", "ready", "failed"]
                         )
+                    )
+                    .filter(
+                        UploadedFile.graph_status != "completed"  # Don't touch completed files
                     )
                     .all()
                 )
@@ -5852,6 +5856,120 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     file_record.graph_completed_at = None
                     file_record.embedding_started_at = None
                     file_record.embedding_completed_at = None
+                    
+                    # Delete markdown file to force re-chunking
+                    logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
+                    if file_record.markdown_path:
+                        # Convert relative path to absolute (try both backend and celery_worker directories)
+                        md_path = file_record.markdown_path
+                        if not os.path.isabs(md_path):
+                            # Try celery_worker directory first
+                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                            backend_path = os.path.join(project_root, "backend", md_path)
+                            
+                            if os.path.exists(celery_worker_path):
+                                md_path = celery_worker_path
+                                logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
+                            elif os.path.exists(backend_path):
+                                md_path = backend_path
+                                logging.info(f"🔍 Found markdown in backend: {md_path}")
+                            else:
+                                logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
+                        
+                        logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
+                        if os.path.exists(md_path):
+                            try:
+                                os.remove(md_path)
+                                logging.info(f"🗑️ Deleted markdown file: {md_path}")
+                                file_record.markdown_path = None
+                            except Exception as md_error:
+                                logging.warning(f"⚠️ Could not delete markdown file for {file_record.original_name}: {str(md_error)}")
+                        else:
+                            logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
+                            file_record.markdown_path = None  # Clear invalid path
+                    else:
+                        logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
+                    
+                    # Delete existing chunks and related entities from Neo4j (preserve Document)
+                    try:
+                        from src.shared.common_fn import create_graph_database_connection
+                        neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                        
+                        if neo4j_uri:
+                            graph_connection = create_graph_database_connection(
+                                neo4j_uri,
+                                os.environ.get("NEO4J_USERNAME"),
+                                os.environ.get("NEO4J_PASSWORD"),
+                                neo4j_database,
+                            )
+                            
+                            # Step 1: Delete chunks and their direct relationships
+                            delete_chunks_query = """
+                            MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
+                            DETACH DELETE c
+                            RETURN count(c) as deletedChunks
+                            """
+                            chunk_result = graph_connection.query(delete_chunks_query, {"fileName": file_record.filename})
+                            deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
+                            
+                            # Step 2: Delete document-related entities (Policy and connected nodes)
+                            # Find all nodes connected to this document through any path (up to 3 hops)
+                            delete_entities_query = """
+                            MATCH (d:Document {fileName: $fileName})
+                            
+                            // Find Policy nodes connected via DOCUMENTED_IN
+                            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+                            
+                            // Find all nodes connected to Policy (1-2 hops)
+                            OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
+                            WHERE relatedNode IS NOT NULL
+                              AND NOT relatedNode:Document 
+                              AND NOT relatedNode:Chunk
+                              AND NOT relatedNode:`__Community__`
+                            
+                            // Safety check: only delete if not connected to other documents
+                            WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
+                            WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
+                                AND NOT EXISTS {
+                                    MATCH (node)-[*1..3]-(otherDoc:Document)
+                                    WHERE otherDoc.fileName <> $fileName
+                                }] AS safeNodes
+                            
+                            // Delete safe nodes and policy
+                            FOREACH (node IN safeNodes | DETACH DELETE node)
+                            WITH d, p, size(safeNodes) as deletedRelated
+                            
+                            // Delete policy if exists
+                            DETACH DELETE p
+                            
+                            RETURN deletedRelated
+                            """
+                            entity_result = graph_connection.query(delete_entities_query, {"fileName": file_record.filename})
+                            deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
+                            
+                            # Step 3: Clean up orphan nodes (nodes with no relationships)
+                            cleanup_orphans_query = """
+                            MATCH (n)
+                            WHERE NOT n:Document 
+                              AND NOT n:Chunk 
+                              AND NOT n:`__Community__`
+                              AND NOT EXISTS { (n)--() }
+                            DETACH DELETE n
+                            RETURN count(n) as deletedOrphans
+                            """
+                            orphan_result = graph_connection.query(cleanup_orphans_query)
+                            deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
+                            
+                            total_deleted = deleted_chunks + deleted_entities + deleted_orphans
+                            if total_deleted > 0:
+                                logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans")
+                        else:
+                            logging.warning("⚠️ Neo4j URI not configured, skipping chunk deletion")
+                    except Exception as neo4j_error:
+                        logging.warning(f"⚠️ Could not delete chunks from Neo4j for {file_record.original_name}: {str(neo4j_error)}")
+                    
                     reset_count += 1
 
                 elif stage == "graph":
@@ -5974,9 +6092,125 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
             file_record.graph_completed_at = None
             file_record.embedding_started_at = None
             file_record.embedding_completed_at = None
+            
+            # Delete markdown file to force re-chunking
+            logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
+            if file_record.markdown_path:
+                # Convert relative path to absolute (try both backend and celery_worker directories)
+                md_path = file_record.markdown_path
+                if not os.path.isabs(md_path):
+                    # Try celery_worker directory first
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                    backend_path = os.path.join(project_root, "backend", md_path)
+                    
+                    if os.path.exists(celery_worker_path):
+                        md_path = celery_worker_path
+                        logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
+                    elif os.path.exists(backend_path):
+                        md_path = backend_path
+                        logging.info(f"🔍 Found markdown in backend: {md_path}")
+                    else:
+                        logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
+                
+                logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
+                if os.path.exists(md_path):
+                    try:
+                        os.remove(md_path)
+                        logging.info(f"🗑️ Deleted markdown file: {md_path}")
+                        file_record.markdown_path = None
+                    except Exception as md_error:
+                        logging.warning(f"⚠️ Could not delete markdown file: {str(md_error)}")
+                else:
+                    logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
+                    file_record.markdown_path = None  # Clear invalid path
+            else:
+                logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
+            
+            
+            # Delete existing chunks and related entities from Neo4j (preserve Document)
+            try:
+                from src.shared.common_fn import create_graph_database_connection
+                neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                
+                if neo4j_uri:
+                    graph_connection = create_graph_database_connection(
+                        neo4j_uri,
+                        os.environ.get("NEO4J_USERNAME"),
+                        os.environ.get("NEO4J_PASSWORD"),
+                        neo4j_database,
+                    )
+                    
+                    # Step 1: Delete chunks and their direct relationships
+                    delete_chunks_query = """
+                    MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
+                    DETACH DELETE c
+                    RETURN count(c) as deletedChunks
+                    """
+                    chunk_result = graph_connection.query(delete_chunks_query, {"fileName": file_record.filename})
+                    deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
+                    
+                    # Step 2: Delete document-related entities (Policy and connected nodes)
+                    delete_entities_query = """
+                    MATCH (d:Document {fileName: $fileName})
+                    
+                    // Find Policy nodes connected via DOCUMENTED_IN
+                    OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+                    
+                    // Find all nodes connected to Policy (1-2 hops)
+                    OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
+                    WHERE relatedNode IS NOT NULL
+                      AND NOT relatedNode:Document 
+                      AND NOT relatedNode:Chunk
+                      AND NOT relatedNode:`__Community__`
+                    
+                    // Safety check: only delete if not connected to other documents
+                    WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
+                    WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
+                        AND NOT EXISTS {
+                            MATCH (node)-[*1..3]-(otherDoc:Document)
+                            WHERE otherDoc.fileName <> $fileName
+                        }] AS safeNodes
+                    
+                    // Delete safe nodes and policy
+                    FOREACH (node IN safeNodes | DETACH DELETE node)
+                    WITH d, p, size(safeNodes) as deletedRelated
+                    
+                    // Delete policy if exists
+                    DETACH DELETE p
+                    
+                    RETURN deletedRelated
+                    """
+                    entity_result = graph_connection.query(delete_entities_query, {"fileName": file_record.filename})
+                    deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
+                    
+                    # Step 3: Clean up orphan nodes (nodes with no relationships)
+                    cleanup_orphans_query = """
+                    MATCH (n)
+                    WHERE NOT n:Document 
+                      AND NOT n:Chunk 
+                      AND NOT n:`__Community__`
+                      AND NOT EXISTS { (n)--() }
+                    DETACH DELETE n
+                    RETURN count(n) as deletedOrphans
+                    """
+                    orphan_result = graph_connection.query(cleanup_orphans_query)
+                    deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
+                    
+                    total_deleted = deleted_chunks + deleted_entities + deleted_orphans
+                    if total_deleted > 0:
+                        logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans")
+                else:
+                    logging.warning("⚠️ Neo4j URI not configured, skipping chunk deletion")
+            except Exception as neo4j_error:
+                logging.warning(f"⚠️ Could not delete chunks from Neo4j: {str(neo4j_error)}")
+            
             logging.info(
                 f"🔄 Reset CHUNKING stage for file {file_id_int} (cascaded to graph, chunking_status={file_record.chunking_status})"
             )
+
+
 
         elif stage == "graph":
             # Reset only graph
@@ -6035,6 +6269,7 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                 f"⚠️ Could not sync reset status to Neo4j: {str(sync_error)}"
             )
 
+        db_session.commit()
         return create_api_response(
             "Success",
             message=f"{stage.capitalize()} stage reset",

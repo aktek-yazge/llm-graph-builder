@@ -127,7 +127,7 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                 logging.info(f"🔍 Sending {len(images_to_analyze)} image(s) to Gemini for document type detection...")
                 
                 doc_type_response = client.models.generate_content(
-                    model="models/gemini-2.5-flash-lite",
+                    model="models/gemini-2.0-flash",
                     contents=parts,
                 )
                 
@@ -245,7 +245,7 @@ CONTEXT HANDLING:
 Return ONLY the markdown content with <CHUNK> tags, nothing else."""
 
                 response = client.models.generate_content(
-                    model="models/gemini-2.5-flash-lite",
+                    model="models/gemini-2.0-flash",
                     contents=[
                         types.Part.from_text(text=prompt_text),
                         types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
@@ -287,6 +287,54 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
 
     except Exception as e:
         logging.error(f"Gemini processing error: {e}")
+
+    # Upload Markdown to S3 if generated
+    if result.get("markdown"):
+        try:
+            s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+            aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+            
+            if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                from src.document_sources.s3_upload_utils import upload_single_file_to_s3
+                
+                # Save markdown to a temporary file for upload
+                doc_name = Path(sorted_images[0]).stem.split("_page_")[0] if sorted_images else "document"
+                # If image_source is local, try to get doc_name from parent folder
+                if image_source == "local" and sorted_images:
+                     # output/images/doc_name_page_1.png -> doc_name
+                     pass
+
+                # Create a temp file for markdown
+                md_filename = f"{doc_name}.md"
+                md_path = os.path.join(os.environ.get("OUTPUT_DIR", "output"), doc_name, md_filename)
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(md_path), exist_ok=True)
+                
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(result["markdown"])
+                
+                result["local_path"] = md_path
+                
+                # Upload to S3: documents/{doc_name}/md/{doc_name}.md
+                s3_key = f"documents/{doc_name}/md/{md_filename}"
+                
+                s3_url = upload_single_file_to_s3(
+                    file_path=md_path,
+                    bucket_name=s3_bucket,
+                    s3_key=s3_key,
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    delete_local_after_upload=False # Don't delete yet, might be needed for graph creation
+                )
+                
+                if s3_url:
+                    logging.info(f"✅ Markdown uploaded to S3: {s3_url}")
+                    result["s3_url"] = s3_url
+                    
+        except Exception as s3_error:
+            logging.error(f"❌ Failed to upload markdown to S3: {s3_error}")
 
     return result
 
@@ -342,9 +390,22 @@ async def processing_source_v2(
         
         graphDb_data_Access = graphDBdataAccess(graph)
         
-        # Chunk'ları oluştur (V2 için)
-        if pages:
-            logging.info(f"🧩 Creating {len(pages)} chunks for V2 file: {file_name}")
+        # Chunk'ları kontrol et - chunking aşamasında oluşturulmuş olmalı
+        # Eğer yoksa (eski versiyon veya hata durumu) oluştur
+        existing_check_query = """
+            MATCH (c:Chunk {fileName: $file_name})
+            RETURN count(c) as chunk_count
+        """
+        existing_result = await asyncio.to_thread(
+            lambda: graph.query(existing_check_query, {"file_name": file_name})
+        )
+        existing_chunk_count = existing_result[0]['chunk_count'] if existing_result else 0
+        
+        if existing_chunk_count > 0:
+            logging.info(f"✅ Found {existing_chunk_count} existing chunks for: {file_name} (created in chunking phase)")
+        elif pages:
+            # Chunk'lar yok, oluştur (geriye dönük uyumluluk için)
+            logging.info(f"🧩 No existing chunks found, creating {len(pages)} chunks for V2 file: {file_name}")
             logging.info(f"🔄 V2: Starting create_chunks_for_upload for: {file_name} (async, non-blocking)")
             await create_chunks_for_upload(graph, pages, file_name, page_images=page_images)
             logging.info(f"✅ Chunks created successfully for: {file_name}")
@@ -538,6 +599,22 @@ async def processing_source_v2(
         
         return uri_latency, response
 
+    finally:
+        # Cleanup temporary files if enabled
+        cleanup_enabled = os.environ.get("CLEANUP_TEMP_FILES", "false").lower() == "true"
+        if cleanup_enabled:
+            try:
+                doc_name = Path(file_name).stem
+                output_dir = os.environ.get("OUTPUT_DIR", "output")
+                doc_output_dir = os.path.join(output_dir, doc_name)
+                
+                if os.path.exists(doc_output_dir):
+                    import shutil
+                    shutil.rmtree(doc_output_dir)
+                    logging.info(f"🧹 Cleaned up temporary directory: {doc_output_dir}")
+            except Exception as cleanup_error:
+                logging.warning(f"⚠️ Failed to cleanup temporary directory: {cleanup_error}")
+
 
 class FileProcessor:
     """Background task processor for file queue"""
@@ -651,7 +728,7 @@ class FileProcessor:
                     normalized_filename, "output"
                 )
 
-                # Check if images already exist locally
+                # 1. Check if images already exist locally
                 doc_name = Path(normalized_filename).stem
                 local_images_exist = False
                 local_image_files = []
@@ -669,39 +746,8 @@ class FileProcessor:
                         logging.info(
                             f"📁 V2: Found {len(local_image_files)} existing page images locally for: {file_record.original_name}"
                         )
-
-                # Check if images exist in S3
-                s3_bucket = os.environ.get(
-                    "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
-                )
-                aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-                aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-
-                s3_images_exist = False
-                s3_image_names = []
-
-                if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                    from src.document_sources.s3_upload_utils import (
-                        check_document_images_exist_in_s3,
-                    )
-
-                    s3_images_exist, s3_image_names = check_document_images_exist_in_s3(
-                        doc_name, s3_bucket, aws_access_key_id, aws_secret_access_key
-                    )
-
-                    if s3_images_exist:
-                        logging.info(
-                            f"☁️ V2: Found {len(s3_image_names)} existing page images in S3 for: {file_record.original_name}"
-                        )
-
-                # If images exist locally or in S3, skip image generation
-                if local_images_exist or s3_images_exist:
-                    logging.info(
-                        f"⏭️ V2: Skipping image extraction for: {file_record.original_name} (images already exist)"
-                    )
-
-                    # Use existing images
-                    if local_images_exist:
+                        
+                        # Use existing local images
                         from src.utf8_utils import normalize_file_name
 
                         generated_images = local_image_files
@@ -712,101 +758,91 @@ class FileProcessor:
                         logging.info(
                             f"✅ V2: Using {len(page_images)} existing local page images for: {file_record.original_name}"
                         )
-                    else:
-                        # Images exist in S3 but not locally - download them
-                        logging.info(
-                            f"📥 V2: Images exist in S3 but not locally, downloading {len(s3_image_names)} images for: {file_record.original_name}"
+
+                # 2. If not local, check if images exist in S3
+                s3_images_exist = False
+                s3_image_names = []
+                
+                if not local_images_exist:
+                    s3_bucket = os.environ.get(
+                        "S3_BACKUP_BUCKET", "llm-graph-builder-backup"
+                    )
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        from src.document_sources.s3_upload_utils import (
+                            check_document_images_exist_in_s3,
                         )
 
-                        # Download images from S3 to local directory
-                        # Note: Use original S3 image names for download (they may not be normalized in S3)
-                        loop = asyncio.get_event_loop()
-                        with ThreadPoolExecutor(max_workers=1) as download_executor:
-                            from src.document_sources.s3_upload_utils import (
-                                download_images_from_s3,
-                            )
-
-                            def download_images():
-                                return download_images_from_s3(
-                                    s3_image_names,  # Use original S3 names for download
-                                    s3_bucket,
-                                    doc_name,
-                                    images_dir,
-                                    aws_access_key_id,
-                                    aws_secret_access_key,
-                                )
-
-                            downloaded_images = await loop.run_in_executor(
-                                download_executor, download_images
-                            )
-
-                        # Check if all images were downloaded successfully
-                        # If some images failed to download (404), we need to extract locally
-                        downloaded_count = (
-                            len(downloaded_images) if downloaded_images else 0
+                        s3_images_exist, s3_image_names = check_document_images_exist_in_s3(
+                            doc_name, s3_bucket, aws_access_key_id, aws_secret_access_key
                         )
-                        expected_count = len(s3_image_names)
 
-                        if downloaded_count == expected_count and downloaded_count > 0:
-                            # All images downloaded successfully
-                            from src.utf8_utils import normalize_file_name
-
-                            generated_images = downloaded_images
-                            # Normalize image names before saving to database
-                            page_images = [
-                                normalize_file_name(os.path.basename(img))
-                                for img in downloaded_images
-                            ]
+                        if s3_images_exist:
                             logging.info(
-                                f"✅ V2: Downloaded {len(page_images)} images from S3 for: {file_record.original_name}"
+                                f"☁️ V2: Found {len(s3_image_names)} existing page images in S3 for: {file_record.original_name}"
                             )
-                        else:
-                            # Some or all images failed to download - extract locally
-                            logging.warning(
-                                f"⚠️ V2: Failed to download all images from S3 for: {file_record.original_name} "
-                                f"({downloaded_count}/{expected_count} downloaded), will extract locally from PDF"
+                            
+                            # Download images from S3 to local directory
+                            logging.info(
+                                f"📥 V2: Images exist in S3 but not locally, downloading {len(s3_image_names)} images for: {file_record.original_name}"
                             )
-                            # Fallback: generate new images from PDF
+
                             loop = asyncio.get_event_loop()
-                            with ThreadPoolExecutor(max_workers=1) as image_executor:
-                                from src.document_sources.local_file import (
-                                    generate_page_images_with_pymupdf,
+                            with ThreadPoolExecutor(max_workers=1) as download_executor:
+                                from src.document_sources.s3_upload_utils import (
+                                    download_images_from_s3,
                                 )
 
-                                def gen_images():
-                                    return generate_page_images_with_pymupdf(
-                                        file_path, images_dir
+                                def download_images():
+                                    return download_images_from_s3(
+                                        s3_image_names,
+                                        s3_bucket,
+                                        doc_name,
+                                        images_dir,
+                                        aws_access_key_id,
+                                        aws_secret_access_key,
                                     )
 
-                                generated_images = await loop.run_in_executor(
-                                    image_executor, gen_images
+                                downloaded_images = await loop.run_in_executor(
+                                    download_executor, download_images
                                 )
 
-                            if not generated_images:
-                                logging.warning(
-                                    f"⚠️ V2: No images generated for: {file_record.original_name}"
-                                )
-                                file_record.chunking_status = (
-                                    "ready"  # Ready for chunking even without images
-                                )
-                                db_session.commit()
-                                return
-
-                            from src.utf8_utils import normalize_file_name
-
-                            page_images = [
-                                normalize_file_name(os.path.basename(img))
-                                for img in generated_images
-                            ]
-                            logging.info(
-                                f"✅ V2: Generated {len(page_images)} new page images for: {file_record.original_name}"
+                            # Check if all images were downloaded successfully
+                            downloaded_count = (
+                                len(downloaded_images) if downloaded_images else 0
                             )
-                else:
-                    # Generate page images with PyMuPDF
-                    logging.info(
-                        f"🖼️ V2: No existing images found, generating new images for: {file_record.original_name}"
-                    )
+                            expected_count = len(s3_image_names)
 
+                            if downloaded_count == expected_count and downloaded_count > 0:
+                                # All images downloaded successfully
+                                from src.utf8_utils import normalize_file_name
+
+                                generated_images = downloaded_images
+                                page_images = [
+                                    normalize_file_name(os.path.basename(img))
+                                    for img in downloaded_images
+                                ]
+                                logging.info(
+                                    f"✅ V2: Downloaded {len(page_images)} images from S3 for: {file_record.original_name}"
+                                )
+                                # Mark as found in S3 to skip extraction
+                                s3_images_exist = True
+                            else:
+                                # Some or all images failed to download - will extract locally
+                                logging.warning(
+                                    f"⚠️ V2: Failed to download all images from S3 for: {file_record.original_name} "
+                                    f"({downloaded_count}/{expected_count} downloaded), will extract locally from PDF"
+                                )
+                                s3_images_exist = False
+
+                # 3. If neither local nor S3 (or S3 download failed), extract from PDF
+                if not local_images_exist and not s3_images_exist:
+                    logging.info(
+                        f"⚙️ V2: Images not found locally or in S3, extracting from PDF: {file_record.original_name}"
+                    )
+                    
                     loop = asyncio.get_event_loop()
                     with ThreadPoolExecutor(max_workers=1) as image_executor:
                         from src.document_sources.local_file import (
@@ -822,25 +858,26 @@ class FileProcessor:
                             image_executor, gen_images
                         )
 
+                    # 4. If extraction fails, throw error
                     if not generated_images:
-                        logging.warning(
-                            f"⚠️ V2: No images generated for: {file_record.original_name}"
-                        )
-                        file_record.chunking_status = (
-                            "ready"  # Ready for chunking even without images
-                        )
+                        error_msg = f"❌ V2: Failed to generate images for: {file_record.original_name}"
+                        logging.error(error_msg)
+                        # Mark as failed
+                        file_record.chunking_status = "failed"
+                        file_record.chunking_error = "Image generation failed"
                         db_session.commit()
-                        return
+                        raise Exception(error_msg)
 
-                    logging.info(
-                        f"✅ V2: Generated {len(generated_images)} page images for: {file_record.original_name}"
-                    )
                     from src.utf8_utils import normalize_file_name
 
                     page_images = [
                         normalize_file_name(os.path.basename(img))
                         for img in generated_images
                     ]
+                    logging.info(
+                        f"✅ V2: Generated {len(page_images)} new page images for: {file_record.original_name}"
+                    )
+
 
                 # S3 upload configuration
                 doc_link = None
@@ -1068,12 +1105,128 @@ class FileProcessor:
 
                 # Check if markdown already exists
                 if file_record.markdown_path and os.path.exists(file_record.markdown_path):
-                    # Markdown exists, mark as chunked
+                    # Markdown exists - read it and create Neo4j nodes
+                    logging.info(f"📝 Markdown file exists, reading and creating Neo4j nodes: {file_record.markdown_path}")
+                    
+                    from concurrent.futures import ThreadPoolExecutor
+                    from src.utf8_utils import normalize_file_name
+                    from langchain_core.documents import Document
+                    
+                    normalized_filename = normalize_file_name(file_record.original_name)
+                    
+                    # Markdown dosyasını oku
+                    with open(file_record.markdown_path, "r", encoding="utf-8") as md_file:
+                        markdown_text = md_file.read()
+                    
+                    # page_images'ı al
+                    page_images = []
+                    if file_record.page_images:
+                        try:
+                            page_images = json.loads(file_record.page_images)
+                        except:
+                            pass
+                    
+                    # Neo4j Document ve Chunk node'larını oluştur
+                    try:
+                        uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        userName = os.environ.get("NEO4J_USERNAME")
+                        password = os.environ.get("NEO4J_PASSWORD")
+                        database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                        
+                        if uri and userName and password:
+                            graph = create_graph_database_connection(uri, userName, password, database)
+                            
+                            # Document node oluştur
+                            from src.graphDB_dataAccess import graphDBdataAccess
+                            graphDb_data_Access = graphDBdataAccess(graph)
+                            graphDb_data_Access.create_source_node(normalized_filename, skip_entity_extraction=True)
+                            logging.info(f"✅ Document node created/updated: {normalized_filename}")
+                            
+                            # Chunk'lara ayır ve Neo4j'ye yaz
+                            min_chunk_size = 150
+                            raw_chunks = []
+                            separators = ["## ", "\n\n", "\n"]
+                            current_text = markdown_text
+                            
+                            for sep in separators:
+                                if sep in current_text:
+                                    parts = current_text.split(sep)
+                                    for i, part in enumerate(parts):
+                                        if part.strip():
+                                            if i > 0 and sep == "## ":
+                                                raw_chunks.append({"text": sep + part.strip(), "page": 1})
+                                            else:
+                                                raw_chunks.append({"text": part.strip(), "page": 1})
+                                    break
+                            else:
+                                if current_text.strip():
+                                    raw_chunks.append({"text": current_text.strip(), "page": 1})
+                            
+                            # Küçük chunk'ları birleştir
+                            merged_chunks = []
+                            current_chunk_text = ""
+                            current_chunk_page = 1
+                            
+                            for chunk_data in raw_chunks:
+                                text = chunk_data['text']
+                                page_idx = chunk_data.get('page', 1)
+                                
+                                if len(current_chunk_text) + len(text) < min_chunk_size:
+                                    if current_chunk_text:
+                                        current_chunk_text += "\n\n" + text
+                                    else:
+                                        current_chunk_text = text
+                                        current_chunk_page = page_idx
+                                else:
+                                    if current_chunk_text:
+                                        merged_chunks.append({'text': current_chunk_text, 'page': current_chunk_page})
+                                    current_chunk_text = text
+                                    current_chunk_page = page_idx
+                            
+                            if current_chunk_text:
+                                merged_chunks.append({'text': current_chunk_text, 'page': current_chunk_page})
+                            
+                            logging.info(f"🧩 Created {len(merged_chunks)} chunks from existing markdown")
+                            
+                            # Document objects oluştur
+                            chunk_documents = []
+                            for idx, chunk_data in enumerate(merged_chunks, 1):
+                                page_num = chunk_data['page']
+                                page_link = None
+                                if page_images and page_num <= len(page_images):
+                                    page_link = page_images[page_num - 1]
+                                
+                                chunk_documents.append(
+                                    Document(
+                                        page_content=chunk_data['text'],
+                                        metadata={
+                                            "chunk_id": idx,
+                                            "source": normalized_filename,
+                                            "page_number": page_num,
+                                            "page_link": page_link
+                                        }
+                                    )
+                                )
+                            
+                            # Chunk node'larını Neo4j'ye yaz
+                            if chunk_documents:
+                                from src.make_relationships import create_chunks_for_upload
+                                await create_chunks_for_upload(graph, chunk_documents, normalized_filename, page_images=page_images)
+                                logging.info(f"✅ Created {len(chunk_documents)} Chunk nodes in Neo4j")
+                        else:
+                            logging.warning("⚠️ Neo4j credentials not configured")
+                    except Exception as neo4j_error:
+                        logging.error(f"❌ Failed to create Neo4j nodes: {str(neo4j_error)}")
+                        import traceback
+                        logging.error(f"Traceback: {traceback.format_exc()}")
+                    
+                    # Mark as chunked
                     file_record.chunking_status = "chunked"
                     file_record.chunking_completed_at = datetime.now(timezone.utc)
+                    file_record.status = "uploaded"
                     db_session.commit()
                     logging.info(
-                        f"✅ V2: Chunking completed (markdown exists) for: {file_record.original_name} (ID: {file_record.id})"
+                        f"✅ V2: Chunking completed (markdown exists + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id})"
                     )
                 else:
                     # V2 Chunking: Use pre-extracted images with Gemini OCR (copied from backend/score.py)
@@ -1301,28 +1454,165 @@ class FileProcessor:
                         f"✅ Gemini OCR completed: Generated markdown from {len(local_images)} pre-extracted images, detected docType: {doc_type}"
                     )
 
-                    # Markdown dosyasını oluştur ve kaydet
-                    markdown_content = markdown_text.strip()
+                    # Markdown path'i al (process_gemini_ocr tarafından oluşturuldu)
+                    markdown_path = ocr_result.get("local_path")
+                    
+                    if not markdown_path or not os.path.exists(markdown_path):
+                        # Fallback: Eğer process_gemini_ocr oluşturmadıysa burada oluştur
+                        doc_name = Path(normalized_filename).stem
+                        markdown_filename = f"{doc_name}.md"
+                        markdown_path = os.path.join(document_dir, markdown_filename)
+                        
+                        with open(markdown_path, "w", encoding="utf-8") as md_file:
+                            md_file.write(markdown_text.strip())
+                            
+                        logging.info(f"📝 Markdown file created (fallback): {markdown_path}")
+                    else:
+                        logging.info(f"📝 Using existing markdown file: {markdown_path}")
 
-                    # Markdown dosyasını document klasörüne kaydet
-                    markdown_filename = f"{normalized_filename}.md"
-                    markdown_path = os.path.join(document_dir, markdown_filename)
-
-                    with open(markdown_path, "w", encoding="utf-8") as md_file:
-                        md_file.write(markdown_content)
-
-                    logging.info(
-                        f"📝 Markdown file created: {markdown_path} ({len(pages)} pages)"
-                    )
+                    # ========================================
+                    # NEO4J: Document ve Chunk node'larını oluştur
+                    # ========================================
+                    try:
+                        logging.info(f"🔄 Creating Document and Chunk nodes in Neo4j for: {normalized_filename}")
+                        
+                        # Neo4j bağlantısı
+                        uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        userName = os.environ.get("NEO4J_USERNAME")
+                        password = os.environ.get("NEO4J_PASSWORD")
+                        database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                        
+                        if uri and userName and password:
+                            graph = create_graph_database_connection(uri, userName, password, database)
+                            
+                            # 1. Document node oluştur
+                            from src.graphDB_dataAccess import graphDBdataAccess
+                            graphDb_data_Access = graphDBdataAccess(graph)
+                            
+                            # Document node'u oluştur veya güncelle
+                            graphDb_data_Access.create_source_node(
+                                normalized_filename,
+                                document_type=doc_type if doc_type else "auto",
+                                skip_entity_extraction=True  # Entity extraction graph creation'da yapılacak
+                            )
+                            logging.info(f"✅ Document node created/updated in Neo4j: {normalized_filename}")
+                            
+                            # 2. Markdown'ı chunk'lara ayır
+                            # Minimum chunk boyutu (karakter)
+                            min_chunk_size = 150
+                            
+                            # Markdown'ı raw chunk'lara ayır (separator bazlı)
+                            raw_chunks = []
+                            separators = ["## ", "\n\n", "\n"]
+                            current_text = markdown_text
+                            
+                            for sep in separators:
+                                if sep in current_text:
+                                    parts = current_text.split(sep)
+                                    for i, part in enumerate(parts):
+                                        if part.strip():
+                                            # İlk parça değilse separator'ı başına ekle
+                                            if i > 0 and sep == "## ":
+                                                raw_chunks.append({"text": sep + part.strip(), "page": 1})
+                                            else:
+                                                raw_chunks.append({"text": part.strip(), "page": 1})
+                                    break
+                            else:
+                                # Hiçbir separator bulunamadıysa tüm metni tek chunk yap
+                                if current_text.strip():
+                                    raw_chunks.append({"text": current_text.strip(), "page": 1})
+                            
+                            # Küçük chunk'ları birleştir
+                            merged_chunks = []
+                            current_chunk_text = ""
+                            current_chunk_page = 1
+                            
+                            for chunk_data in raw_chunks:
+                                text = chunk_data['text']
+                                page_idx = chunk_data.get('page', 1)
+                                
+                                if len(current_chunk_text) + len(text) < min_chunk_size:
+                                    # Chunk çok küçük, bir sonrakiyle birleştir
+                                    if current_chunk_text:
+                                        current_chunk_text += "\n\n" + text
+                                    else:
+                                        current_chunk_text = text
+                                        current_chunk_page = page_idx
+                                else:
+                                    # Mevcut chunk'ı kaydet ve yenisine başla
+                                    if current_chunk_text:
+                                        merged_chunks.append({
+                                            'text': current_chunk_text,
+                                            'page': current_chunk_page
+                                        })
+                                    current_chunk_text = text
+                                    current_chunk_page = page_idx
+                            
+                            # Son chunk'ı ekle
+                            if current_chunk_text:
+                                merged_chunks.append({
+                                    'text': current_chunk_text,
+                                    'page': current_chunk_page
+                                })
+                            
+                            logging.info(f"🧩 Parsed {len(raw_chunks)} raw chunks, merged into {len(merged_chunks)} semantic chunks (min {min_chunk_size} chars)")
+                            
+                            # 3. Document objects oluştur (LangChain format)
+                            chunk_documents = []
+                            for idx, chunk_data in enumerate(merged_chunks, 1):
+                                page_num = chunk_data['page']
+                                # page_link'i page_images'dan al
+                                page_link = None
+                                if page_images and page_num <= len(page_images):
+                                    page_link = page_images[page_num - 1]  # 0-indexed
+                                
+                                chunk_documents.append(
+                                    Document(
+                                        page_content=chunk_data['text'],
+                                        metadata={
+                                            "chunk_id": idx,
+                                            "source": normalized_filename,
+                                            "page_number": page_num,
+                                            "page_link": page_link
+                                        }
+                                    )
+                                )
+                            
+                            # 4. Chunk node'larını Neo4j'ye yaz
+                            if chunk_documents:
+                                from src.make_relationships import create_chunks_for_upload
+                                await create_chunks_for_upload(
+                                    graph, 
+                                    chunk_documents, 
+                                    normalized_filename, 
+                                    page_images=page_images,
+                                    generate_embedding=False  # Embedding ayrı aşamada yapılacak
+                                )
+                                logging.info(f"✅ Created {len(chunk_documents)} Chunk nodes in Neo4j for: {normalized_filename}")
+                            else:
+                                logging.warning(f"⚠️ No chunks to create for: {normalized_filename}")
+                        else:
+                            logging.warning(f"⚠️ Neo4j credentials not configured, skipping Document/Chunk node creation")
+                    
+                    except Exception as neo4j_error:
+                        logging.error(f"❌ Failed to create Document/Chunk nodes in Neo4j: {str(neo4j_error)}")
+                        import traceback
+                        logging.error(f"Traceback: {traceback.format_exc()}")
+                        # Neo4j hatası chunking'i durdurmaz, devam et
+                    
+                    # ========================================
+                    # END: Neo4j Document ve Chunk node oluşturma
+                    # ========================================
 
                     # Markdown path'i kaydet
                     file_record.markdown_path = markdown_path
                     file_record.chunking_status = "chunked"
                     file_record.chunking_completed_at = datetime.now(timezone.utc)
+                    file_record.status = "uploaded"  # Reset status so frontend can proceed
                     db_session.commit()
                     
                     logging.info(
-                        f"✅ V2: Chunking completed (markdown created) for: {file_record.original_name} (ID: {file_record.id})"
+                        f"✅ V2: Chunking completed (markdown created + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id})"
                     )
 
                 # Refresh to check status

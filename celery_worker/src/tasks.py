@@ -496,103 +496,88 @@ def delete_files_task(self, file_ids: list):
                         use_database = None
 
                     if use_connection:
-                        # V2 Document deletion query (copied from backend)
-                        delete_query = """
-                            MATCH (d:Document {fileName: $filename})
-                            
-                            // 1. Document'a bağlı Chunk node'ları topla
-                            OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                            
-                            // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla
-                            OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
-                            
-                            // 3. Document'a DOCUMENTED_IN ile bağlı Endorsement node'ları topla
-                            OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(e:Endorsement)
-                            
-                            // 4. Policy'den -> yönünde bağlı tüm node'ları topla
-                            OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
-                            WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
-                                  relatedNodes:PolicyType OR relatedNodes:Customer OR
-                                  relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
-                                  relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
-                            
-                            // 5. Policy'den bağlı Endorsement node'ları topla
-                            OPTIONAL MATCH (p)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(policyEndorsements:Endorsement)
-                            
-                            // 6. Endorsement'lardan bağlı node'ları topla
-                            OPTIONAL MATCH (e)-[*1..2]->(endorsementRelatedNodes)
-                            WHERE endorsementRelatedNodes:Premium OR endorsementRelatedNodes:Coverage OR
-                                  endorsementRelatedNodes:Clause OR endorsementRelatedNodes:Payment OR
-                                  endorsementRelatedNodes:Address OR endorsementRelatedNodes:Phone OR
-                                  endorsementRelatedNodes:Email
-                            
-                            OPTIONAL MATCH (policyEndorsements)-[*1..2]->(policyEndorsementRelatedNodes)
-                            WHERE policyEndorsementRelatedNodes:Premium OR policyEndorsementRelatedNodes:Coverage OR
-                                  policyEndorsementRelatedNodes:Clause OR policyEndorsementRelatedNodes:Payment OR
-                                  policyEndorsementRelatedNodes:Address OR policyEndorsementRelatedNodes:Phone OR
-                                  policyEndorsementRelatedNodes:Email
-                            
-                            // 7. Sadece başka Document'larda kullanılmayan node'ları sil
-                            WITH d, 
-                                 COLLECT(DISTINCT c) AS chunks,
-                                 COLLECT(DISTINCT p) AS policies,
-                                 COLLECT(DISTINCT e) + COLLECT(DISTINCT policyEndorsements) AS allEndorsements,
-                                 COLLECT(DISTINCT relatedNodes) AS relatedNodesList,
-                                 COLLECT(DISTINCT endorsementRelatedNodes) + COLLECT(DISTINCT policyEndorsementRelatedNodes) AS endorsementRelatedNodesList
-                            
-                            // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
-                            WITH d, chunks,
-                                 [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
-                                     MATCH (d2:Document)
-                                     WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
-                                 }] AS safePolicies,
-                                 [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
-                                     MATCH (d2:Document)
-                                     WHERE d2 <> d AND (
-                                         (d2)<-[:DOCUMENTED_IN]-(endorsement) OR
-                                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
-                                     )
-                                 }] AS safeEndorsements,
-                                 [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                     MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
-                                     WHERE d2 <> d AND (
-                                         (p2)-[*1..2]->(node) OR
-                                         (p2)<-[:HAS_DOC]-(node) OR
-                                         (p2)<-[:DOCUMENTED_IN]-(node)
-                                     )
-                                 }] AS safeRelatedNodes,
-                                 [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                     MATCH (d2:Document)
-                                     WHERE d2 <> d AND (
-                                         (d2)<-[:DOCUMENTED_IN]-(:Endorsement)-[*1..2]->(node) OR
-                                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
-                                     )
-                                 }] AS safeEndorsementRelatedNodes
-                            
-                            // 8. Silme işlemi
-                            FOREACH (chunk IN chunks | DETACH DELETE chunk)
-                            FOREACH (endorsement IN safeEndorsements | 
-                                FOREACH (relNode IN safeEndorsementRelatedNodes | DETACH DELETE relNode)
-                            )
-                            FOREACH (endorsement IN safeEndorsements | DETACH DELETE endorsement)
-                            FOREACH (policy IN safePolicies | 
-                                FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
-                            )
-                            FOREACH (policy IN safePolicies | DETACH DELETE policy)
-                            DETACH DELETE d
-                            
-                            RETURN count(d) AS deletedDocuments
-                        """
-
                         session_params = {}
                         if use_database:
                             session_params["database"] = use_database
-
-                        result = use_connection.query(
-                            delete_query,
+                        
+                        # Step 1: Delete chunks
+                        delete_chunks_query = """
+                        MATCH (d:Document {fileName: $filename})<-[:PART_OF]-(c:Chunk)
+                        DETACH DELETE c
+                        RETURN count(c) as deletedChunks
+                        """
+                        chunk_result = use_connection.query(
+                            delete_chunks_query,
                             {"filename": filename},
                             session_params=session_params,
                         )
+                        deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
+                        
+                        # Step 2: Delete document-related entities (Policy and connected nodes)
+                        delete_entities_query = """
+                        MATCH (d:Document {fileName: $filename})
+                        
+                        // Find Policy nodes connected via DOCUMENTED_IN
+                        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+                        
+                        // Find all nodes connected to Policy (1-2 hops)
+                        OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
+                        WHERE relatedNode IS NOT NULL
+                          AND NOT relatedNode:Document 
+                          AND NOT relatedNode:Chunk
+                          AND NOT relatedNode:`__Community__`
+                        
+                        // Safety check: only delete if not connected to other documents
+                        WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
+                        WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
+                            AND NOT EXISTS {
+                                MATCH (node)-[*1..3]-(otherDoc:Document)
+                                WHERE otherDoc.fileName <> $filename
+                            }] AS safeNodes
+                        
+                        // Delete safe nodes and policy
+                        FOREACH (node IN safeNodes | DETACH DELETE node)
+                        WITH d, p, size(safeNodes) as deletedRelated
+                        
+                        // Delete policy if exists
+                        DETACH DELETE p
+                        
+                        RETURN deletedRelated
+                        """
+                        entity_result = use_connection.query(
+                            delete_entities_query,
+                            {"filename": filename},
+                            session_params=session_params,
+                        )
+                        deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
+                        
+                        # Step 3: Delete the Document node itself
+                        delete_doc_query = """
+                        MATCH (d:Document {fileName: $filename})
+                        DETACH DELETE d
+                        RETURN count(d) as deletedDocuments
+                        """
+                        result = use_connection.query(
+                            delete_doc_query,
+                            {"filename": filename},
+                            session_params=session_params,
+                        )
+                        
+                        # Step 4: Clean up orphan nodes (nodes with no relationships)
+                        cleanup_orphans_query = """
+                        MATCH (n)
+                        WHERE NOT n:Document 
+                          AND NOT n:Chunk 
+                          AND NOT n:`__Community__`
+                          AND NOT EXISTS { (n)--() }
+                        DETACH DELETE n
+                        RETURN count(n) as deletedOrphans
+                        """
+                        orphan_result = use_connection.query(cleanup_orphans_query, session_params=session_params)
+                        deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
+                        
+                        total_neo4j_deleted = deleted_chunks + deleted_entities + deleted_orphans + 1  # +1 for document
+                        logging.info(f"🗑️ Neo4j cleanup for {original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans, 1 document")
                         
                         # Özel bağlantı kullanıldıysa kapat
                         if use_connection != graph_connection and hasattr(use_connection, 'close'):
@@ -601,14 +586,7 @@ def delete_files_task(self, file_ids: list):
                             except:
                                 pass
 
-                        if result and len(result) > 0:
-                            deleted_count_neo4j = result[0]["deletedDocuments"]
-                            logging.info(
-                                f"✅ Deleted {deleted_count_neo4j} Document nodes from Neo4j for: {original_name}"
-                            )
-                            neo4j_deleted = True
-                        else:
-                            neo4j_deleted = True  # Not an error if document doesn't exist
+                        neo4j_deleted = True
                     else:
                         neo4j_deleted = True  # Not an error if Neo4j is not configured
 
@@ -630,6 +608,27 @@ def delete_files_task(self, file_ids: list):
                 if file_path.exists():
                     file_path.unlink()
                     logging.info(f"🗑️ Deleted file from filesystem: {file_path}")
+                
+                # Delete markdown file if exists
+                if file_record.markdown_path:
+                    md_path = file_record.markdown_path
+                    if not os.path.isabs(md_path):
+                        # Try celery_worker directory first, then backend
+                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                        backend_path = os.path.join(project_root, "backend", md_path)
+                        
+                        if os.path.exists(celery_worker_path):
+                            md_path = celery_worker_path
+                        elif os.path.exists(backend_path):
+                            md_path = backend_path
+                    
+                    if os.path.exists(md_path):
+                        try:
+                            os.remove(md_path)
+                            logging.info(f"🗑️ Deleted markdown file: {md_path}")
+                        except Exception as md_error:
+                            logging.warning(f"⚠️ Could not delete markdown file: {str(md_error)}")
 
                 # Delete from database
                 success = db.delete_file(file_id_int)
