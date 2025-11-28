@@ -17,12 +17,24 @@ export CELERY_RESULT_BACKEND="db+postgresql://postgres:postgres@localhost:5432/l
 cd "$SCRIPT_DIR"
 
 echo "🚀 Starting Backend API Server..."
-echo "📡 API will be available at: http://0.0.0.0:8000"
-echo "📊 API docs will be available at: http://0.0.0.0:8000/docs"
+echo "📡 API will be available at: http://0.0.0.0:8001"
+echo "📊 API docs will be available at: http://0.0.0.0:8001/docs"
 echo ""
 
-# Start uvicorn (port 8001 to match your current setup)
-uv run uvicorn score:app --host 0.0.0.0 --port 8001 --reload --log-level debug
+# Worker count for parallel request handling
+# Higher = more parallel uploads, but more memory usage
+WORKERS="${BACKEND_WORKERS:-32}"
+
+echo "👥 Workers: ${WORKERS}"
+echo ""
+
+# Start uvicorn with multiple workers for parallel upload handling
+# NOTE: --reload is incompatible with --workers, so we use --workers only
+# For development with hot-reload, comment out --workers line and uncomment --reload line
+uv run uvicorn score:app --host 0.0.0.0 --port 8001 --workers ${WORKERS} --log-level info
+
+# Development mode with hot-reload (single worker):
+# uv run uvicorn score:app --host 0.0.0.0 --port 8001 --reload --log-level debug
 
 
 

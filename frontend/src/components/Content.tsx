@@ -1230,6 +1230,18 @@ const Content: React.FC<ContentProps> = ({
       return;
     }
 
+    // İlk confirm: Reset işlemini onaylama
+    if (!confirm('Seçili dosyaların chunking işlemini sıfırlamak istediğinize emin misiniz?')) {
+      return;
+    }
+
+    // İkinci confirm: Markdown dosyalarını silme seçeneği
+    const deleteMarkdown = confirm(
+      'Çıkartılan markdown dosyalarını da silmek istiyor musunuz?\n\n' +
+      '• EVET: Markdown dosyaları silinir, chunking baştan yapılır\n' +
+      '• HAYIR: Markdown dosyaları korunur, sadece durum sıfırlanır'
+    );
+
     // Check if all V2 files are selected
     const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
     const isAllSelected = allV2Files.length > 0 && v2FileIds.length === allV2Files.length;
@@ -1239,39 +1251,39 @@ const Content: React.FC<ContentProps> = ({
 
       if (isAllSelected) {
         // Use "all" parameter when all files are selected
-        showNormalToast('Tüm dosyalar için chunking reset ediliyor...');
-        const response = await resetFileStageAPI('all', 'chunking');
+        showNormalToast(`Tüm dosyalar için chunking reset ediliyor${deleteMarkdown ? ' (markdown silinecek)' : ''}...`);
+        const response = await resetFileStageAPI('all', 'chunking', deleteMarkdown);
         if (response.status === 'Success' || response.status === 'success') {
           const resetCount = response.data?.reset_count || v2FileIds.length;
-          showSuccessToast(`✓ ${resetCount} dosya chunking reset edildi`);
+          showSuccessToast(`✓ ${resetCount} dosya chunking reset edildi${deleteMarkdown ? ' (markdown silindi)' : ''}`);
           childRef.current?.reloadV2Files?.();
         } else {
           showErrorToast(`Chunking reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
         }
       } else {
         // Seçili dosyalar için tek tek çağrı yap
-      showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor...`);
+        showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor${deleteMarkdown ? ' (markdown silinecek)' : ''}...`);
         let successCount = 0;
         let failCount = 0;
 
-      for (const fileId of v2FileIds) {
-        try {
-          const response = await resetFileStageAPI(fileId, 'chunking');
-          if (response.status === 'Success' || response.status === 'success') {
+        for (const fileId of v2FileIds) {
+          try {
+            const response = await resetFileStageAPI(fileId, 'chunking', deleteMarkdown);
+            if (response.status === 'Success' || response.status === 'success') {
               successCount++;
-          } else {
+            } else {
               failCount++;
-            showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
-          }
-        } catch (error: any) {
+              showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
+            }
+          } catch (error: any) {
             failCount++;
-          const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
-          showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
-        }
+            const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
+            showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+          }
         }
 
         if (successCount > 0) {
-          showSuccessToast(`✓ ${successCount} dosya chunking reset edildi`);
+          showSuccessToast(`✓ ${successCount} dosya chunking reset edildi${deleteMarkdown ? ' (markdown silindi)' : ''}`);
         }
         childRef.current?.reloadV2Files?.();
       }

@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
-import { Dropzone, Flex, SpotlightTarget, Typography } from '@neo4j-ndl/react';
-import { InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
-import { FunctionComponent, useCallback, useEffect, useState } from 'react';
+import { Button, Dropzone, Flex, SpotlightTarget, Typography } from '@neo4j-ndl/react';
+import { FolderOpenIconOutline, InformationCircleIconOutline } from '@neo4j-ndl/react/icons';
+import { FunctionComponent, useCallback, useEffect, useRef, useState } from 'react';
 import { useCredentials } from '../../../context/UserCredentials';
 import { useFileContext } from '../../../context/UsersFiles';
 import { CustomFile } from '../../../types';
@@ -37,7 +37,151 @@ const DropZoneV2: FunctionComponent = () => {
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
 
-  const BATCH_SIZE = 20; // Smaller batch size for V2
+  // Ref for folder input
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const BATCH_SIZE = 128; // Smaller batch size for V2
+
+  // Setup webkitdirectory attribute and event listener manually (React doesn't handle it well)
+  useEffect(() => {
+    const input = folderInputRef.current;
+    if (input) {
+      // Set folder selection attributes
+      input.setAttribute('webkitdirectory', '');
+      input.setAttribute('directory', '');
+      input.setAttribute('mozdirectory', '');
+      console.log('📁 Folder input attributes set manually');
+      
+      // Add change event listener manually (more reliable than React's onChange)
+      const handleChange = (event: Event) => {
+        console.log('📁 Native change event triggered');
+        const target = event.target as HTMLInputElement;
+        const files = target.files;
+        
+        if (!files || files.length === 0) {
+          console.log('📁 No files selected');
+          return;
+        }
+        
+        console.log(`📁 Folder selected: ${files.length} files`);
+        
+        // Log raw files BEFORE any processing to check webkitRelativePath
+        console.log('📁 RAW FILES (before processing):');
+        for (let i = 0; i < Math.min(5, files.length); i++) {
+          const f = files[i];
+          console.log(`  RAW ${i + 1}. name="${f.name}" | webkitRelativePath="${(f as any).webkitRelativePath}"`);
+        }
+        
+        // Filter for supported types - keep webkitRelativePath
+        const fileArray: File[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const ext = file.name.toLowerCase().split('.').pop();
+          const supported = ['pdf', 'txt', 'doc', 'docx', 'csv', 'xls', 'xlsx'];
+          if (supported.includes(ext || '')) {
+            fileArray.push(file);
+          }
+        }
+        
+        console.log(`📁 Filtered to ${fileArray.length} supported files`);
+        
+        // Log files AFTER filtering to verify webkitRelativePath is preserved
+        console.log('📁 FILTERED FILES (after processing):');
+        fileArray.slice(0, 5).forEach((file, i) => {
+          console.log(`  FILTERED ${i + 1}. name="${file.name}" | webkitRelativePath="${(file as any).webkitRelativePath}"`);
+        });
+        
+        // Process files using onDropHandler
+        if (fileArray.length > 0) {
+          onDropHandler(fileArray);
+        }
+        
+        // Reset input
+        target.value = '';
+      };
+      
+      input.addEventListener('change', handleChange);
+      console.log('📁 Change event listener added');
+      
+      // Cleanup
+      return () => {
+        input.removeEventListener('change', handleChange);
+      };
+    }
+  }, []);
+
+  // Handler for folder selection via native input
+  const handleFolderSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('📁 handleFolderSelect triggered');
+    const files = event.target.files;
+    console.log(`📁 Files object: ${files ? `FileList with ${files.length} items` : 'null'}`);
+    
+    if (!files || files.length === 0) {
+      console.log('📁 No files selected, returning');
+      return;
+    }
+
+    console.log(`📁 Folder selected: ${files.length} files`);
+
+    // Convert FileList to array and filter for supported types
+    const fileArray = Array.from(files).filter((file) => {
+      const ext = file.name.toLowerCase().split('.').pop();
+      const supported = ['pdf', 'txt', 'doc', 'docx', 'csv', 'xls', 'xlsx'];
+      return supported.includes(ext || '');
+    });
+
+    console.log(`📁 Filtered to ${fileArray.length} supported files`);
+
+    // Log some files with their paths
+    fileArray.slice(0, 5).forEach((file, i) => {
+      console.log(`  ${i + 1}. ${file.name} | Path: ${(file as any).webkitRelativePath || 'N/A'}`);
+    });
+
+    // Pass to the same handler as dropzone
+    onDropHandler(fileArray);
+
+    // Reset input so same folder can be selected again
+    event.target.value = '';
+  };
+
+  // Helper function to make filename unique by adding full folder path as prefix
+  // This ensures files with same name in different folders get unique names
+  // e.g., "Müşteri A/Poliçeler/MAKİNE KIRILMASI.pdf" -> "Müşteri A_Poliçeler_MAKİNE KIRILMASI.pdf"
+  const makeFilenameUnique = (file: File): string => {
+    const originalName = file.name;
+    
+    // Get webkitRelativePath if available (folder upload)
+    // Also check originalPath (set when file is recreated)
+    const relativePath = (file as any).webkitRelativePath || (file as any).originalPath || '';
+    
+    console.log(`🔍 makeFilenameUnique: originalName="${originalName}", relativePath="${relativePath}"`);
+    
+    if (relativePath) {
+      // Extract all parent folders from path (excluding the filename itself)
+      // e.g., "Müşteri A/Poliçeler/MAKİNE KIRILMASI.pdf" -> ["Müşteri A", "Poliçeler"]
+      const pathParts = relativePath.split('/');
+      console.log(`🔍 pathParts: [${pathParts.join(', ')}], length=${pathParts.length}`);
+      
+      if (pathParts.length >= 2) {
+        // Remove the filename (last part) and join folders with underscore
+        const folders = pathParts.slice(0, -1);
+        // Create prefix from all folder names: "Müşteri A_Poliçeler"
+        const folderPrefix = folders.join('_');
+        // Final name: "Müşteri A_Poliçeler_MAKİNE KIRILMASI.pdf"
+        const newName = `${folderPrefix}_${originalName}`;
+        console.log(`📂 Folder upload: ${relativePath} -> ${newName}`);
+        return newName;
+      } else {
+        console.log(`⚠️ pathParts.length < 2, not adding prefix`);
+      }
+    } else {
+      console.log(`⚠️ No relativePath found for ${originalName} - no prefix added`);
+    }
+    
+    // No folder path - use original name
+    // Single file uploads will use original name
+    return originalName;
+  };
 
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
@@ -51,7 +195,9 @@ const DropZoneV2: FunctionComponent = () => {
         return;
       }
 
-      console.log(`📄 File ${index + 1}: ${file.name}, Size: ${file.size ?? 'undefined'} bytes, Type: ${file.type}`);
+      // Log webkitRelativePath if available (folder upload)
+      const relativePath = (file as any).webkitRelativePath || '';
+      console.log(`📄 File ${index + 1}: ${file.name}, Path: ${relativePath || 'N/A'}, Size: ${file.size ?? 'undefined'} bytes`);
 
       // File size validation
       if (!file.size || file.size === 0) {
@@ -71,13 +217,34 @@ const DropZoneV2: FunctionComponent = () => {
       return;
     }
 
-    setSelectedFiles(validFiles);
+    // Add folder prefix to filenames for uniqueness
+    // This ensures files from different folders don't overwrite each other in S3
+    const renamedFiles: File[] = validFiles.map((file) => {
+      const uniqueName = makeFilenameUnique(file);
+      if (uniqueName !== file.name) {
+        // Create a new File object with the unique name (includes folder prefix)
+        const renamedFile = new File([file], uniqueName, { type: file.type, lastModified: file.lastModified });
+        // Store original path and name in custom properties (webkitRelativePath is read-only)
+        (renamedFile as any).originalPath = (file as any).webkitRelativePath || '';
+        (renamedFile as any).originalName = file.name; // Keep original name for reference
+        return renamedFile;
+      }
+      return file;
+    });
+
+    setSelectedFiles(renamedFiles);
 
     // Add to upload queue
-    setUploadQueue((prev) => [...prev, ...validFiles]);
-    console.log(`📦 Added ${validFiles.length} files to upload queue`);
+    setUploadQueue((prev) => [...prev, ...renamedFiles]);
+    console.log(`📦 Added ${renamedFiles.length} files to upload queue`);
 
-    showSuccessToast(`${validFiles.length} files added to upload queue`);
+    // Show summary of renamed files
+    const renamedCount = renamedFiles.filter((f) => (f as any).originalName).length;
+    if (renamedCount > 0) {
+      showSuccessToast(`${renamedFiles.length} files added (${renamedCount} renamed with folder prefix)`);
+    } else {
+      showSuccessToast(`${renamedFiles.length} files added to upload queue`);
+    }
   };
 
   // V2 Upload function - only uploads, no processing
@@ -385,6 +552,85 @@ const DropZoneV2: FunctionComponent = () => {
 
   return (
     <>
+      {/* Folder selection button - creates input dynamically on click */}
+      <div className='mb-2'>
+        <Button
+          onClick={() => {
+            console.log('📁 Klasör Seç button clicked');
+            
+            // Create input element dynamically and add to DOM
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = true;
+            input.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;';
+            input.setAttribute('webkitdirectory', '');
+            input.setAttribute('directory', '');
+            input.setAttribute('mozdirectory', '');
+            
+            // Add to DOM (required for some browsers)
+            document.body.appendChild(input);
+            console.log('📁 Input added to DOM');
+            
+            // Use addEventListener instead of onchange
+            input.addEventListener('change', function handleChange(e: Event) {
+              console.log('📁 Change event fired!');
+              const target = e.target as HTMLInputElement;
+              const files = target.files;
+              
+              console.log(`📁 Files object: ${files}`);
+              console.log(`📁 Files count: ${files ? files.length : 0}`);
+              
+              if (!files || files.length === 0) {
+                console.log('📁 No files selected');
+                setTimeout(() => {
+                  if (input.parentNode) document.body.removeChild(input);
+                }, 100);
+                return;
+              }
+              
+              console.log(`📁 Folder selected: ${files.length} files`);
+              
+              // Filter for supported types
+              const fileArray = Array.from(files).filter((file) => {
+                const ext = file.name.toLowerCase().split('.').pop();
+                const supported = ['pdf', 'txt', 'doc', 'docx', 'csv', 'xls', 'xlsx'];
+                return supported.includes(ext || '');
+              });
+              
+              console.log(`📁 Filtered to ${fileArray.length} supported files`);
+              
+              // Log first few files with paths
+              fileArray.slice(0, 5).forEach((file, i) => {
+                console.log(`  ${i + 1}. ${file.name} | Path: ${(file as any).webkitRelativePath || 'N/A'}`);
+              });
+              
+              // Process files
+              if (fileArray.length > 0) {
+                console.log('📁 Calling onDropHandler with files');
+                onDropHandler(fileArray);
+              }
+              
+              // Remove from DOM after a delay
+              setTimeout(() => {
+                if (input.parentNode) document.body.removeChild(input);
+              }, 1000);
+            });
+            
+            // Trigger click
+            console.log('📁 Triggering input.click()');
+            input.click();
+          }}
+          isDisabled={isUploading}
+          size='medium'
+        >
+          <FolderOpenIconOutline className='w-4 h-4 mr-2' />
+          Klasör Seç (Alt Klasörlerle)
+        </Button>
+        <Typography variant='body-small' className='text-gray-500 ml-2 inline'>
+          veya dosyaları aşağıya sürükleyin
+        </Typography>
+      </div>
+
       <SpotlightTarget
         id='dropzone-v2'
         hasPulse={true}
@@ -451,6 +697,9 @@ const DropZoneV2: FunctionComponent = () => {
             },
             multiple: true,
             disabled: isUploading,
+            // Important: Disable File System Access API to preserve webkitRelativePath
+            // This allows us to get the folder path when user selects a folder
+            useFsAccessApi: false,
           }}
         />
       </SpotlightTarget>

@@ -1,0 +1,179 @@
+# Docker Compose for Celery Worker (Development/Standalone)
+# Usage: docker-compose up -d
+# Scale: docker-compose up -d --scale celery_worker=3
+
+services:
+  # Celery Worker - Background Task Processor
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: celery-worker-dev
+    # threads pool for asyncio compatibility
+    # Keep concurrency low (8) to avoid PostgreSQL "too many clients" error
+    command: >
+      uv run celery -A src.celery_app worker
+      --loglevel=info
+      --pool=threads
+      --concurrency=${CELERY_CONCURRENCY:-8}
+      -E
+      -n worker-${HOSTNAME:-local}@%h
+    env_file:
+      - ../backend/.env
+    environment:
+      # Core settings
+      - PYTHONPATH=/code
+      - ENV=${ENV:-development}
+      
+      # Database (PostgreSQL)
+      - QUEUE_DB_URL=${QUEUE_DB_URL:-postgresql://postgres:postgres@postgres:5432/llm_graph_builder}
+      
+      # Celery/RabbitMQ
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder}
+      
+      # Neo4j (remote or local)
+      - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-qwerty5555}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+      
+      # S3 (optional)
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-}
+      - S3_BACKUP_BUCKET=${S3_BACKUP_BUCKET:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-eu-central-1}
+      
+      # Gemini API
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      
+      # OpenAI API (for embeddings/graph)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      
+      # Encoding
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      # Share output folder with backend
+      - ${OUTPUT_VOLUME:-llm-graph-output}:/code/output
+      # Development: mount source for hot reload (optional)
+      # - ./src:/code/src:ro
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "4"
+        reservations:
+          memory: 2g
+          cpus: "1"
+    healthcheck:
+      test: ["CMD", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - llm-graph-builder
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # Flower - Celery Monitoring Dashboard
+  flower:
+    image: mher/flower:2.0
+    container_name: flower-dev
+    command: celery flower --broker=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - FLOWER_PORT=5555
+      - FLOWER_BASIC_AUTH=${FLOWER_AUTH:-admin:admin}
+    ports:
+      - "5555:5555"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+    networks:
+      - llm-graph-builder
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+
+  # RabbitMQ - Message Broker
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq-dev
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - llm-graph-builder
+    restart: unless-stopped
+
+  # PostgreSQL - Task Result Backend & Queue DB
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-dev
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-llm_graph_builder}
+    # Increase max_connections for high concurrency workloads
+    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - llm-graph-builder
+    restart: unless-stopped
+
+networks:
+  llm-graph-builder:
+    driver: bridge
+    # Connect to existing network if running with main docker-compose
+    # external: true
+    # name: llm-graph-builder_prod
+
+volumes:
+  rabbitmq_data:
+  postgres_data:
+  llm-graph-output:
+
+

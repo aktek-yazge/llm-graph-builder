@@ -78,7 +78,7 @@ import re
 from urllib.parse import unquote
 from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
-from src.celery_client import celery_app
+from src.celery_client import celery_app, revoke_celery_task, revoke_celery_tasks
 from src.models.file_queue_models import get_file_queue_db
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
@@ -3169,9 +3169,21 @@ async def upload_large_file_into_chunks(
                 )
                 logging.info(f"✅ File added to Queue DB: ID={file_record.id}")
                 
-                # Trigger Celery Task
+                # Trigger Celery Task and save task_id
                 task_result = celery_app.send_task("src.tasks.process_file_pipeline", args=[file_record.id])
                 logging.info(f"🚀 Celery task triggered: {task_result.id}")
+                
+                # Save task_id to database for cancellation/tracking
+                db_session = queue_db.get_db_session()
+                try:
+                    file_record = db_session.query(UploadedFile).filter_by(id=file_record.id).first()
+                    if file_record:
+                        file_record.celery_task_id = task_result.id
+                        db_session.commit()
+                except Exception as task_save_error:
+                    logging.warning(f"⚠️ Could not save celery task_id: {task_save_error}")
+                finally:
+                    db_session.close()
                 
             except Exception as queue_error:
                 logging.error(f"❌ Failed to queue file for processing: {queue_error}")
@@ -4647,22 +4659,101 @@ async def upload_file_to_queue(
             f"✅ File saved to output structure: {file_path} ({file_size} bytes)"
         )
 
-        # Image extraction will be done in background processor (20-file batches)
-        # Upload endpoint only saves the file and returns immediately
-        logging.info(
-            f"ℹ️ Image extraction will be done in background processor for: {normalized_filename}"
-        )
+        # ==========================================
+        # Image Extraction (immediately after upload)
+        # ==========================================
+        logging.info(f"🖼️ Starting image extraction for: {normalized_filename}")
+        
+        from src.document_sources.local_file import generate_page_images_with_pymupdf
+        
+        extracted_images = []
+        try:
+            # Extract images from PDF using PyMuPDF
+            extracted_images = generate_page_images_with_pymupdf(file_path, images_dir)
+            logging.info(f"✅ Extracted {len(extracted_images)} images from: {normalized_filename}")
+        except Exception as extract_error:
+            logging.warning(f"⚠️ Image extraction failed for {normalized_filename}: {extract_error}")
+            # Continue anyway - chunking can still work without pre-extracted images
+        
+        # ==========================================
+        # S3 Upload (PDF + Images)
+        # ==========================================
+        s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+        doc_link = None
+        page_images_json = None
+        
+        if s3_bucket:
+            logging.info(f"📤 Uploading to S3 bucket: {s3_bucket}")
+            try:
+                from src.document_sources.s3_upload_utils import upload_files_to_s3
+                
+                doc_name_without_ext = Path(normalized_filename).stem
+                
+                # ==========================================
+                # Upload PDF to: documents/{doc_name}/pdf/
+                # ==========================================
+                pdf_s3_prefix = f"documents/{doc_name_without_ext}/pdf"
+                pdf_urls, pdf_failed = upload_files_to_s3(
+                    file_paths=[file_path],
+                    bucket_name=s3_bucket,
+                    s3_prefix=pdf_s3_prefix,
+                    delete_local_after_upload=False,
+                )
+                
+                if pdf_urls:
+                    doc_link = pdf_urls[0]
+                    logging.info(f"✅ PDF uploaded to S3: {doc_link}")
+                elif pdf_failed:
+                    logging.warning(f"⚠️ Failed to upload PDF to S3")
+                
+                # ==========================================
+                # Upload Images to: documents/{doc_name}/images/
+                # ==========================================
+                page_image_filenames = []
+                if extracted_images:
+                    images_s3_prefix = f"documents/{doc_name_without_ext}/images"
+                    image_urls, image_failed = upload_files_to_s3(
+                        file_paths=extracted_images,
+                        bucket_name=s3_bucket,
+                        s3_prefix=images_s3_prefix,
+                        delete_local_after_upload=False,
+                    )
+                    
+                    if image_urls:
+                        logging.info(f"✅ Uploaded {len(image_urls)} images to S3")
+                        # Extract just filenames for page_images field
+                        for url in image_urls:
+                            page_image_filenames.append(os.path.basename(url.replace('s3://', '').split('/')[-1]))
+                    
+                    if image_failed:
+                        logging.warning(f"⚠️ Failed to upload {len(image_failed)} images to S3")
+                
+                if page_image_filenames:
+                    import json
+                    page_images_json = json.dumps(page_image_filenames)
+                    logging.info(f"✅ Page images recorded: {len(page_image_filenames)} images")
+                    
+            except Exception as s3_error:
+                logging.warning(f"⚠️ S3 upload failed: {s3_error}")
+                # Continue without S3 - local files will be used
+        else:
+            logging.info(f"ℹ️ S3_BACKUP_BUCKET not configured, skipping S3 upload")
+            # Store local image paths for processing
+            if extracted_images:
+                import json
+                page_image_filenames = [os.path.basename(img) for img in extracted_images]
+                page_images_json = json.dumps(page_image_filenames)
 
         # Add to database
         db = get_file_queue_db()
 
-        # Check for existing file by hash to prevent duplicates
-        file_hash = UploadedFile.calculate_file_hash(str(file_path))
-        existing_file = db.get_file_by_hash(file_hash) if file_hash else None
+        # Check for existing file by filename (includes folder prefix for uniqueness)
+        # This allows same-content files from different folders to be stored separately
+        existing_file = db.get_file_by_filename(normalized_filename)
 
         if existing_file:
             logging.info(
-                f"📋 File already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
+                f"📋 File with same name already exists in queue: {existing_file.filename} (ID: {existing_file.id})"
             )
             return create_api_response(
                 "Success",
@@ -4695,12 +4786,42 @@ async def upload_file_to_queue(
             auto_process=auto_process_bool,
         )
 
-        # Image extraction and S3 upload will be done in background processor
-        # No metadata update needed here
+        # Update file record with extraction results
+        # Store values for use after session closes
+        file_id = uploaded_file.id
+        filename = uploaded_file.filename
+        original_name_result = uploaded_file.original_name
+        upload_status = "uploaded"
+        chunking_status = "ready"
+        graph_status = uploaded_file.graph_status
+        embedding_status = uploaded_file.embedding_status
+        
+        db_session = db.get_db_session()
+        try:
+            file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+            if file_record:
+                # Update S3/local metadata
+                if doc_link:
+                    file_record.doc_link = doc_link
+                if page_images_json:
+                    file_record.page_images = page_images_json
+                
+                # Mark as ready for chunking (extraction completed)
+                file_record.chunking_status = "ready"
+                file_record.upload_status = "uploaded"
+                
+                db_session.commit()
+                
+                logging.info(f"✅ File metadata updated: doc_link={doc_link is not None}, page_images={page_images_json is not None}, chunking_status=ready")
+        except Exception as update_error:
+            logging.warning(f"⚠️ Could not update file metadata: {update_error}")
+            db_session.rollback()
+        finally:
+            db_session.close()
 
         elapsed_time = time.time() - start
         logging.info(
-            f"✅ V2 Upload completed: ID={uploaded_file.id}, Status={uploaded_file.upload_status} ({elapsed_time:.2f}s)"
+            f"✅ V2 Upload completed: ID={file_id}, Status={upload_status}, ChunkingStatus={chunking_status} ({elapsed_time:.2f}s)"
         )
 
         # Neo4j'ye initial sync et (upload başarılı)
@@ -4715,40 +4836,55 @@ async def upload_file_to_queue(
             )
             sync_queue_db_status_to_neo4j(
                 graph=graph_connection,
-                file_name=uploaded_file.filename,
-                upload_status=uploaded_file.upload_status,
-                chunking_status=uploaded_file.chunking_status,
-                graph_status=uploaded_file.graph_status,
-                embedding_status=uploaded_file.embedding_status,
+                file_name=filename,
+                upload_status=upload_status,
+                chunking_status=chunking_status,
+                graph_status=graph_status,
+                embedding_status=embedding_status,
                 database=os.environ.get("NEO4J_DATABASE", "neo4j"),
             )
             logging.info(
-                f"✅ Initial Neo4j sync for uploaded file: {uploaded_file.filename}"
+                f"✅ Initial Neo4j sync for uploaded file: {filename}"
             )
         except Exception as sync_error:
             logging.warning(
                 f"⚠️ Could not sync upload status to Neo4j: {str(sync_error)}"
             )
 
-        # Trigger celery task for image extraction and processing
-        try:
-            celery_app.send_task("src.tasks.process_file_pipeline", args=[uploaded_file.id])
-            logging.info(f"✅ Celery task triggered for file ID: {uploaded_file.id}")
-        except Exception as celery_error:
-            logging.warning(f"⚠️ Failed to trigger celery task: {celery_error}")
-            # Continue anyway - celery worker will pick it up from queue
+        # Only trigger celery task if auto_process is enabled
+        if auto_process_bool:
+            try:
+                task_result = celery_app.send_task("src.tasks.process_file_pipeline", args=[file_id])
+                logging.info(f"✅ Celery task triggered for file ID: {file_id}, task_id: {task_result.id}")
+                
+                # Save task_id to database for cancellation/tracking
+                try:
+                    db_session = db.get_db_session()
+                    file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+                    if file_record:
+                        file_record.celery_task_id = task_result.id
+                        db_session.commit()
+                    db_session.close()
+                except Exception as task_save_error:
+                    logging.warning(f"⚠️ Could not save celery task_id: {task_save_error}")
+            except Exception as celery_error:
+                logging.warning(f"⚠️ Failed to trigger celery task: {celery_error}")
+        else:
+            logging.info(f"ℹ️ Auto-process disabled. File {file_id} saved, waiting for manual processing trigger.")
 
         return create_api_response(
             "Success",
-            message="File uploaded successfully. Image extraction will be done in background.",
+            message="File uploaded successfully. Image extraction completed." + (" S3 upload completed." if doc_link else ""),
             data={
-                "file_id": uploaded_file.id,
-                "filename": uploaded_file.filename,
-                "original_name": uploaded_file.original_name,
-                "upload_status": uploaded_file.upload_status,
-                "chunking_status": uploaded_file.chunking_status,
-                "graph_status": uploaded_file.graph_status,
-                "file_size": uploaded_file.file_size,
+                "file_id": file_id,
+                "filename": filename,
+                "original_name": original_name_result,
+                "upload_status": upload_status,
+                "chunking_status": chunking_status,
+                "graph_status": graph_status,
+                "file_size": file_size,
+                "images_extracted": len(extracted_images) if extracted_images else 0,
+                "s3_uploaded": doc_link is not None,
                 "duplicate": False,
             },
         )
@@ -4936,9 +5072,15 @@ async def start_chunking(file_id: str):
                     f"📦 Chunking batch seçildi: {len(batch_files)} dosya işlenmeye başlanıyor (ID'ler: {batch_file_ids})"
                 )
 
-                # Queue celery tasks for chunking
+                # Queue celery tasks for chunking and save task_ids
                 for file_record in batch_files:
-                    celery_app.send_task("src.tasks.chunk_file_task", args=[file_record.id])
+                    task_result = celery_app.send_task("src.tasks.chunk_file_task", args=[file_record.id])
+                    # Save task_id for cancellation/tracking
+                    try:
+                        file_record.celery_task_id = task_result.id
+                        db_session.commit()
+                    except Exception as task_save_error:
+                        logging.warning(f"⚠️ Could not save celery task_id for file {file_record.id}: {task_save_error}")
                 processed_count += len(batch_files)
 
                 # Wait before processing next batch (eğer daha fazla dosya varsa)
@@ -5061,34 +5203,14 @@ async def start_chunking(file_id: str):
 
                         # Dosya indirildi, şimdi image extraction yapılması için status'ü güncelle
                         # Image extraction yapılması için chunking_status'ü "ready" yap ve upload_status'ü kontrol et
-                        file_record.chunking_status = "ready"  # Image extraction yapılacak
+                        file_record.chunking_status = "ready"  # Ready for chunking
                         file_record.upload_status = "uploaded"  # PDF indirildi
                         file_record.status = "uploaded"  # Ana status'ü güncelle
                         db_session.commit()
                         db_session.close()
 
-                        # Image extraction için celery task'i tetikle
-                        celery_app.send_task("src.tasks.extract_images_task", args=[file_id_int])
-                        # Image extraction işlemi celery worker'da başlatıldı
-                        # File record'ı database'den yeniden al (session kapandı)
-                        db_session_refresh = db.get_db_session()
-                        try:
-                            file_record_refresh = (
-                                db_session_refresh.query(UploadedFile)
-                                .filter_by(id=file_id_int)
-                                .first()
-                            )
-                            if file_record_refresh:
-                                asyncio.create_task(
-                                    processor._process_single_file_extraction(
-                                        file_record_refresh
-                                    )
-                                )
-                        finally:
-                            db_session_refresh.close()
-
                         logging.info(
-                            f"🔄 PDF downloaded from S3, image extraction started for file {file_id_int}"
+                            f"✅ PDF downloaded from S3, file {file_id_int} is ready for chunking"
                         )
 
                         return create_api_response(
@@ -5630,8 +5752,16 @@ async def start_graph_creation(
             f"✨ Started graph creation for file {file_id_int}: {file_record.original_name}, Model: {model}"
         )
 
-        # Graph creation işlemini celery task'e yönlendir
-        celery_app.send_task("src.tasks.create_graph_task", args=[file_id_int])
+        # Graph creation işlemini celery task'e yönlendir and save task_id
+        task_result = celery_app.send_task("src.tasks.create_graph_task", args=[file_id_int])
+        
+        # Save task_id for cancellation/tracking
+        try:
+            file_record.celery_task_id = task_result.id
+            db_session.commit()
+            logging.info(f"✅ Task ID saved: {task_result.id} for file {file_id_int}")
+        except Exception as task_save_error:
+            logging.warning(f"⚠️ Could not save celery task_id: {task_save_error}")
 
         db_session.close()
         return create_api_response(
@@ -5718,11 +5848,12 @@ async def create_embeddings_for_file(file_id: int):
 
 
 @app.post("/api/v2/files/{file_id}/reset")
-async def reset_file_stage(file_id: str, stage: str = "invalidate"):
+async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markdown: bool = False):
     """Reset file to a specific stage (cascading: upload→chunking→graph)
 
     If file_id is "all", resets all files based on the stage parameter.
     If stage is "invalidate", intelligently resets a SINGLE file based on its stuck/failed status.
+    If delete_markdown is True, markdown files will be deleted during chunking reset.
     """
     try:
         if stage not in ["upload", "chunking", "graph", "invalidate"]:
@@ -5749,6 +5880,12 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                 
                 for file_record in files_to_check:
                     reset_performed = False
+                    
+                    # Revoke any active Celery task for this file
+                    if file_record.celery_task_id:
+                        revoke_celery_task(file_record.celery_task_id, terminate=True)
+                        logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_record.id}")
+                        file_record.celery_task_id = None
                     
                     # Check Chunking Status
                     if file_record.chunking_status in ["chunking", "failed"]:
@@ -5807,6 +5944,143 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     )
                     .all()
                 )
+                
+                # PARALLEL PROCESSING for chunking reset
+                if files_to_reset:
+                    file_ids_to_reset = [f.id for f in files_to_reset]
+                    db_session.close()  # Close session before parallel processing
+                    
+                    # Parallel reset function
+                    async def reset_single_file_chunking(file_id: int, semaphore: asyncio.Semaphore):
+                        async with semaphore:
+                            local_db = get_file_queue_db()
+                            local_session = local_db.get_db_session()
+                            try:
+                                file_record = local_session.query(UploadedFile).filter_by(id=file_id).first()
+                                if not file_record:
+                                    return False
+                                
+                                # Revoke Celery task
+                                if file_record.celery_task_id:
+                                    revoke_celery_task(file_record.celery_task_id, terminate=True)
+                                    logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id}")
+                                    file_record.celery_task_id = None
+                                
+                                # Reset status
+                                if file_record.chunking_status == "failed":
+                                    file_record.chunking_status = "ready"
+                                elif file_record.chunking_status in ["chunked", "chunking", "ready"]:
+                                    file_record.chunking_status = "ready"
+                                else:
+                                    file_record.chunking_status = "pending"
+                                
+                                file_record.graph_status = "pending"
+                                file_record.embedding_status = "pending"
+                                file_record.status = "uploaded"
+                                file_record.chunking_started_at = None
+                                file_record.chunking_completed_at = None
+                                file_record.graph_started_at = None
+                                file_record.graph_completed_at = None
+                                file_record.embedding_started_at = None
+                                file_record.embedding_completed_at = None
+                                
+                                # Markdown handling
+                                if delete_markdown and file_record.markdown_path:
+                                    md_path = file_record.markdown_path
+                                    if not os.path.isabs(md_path):
+                                        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                                        celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                                        backend_path = os.path.join(project_root, "backend", md_path)
+                                        if os.path.exists(celery_worker_path):
+                                            md_path = celery_worker_path
+                                        elif os.path.exists(backend_path):
+                                            md_path = backend_path
+                                    if os.path.exists(md_path):
+                                        try:
+                                            os.remove(md_path)
+                                            file_record.markdown_path = None
+                                        except:
+                                            pass
+                                else:
+                                    logging.info(f"ℹ️ Markdown preserved for {file_record.original_name}")
+                                
+                                # Neo4j cleanup (async in thread pool) with retry
+                                neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                                neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                                filename = file_record.filename
+                                original_name = file_record.original_name
+                                
+                                if neo4j_uri:
+                                    def neo4j_cleanup():
+                                        from src.shared.common_fn import create_graph_database_connection
+                                        graph_conn = create_graph_database_connection(
+                                            neo4j_uri,
+                                            os.environ.get("NEO4J_USERNAME"),
+                                            os.environ.get("NEO4J_PASSWORD"),
+                                            neo4j_database,
+                                        )
+                                        # Delete chunks
+                                        chunk_result = graph_conn.query(
+                                            "MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk) DETACH DELETE c RETURN count(c) as cnt",
+                                            {"fileName": filename}
+                                        )
+                                        deleted_chunks = chunk_result[0]["cnt"] if chunk_result else 0
+                                        # Delete policy and related
+                                        graph_conn.query(
+                                            """MATCH (d:Document {fileName: $fileName})
+                                            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+                                            OPTIONAL MATCH (p)-[*1..2]-(n) WHERE n IS NOT NULL AND NOT n:Document AND NOT n:Chunk
+                                            DETACH DELETE p, n""",
+                                            {"fileName": filename}
+                                        )
+                                        return deleted_chunks
+                                    
+                                    # Retry mechanism: 3 attempts with exponential backoff (2s, 4s, 8s)
+                                    max_retries = 3
+                                    retry_delay = 2
+                                    deleted = 0
+                                    last_error = None
+                                    
+                                    for attempt in range(max_retries):
+                                        try:
+                                            loop = asyncio.get_event_loop()
+                                            deleted = await loop.run_in_executor(None, neo4j_cleanup)
+                                            if deleted > 0:
+                                                logging.info(f"🗑️ Neo4j: {deleted} chunks deleted for {original_name}")
+                                            break  # Success, exit retry loop
+                                        except Exception as e:
+                                            last_error = e
+                                            if attempt < max_retries - 1:
+                                                logging.warning(f"⚠️ Neo4j cleanup attempt {attempt + 1}/{max_retries} failed for {file_id}: {e}. Retrying in {retry_delay}s...")
+                                                await asyncio.sleep(retry_delay)
+                                                retry_delay *= 2  # Exponential backoff
+                                            else:
+                                                logging.warning(f"⚠️ Neo4j cleanup failed after {max_retries} attempts for file {file_id}: {last_error}")
+                                
+                                local_session.commit()
+                                logging.info(f"🔄 Reset CHUNKING for file {file_id} ({file_record.original_name})")
+                                return True
+                            except Exception as e:
+                                logging.error(f"❌ Reset failed for file {file_id}: {e}")
+                                local_session.rollback()
+                                return False
+                            finally:
+                                local_session.close()
+                    
+                    # Run parallel reset with semaphore (max 4 concurrent to avoid Neo4j connection limits)
+                    semaphore = asyncio.Semaphore(4)
+                    tasks = [reset_single_file_chunking(fid, semaphore) for fid in file_ids_to_reset]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    reset_count = sum(1 for r in results if r is True)
+                    failed_count = len(results) - reset_count
+                    
+                    logging.info(f"✅ Parallel CHUNKING reset completed: {reset_count} success, {failed_count} failed")
+                    return create_api_response(
+                        "Success",
+                        message=f"Reset chunking stage for {reset_count} file(s) (parallel)",
+                        data={"reset_count": reset_count, "failed_count": failed_count, "stage": stage, "parallel": True},
+                    )
             elif stage == "graph":
                 # Reset all files that have graph_status in ["processing", "completed", "failed"]
                 files_to_reset = (
@@ -5819,6 +6093,12 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                 files_to_reset = []
 
             for file_record in files_to_reset:
+                # Revoke any active Celery task for this file before reset
+                if file_record.celery_task_id:
+                    revoke_celery_task(file_record.celery_task_id, terminate=True)
+                    logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_record.id} (stage reset: {stage})")
+                    file_record.celery_task_id = None
+                
                 # Reset logic with cascading
                 if stage == "upload":
                     # Reset everything
@@ -5834,6 +6114,9 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     file_record.embedding_started_at = None
                     file_record.embedding_completed_at = None
                     reset_count += 1
+                    # Commit after each file to prevent data loss if process is interrupted
+                    db_session.commit()
+                    logging.info(f"🔄 Reset UPLOAD for file {file_record.id} ({file_record.original_name})")
 
                 elif stage == "chunking":
                     # Reset chunking and graph (cascade)
@@ -5860,39 +6143,42 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     file_record.embedding_started_at = None
                     file_record.embedding_completed_at = None
                     
-                    # Delete markdown file to force re-chunking
-                    logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
-                    if file_record.markdown_path:
-                        # Convert relative path to absolute (try both backend and celery_worker directories)
-                        md_path = file_record.markdown_path
-                        if not os.path.isabs(md_path):
-                            # Try celery_worker directory first
-                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                            celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
-                            backend_path = os.path.join(project_root, "backend", md_path)
+                    # Delete markdown file only if delete_markdown=True
+                    if delete_markdown:
+                        logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
+                        if file_record.markdown_path:
+                            # Convert relative path to absolute (try both backend and celery_worker directories)
+                            md_path = file_record.markdown_path
+                            if not os.path.isabs(md_path):
+                                # Try celery_worker directory first
+                                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                                celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                                backend_path = os.path.join(project_root, "backend", md_path)
+                                
+                                if os.path.exists(celery_worker_path):
+                                    md_path = celery_worker_path
+                                    logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
+                                elif os.path.exists(backend_path):
+                                    md_path = backend_path
+                                    logging.info(f"🔍 Found markdown in backend: {md_path}")
+                                else:
+                                    logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
                             
-                            if os.path.exists(celery_worker_path):
-                                md_path = celery_worker_path
-                                logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
-                            elif os.path.exists(backend_path):
-                                md_path = backend_path
-                                logging.info(f"🔍 Found markdown in backend: {md_path}")
+                            logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
+                            if os.path.exists(md_path):
+                                try:
+                                    os.remove(md_path)
+                                    logging.info(f"🗑️ Deleted markdown file: {md_path}")
+                                    file_record.markdown_path = None
+                                except Exception as md_error:
+                                    logging.warning(f"⚠️ Could not delete markdown file for {file_record.original_name}: {str(md_error)}")
                             else:
-                                logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
-                        
-                        logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
-                        if os.path.exists(md_path):
-                            try:
-                                os.remove(md_path)
-                                logging.info(f"🗑️ Deleted markdown file: {md_path}")
-                                file_record.markdown_path = None
-                            except Exception as md_error:
-                                logging.warning(f"⚠️ Could not delete markdown file for {file_record.original_name}: {str(md_error)}")
+                                logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
+                                file_record.markdown_path = None  # Clear invalid path
                         else:
-                            logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
-                            file_record.markdown_path = None  # Clear invalid path
+                            logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
                     else:
-                        logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
+                        logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
                     
                     # Delete existing chunks and related entities from Neo4j (preserve Document)
                     try:
@@ -5974,6 +6260,9 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                         logging.warning(f"⚠️ Could not delete chunks from Neo4j for {file_record.original_name}: {str(neo4j_error)}")
                     
                     reset_count += 1
+                    # Commit after each file to prevent data loss if process is interrupted
+                    db_session.commit()
+                    logging.info(f"🔄 Reset CHUNKING for file {file_record.id} ({file_record.original_name}) - chunking_status=ready")
 
                 elif stage == "graph":
                     # Reset only graph
@@ -5994,9 +6283,13 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
                     file_record.graph_started_at = None
                     file_record.graph_completed_at = None
                     reset_count += 1
+                    # Commit after each file to prevent data loss if process is interrupted
+                    db_session.commit()
+                    logging.info(f"🔄 Reset GRAPH for file {file_record.id} ({file_record.original_name})")
 
+            # Final commit for any remaining changes
             db_session.commit()
-            logging.info(f"🔄 Reset {stage.upper()} stage for {reset_count} file(s)")
+            logging.info(f"✅ Reset {stage.upper()} stage completed for {reset_count} file(s)")
             return create_api_response(
                 "Success",
                 message=f"Reset {stage} stage for {reset_count} file(s)",
@@ -6012,6 +6305,12 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
         file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
         if not file_record:
             return create_api_response("Failed", message="File not found")
+
+        # Revoke any active Celery task for this file before reset
+        if file_record.celery_task_id:
+            revoke_celery_task(file_record.celery_task_id, terminate=True)
+            logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id_int} (single file reset)")
+            file_record.celery_task_id = None
 
         # Reset logic with cascading
         if stage == "invalidate":
@@ -6096,40 +6395,42 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate"):
             file_record.embedding_started_at = None
             file_record.embedding_completed_at = None
             
-            # Delete markdown file to force re-chunking
-            logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
-            if file_record.markdown_path:
-                # Convert relative path to absolute (try both backend and celery_worker directories)
-                md_path = file_record.markdown_path
-                if not os.path.isabs(md_path):
-                    # Try celery_worker directory first
-                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
-                    backend_path = os.path.join(project_root, "backend", md_path)
+            # Delete markdown file only if delete_markdown=True
+            if delete_markdown:
+                logging.info(f"🔍 Markdown path for {file_record.original_name}: {file_record.markdown_path}")
+                if file_record.markdown_path:
+                    # Convert relative path to absolute (try both backend and celery_worker directories)
+                    md_path = file_record.markdown_path
+                    if not os.path.isabs(md_path):
+                        # Try celery_worker directory first
+                        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        celery_worker_path = os.path.join(project_root, "celery_worker", md_path)
+                        backend_path = os.path.join(project_root, "backend", md_path)
+                        
+                        if os.path.exists(celery_worker_path):
+                            md_path = celery_worker_path
+                            logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
+                        elif os.path.exists(backend_path):
+                            md_path = backend_path
+                            logging.info(f"🔍 Found markdown in backend: {md_path}")
+                        else:
+                            logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
                     
-                    if os.path.exists(celery_worker_path):
-                        md_path = celery_worker_path
-                        logging.info(f"🔍 Found markdown in celery_worker: {md_path}")
-                    elif os.path.exists(backend_path):
-                        md_path = backend_path
-                        logging.info(f"🔍 Found markdown in backend: {md_path}")
+                    logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
+                    if os.path.exists(md_path):
+                        try:
+                            os.remove(md_path)
+                            logging.info(f"🗑️ Deleted markdown file: {md_path}")
+                            file_record.markdown_path = None
+                        except Exception as md_error:
+                            logging.warning(f"⚠️ Could not delete markdown file: {str(md_error)}")
                     else:
-                        logging.warning(f"⚠️ Markdown not found in celery_worker or backend: {file_record.markdown_path}")
-                
-                logging.info(f"🔍 Checking if markdown exists: {os.path.exists(md_path)}")
-                if os.path.exists(md_path):
-                    try:
-                        os.remove(md_path)
-                        logging.info(f"🗑️ Deleted markdown file: {md_path}")
-                        file_record.markdown_path = None
-                    except Exception as md_error:
-                        logging.warning(f"⚠️ Could not delete markdown file: {str(md_error)}")
+                        logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
+                        file_record.markdown_path = None  # Clear invalid path
                 else:
-                    logging.info(f"ℹ️ Markdown file does not exist at: {md_path}")
-                    file_record.markdown_path = None  # Clear invalid path
+                    logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
             else:
-                logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
-            
+                logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
             
             # Delete existing chunks and related entities from Neo4j (preserve Document)
             try:
@@ -6643,80 +6944,234 @@ async def delete_file_background_task(
 @app.delete("/api/v2/files/{file_id}")
 async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
     """Delete a file or all files from queue, filesystem, and Neo4j database
+    
+    Silme işlemi SENKRON olarak backend'de yapılır:
+    1. Celery task'ları iptal edilir (RabbitMQ'dan çıkar)
+    2. Neo4j'den silinir (chunk, entity, document)
+    3. Dosya sisteminden silinir
+    4. Veritabanından silinir
 
-    If file_id is "all", deletes all files from the database asynchronously in batches
+    If file_id is "all", deletes all files synchronously
     """
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
+        
+        deleted_count = 0
+        failed_count = 0
+        revoked_count = 0
 
-        # Handle "all" parameter - run as background task
+        # Neo4j bağlantısını kur
+        graph_connection = None
+        try:
+            neo4j_uri = os.environ.get("NEO4J_URI")
+            neo4j_username = os.environ.get("NEO4J_USERNAME")
+            neo4j_password = os.environ.get("NEO4J_PASSWORD")
+            neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
+            
+            if all([neo4j_uri, neo4j_username, neo4j_password]):
+                graph_connection = create_graph_database_connection(
+                    neo4j_uri, neo4j_username, neo4j_password, neo4j_database
+                )
+                logging.info(f"🔗 Neo4j connection established for deletion")
+        except Exception as neo4j_error:
+            logging.warning(f"⚠️ Could not connect to Neo4j for deletion: {neo4j_error}")
+
+        # Handle "all" parameter
         if file_id.lower() == "all":
-            # Get all files
             all_files = db_session.query(UploadedFile).all()
 
             if not all_files:
                 db_session.close()
+                if graph_connection and hasattr(graph_connection, 'close'):
+                    graph_connection.close()
                 return create_api_response(
                     "Success",
                     message="No files to delete",
                     data={"deleted_count": 0},
                 )
 
-            # Get file IDs for background task
-            file_ids = [f.id for f in all_files]
-            total_files = len(file_ids)
+            total_files = len(all_files)
+            logging.info(f"🗑️ Starting synchronous deletion of {total_files} files")
+
+            # Process each file
+            for file_record in all_files:
+                try:
+                    # 1. Revoke Celery task
+                    if file_record.celery_task_id:
+                        revoke_celery_task(file_record.celery_task_id, terminate=True)
+                        revoked_count += 1
+                        logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_record.id}")
+                    
+                    # 2. Delete from Neo4j
+                    if graph_connection:
+                        try:
+                            from src.utf8_utils import normalize_file_name
+                            normalized_name = normalize_file_name(file_record.original_name)
+                            
+                            # Delete chunks
+                            graph_connection.query(
+                                "MATCH (c:Chunk) WHERE c.fileName = $fileName DETACH DELETE c",
+                                {"fileName": normalized_name}
+                            )
+                            # Delete orphan entities
+                            graph_connection.query(
+                                "MATCH (e) WHERE e.fileName = $fileName AND NOT (e)--() DELETE e",
+                                {"fileName": normalized_name}
+                            )
+                            # Delete document
+                            graph_connection.query(
+                                "MATCH (d:Document) WHERE d.fileName = $fileName DETACH DELETE d",
+                                {"fileName": normalized_name}
+                            )
+                            logging.info(f"🗑️ Neo4j cleanup completed for: {normalized_name}")
+                        except Exception as neo4j_del_error:
+                            logging.warning(f"⚠️ Neo4j deletion error for {file_record.original_name}: {neo4j_del_error}")
+                    
+                    # 3. Delete from filesystem
+                    if file_record.file_path:
+                        file_path = Path(file_record.file_path)
+                        
+                        # Delete the PDF file
+                        if file_path.exists():
+                            file_path.unlink()
+                            logging.info(f"🗑️ Deleted file: {file_path}")
+                        
+                        # Delete the document directory (images, markdown, etc.)
+                        doc_dir = file_path.parent.parent  # Go up from pdf/ to doc_name/
+                        if doc_dir.exists() and doc_dir.name != "output":
+                            import shutil
+                            shutil.rmtree(doc_dir, ignore_errors=True)
+                            logging.info(f"🗑️ Deleted directory: {doc_dir}")
+                    
+                    # 4. Delete from database
+                    db_session.delete(file_record)
+                    deleted_count += 1
+                    logging.info(f"✅ Deleted file: ID={file_record.id}, Name={file_record.original_name}")
+                    
+                except Exception as file_error:
+                    logging.error(f"❌ Failed to delete file {file_record.id}: {file_error}")
+                    failed_count += 1
+                    continue
             
+            # Commit all deletions
+            db_session.commit()
             db_session.close()
             
-            # Start deletion via Celery task
-            batch_size = int(os.environ.get("DELETE_BATCH_SIZE", "10"))
-            # Process files in batches via Celery
-            for i in range(0, len(file_ids), batch_size):
-                batch = file_ids[i:i + batch_size]
-                celery_app.send_task("src.tasks.delete_files_task", args=[batch])
+            # Close Neo4j connection
+            if graph_connection and hasattr(graph_connection, 'close'):
+                graph_connection.close()
+                logging.info(f"🔌 Neo4j connection closed")
             
-            logging.info(
-                f"🗑️ Started background deletion for {total_files} files (batch size: {batch_size})"
-            )
+            logging.info(f"✅ Deletion completed: {deleted_count} deleted, {failed_count} failed, {revoked_count} tasks revoked")
             
             return create_api_response(
                 "Success",
-                message=f"Deletion started in background for {total_files} file(s). Processing in batches of {batch_size}.",
+                message=f"Deleted {deleted_count} file(s). {failed_count} failed. {revoked_count} Celery tasks revoked.",
                 data={
-                    "total_files": total_files,
-                    "batch_size": batch_size,
-                    "status": "processing",
+                    "deleted_count": deleted_count,
+                    "failed_count": failed_count,
+                    "revoked_tasks": revoked_count,
                 },
             )
 
-        # Single file processing - also run as background task for consistency
+        # Single file processing
         try:
             file_id_int = int(file_id)
         except ValueError:
             db_session.close()
+            if graph_connection and hasattr(graph_connection, 'close'):
+                graph_connection.close()
             return create_api_response("Failed", message="Invalid file_id parameter")
 
-        # Get file info before deletion
-        file_record = db.get_file_by_id(file_id_int)
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
         if not file_record:
             db_session.close()
+            if graph_connection and hasattr(graph_connection, 'close'):
+                graph_connection.close()
             return create_api_response(
                 "Failed", message="File not found", error="File ID not in database"
             )
 
+        original_name = file_record.original_name
+        
+        try:
+            # 1. Revoke Celery task
+            if file_record.celery_task_id:
+                revoke_celery_task(file_record.celery_task_id, terminate=True)
+                logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id_int}")
+            
+            # 2. Delete from Neo4j
+            if graph_connection:
+                try:
+                    from src.utf8_utils import normalize_file_name
+                    normalized_name = normalize_file_name(original_name)
+                    
+                    # Delete chunks
+                    graph_connection.query(
+                        "MATCH (c:Chunk) WHERE c.fileName = $fileName DETACH DELETE c",
+                        {"fileName": normalized_name}
+                    )
+                    # Delete orphan entities
+                    graph_connection.query(
+                        "MATCH (e) WHERE e.fileName = $fileName AND NOT (e)--() DELETE e",
+                        {"fileName": normalized_name}
+                    )
+                    # Delete document
+                    graph_connection.query(
+                        "MATCH (d:Document) WHERE d.fileName = $fileName DETACH DELETE d",
+                        {"fileName": normalized_name}
+                    )
+                    logging.info(f"🗑️ Neo4j cleanup completed for: {normalized_name}")
+                except Exception as neo4j_del_error:
+                    logging.warning(f"⚠️ Neo4j deletion error for {original_name}: {neo4j_del_error}")
+            
+            # 3. Delete from filesystem
+            if file_record.file_path:
+                file_path = Path(file_record.file_path)
+                
+                # Delete the PDF file
+                if file_path.exists():
+                    file_path.unlink()
+                    logging.info(f"🗑️ Deleted file: {file_path}")
+                
+                # Delete the document directory (images, markdown, etc.)
+                doc_dir = file_path.parent.parent  # Go up from pdf/ to doc_name/
+                if doc_dir.exists() and doc_dir.name != "output":
+                    import shutil
+                    shutil.rmtree(doc_dir, ignore_errors=True)
+                    logging.info(f"🗑️ Deleted directory: {doc_dir}")
+            
+            # 4. Delete from database
+            db_session.delete(file_record)
+            db_session.commit()
+            deleted_count = 1
+            
+            logging.info(f"✅ Deleted file: ID={file_id_int}, Name={original_name}")
+            
+        except Exception as delete_error:
+            logging.error(f"❌ Failed to delete file {file_id_int}: {delete_error}")
+            db_session.rollback()
+            failed_count = 1
+        
         db_session.close()
         
-        # Start deletion via Celery task for single file
-        celery_app.send_task("src.tasks.delete_files_task", args=[[file_id_int]])
+        # Close Neo4j connection
+        if graph_connection and hasattr(graph_connection, 'close'):
+            graph_connection.close()
         
-        logging.info(f"🗑️ Started background deletion for file ID: {file_id_int}")
-        
-        return create_api_response(
-            "Success",
-            message="File deletion started in background",
-            data={"file_id": file_id_int, "status": "processing"},
-        )
+        if deleted_count > 0:
+            return create_api_response(
+                "Success",
+                message=f"File deleted successfully: {original_name}",
+                data={"file_id": file_id_int, "deleted": True},
+            )
+        else:
+            return create_api_response(
+                "Failed",
+                message=f"Failed to delete file: {original_name}",
+                data={"file_id": file_id_int, "deleted": False},
+            )
 
     except Exception as e:
         error_message = str(e)
@@ -6847,8 +7302,9 @@ async def stop_background_processing():
 
 @app.post("/api/v2/files/{file_id}/cancel")
 async def cancel_file_processing(file_id: int):
-    """Cancel processing for a specific V2 file"""
+    """Cancel processing for a specific V2 file and revoke any active Celery task"""
     db_session = None
+    celery_task_revoked = False
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
@@ -6857,16 +7313,29 @@ async def cancel_file_processing(file_id: int):
         if not file_record:
             return create_api_response("Failed", message="File not found")
 
-        # Check if file is actually processing
-        if file_record.status != "processing":
+        # Check if file is actually in a processing state (any stage)
+        is_processing = (
+            file_record.status == "processing" or
+            file_record.chunking_status == "chunking" or
+            file_record.graph_status == "processing" or
+            file_record.embedding_status == "processing"
+        )
+        
+        if not is_processing:
             return create_api_response(
                 "Failed",
-                message=f"File is not in processing state (current status: {file_record.status})",
+                message=f"File is not in processing state (status: {file_record.status}, chunking: {file_record.chunking_status}, graph: {file_record.graph_status}, embedding: {file_record.embedding_status})",
             )
 
         logging.info(
             f"🛑 Cancelling processing for file {file_id}: {file_record.original_name}"
         )
+
+        # Revoke Celery task if exists
+        if file_record.celery_task_id:
+            celery_task_revoked = revoke_celery_task(file_record.celery_task_id, terminate=True)
+            logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id}")
+            file_record.celery_task_id = None
 
         # Reset status based on which stage was being processed
         if file_record.embedding_status == "processing":
@@ -6888,7 +7357,11 @@ async def cancel_file_processing(file_id: int):
         return create_api_response(
             "Success",
             message=f"Processing cancelled for {file_record.original_name}",
-            data={"file_id": file_id, "status": "cancelled"},
+            data={
+                "file_id": file_id, 
+                "status": "cancelled",
+                "celery_task_revoked": celery_task_revoked
+            },
         )
 
     except Exception as e:

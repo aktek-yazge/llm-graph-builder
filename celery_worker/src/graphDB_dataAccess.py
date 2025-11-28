@@ -3,7 +3,7 @@ import os
 import time
 import re
 import difflib
-from neo4j.exceptions import TransientError
+from neo4j.exceptions import TransientError, ServiceUnavailable, SessionExpired
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import (
     create_gcs_bucket_folder_name_hashed,
@@ -23,8 +23,107 @@ from src.utils.log_helpers import log_delete, log_processing
 from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
+from functools import wraps
 
 load_dotenv()
+
+
+# ============================================================================
+# Neo4j Connection Retry Helper
+# ============================================================================
+NEO4J_RETRY_ATTEMPTS = 3
+NEO4J_RETRY_WAIT_MIN = 2
+NEO4J_RETRY_WAIT_MAX = 10
+
+
+def neo4j_retry(func):
+    """
+    Decorator to retry Neo4j operations on connection errors.
+    Handles ServiceUnavailable, SessionExpired, and ConnectionResetError.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exception = None
+        for attempt in range(1, NEO4J_RETRY_ATTEMPTS + 1):
+            try:
+                return func(*args, **kwargs)
+            except (ServiceUnavailable, SessionExpired, ConnectionResetError) as e:
+                last_exception = e
+                wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                logging.warning(
+                    f"⚠️ Neo4j connection error (attempt {attempt}/{NEO4J_RETRY_ATTEMPTS}): {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            except Exception as e:
+                # Check if it's a wrapped connection error
+                error_str = str(e).lower()
+                if "connection" in error_str and ("reset" in error_str or "defunct" in error_str):
+                    last_exception = e
+                    wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                    logging.warning(
+                        f"⚠️ Neo4j connection error (attempt {attempt}/{NEO4J_RETRY_ATTEMPTS}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise
+        
+        # All retries exhausted
+        logging.error(f"❌ Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts")
+        raise last_exception
+    
+    return wrapper
+
+
+def execute_neo4j_query_with_retry(graph, query, params=None, max_retries=NEO4J_RETRY_ATTEMPTS):
+    """
+    Execute a Neo4j query with automatic retry on connection errors.
+    
+    Args:
+        graph: Neo4jGraph instance
+        query: Cypher query string
+        params: Query parameters dict
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        Query result
+    """
+    last_exception = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return graph.query(query, params=params)
+        except (ServiceUnavailable, SessionExpired, ConnectionResetError) as e:
+            last_exception = e
+            wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+            logging.warning(
+                f"⚠️ Neo4j query error (attempt {attempt}/{max_retries}): {e}. "
+                f"Retrying in {wait_time}s..."
+            )
+            time.sleep(wait_time)
+            
+            # Try to refresh the connection
+            try:
+                if hasattr(graph, '_driver') and graph._driver:
+                    graph._driver.verify_connectivity()
+            except Exception:
+                pass
+        except Exception as e:
+            # Check if it's a wrapped connection error
+            error_str = str(e).lower()
+            if "connection" in error_str and ("reset" in error_str or "defunct" in error_str):
+                last_exception = e
+                wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                logging.warning(
+                    f"⚠️ Neo4j query error (attempt {attempt}/{max_retries}): {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                raise
+    
+    logging.error(f"❌ Neo4j query failed after {max_retries} attempts")
+    raise last_exception
 
 
 # Neo4j notification loglarını kapat
@@ -58,6 +157,13 @@ class graphDBdataAccess:
 
     def __init__(self, graph: Neo4jGraph):
         self.graph = graph
+    
+    def query_with_retry(self, query, params=None, max_retries=NEO4J_RETRY_ATTEMPTS):
+        """
+        Execute a Neo4j query with automatic retry on connection errors.
+        Use this for critical operations that should not fail due to transient connection issues.
+        """
+        return execute_neo4j_query_with_retry(self.graph, query, params, max_retries)
 
     def update_exception_db(self, file_name, exp_msg, retry_condition=None):
         try:
@@ -195,14 +301,14 @@ class graphDBdataAccess:
                     RETURN d.fileName as fileName, d.status as status
                 """
 
-                result = self.graph.query(
+                # Use retry wrapper for connection resilience
+                result = self.query_with_retry(
                     merge_query,
                     {
                         "file_name": file_name,
                         "file_type": file_type,
                         "file_size": file_size,
                     },
-                    session_params={"database": self.graph._database},
                 )
 
                 if result:

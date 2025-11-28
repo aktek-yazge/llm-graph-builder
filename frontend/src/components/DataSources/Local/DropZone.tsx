@@ -25,7 +25,7 @@ const DropZone: FunctionComponent = () => {
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
 
-  const BATCH_SIZE = 20;
+  const BATCH_SIZE = 128;
   const onDropHandler = (f: Partial<globalThis.File>[]) => {
     setIsLoading(false);
     console.log(`📁 Files dropped: ${f.length} files`);

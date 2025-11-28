@@ -341,9 +341,10 @@ export const startEmbeddingAPI = async (
 // Reset file to a specific stage
 export const resetFileStageAPI = async (
   fileId: number | string,
-  stage: 'upload' | 'chunking' | 'graph' | 'auto' | 'invalidate' = 'upload'
+  stage: 'upload' | 'chunking' | 'graph' | 'auto' | 'invalidate' = 'upload',
+  deleteMarkdown: boolean = false
 ): Promise<any> => {
-  const urlReset = `${url()}/api/v2/files/${fileId}/reset?stage=${stage}`;
+  const urlReset = `${url()}/api/v2/files/${fileId}/reset?stage=${stage}&delete_markdown=${deleteMarkdown}`;
   const method: Method = 'post';
   const response = await apiCall(urlReset, method, {});
   return response;

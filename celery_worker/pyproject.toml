@@ -7,13 +7,13 @@ requires-python = ">=3.13.5"
 dependencies = [
     # Core
     "celery==5.4.0",
+    "gevent>=24.11.1",  # For high-concurrency I/O-bound tasks
     "flower==2.0.1",
     "python-dotenv==1.1.0",
     "sqlalchemy==2.0.41",
     "psycopg2-binary==2.9.10",
     "pydantic==2.11.7",
     "pydantic-settings==2.10.1",
-    
     # AI & ML
     "torch==2.8.0",
     "torchvision==0.23.0",
@@ -24,7 +24,6 @@ dependencies = [
     "timm==1.0.19",
     "opencv-python==4.11.0.86",
     "pillow==11.3.0",
-    
     # LangChain Ecosystem
     "langchain==0.3.27",
     "langchain-core>=0.3.78",
@@ -39,20 +38,17 @@ dependencies = [
     "langchain-docling==1.1.0",
     "langchain-experimental==0.3.4",
     "langchain-aws==0.2.12",
-    
     # LLM Clients
     "openai==2.1.0",
     "anthropic==0.69.0",
     "groq==0.30.0",
     "google-genai==1.36.0",
     "google-cloud-aiplatform==1.113.0",
-    
     # Graph DB
     "neo4j==5.28.1",
     "neo4j-graphrag==1.8.0",
     "graphdatascience==1.14",
     "networkx==3.5",
-    
     # Document Processing
     "youtube-transcript-api",
     "unstructured==0.17.2",
@@ -72,8 +68,8 @@ dependencies = [
     "openpyxl==3.1.5",
     "xlrd==2.0.2",
     "xlsxwriter==3.2.5",
-    
     # Utilities
+    "nest-asyncio>=1.6.0",  # Allow nested event loops (needed for gevent + asyncio)
     "requests==2.32.5",
     "httpx==0.28.1",
     "aiohttp==3.12.15",
@@ -88,7 +84,7 @@ dependencies = [
     "boto3==1.38.36",
     "azure-identity==1.25.0",
     "azure-core==1.35.1",
-    
     # MCP (If needed in worker)
     "mcp-neo4j-cypher @ git+https://github.com/aktek-yazge/llm-graph-builder.git@d2ce091dc735413ee0fcfd1fc58f01d6e77c1b21#subdirectory=backend/mcp-servers/mcp-neo4j-cypher",
+    "supervisor>=4.3.0",
 ]

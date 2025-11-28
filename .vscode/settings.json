@@ -35,5 +35,17 @@
   "python.analysis.useLibraryCodeForTypes": true,
   "python.analysis.stubPath": "${workspaceFolder}/typings",
   "python.analysis.venvPath": "${workspaceFolder}",
-  "python.analysis.venv": ".venv"
+  "python.analysis.venv": ".venv",
+  "sqltools.connections": [
+    {
+      "ssh": "Disabled",
+      "previewLimit": 50,
+      "server": "localhost",
+      "port": 5432,
+      "driver": "PostgreSQL",
+      "name": "local postgres",
+      "username": "postgres",
+      "database": "llm_graph_builder"
+    }
+  ]
 }

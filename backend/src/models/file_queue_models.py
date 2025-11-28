@@ -124,6 +124,9 @@ class UploadedFile(Base):
     auto_process = Column(
         Boolean, default=False, nullable=False
     )  # Auto start chunking and graph creation after image extraction
+    
+    # Celery task tracking for cancellation/reset
+    celery_task_id = Column(String(100), nullable=True, index=True)  # Current active Celery task ID
 
     # Add composite indexes for common queries
     __table_args__ = (
@@ -177,11 +180,27 @@ class FileQueueDatabase:
             self.db_path = Path(db_path)
             self.db_url = f"sqlite:///{self.db_path}"
             
+        # Pool configuration for PostgreSQL
+        # pool_size: Number of connections to keep open
+        # max_overflow: Maximum overflow connections allowed
+        # pool_timeout: Seconds to wait for connection from pool
+        # pool_recycle: Recycle connections after N seconds (prevent stale connections)
+        pool_config = {}
+        if "sqlite" not in self.db_url:
+            pool_config = {
+                "pool_size": 100,          # Base connections (was 5)
+                "max_overflow": 200,       # Extra connections when needed (was 10)
+                "pool_timeout": 120,       # Wait up to 120s for connection (was 30)
+                "pool_recycle": 1800,      # Recycle connections every 30 min
+                "pool_pre_ping": True,     # Check connection health before use
+            }
+        
         self.engine = create_engine(
             self.db_url,
             # connect_args={"check_same_thread": False}, # Only for SQLite
             echo=False,
             poolclass=StaticPool if "sqlite" in self.db_url else None, # StaticPool for SQLite
+            **pool_config,
         )
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
@@ -194,6 +213,8 @@ class FileQueueDatabase:
         self._migrate_add_auto_process_column()
         # Migrate: Add reason column if it doesn't exist
         self._migrate_add_reason_column()
+        # Migrate: Add celery_task_id column if it doesn't exist
+        self._migrate_add_celery_task_id_column()
 
     def _migrate_add_auto_process_column(self):
         """Add auto_process column to uploaded_files table if it doesn't exist"""
@@ -278,6 +299,42 @@ class FileQueueDatabase:
         except Exception as e:
             logging.warning(f"⚠️ Migration warning (reason): {str(e)}")
             # Continue even if migration fails
+
+    def _migrate_add_celery_task_id_column(self):
+        """Add celery_task_id column to uploaded_files table if it doesn't exist"""
+        try:
+            with self.engine.connect() as conn:
+                db_url = getattr(self, 'db_url', str(self.engine.url))
+                if "sqlite" in db_url:
+                    result = conn.execute(
+                        text("PRAGMA table_info(uploaded_files)")
+                    ).fetchall()
+                    column_names = [row[1] for row in result]
+                else:
+                    result = conn.execute(
+                        text("""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = 'uploaded_files' AND column_name = 'celery_task_id'
+                        """)
+                    ).fetchall()
+                    column_names = [row[0] for row in result] if result else []
+
+                if "celery_task_id" not in column_names:
+                    logging.info(
+                        "🔄 Migrating: Adding celery_task_id column to uploaded_files table"
+                    )
+                    conn.execute(
+                        text(
+                            "ALTER TABLE uploaded_files ADD COLUMN celery_task_id VARCHAR(100)"
+                        )
+                    )
+                    conn.commit()
+                    logging.info("✅ Migration completed: celery_task_id column added")
+                else:
+                    logging.debug("ℹ️ celery_task_id column already exists")
+        except Exception as e:
+            logging.warning(f"⚠️ Migration warning (celery_task_id): {str(e)}")
 
     def get_db_session(self) -> Session:
         """Get database session"""
@@ -377,6 +434,18 @@ class FileQueueDatabase:
             return (
                 db.query(UploadedFile)
                 .filter(UploadedFile.file_hash == file_hash)
+                .first()
+            )
+        finally:
+            db.close()
+
+    def get_file_by_filename(self, filename: str) -> Optional[UploadedFile]:
+        """Get file by filename (includes folder prefix for uniqueness)"""
+        db = self.get_db_session()
+        try:
+            return (
+                db.query(UploadedFile)
+                .filter(UploadedFile.filename == filename)
                 .first()
             )
         finally:

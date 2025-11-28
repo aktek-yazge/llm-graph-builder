@@ -166,14 +166,24 @@ const V2FileQueue: React.FC = () => {
       return;
     }
 
+    // Chunking reset için markdown silme seçeneği sor
+    let deleteMarkdown = false;
+    if (stage === 'chunking') {
+      deleteMarkdown = confirm(
+        'Çıkartılan markdown dosyasını da silmek istiyor musunuz?\n\n' +
+        '• EVET: Markdown silinir, chunking baştan yapılır\n' +
+        '• HAYIR: Markdown korunur, sadece durum sıfırlanır'
+      );
+    }
+
     try {
       setIsLoading(true);
-      console.log(`🔄 Resetting ${stage} stage for file ${fileId}`);
+      console.log(`🔄 Resetting ${stage} stage for file ${fileId}${stage === 'chunking' ? ` (deleteMarkdown=${deleteMarkdown})` : ''}`);
 
       // Call backend API
-      await resetFileStageAPI(fileId, stage);
+      await resetFileStageAPI(fileId, stage, deleteMarkdown);
 
-      showSuccessToast(`${stage} stage reset`);
+      showSuccessToast(`${stage} stage reset${deleteMarkdown ? ' (markdown silindi)' : ''}`);
       await fetchV2Files(); // Refresh file list
     } catch (error) {
       showErrorToast(`Failed to reset ${stage} stage`);

@@ -38,6 +38,18 @@ dependencies = [
     "python-dateutil==2.9.0.post0",
     "pytz==2025.2",
     
+    # PDF Processing (for image extraction in upload)
+    "PyMuPDF>=1.26.1",
+    
+    # AI & ML (for image processing)
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "pillow==11.3.0",
+    "opencv-python==4.11.0.86",
+    
+    # System Monitoring
+    "psutil>=5.9.0",
+    
     # Telemetry (Optional, keep if used in API)
     "opentelemetry-api",
     "opentelemetry-sdk",

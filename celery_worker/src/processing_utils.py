@@ -14,6 +14,7 @@ import json
 from typing import Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timezone
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.shared.common_fn import formatted_time, create_graph_database_connection
@@ -27,10 +28,110 @@ except ImportError:
     genai_sdk = None
 
 
+# Retry configuration for Gemini API calls
+GEMINI_RETRY_ATTEMPTS = 3
+GEMINI_RETRY_WAIT_MIN = 2  # seconds
+GEMINI_RETRY_WAIT_MAX = 10  # seconds
+
+
+class GeminiOCRException(Exception):
+    """Exception raised when Gemini OCR fails after all retries."""
+    pass
+
+
+class GeminiRateLimitException(GeminiOCRException):
+    """Exception raised when Gemini API rate limit is hit."""
+    pass
+
+
+def _create_gemini_retry_decorator():
+    """Create a retry decorator for Gemini API calls with exponential backoff."""
+    return retry(
+        stop=stop_after_attempt(GEMINI_RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=GEMINI_RETRY_WAIT_MIN, max=GEMINI_RETRY_WAIT_MAX),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=lambda retry_state: logging.warning(
+            f"🔄 Gemini API call failed, retrying in {retry_state.next_action.sleep} seconds... "
+            f"(attempt {retry_state.attempt_number}/{GEMINI_RETRY_ATTEMPTS})"
+        ),
+        reraise=True
+    )
+
+
+def _call_gemini_with_retry(client, model: str, contents: list, page_info: str = ""):
+    """
+    Gemini API çağrısı yapar, başarısız olursa 3 kez retry eder.
+    
+    Args:
+        client: Gemini client
+        model: Model adı (örn: "models/gemini-2.0-flash")
+        contents: Gemini'ye gönderilecek içerik
+        page_info: Log mesajları için sayfa bilgisi
+    
+    Returns:
+        Gemini response
+    
+    Raises:
+        GeminiOCRException: 3 deneme sonrası başarısız olursa
+        GeminiRateLimitException: Rate limit'e takılırsa
+    """
+    last_exception = None
+    is_rate_limit = False
+    
+    for attempt in range(1, GEMINI_RETRY_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+            )
+            return response
+        except Exception as e:
+            last_exception = e
+            error_str = str(e).lower()
+            
+            # Check if it's a rate limit error
+            if "rate" in error_str or "limit" in error_str or "quota" in error_str or "429" in error_str:
+                is_rate_limit = True
+            
+            if attempt < GEMINI_RETRY_ATTEMPTS:
+                wait_time = GEMINI_RETRY_WAIT_MIN * (2 ** (attempt - 1))  # Exponential backoff
+                wait_time = min(wait_time, GEMINI_RETRY_WAIT_MAX)
+                
+                # Rate limit için daha uzun bekle
+                if is_rate_limit:
+                    wait_time = wait_time * 2
+                    logging.warning(
+                        f"🚫 Gemini API rate limit hit for {page_info}, waiting {wait_time}s... "
+                        f"(attempt {attempt}/{GEMINI_RETRY_ATTEMPTS})"
+                    )
+                else:
+                    logging.warning(
+                        f"🔄 Gemini API call failed for {page_info}, retrying in {wait_time}s... "
+                        f"(attempt {attempt}/{GEMINI_RETRY_ATTEMPTS}): {str(e)[:100]}"
+                    )
+                time.sleep(wait_time)
+            else:
+                logging.error(
+                    f"❌ Gemini API call failed after {GEMINI_RETRY_ATTEMPTS} attempts for {page_info}: {e}"
+                )
+    
+    # Raise appropriate exception after all retries failed
+    if is_rate_limit:
+        raise GeminiRateLimitException(
+            f"Gemini API rate limit exceeded after {GEMINI_RETRY_ATTEMPTS} retries for {page_info}: {last_exception}"
+        )
+    else:
+        raise GeminiOCRException(
+            f"Gemini OCR failed after {GEMINI_RETRY_ATTEMPTS} retries for {page_info}: {last_exception}"
+        )
+
+
 def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     """
     Gemini 2.0 Flash ile image'ları markdown'a çevirme ve belge tipini tespit etme (sync function for executor)
     Copied from backend/score.py
+    
+    RETRY MECHANISM: Her Gemini API çağrısı 3 kez denenir (exponential backoff ile).
 
     Args:
         image_list: Image path'leri veya filename'leri
@@ -126,9 +227,12 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                 
                 logging.info(f"🔍 Sending {len(images_to_analyze)} image(s) to Gemini for document type detection...")
                 
-                doc_type_response = client.models.generate_content(
+                # Call Gemini with retry (3 attempts with exponential backoff)
+                doc_type_response = _call_gemini_with_retry(
+                    client=client,
                     model="models/gemini-2.0-flash",
                     contents=parts,
+                    page_info="document_type_detection"
                 )
                 
                 # 🔍 Gemini'nin raw response'unu logla
@@ -244,12 +348,15 @@ CONTEXT HANDLING:
 
 Return ONLY the markdown content with <CHUNK> tags, nothing else."""
 
-                response = client.models.generate_content(
+                # Call Gemini with retry (3 attempts with exponential backoff)
+                response = _call_gemini_with_retry(
+                    client=client,
                     model="models/gemini-2.0-flash",
                     contents=[
                         types.Part.from_text(text=prompt_text),
                         types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
                     ],
+                    page_info=f"page_{idx}/{len(sorted_images)}"
                 )
 
                 if response.text:
@@ -273,8 +380,13 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
                     logging.warning(
                         f"Gemini returned empty response for {os.path.basename(img_path)}"
                     )
+            except (GeminiOCRException, GeminiRateLimitException) as e:
+                # Re-raise Gemini specific exceptions - these should fail the task
+                logging.error(f"❌ Gemini OCR failed for {img_ref}: {e}")
+                raise
             except Exception as e:
                 logging.warning(f"Gemini processing failed for {img_ref}: {e}")
+                # For non-Gemini errors, continue with other pages
 
         result["markdown"] = markdown_text
 
@@ -283,10 +395,17 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
                 f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images"
             )
         else:
-            logging.warning("Gemini generated empty markdown")
+            # Empty markdown is a failure - raise exception
+            error_msg = f"Gemini OCR failed: No markdown generated from {len(image_list)} images"
+            logging.error(f"❌ {error_msg}")
+            raise GeminiOCRException(error_msg)
 
+    except (GeminiOCRException, GeminiRateLimitException):
+        # Re-raise Gemini exceptions to caller
+        raise
     except Exception as e:
         logging.error(f"Gemini processing error: {e}")
+        raise GeminiOCRException(f"Gemini processing failed: {e}")
 
     # Upload Markdown to S3 if generated
     if result.get("markdown"):
@@ -834,8 +953,15 @@ class FileProcessor:
                         logging.error(f"❌ Failed to create Neo4j nodes: {str(neo4j_error)}")
                         import traceback
                         logging.error(f"Traceback: {traceback.format_exc()}")
+                        # Neo4j hatası kritik - chunking failed olarak işaretle ve exception fırlat
+                        file_record.chunking_status = "failed"
+                        file_record.processing_error = f"Neo4j error: {str(neo4j_error)[:500]}"
+                        file_record.chunking_completed_at = datetime.now(timezone.utc)
+                        db_session.commit()
+                        logging.error(f"❌ V2: Chunking FAILED due to Neo4j error for: {file_record.original_name} (ID: {file_record.id})")
+                        raise  # Celery retry mekanizmasını tetikle
                     
-                    # Mark as chunked
+                    # Mark as chunked - sadece Neo4j başarılı olursa buraya ulaşır
                     file_record.chunking_status = "chunked"
                     file_record.chunking_completed_at = datetime.now(timezone.utc)
                     file_record.status = "uploaded"
@@ -1219,13 +1345,21 @@ class FileProcessor:
                         logging.error(f"❌ Failed to create Document/Chunk nodes in Neo4j: {str(neo4j_error)}")
                         import traceback
                         logging.error(f"Traceback: {traceback.format_exc()}")
-                        # Neo4j hatası chunking'i durdurmaz, devam et
+                        # Neo4j hatası kritik - chunking failed olarak işaretle ve exception fırlat
+                        # Markdown oluşturuldu ama Neo4j'ye yazılamadı - retry gerekli
+                        file_record.markdown_path = markdown_path  # Markdown path'i yine de kaydet
+                        file_record.chunking_status = "failed"
+                        file_record.processing_error = f"Neo4j error: {str(neo4j_error)[:500]}"
+                        file_record.chunking_completed_at = datetime.now(timezone.utc)
+                        db_session.commit()
+                        logging.error(f"❌ V2: Chunking FAILED due to Neo4j error for: {file_record.original_name} (ID: {file_record.id})")
+                        raise  # Celery retry mekanizmasını tetikle
                     
                     # ========================================
                     # END: Neo4j Document ve Chunk node oluşturma
                     # ========================================
 
-                    # Markdown path'i kaydet
+                    # Markdown path'i kaydet - sadece Neo4j başarılı olursa buraya ulaşır
                     file_record.markdown_path = markdown_path
                     file_record.chunking_status = "chunked"
                     file_record.chunking_completed_at = datetime.now(timezone.utc)

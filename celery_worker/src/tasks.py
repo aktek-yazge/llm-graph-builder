@@ -1,8 +1,23 @@
 import logging
 import asyncio
+import nest_asyncio
 from datetime import datetime, timezone
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
+
+# Allow nested event loops - required for gevent + asyncio compatibility
+nest_asyncio.apply()
 from src.celery_app import app
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
+from src.processing_utils import GeminiOCRException, GeminiRateLimitException
+
+# Import DB Write Queue helpers - async writes to PostgreSQL
+from src.db_writer import (
+    enqueue_db_write,
+    enqueue_chunking_update,
+    enqueue_graph_update,
+    enqueue_embedding_update,
+    enqueue_error_update,
+)
 # Lazy imports to avoid SIGSEGV on module load (especially with prefork pool + MPS)
 # from src.processing_utils import FileProcessor
 # from src.document_sources.s3_upload_utils import create_document_output_structure
@@ -15,7 +30,78 @@ import os
 def get_db():
     return get_file_queue_db()
 
-@app.task(bind=True, name="src.tasks.process_file_pipeline")
+
+class TaskCancelledException(Exception):
+    """Exception raised when a task is cancelled or file is deleted during processing"""
+    pass
+
+
+def check_task_cancelled(task_instance, file_id: int, db_session) -> bool:
+    """
+    Check if task should be cancelled.
+    Returns True if task should stop, False if it should continue.
+    
+    Checks:
+    1. If the Celery task itself was revoked
+    2. If the file record no longer exists (deleted)
+    3. If the file status is 'deleted' or 'cancelled'
+    """
+    # Check if Celery task was revoked
+    if task_instance.request.id:
+        try:
+            # Check revoke state from backend
+            result = app.AsyncResult(task_instance.request.id)
+            if result.state == 'REVOKED':
+                logging.warning(f"⚠️ Task {task_instance.request.id} was revoked for file {file_id}")
+                return True
+        except Exception:
+            pass  # Ignore errors in checking revoke state
+    
+    # Check if file still exists and is not deleted
+    try:
+        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
+        if not file_record:
+            logging.warning(f"⚠️ File {file_id} no longer exists in database - task cancelled")
+            return True
+        
+        # Check if file was marked as deleted or cancelled
+        if file_record.status in ['deleted', 'cancelled']:
+            logging.warning(f"⚠️ File {file_id} status is '{file_record.status}' - task cancelled")
+            return True
+            
+    except Exception as e:
+        logging.warning(f"⚠️ Error checking file status for {file_id}: {e}")
+        # Continue processing if we can't check
+        return False
+    
+    return False
+
+
+def raise_if_cancelled(task_instance, file_id: int, db_session, step_name: str = ""):
+    """
+    Raise TaskCancelledException if task should be cancelled.
+    Use this at key checkpoints in long-running tasks.
+    """
+    if check_task_cancelled(task_instance, file_id, db_session):
+        raise TaskCancelledException(f"Task cancelled at step '{step_name}' for file {file_id}")
+
+
+# ============================================================================
+# DEPRECATED TASKS - Kept for backward compatibility with old RabbitMQ messages
+# These tasks do nothing but consume old messages that may be stuck in queues
+# ============================================================================
+
+@app.task(bind=True, name="src.tasks.extract_images_task")
+def extract_images_task(self, file_id: int):
+    """
+    DEPRECATED: Image extraction is now done in backend during upload.
+    This task is kept to consume old messages in RabbitMQ queues.
+    """
+    logging.warning(f"⚠️ DEPRECATED: extract_images_task called for file {file_id} - ignoring")
+    return file_id
+
+
+@app.task(bind=True, name="src.tasks.process_file_pipeline", acks_late=True)
 def process_file_pipeline(self, file_id: int):
     """
     Orchestrator task that triggers the pipeline:
@@ -57,24 +143,30 @@ def process_file_pipeline(self, file_id: int):
 
 
 
-@app.task(bind=True, name="src.tasks.chunk_file_task")
+@app.task(bind=True, name="src.tasks.chunk_file_task", acks_late=True)
 def chunk_file_task(self, file_id: int):
     """
     Task to chunk the file
+    
+    DB writes are now async via RabbitMQ queue to prevent connection pool exhaustion.
     """
     db = get_db()
-    db_session = db.get_db_session()
+    db_session = None
+    file_record = None  # Initialize before try block to avoid UnboundLocalError
     try:
+        db_session = db.get_db_session()
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             logging.error(f"File {file_id} not found for chunking")
             return file_id  # Return file_id even if not found to keep chain working
 
+        # Check if task was cancelled before starting
+        raise_if_cancelled(self, file_id, db_session, "before_chunking_start")
+
         logging.info(f"📦 Starting chunking for file {file_id}")
         
-        file_record.chunking_status = "chunking"
-        file_record.chunking_started_at = datetime.now(timezone.utc)
-        db_session.commit()
+        # ✅ Async DB write - status update via queue
+        enqueue_chunking_update(file_id, "chunking")
 
         # Re-use logic
         # Lazy import to avoid SIGSEGV
@@ -87,6 +179,9 @@ def chunk_file_task(self, file_id: int):
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+        
+        # Check cancellation before expensive processing
+        raise_if_cancelled(self, file_id, db_session, "before_process_v2_chunking")
         
         try:
             # Since process_v2_chunking_batch takes a list, we can pass a list of one
@@ -95,44 +190,93 @@ def chunk_file_task(self, file_id: int):
             # Don't close the loop - it might be reused
             pass
         
+        # Final check after processing
+        raise_if_cancelled(self, file_id, db_session, "after_chunking_complete")
+        
         return file_id
 
+    except TaskCancelledException as e:
+        logging.warning(f"⚠️ Chunking cancelled for file {file_id}: {e}")
+        # Don't retry cancelled tasks, just return
+        return file_id
+    except GeminiRateLimitException as e:
+        # Rate limit hit after 3 retries - mark as failed, don't retry task
+        logging.error(f"🚫 Gemini API rate limit exceeded for file {file_id}: {e}")
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(
+            file_id, 
+            "chunking_status", 
+            f"Gemini API rate limit exceeded: {str(e)[:500]}",
+            reason="Rate limit - please try again later"
+        )
+        # Don't retry - rate limit means we need to wait
+        return file_id
+    except GeminiOCRException as e:
+        # OCR failed after 3 retries - mark as failed, don't retry task
+        logging.error(f"❌ Gemini OCR failed for file {file_id}: {e}")
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(
+            file_id,
+            "chunking_status",
+            f"Gemini OCR failed: {str(e)[:500]}",
+            reason="OCR extraction failed"
+        )
+        # Don't retry - OCR already retried 3 times internally
+        return file_id
+    except SQLAlchemyOperationalError as e:
+        # PostgreSQL connection error (e.g., "too many clients")
+        # Short retry with more attempts - connection issues are usually temporary
+        error_msg = str(e)
+        if "too many clients" in error_msg.lower():
+            logging.warning(f"⚠️ PostgreSQL connection limit - will retry in 10s for file {file_id}")
+            raise self.retry(exc=e, countdown=10, max_retries=10)
+        else:
+            logging.error(f"❌ Database connection error for file {file_id}: {e}")
+            raise self.retry(exc=e, countdown=30, max_retries=5)
     except Exception as e:
         logging.error(f"❌ Chunking failed: {e}")
-        if file_record:
-            file_record.chunking_status = "failed"
-            file_record.processing_error = str(e)
-            db_session.commit()
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(file_id, "chunking_status", str(e)[:500])
         raise self.retry(exc=e, countdown=60, max_retries=3)
     finally:
-        db_session.close()
+        if db_session:
+            db_session.close()
 
-@app.task(bind=True, name="src.tasks.create_graph_task")
+@app.task(bind=True, name="src.tasks.create_graph_task", acks_late=True)
 def create_graph_task(self, file_id: int):
     """
     Task to create graph from chunks
+    
+    DB writes are now async via RabbitMQ queue to prevent connection pool exhaustion.
     """
     db = get_db()
-    db_session = db.get_db_session()
+    db_session = None
+    file_record = None  # Initialize before try block
     try:
+        db_session = db.get_db_session()
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
-            logging.error(f"File {file_id} not found for chunking")
+            logging.error(f"File {file_id} not found for graph creation")
             return file_id  # Return file_id even if not found to keep chain working
+
+        # Check if task was cancelled before starting
+        raise_if_cancelled(self, file_id, db_session, "before_graph_creation_start")
 
         logging.info(f"🕸️ Starting graph creation for file {file_id}")
         
         # Check if chunking is completed before starting graph creation
         if file_record.chunking_status == "failed":
             logging.warning(f"⚠️ Graph creation skipped: Chunking failed for file {file_id}")
-            file_record.graph_status = "failed"
-            file_record.processing_error = f"Graph creation skipped: Chunking failed - {file_record.processing_error or 'Unknown error'}"
-            db_session.commit()
+            # ✅ Async DB write - error update via queue
+            enqueue_error_update(
+                file_id,
+                "graph_status",
+                f"Graph creation skipped: Chunking failed - {file_record.processing_error or 'Unknown error'}"
+            )
             return file_id
         
-        file_record.graph_status = "processing"
-        file_record.graph_started_at = datetime.now(timezone.utc)
-        db_session.commit()
+        # ✅ Async DB write - status update via queue
+        enqueue_graph_update(file_id, "processing")
 
         # Re-use logic
         # Lazy import to avoid SIGSEGV
@@ -145,6 +289,9 @@ def create_graph_task(self, file_id: int):
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+        
+        # Check cancellation before expensive processing
+        raise_if_cancelled(self, file_id, db_session, "before_process_v2_graph_creation")
         
         try:
             loop.run_until_complete(processor.process_v2_graph_creation_batch([file_record]))
@@ -155,9 +302,12 @@ def create_graph_task(self, file_id: int):
             # If graph creation was skipped due to chunking failure, update status
             if file_record.chunking_status == "failed":
                 logging.warning(f"⚠️ Graph creation skipped due to chunking failure for file {file_id}")
-                file_record.graph_status = "failed"
-                file_record.processing_error = f"Graph creation skipped: Chunking failed - {file_record.processing_error or 'Unknown error'}"
-                db_session.commit()
+                # ✅ Async DB write - error update via queue
+                enqueue_error_update(
+                    file_id,
+                    "graph_status",
+                    f"Graph creation skipped: Chunking failed - {file_record.processing_error or 'Unknown error'}"
+                )
             elif file_record.graph_status == "processing":
                 # If still processing, check if it actually completed
                 # The processing_utils should update this, but if not, we mark as failed
@@ -167,31 +317,75 @@ def create_graph_task(self, file_id: int):
             # Don't close the loop - it might be reused
             pass
         
+        # Final check after processing
+        raise_if_cancelled(self, file_id, db_session, "after_graph_creation_complete")
+        
         return file_id
 
+    except TaskCancelledException as e:
+        logging.warning(f"⚠️ Graph creation cancelled for file {file_id}: {e}")
+        # Don't retry cancelled tasks, just return
+        return file_id
+    except GeminiRateLimitException as e:
+        # Rate limit hit - mark as failed, don't retry
+        logging.error(f"🚫 Gemini API rate limit exceeded during graph creation for file {file_id}: {e}")
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(
+            file_id,
+            "graph_status",
+            f"Gemini API rate limit exceeded: {str(e)[:500]}",
+            reason="Rate limit - please try again later"
+        )
+        return file_id
+    except GeminiOCRException as e:
+        # Gemini processing failed - mark as failed, don't retry
+        logging.error(f"❌ Gemini processing failed during graph creation for file {file_id}: {e}")
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(
+            file_id,
+            "graph_status",
+            f"Gemini processing failed: {str(e)[:500]}",
+            reason="LLM processing failed"
+        )
+        return file_id
+    except SQLAlchemyOperationalError as e:
+        # PostgreSQL connection error
+        error_msg = str(e)
+        if "too many clients" in error_msg.lower():
+            logging.warning(f"⚠️ PostgreSQL connection limit - will retry in 10s for file {file_id} (graph)")
+            raise self.retry(exc=e, countdown=10, max_retries=10)
+        else:
+            logging.error(f"❌ Database connection error for file {file_id} (graph): {e}")
+            raise self.retry(exc=e, countdown=30, max_retries=5)
     except Exception as e:
         logging.error(f"❌ Graph creation failed: {e}")
-        if file_record:
-            file_record.graph_status = "failed"
-            file_record.processing_error = str(e)
-            db_session.commit()
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(file_id, "graph_status", str(e)[:500])
         raise self.retry(exc=e, countdown=60, max_retries=3)
     finally:
-        db_session.close()
+        if db_session:
+            db_session.close()
 
-@app.task(bind=True, name="src.tasks.create_embeddings_task")
+@app.task(bind=True, name="src.tasks.create_embeddings_task", acks_late=True)
 def create_embeddings_task(self, file_id: int):
     """
     Task to create embeddings for chunks of a completed file
     Copied from backend/score.py process_embedding_creation
+    
+    DB writes are now async via RabbitMQ queue to prevent connection pool exhaustion.
     """
     db = get_db()
-    db_session = db.get_db_session()
+    db_session = None
+    file_record = None  # Initialize before try block
     try:
+        db_session = db.get_db_session()
         file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
         if not file_record:
             logging.error(f"❌ File record not found for ID: {file_id}")
             return file_id
+
+        # Check if task was cancelled before starting
+        raise_if_cancelled(self, file_id, db_session, "before_embedding_creation_start")
 
         logging.info(f"📊 Starting embedding creation for: {file_record.original_name}")
 
@@ -205,11 +399,12 @@ def create_embeddings_task(self, file_id: int):
             if not all([uri, userName, password]):
                 error_msg = "Neo4j credentials not configured"
                 logging.error(f"❌ {error_msg}")
-                file_record.embedding_status = "failed"
-                file_record.embedding_completed_at = datetime.now(timezone.utc)
-                file_record.processing_error = error_msg
-                file_record.reason = f"Embedding creation failed: {error_msg}"
-                db_session.commit()
+                # ✅ Async DB write - error update via queue
+                enqueue_embedding_update(
+                    file_id, "failed",
+                    processing_error=error_msg,
+                    reason=f"Embedding creation failed: {error_msg}"
+                )
                 return file_id
 
             # Get graph connection
@@ -246,12 +441,12 @@ def create_embeddings_task(self, file_id: int):
                 error_msg = f"Embedding creation failed: {result['error']}"
                 logging.error(f"❌ {error_msg}")
 
-                # Update status to failed
-                file_record.embedding_status = "failed"
-                file_record.embedding_completed_at = datetime.now(timezone.utc)
-                file_record.processing_error = error_msg[:500]
-                file_record.reason = f"Embedding creation failed: {result['error']}"
-                db_session.commit()
+                # ✅ Async DB write - error update via queue
+                enqueue_embedding_update(
+                    file_id, "failed",
+                    processing_error=error_msg[:500],
+                    reason=f"Embedding creation failed: {result['error']}"
+                )
 
                 # Neo4j'ye failed status sync et
                 try:
@@ -282,12 +477,12 @@ def create_embeddings_task(self, file_id: int):
             total_chunks = result.get("total_chunks_updated", 0)
             embedding_model = result.get("embedding_model", "Unknown")
 
-            # Update status to completed
-            file_record.embedding_status = "completed"
-            file_record.embedding_completed_at = datetime.now(timezone.utc)
-            file_record.status = "uploaded"  # Reset status from 'processing' to 'uploaded'
-            file_record.reason = f"Embedding creation completed successfully. Updated {total_chunks} chunks."
-            db_session.commit()
+            # ✅ Async DB write - success update via queue
+            enqueue_embedding_update(
+                file_id, "completed",
+                status="uploaded",  # Reset status from 'processing' to 'uploaded'
+                reason=f"Embedding creation completed successfully. Updated {total_chunks} chunks."
+            )
 
             logging.info(
                 f"✅ Embedding creation completed for: {file_record.original_name} - {total_chunks} chunks updated"
@@ -300,7 +495,7 @@ def create_embeddings_task(self, file_id: int):
                     f"upload_status={file_record.upload_status}, "
                     f"chunking_status={file_record.chunking_status}, "
                     f"graph_status={file_record.graph_status}, "
-                    f"embedding_status={file_record.embedding_status}"
+                    f"embedding_status=completed"
                 )
 
                 graph_connection = loop.run_until_complete(
@@ -317,7 +512,7 @@ def create_embeddings_task(self, file_id: int):
                         file_record.upload_status,
                         file_record.chunking_status,
                         file_record.graph_status,
-                        file_record.embedding_status,
+                        "completed",  # Use the value we just set
                         database
                     )
                 )
@@ -331,29 +526,41 @@ def create_embeddings_task(self, file_id: int):
             import traceback
             logging.error(f"Traceback: {traceback.format_exc()}")
             
-            # Update status to failed
-            file_record.embedding_status = "failed"
-            file_record.embedding_completed_at = datetime.now(timezone.utc)
-            file_record.processing_error = str(emb_error)[:500]
-            file_record.reason = f"Embedding creation failed: {str(emb_error)}"
-            db_session.commit()
+            # ✅ Async DB write - error update via queue
+            enqueue_embedding_update(
+                file_id, "failed",
+                processing_error=str(emb_error)[:500],
+                reason=f"Embedding creation failed: {str(emb_error)}"
+            )
             raise self.retry(exc=emb_error, countdown=60, max_retries=3)
 
         return file_id
 
+    except TaskCancelledException as e:
+        logging.warning(f"⚠️ Embedding creation cancelled for file {file_id}: {e}")
+        # Don't retry cancelled tasks, just return
+        return file_id
+    except SQLAlchemyOperationalError as e:
+        # PostgreSQL connection error
+        error_msg = str(e)
+        if "too many clients" in error_msg.lower():
+            logging.warning(f"⚠️ PostgreSQL connection limit - will retry in 10s for file {file_id} (embedding)")
+            raise self.retry(exc=e, countdown=10, max_retries=10)
+        else:
+            logging.error(f"❌ Database connection error for file {file_id} (embedding): {e}")
+            raise self.retry(exc=e, countdown=30, max_retries=5)
     except Exception as e:
         logging.error(f"❌ Embedding creation task failed: {e}")
         import traceback
         logging.error(f"Traceback: {traceback.format_exc()}")
-        if file_record:
-            file_record.embedding_status = "failed"
-            file_record.processing_error = str(e)[:500]
-            db_session.commit()
+        # ✅ Async DB write - error update via queue
+        enqueue_error_update(file_id, "embedding_status", str(e)[:500])
         raise self.retry(exc=e, countdown=60, max_retries=3)
     finally:
-        db_session.close()
+        if db_session:
+            db_session.close()
 
-@app.task(bind=True, name="src.tasks.delete_files_task")
+@app.task(bind=True, name="src.tasks.delete_files_task", acks_late=True)
 def delete_files_task(self, file_ids: list):
     """
     Task to delete files from queue, filesystem, and Neo4j database
@@ -390,13 +597,23 @@ def delete_files_task(self, file_ids: list):
         for file_id_int in file_ids:
             try:
                 db_session = db.get_db_session()
-                file_record = db.get_file_by_id(file_id_int)
+                file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
                 
                 if not file_record:
                     logging.warning(f"⚠️ File not found: ID={file_id_int}")
                     failed_count += 1
                     db_session.close()
                     continue
+                
+                # Revoke any active Celery task for this file before deletion
+                if file_record.celery_task_id:
+                    try:
+                        app.control.revoke(file_record.celery_task_id, terminate=True)
+                        logging.info(f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id_int}")
+                        file_record.celery_task_id = None
+                        db_session.commit()
+                    except Exception as revoke_error:
+                        logging.warning(f"⚠️ Could not revoke task: {revoke_error}")
                 
                 file_path = Path(file_record.file_path)
                 original_name = file_record.original_name
@@ -602,7 +819,16 @@ def delete_files_task(self, file_ids: list):
         )
         
         return {"deleted_count": deleted_count, "failed_count": failed_count}
-        
+    
+    except SQLAlchemyOperationalError as e:
+        # PostgreSQL connection error
+        error_msg = str(e)
+        if "too many clients" in error_msg.lower():
+            logging.warning(f"⚠️ PostgreSQL connection limit - will retry in 10s (delete task)")
+            raise self.retry(exc=e, countdown=10, max_retries=10)
+        else:
+            logging.error(f"❌ Database connection error (delete task): {e}")
+            raise self.retry(exc=e, countdown=30, max_retries=5)
     except Exception as e:
         logging.error(f"❌ Deletion task error: {str(e)}")
         import traceback
