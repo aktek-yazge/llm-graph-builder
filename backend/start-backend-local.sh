@@ -23,7 +23,7 @@ echo ""
 
 # Worker count for parallel request handling
 # Higher = more parallel uploads, but more memory usage
-WORKERS="${BACKEND_WORKERS:-32}"
+WORKERS="${BACKEND_WORKERS:-1}"
 
 echo "👥 Workers: ${WORKERS}"
 echo ""

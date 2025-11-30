@@ -87,7 +87,7 @@ uv run python -m celery -A src.celery_app worker \
     --loglevel=info \
     --pool=${POOL_TYPE} \
     --concurrency=${MAIN_CONCURRENCY} \
-    -Q celery,default \
+    -Q celery \
     -E \
     -n "${MAIN_WORKER_ID}@%h" 2>&1 | tee -a "$MAIN_LOG" &
 MAIN_WORKER_PID=$!
@@ -131,7 +131,7 @@ fi
 
 log ""
 log "📋 Worker Summary:"
-log "   Main Worker:   PID=$MAIN_WORKER_PID, Queues=celery,default, Concurrency=$MAIN_CONCURRENCY"
+log "   Main Worker:   PID=$MAIN_WORKER_PID, Queue=celery, Concurrency=$MAIN_CONCURRENCY"
 log "   DB Writer:     PID=$DB_WRITER_PID, Queue=db_write, Concurrency=$WRITER_CONCURRENCY"
 log "   Neo4j Writer:  PID=$NEO4J_WRITER_PID, Queue=neo4j_write, Concurrency=$WRITER_CONCURRENCY"
 log ""

@@ -7,7 +7,6 @@ import {
   IconButton,
   ProgressBar,
   StatusIndicator,
-  TextInput,
   TextLink,
   Typography,
   useCopyToClipboard,
@@ -19,7 +18,6 @@ import {
   DocumentTextIconSolid,
   ExploreIcon,
   InformationCircleIconOutline,
-  MagnifyingGlassIconOutline,
   XMarkIconOutline,
 } from '@neo4j-ndl/react/icons';
 import {
@@ -57,7 +55,7 @@ import { ChildRef, CustomFile, FileTableProps, SourceNode, UserCredentials, stat
 import { batchSize, llms } from '../utils/Constants';
 import { getQueuedFilesAPI, startChunkingAPI, startGraphCreationAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast } from '../utils/Toasts';
-import { capitalizeWithUnderscore, statusCheck } from '../utils/Utils';
+import { capitalizeWithUnderscore, statusCheck, url } from '../utils/Utils';
 import { normalizeFileName } from '../utils/utf8';
 import BreakDownPopOver from './BreakDownPopOver';
 import CustomProgressBar from './UI/CustomProgressBar';
@@ -66,7 +64,7 @@ import { IconButtonWithToolTip } from './UI/IconButtonToolTip';
 let onlyfortheFirstRender = true;
 
 const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, ref) => {
-  const { connectionStatus, setConnectionStatus, onInspect, onRetry, onChunkView, setIsQueueProcessingStopped } = props;
+  const { connectionStatus, setConnectionStatus, onInspect, onRetry, onChunkView, setIsQueueProcessingStopped, nameFilter, setNameFilter } = props;
   const { filesData, setFilesData, model, rowSelection, setRowSelection, setSelectedRows, setProcessedCount, queue } =
     useFileContext();
   const { userCredentials, isReadOnlyUser } = useCredentials();
@@ -77,7 +75,6 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const [filetypeFilter, setFiletypeFilter] = useState<string>('');
   const [fileSourceFilter, setFileSourceFilter] = useState<string>('');
   const [llmtypeFilter, setLLmtypeFilter] = useState<string>('');
-  const [nameFilter, setNameFilter] = useState<string>('');
   const skipPageResetRef = useRef<boolean>(false);
   const [_, copy] = useCopyToClipboard();
   const { colorMode } = useContext(ThemeWrapperContext);
@@ -167,7 +164,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
             size: file.file_size || 0, // File size in bytes
             status, // Mapped status
             fileSource: 'V2 Queue',
-            sourceUrl: '',
+            sourceUrl: file.original_name ? `${url()}/files/${encodeURIComponent(file.original_name)}?inline=true` : '',
             fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
             nodesCount: 0,
             relationshipsCount: 0,
@@ -361,52 +358,41 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       columnHelper.accessor((row) => row.name, {
         id: 'name',
         cell: (info) => {
+          const fileSource = info.row.original?.fileSource;
+          const sourceUrl = info.row.original?.sourceUrl;
+          const fileName = info.getValue();
+          
+          // V2 Queue dosyaları için link oluştur
+          if (fileSource === 'V2 Queue' && sourceUrl) {
+            return (
+              <div className='textellipsis'>
+                <TextLink
+                  type='external'
+                  target='_blank'
+                  href={sourceUrl}
+                  title={fileName}
+                >
+                  {fileName}
+                </TextLink>
+              </div>
+            );
+          }
+          
           return (
             <div className='textellipsis'>
               <span
                 title={
-                  (info.row.original?.fileSource === 's3 bucket' && info.row.original?.sourceUrl) ||
-                  (info.row.original?.fileSource === 'youtube' && info.row.original?.sourceUrl) ||
-                  info.getValue()
+                  (fileSource === 's3 bucket' && sourceUrl) ||
+                  (fileSource === 'youtube' && sourceUrl) ||
+                  fileName
                 }
               >
-                {info.getValue()}
+                {fileName}
               </span>
             </div>
           );
         },
-        header: () => (
-          <Flex flexDirection='column' gap='1'>
-            <span>Name</span>
-            <TextInput
-              aria-label='Search files'
-              placeholder='Search...'
-              value={nameFilter}
-              onChange={(e) => {
-                setNameFilter(e.target.value);
-                table.getColumn('name')?.setFilterValue(e.target.value);
-              }}
-              size='small'
-              fluid
-              leftIcon={<MagnifyingGlassIconOutline className='n-size-token-4' />}
-              rightIcon={
-                nameFilter ? (
-                  <XMarkIconOutline 
-                    className='n-size-token-4 cursor-pointer' 
-                    onClick={() => {
-                      setNameFilter('');
-                      table.getColumn('name')?.setFilterValue('');
-                    }}
-                  />
-                ) : undefined
-              }
-              htmlAttributes={{
-                onClick: (e: React.MouseEvent) => e.stopPropagation(),
-                onKeyDown: (e: React.KeyboardEvent) => e.stopPropagation(),
-              }}
-            />
-          </Flex>
-        ),
+        header: () => <span>Name</span>,
         footer: (info) => info.column.id,
         filterFn: 'nameFilter' as any,
       }),
@@ -1130,6 +1116,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       table.resetRowSelection();
     }
   }, [llmtypeFilter, table]);
+
+  useEffect(() => {
+    table.getColumn('name')?.setFilterValue(nameFilter);
+  }, [nameFilter, table]);
 
   const handleFileUploadError = (error: AxiosError) => {
     // @ts-ignore

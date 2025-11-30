@@ -524,6 +524,16 @@ async def processing_source_v2(
         
         if existing_chunk_count > 0:
             logging.info(f"✅ Found {existing_chunk_count} existing chunks for: {file_name} (created in chunking phase)")
+            
+            # Re-graph creation: Mevcut entity'leri temizle (Document ve Chunk'ları koru)
+            logging.info(f"🧹 Re-graph creation: Clearing existing entities for: {file_name}")
+            clear_result = await asyncio.to_thread(
+                graphDb_data_Access.clear_entities_for_regraph, file_name
+            )
+            if clear_result.get("status") == "success":
+                logging.info(f"✅ Entities cleared for re-graph: {clear_result.get('total_deleted_entities', 0)} entities deleted")
+            elif clear_result.get("status") == "error":
+                logging.warning(f"⚠️ Entity clearing failed: {clear_result.get('error')}, continuing anyway...")
         elif pages:
             # Chunk'lar yok, oluştur (geriye dönük uyumluluk için)
             logging.info(f"🧩 No existing chunks found, creating {len(pages)} chunks for V2 file: {file_name}")
@@ -721,7 +731,7 @@ class FileProcessor:
         self.is_processing = False
         self.current_task_id = None
         # Batch size from environment variable (default: 20)
-        self.batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
+        self.batch_size = int(os.environ.get("V2_BATCH_SIZE", "100"))
         # Wait time before starting processing (to allow all uploads to complete)
         self.upload_wait_time = int(
             os.environ.get("V2_UPLOAD_WAIT_TIME", "10")

@@ -343,6 +343,8 @@ def generate_s3_presigned_url(
     aws_access_key_id: Optional[str] = None,
     aws_secret_access_key: Optional[str] = None,
     expiration: int = 3600,
+    inline: bool = False,
+    content_type: Optional[str] = None,
 ) -> Optional[str]:
     """
     S3 object için presigned URL oluşturur.
@@ -353,6 +355,8 @@ def generate_s3_presigned_url(
         aws_access_key_id: AWS access key
         aws_secret_access_key: AWS secret key
         expiration: URL'in geçerlilik süresi (saniye)
+        inline: True ise tarayıcıda inline görüntülenir (download yerine)
+        content_type: Response content type (örn: 'application/pdf')
 
     Returns:
         Optional[str]: Presigned URL (başarısızsa None)
@@ -379,10 +383,19 @@ def generate_s3_presigned_url(
         else:
             s3_client = boto3.client("s3", config=config)
 
+        # Presigned URL parametreleri
+        params = {"Bucket": bucket_name, "Key": s3_key}
+        
+        # Inline viewing için response headers ekle
+        if inline:
+            params["ResponseContentDisposition"] = "inline"
+        if content_type:
+            params["ResponseContentType"] = content_type
+
         # Presigned URL oluştur
         presigned_url = s3_client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": bucket_name, "Key": s3_key},
+            Params=params,
             ExpiresIn=expiration,
         )
 

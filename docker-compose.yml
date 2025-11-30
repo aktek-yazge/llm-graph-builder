@@ -48,6 +48,9 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
+      # Disable consumer timeout for long-running tasks (default is 30min = 1800000ms)
+      # Use 'infinity' to completely disable, or high value like 7200000 (2 hours)
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     logging:
       driver: "json-file"
       options:

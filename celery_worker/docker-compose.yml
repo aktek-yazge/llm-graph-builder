@@ -40,7 +40,7 @@ services:
       --loglevel=${LOG_LEVEL:-info}
       --pool=${CELERY_POOL:-threads}
       --concurrency=${MAIN_CONCURRENCY:-8}
-      -Q celery,default
+      -Q celery
       -E
       -n main-worker@%h
     env_file:

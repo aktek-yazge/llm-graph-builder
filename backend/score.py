@@ -783,47 +783,68 @@ app.add_api_route("/health", health([healthy_condition, healthy]))
 
 
 @app.get("/files/{file_name:path}")
-async def serve_document_file(file_name: str):
+async def serve_document_file(file_name: str, inline: bool = False):
     """
-    S3'ten document dosyalarını serve eder.
+    S3'ten document dosyalarını proxy olarak serve eder.
     URL encoding sorununu çözmek için file_name:path kullanıyoruz.
+    
+    Query params:
+        inline: True ise tarayıcıda görüntülenir, False ise download edilir (default: False)
+        Kullanım: /files/dosya.pdf?inline=true
     """
     try:
         # URL decode işlemi
         import urllib.parse
+        import boto3
+        from fastapi.responses import StreamingResponse
 
         decoded_file_name = urllib.parse.unquote(file_name, encoding="utf-8")
+        
+        # UTF-8 normalize et (upload sırasında da normalize edildi)
+        normalized_file_name = normalize_file_name(decoded_file_name)
 
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
             raise HTTPException(
                 status_code=503, detail="S3 configuration not available"
             )
 
-        # S3 key'ini tahmin et
+        # S3 key'ini tahmin et - PDF'ler documents/{doc_name}/pdf/ altında
         from pathlib import Path
 
-        doc_name = Path(decoded_file_name).stem
-        s3_key = f"documents/{doc_name}/{decoded_file_name}"
+        doc_name = Path(normalized_file_name).stem
+        s3_key = f"documents/{doc_name}/pdf/{normalized_file_name}"
 
-        # Presigned URL oluştur
-        from src.document_sources.s3_upload_utils import generate_s3_presigned_url
-
-        presigned_url = generate_s3_presigned_url(
-            S3_BACKUP_BUCKET,
-            s3_key,
-            AWS_ACCESS_KEY_ID,
-            AWS_SECRET_ACCESS_KEY,
-            expiration=3600,
+        # S3 client oluştur
+        s3_client = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         )
 
-        if not presigned_url:
+        try:
+            # S3'ten dosyayı al
+            s3_response = s3_client.get_object(Bucket=S3_BACKUP_BUCKET, Key=s3_key)
+        except s3_client.exceptions.NoSuchKey:
+            raise HTTPException(status_code=404, detail=f"File not found: {file_name}")
+        except Exception as e:
+            logging.error(f"S3 get_object error: {e}")
             raise HTTPException(status_code=404, detail=f"File not found: {file_name}")
 
-        # Redirect to presigned URL
-        from fastapi.responses import RedirectResponse
+        # Content-Disposition header'ını ayarla
+        content_disposition = "inline" if inline else f'attachment; filename="{normalized_file_name}"'
 
-        return RedirectResponse(url=presigned_url, status_code=302)
+        # Dosyayı stream olarak döndür
+        return StreamingResponse(
+            s3_response["Body"].iter_chunks(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": content_disposition,
+                "Content-Length": str(s3_response.get("ContentLength", "")),
+            },
+        )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error serving document file {file_name}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -840,6 +861,9 @@ async def serve_page_image(image_name: str):
         import urllib.parse
 
         decoded_image_name = urllib.parse.unquote(image_name, encoding="utf-8")
+        
+        # UTF-8 normalize et
+        normalized_image_name = normalize_file_name(decoded_image_name)
 
         if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
             raise HTTPException(
@@ -850,12 +874,12 @@ async def serve_page_image(image_name: str):
         # Format: "doc_name_page_001.png"
         import re
 
-        match = re.match(r"(.+)_page_\d+\.png$", decoded_image_name)
+        match = re.match(r"(.+)_page_\d+\.png$", normalized_image_name)
         if not match:
             raise HTTPException(status_code=400, detail="Invalid image name format")
 
         doc_name = match.group(1)
-        s3_key = f"documents/{doc_name}/{decoded_image_name}"
+        s3_key = f"documents/{doc_name}/images/{normalized_image_name}"
 
         # Presigned URL oluştur
         from src.document_sources.s3_upload_utils import generate_s3_presigned_url
@@ -5009,7 +5033,7 @@ async def start_chunking(file_id: str):
                 )
 
             # Process files in batches using celery tasks
-            batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
+            batch_size = int(os.environ.get("V2_BATCH_SIZE", "100"))
             processed_count = 0
 
             # Önce tüm "ready" dosyalarını queue'ya al (status = "queued")
@@ -5096,7 +5120,7 @@ async def start_chunking(file_id: str):
                     logging.info(
                         f"⏳ Waiting before starting next batch ({remaining_files} files remaining)..."
                     )
-                    await asyncio.sleep(2)  # 2 saniye bekle, sonraki batch'i al
+                    await asyncio.sleep(0.5)  # 0.5 saniye bekle, sonraki batch'i al
                 else:
                     # No more files, break
                     break
@@ -5554,7 +5578,7 @@ async def start_graph_creation(
         # Handle "all" parameter
         if file_id.lower() == "all":
             # Get batch size from environment variable (default: 20)
-            batch_size = int(os.environ.get("V2_BATCH_SIZE", "20"))
+            batch_size = int(os.environ.get("V2_BATCH_SIZE", "100"))
 
             # Get all files ready for graph creation (chunking completed, graph pending or processing)
             # Include "processing" status files to handle restart scenarios
@@ -5681,7 +5705,7 @@ async def start_graph_creation(
                     logging.info(
                         f"⏳ Waiting before starting next batch ({remaining_files} files remaining)..."
                     )
-                    await asyncio.sleep(2)  # 2 saniye bekle, sonraki batch'i al
+                    await asyncio.sleep(0.5)  # 0.5 saniye bekle, sonraki batch'i al
                 else:
                     # No more files, break
                     break

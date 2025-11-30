@@ -192,6 +192,8 @@ export interface FileTableProps {
   handleGenerateGraph: () => void;
   onRetry: (id: string) => void;
   setIsQueueProcessingStopped?: Dispatch<SetStateAction<boolean>>;
+  nameFilter: string;
+  setNameFilter: Dispatch<SetStateAction<string>>;
 }
 
 export interface CustomModalProps {

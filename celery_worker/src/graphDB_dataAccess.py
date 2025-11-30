@@ -1153,6 +1153,148 @@ class graphDBdataAccess:
             logging.error(f"❌ Otomatik temizlik hatası ({file_name}): {e}")
             return False
 
+    def clear_entities_for_regraph(self, file_name: str) -> dict:
+        """
+        Re-graph creation öncesi Document'a bağlı entity'leri temizler.
+        Document ve Chunk node'ları KORUNUR, sadece entity'ler silinir.
+        
+        Bu fonksiyon:
+        1. Document ve Chunk'ları KORUR (PART_OF, FIRST_CHUNK, NEXT_CHUNK ilişkileri dahil)
+        2. Chunk'lardan EXTRACTED_FROM ilişkilerini ve entity node'larını siler
+        3. Document'a direkt/dolaylı bağlı diğer entity'leri siler (Policy, Customer vs.)
+        4. Başka Document'lerde kullanılan shared entity'leri KORUR
+        
+        Args:
+            file_name: Entity'leri temizlenecek dosya adı
+            
+        Returns:
+            dict: Silinen entity istatistikleri
+        """
+        try:
+            logging.info(f"🧹 Re-graph için entity temizliği başlıyor: {file_name}")
+            
+            # 1. Dosyanın var olup olmadığını kontrol et
+            check_query = """
+                MATCH (d:Document {fileName: $file_name})
+                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                RETURN d.fileName as fileName, count(c) as chunkCount
+            """
+            result = self.execute_query(check_query, {"file_name": file_name})
+            
+            if not result or not result[0].get("fileName"):
+                logging.info(f"📄 Dosya veritabanında bulunamadı: {file_name}")
+                return {"status": "not_found", "deleted_entities": 0}
+            
+            chunk_count = result[0].get("chunkCount", 0)
+            logging.info(f"🔍 Dosya bulundu: {file_name} ({chunk_count} chunk)")
+            
+            # 2. Entity temizleme sorgusu - Document ve Chunk'ları KORUR
+            # NOT: Entity'ler Chunk'lara EXTRACTED_FROM ilişkisi ile bağlı (Entity -> Chunk)
+            clear_entities_query = """
+                MATCH (d:Document {fileName: $file_name})
+                
+                // 1. Chunk'lardan çıkarılan entity'leri bul (EXTRACTED_FROM ile: Entity -> Chunk)
+                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)<-[extractedFrom:EXTRACTED_FROM]-(chunkEntity)
+                
+                // 2. Document'a direkt bağlı entity'leri bul (Policy, Customer vs.)
+                OPTIONAL MATCH (d)<-[docRel:DOCUMENTED_IN|HAS_DOC]-(docEntity)
+                WHERE NOT docEntity:Chunk AND NOT docEntity:Document
+                
+                // 3. Policy'ye bağlı alt entity'leri bul
+                OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(policy:Policy)-[policyRel]->(policyRelated)
+                WHERE NOT policyRelated:Document AND NOT policyRelated:Chunk
+                
+                // Entity'leri topla
+                WITH d, 
+                     collect(DISTINCT extractedFrom) AS extractedFromRels,
+                     collect(DISTINCT chunkEntity) AS chunkEntities,
+                     collect(DISTINCT docEntity) AS docEntities,
+                     collect(DISTINCT policy) AS policies,
+                     collect(DISTINCT policyRelated) AS policyRelatedNodes
+                
+                // Güvenlik kontrolü - başka document'larda kullanılmayan entity'leri belirle
+                WITH d, extractedFromRels,
+                     [entity IN chunkEntities WHERE entity IS NOT NULL 
+                      AND NOT EXISTS {
+                        MATCH (entity)-[:EXTRACTED_FROM]->(otherChunk:Chunk)-[:PART_OF]->(otherDoc:Document)
+                        WHERE otherDoc.fileName <> $file_name
+                      }] AS safeChunkEntities,
+                     [entity IN docEntities WHERE entity IS NOT NULL
+                      AND NOT EXISTS {
+                        MATCH (otherDoc:Document)
+                        WHERE otherDoc.fileName <> $file_name 
+                          AND ((otherDoc)<-[:DOCUMENTED_IN]-(entity) OR (otherDoc)<-[:HAS_DOC]-(entity))
+                      }] AS safeDocEntities,
+                     [p IN policies WHERE p IS NOT NULL
+                      AND NOT EXISTS {
+                        MATCH (p)-[:DOCUMENTED_IN]->(otherDoc:Document)
+                        WHERE otherDoc.fileName <> $file_name
+                      }] AS safePolicies,
+                     [node IN policyRelatedNodes WHERE node IS NOT NULL
+                      AND NOT EXISTS {
+                        MATCH (node)<-[]-(:Policy)-[:DOCUMENTED_IN]->(otherDoc:Document)
+                        WHERE otherDoc.fileName <> $file_name
+                      }] AS safePolicyRelatedNodes
+                
+                // EXTRACTED_FROM ilişkilerini sil (Entity-Chunk bağlantısını kopar)
+                FOREACH (rel IN extractedFromRels | DELETE rel)
+                
+                // Güvenli entity'leri sil
+                FOREACH (entity IN safeChunkEntities | DETACH DELETE entity)
+                FOREACH (entity IN safeDocEntities | DETACH DELETE entity)
+                FOREACH (node IN safePolicyRelatedNodes | DETACH DELETE node)
+                FOREACH (policy IN safePolicies | DETACH DELETE policy)
+                
+                RETURN 
+                    size(extractedFromRels) as deletedExtractedFromRels,
+                    size(safeChunkEntities) as deletedChunkEntities,
+                    size(safeDocEntities) as deletedDocEntities,
+                    size(safePolicies) as deletedPolicies,
+                    size(safePolicyRelatedNodes) as deletedPolicyRelatedNodes
+            """
+            
+            clear_result = self.execute_query(clear_entities_query, {"file_name": file_name})
+            
+            if clear_result:
+                stats = clear_result[0]
+                deleted_extracted_from_rels = stats.get("deletedExtractedFromRels", 0)
+                deleted_chunk_entities = stats.get("deletedChunkEntities", 0)
+                deleted_doc_entities = stats.get("deletedDocEntities", 0)
+                deleted_policies = stats.get("deletedPolicies", 0)
+                deleted_policy_related = stats.get("deletedPolicyRelatedNodes", 0)
+                
+                total_deleted = (deleted_chunk_entities + deleted_doc_entities + 
+                               deleted_policies + deleted_policy_related)
+                
+                logging.info(f"✅ Re-graph için entity temizliği tamamlandı: {file_name}")
+                logging.info(f"📊 Temizlik istatistikleri:")
+                logging.info(f"   - Silinen EXTRACTED_FROM ilişkileri: {deleted_extracted_from_rels}")
+                logging.info(f"   - Silinen Chunk Entity'leri: {deleted_chunk_entities}")
+                logging.info(f"   - Silinen Document Entity'leri: {deleted_doc_entities}")
+                logging.info(f"   - Silinen Policy'ler: {deleted_policies}")
+                logging.info(f"   - Silinen Policy-related node'lar: {deleted_policy_related}")
+                logging.info(f"   - Toplam silinen entity: {total_deleted}")
+                logging.info(f"   ✅ Document ve Chunk'lar KORUNDU ({chunk_count} chunk)")
+                
+                return {
+                    "status": "success",
+                    "file_name": file_name,
+                    "chunks_preserved": chunk_count,
+                    "deleted_extracted_from_rels": deleted_extracted_from_rels,
+                    "deleted_chunk_entities": deleted_chunk_entities,
+                    "deleted_doc_entities": deleted_doc_entities,
+                    "deleted_policies": deleted_policies,
+                    "deleted_policy_related": deleted_policy_related,
+                    "total_deleted_entities": total_deleted
+                }
+            else:
+                logging.warning(f"⚠️ Entity temizleme sonucu alınamadı: {file_name}")
+                return {"status": "no_result", "deleted_entities": 0}
+                
+        except Exception as e:
+            logging.error(f"❌ Re-graph entity temizleme hatası ({file_name}): {e}")
+            return {"status": "error", "error": str(e), "deleted_entities": 0}
+
     def list_unconnected_nodes(self):
         query = """
         MATCH (e:!Chunk&!Document&!`__Community__`) 
@@ -1412,6 +1554,10 @@ class graphDBdataAccess:
             # self.merge_existing_duplicate_insurance_companies()
             # self.merge_existing_duplicate_coverage_types()
 
+            # Document Summary node oluştur (Agent'ın hızlı erişimi için)
+            # TODO: Summary özelliği şimdilik devre dışı - ileride aktifleştirilebilir
+            # self._create_document_summary(file_name, entities_data, document_type, model)
+
             logging.info(
                 f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})"
             )
@@ -1440,7 +1586,7 @@ class graphDBdataAccess:
         """
         try:
             from src.shared.common_fn import load_embedding_model
-            from src.make_relationships import create_chunk_vector_index
+            from src.make_relationships import create_chunk_vector_index, create_chunk_fulltext_index
 
             logging.info(
                 f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}"
@@ -1580,18 +1726,22 @@ class graphDBdataAccess:
                         "chunks_updated": 0,
                     }
 
-            # Vector index'i kontrol et/oluştur
+            # Vector index ve Fulltext index'i kontrol et/oluştur
             if total_updated > 0:
                 try:
                     create_chunk_vector_index(self.graph)
                     logging.info(f"✅ Vector index checked/updated")
+                    
+                    # Fulltext index oluştur (keyword search için)
+                    create_chunk_fulltext_index(self.graph)
+                    logging.info(f"✅ Fulltext index checked/updated")
 
                     # KNN graph ilişkilerini güncelle - DEVRE DIŞI BIRAKTI
                     # self.update_KNN_graph()
                     # logging.info(f"✅ KNN graph relationships updated")
 
                 except Exception as index_error:
-                    logging.warning(f"⚠️ Vector index/KNN update warning: {index_error}")
+                    logging.warning(f"⚠️ Vector/Fulltext index update warning: {index_error}")
 
             # Genel sonuç raporu
             summary = {
@@ -3764,6 +3914,14 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     insurance_amount_data, policy_id
                 )
 
+            # 17. Chunk -> Entity ilişkileri
+            # NOT: EXTRACTED_FROM ilişkileri make_relationships.py'deki 
+            # merge_relationship_between_chunk_and_entites fonksiyonunda oluşturuluyor.
+            # O fonksiyon her chunk işlenirken entity'yi o chunk'a bağlıyor (Entity -> Chunk).
+            # _create_chunk_entity_relationships yanlış bir şekilde TÜM chunk'ları TÜM entity'lere
+            # bağlıyordu, bu nedenle devre dışı bırakıldı.
+            # self._create_chunk_entity_relationships(file_name, policy_id, entities_data)
+
             logging.info(f"✅ Tüm varlık node'ları başarıyla oluşturuldu: {file_name}")
 
         except Exception as e:
@@ -5709,6 +5867,357 @@ KRİTİK:
 
         except Exception as e:
             logging.error(f"Policyholder node oluşturma hatası: {e}")
+
+    def _create_chunk_entity_relationships(self, file_name: str, policy_id: str, entities_data: dict):
+        """
+        Document'a ait Chunk'ları, çıkarılan Entity'lere HAS_ENTITY ilişkisi ile bağlar.
+        
+        Bu ilişki sayesinde:
+        - Agent "bu bilgi nereden geldi?" sorusuna cevap verebilir
+        - Citation/kaynak gösterme imkanı sağlar
+        - Entity'den geriye Chunk'a traversal yapılabilir
+        """
+        try:
+            # Tüm entity tiplerini ve ID'lerini topla
+            entity_ids = []
+            
+            # Policy
+            if policy_id:
+                entity_ids.append({"type": "Policy", "id": policy_id})
+            
+            # Customer
+            customer_data = entities_data.get("customer") or {}
+            if customer_data.get("name"):
+                customer_name = customer_data.get("name", "").strip()
+                entity_ids.append({"type": "Customer", "name": customer_name})
+            
+            # InsuranceCompany
+            company_data = entities_data.get("insurance_company") or {}
+            if company_data.get("name"):
+                entity_ids.append({"type": "InsuranceCompany", "name": company_data.get("name", "").strip()})
+            
+            # Coverage - policy_id ile bağlı
+            coverage_data = entities_data.get("coverage") or {}
+            if coverage_data:
+                entity_ids.append({"type": "Coverage", "policy_id": policy_id})
+            
+            # Premium - policy_id ile bağlı
+            premium_data = entities_data.get("premium") or {}
+            if premium_data.get("amount") is not None:
+                entity_ids.append({"type": "Premium", "policy_id": policy_id})
+            
+            # RiskAddress - policy_id ile bağlı
+            address_data = entities_data.get("address") or {}
+            if address_data.get("address") or address_data.get("city"):
+                entity_ids.append({"type": "RiskAddress", "policy_id": policy_id})
+            
+            # InsuredProperty - policy_id ile bağlı
+            insured_property_data = entities_data.get("insured_property")
+            if isinstance(insured_property_data, list) and len(insured_property_data) > 0:
+                entity_ids.append({"type": "InsuredProperty", "policy_id": policy_id})
+            elif isinstance(insured_property_data, dict) and insured_property_data:
+                entity_ids.append({"type": "InsuredProperty", "policy_id": policy_id})
+            
+            # InsuredPerson - policy_id ile bağlı
+            insured_person_data = entities_data.get("insured_person")
+            if isinstance(insured_person_data, list) and len(insured_person_data) > 0:
+                entity_ids.append({"type": "InsuredPerson", "policy_id": policy_id})
+            elif isinstance(insured_person_data, dict) and insured_person_data.get("name"):
+                entity_ids.append({"type": "InsuredPerson", "policy_id": policy_id})
+            
+            # Policyholder - policy_id ile bağlı
+            policyholder_data = entities_data.get("policyholder")
+            if isinstance(policyholder_data, list) and len(policyholder_data) > 0:
+                entity_ids.append({"type": "Policyholder", "policy_id": policy_id})
+            elif isinstance(policyholder_data, dict) and policyholder_data.get("name"):
+                entity_ids.append({"type": "Policyholder", "policy_id": policy_id})
+            
+            if not entity_ids:
+                logging.info(f"ℹ️ Chunk-Entity ilişkisi için entity bulunamadı: {file_name}")
+                return
+            
+            # Chunk'ları Entity'lere bağla
+            # Her entity tipi için ayrı query çalıştır
+            for entity_info in entity_ids:
+                entity_type = entity_info.get("type")
+                
+                if entity_type == "Policy":
+                    query = """
+                        MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
+                        MATCH (e:Policy {id: $entity_id})
+                        MERGE (c)-[r:HAS_ENTITY]->(e)
+                        SET r.created_at = datetime(),
+                            r.source = 'llm_extraction',
+                            r.extraction_method = 'comprehensive'
+                        RETURN count(r) as relationships_created
+                    """
+                    params = {"file_name": file_name, "entity_id": entity_info.get("id")}
+                    
+                elif entity_type == "Customer":
+                    query = """
+                        MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
+                        MATCH (e:Customer) WHERE toLower(e.name) = toLower($entity_name)
+                        MERGE (c)-[r:HAS_ENTITY]->(e)
+                        SET r.created_at = datetime(),
+                            r.source = 'llm_extraction'
+                        RETURN count(r) as relationships_created
+                    """
+                    params = {"file_name": file_name, "entity_name": entity_info.get("name")}
+                    
+                elif entity_type == "InsuranceCompany":
+                    query = """
+                        MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
+                        MATCH (e:InsuranceCompany) WHERE toLower(e.name) = toLower($entity_name)
+                        MERGE (c)-[r:HAS_ENTITY]->(e)
+                        SET r.created_at = datetime(),
+                            r.source = 'llm_extraction'
+                        RETURN count(r) as relationships_created
+                    """
+                    params = {"file_name": file_name, "entity_name": entity_info.get("name")}
+                    
+                else:
+                    # Diğer entity'ler için policy_id ile bağlantı kur
+                    query = f"""
+                        MATCH (d:Document {{fileName: $file_name}})<-[:PART_OF]-(c:Chunk)
+                        MATCH (p:Policy {{id: $policy_id}})-[]->(e:{entity_type})
+                        MERGE (c)-[r:HAS_ENTITY]->(e)
+                        SET r.created_at = datetime(),
+                            r.source = 'llm_extraction'
+                        RETURN count(r) as relationships_created
+                    """
+                    params = {"file_name": file_name, "policy_id": entity_info.get("policy_id")}
+                
+                try:
+                    result = self.graph.query(
+                        query,
+                        params,
+                        session_params={"database": self.graph._database},
+                    )
+                    if result and result[0].get("relationships_created", 0) > 0:
+                        logging.info(f"✅ Chunk->{entity_type} HAS_ENTITY ilişkileri oluşturuldu: {result[0].get('relationships_created')}")
+                except Exception as entity_error:
+                    logging.warning(f"⚠️ Chunk->{entity_type} ilişkisi oluşturulamadı: {entity_error}")
+            
+            logging.info(f"✅ Chunk-Entity ilişkileri tamamlandı: {file_name}")
+            
+        except Exception as e:
+            logging.error(f"❌ Chunk-Entity ilişkileri oluşturma hatası: {e}")
+
+    def _create_document_summary(self, file_name: str, entities_data: dict, document_type: str, model: str = "openai_gpt_4o_mini"):
+        """
+        Document için LLM kullanarak akıllı özet node oluşturur.
+        
+        Bu özet:
+        - Agent'ın hızlı erişimi için belgenin ana bilgilerini içerir
+        - Semantic search için optimize edilmiş doğal dil metni
+        - Embedding ile benzerlik araması yapılabilir
+        - Document'a HAS_SUMMARY ilişkisi ile bağlanır
+        
+        Args:
+            file_name: Belge adı
+            entities_data: Çıkarılan entity verileri
+            document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, vb.)
+            model: LLM modeli (özet oluşturmak için)
+        """
+        try:
+            logging.info(f"📝 Document Summary oluşturuluyor (LLM ile): {file_name}")
+            
+            # Entity verilerini JSON olarak hazırla (LLM'e göndermek için)
+            entities_json = json.dumps(entities_data, ensure_ascii=False, indent=2, default=str)
+            
+            # Özet oluşturma prompt'u
+            summary_prompt = f"""
+Aşağıdaki sigorta poliçesi/belgesi bilgilerinden Türkçe olarak doğal dil ile özet oluştur.
+
+Belge adı: {file_name}
+Belge türü: {document_type}
+
+Çıkarılan bilgiler (JSON):
+{entities_json}
+
+ÖZET KURALLARI:
+1. Özeti 2-4 cümle arasında tut (maksimum 500 karakter)
+2. Doğal, akıcı Türkçe kullan (liste formatı KULLANMA)
+3. Şu bilgileri mutlaka dahil et (varsa):
+   - Müşteri adı
+   - Sigorta şirketi
+   - Poliçe türü (Kasko, Konut, DASK, vb.)
+   - Sigorta bedeli veya prim tutarı
+   - Geçerlilik tarihleri
+   - Risk adresi/konumu (il/ilçe)
+4. Semantic search için anahtar kelimeleri kullan
+5. Belge zeyilname ise ana poliçeye referans ver
+
+ÖRNEK ÖZET:
+"Bu belge ÖMER DİNÇKÖK adına AXA Sigorta tarafından düzenlenmiş bir konut sigortası poliçesidir. 
+Poliçe 15.03.2024 - 15.03.2025 tarihleri arasında geçerli olup, İstanbul Kadıköy'deki meskeni kapsamaktadır. 
+Yıllık prim tutarı 2.500 TL, toplam teminat bedeli 1.500.000 TL'dir."
+
+SADECE özet metnini döndür, başka açıklama ekleme:
+"""
+            
+            summary_text = None
+            
+            # Gemini kullanılıyor mu kontrol et
+            try:
+                from google import genai as genai_sdk
+                api_key = os.environ.get("GEMINI_API_KEY")
+                
+                if api_key:
+                    client = genai_sdk.Client(api_key=api_key)
+                    from google.genai import types
+                    
+                    logging.info("✅ Gemini 2.0 Flash ile özet oluşturuluyor...")
+                    
+                    response = client.models.generate_content(
+                        model="models/gemini-2.0-flash",
+                        contents=[
+                            types.Part.from_text(text=summary_prompt),
+                        ],
+                    )
+                    
+                    summary_text = response.text.strip() if response.text else None
+                    
+                    if summary_text:
+                        # Tırnak işaretlerini temizle (LLM bazen tırnak içinde döndürüyor)
+                        summary_text = summary_text.strip('"').strip("'").strip()
+                        logging.info(f"✅ Gemini ile özet oluşturuldu ({len(summary_text)} karakter)")
+                        
+            except Exception as gemini_error:
+                logging.warning(f"⚠️ Gemini özet oluşturma başarısız: {gemini_error}, fallback deneniyor...")
+            
+            # Gemini başarısız olduysa langchain LLM kullan
+            if not summary_text:
+                try:
+                    from src.llm import get_llm
+                    llm, _ = get_llm(model)
+                    response = llm.invoke(summary_prompt)
+                    summary_text = response.content.strip() if response.content else None
+                    
+                    if summary_text:
+                        summary_text = summary_text.strip('"').strip("'").strip()
+                        logging.info(f"✅ LLM ({model}) ile özet oluşturuldu ({len(summary_text)} karakter)")
+                        
+                except Exception as llm_error:
+                    logging.warning(f"⚠️ LLM özet oluşturma başarısız: {llm_error}")
+            
+            # LLM başarısız olduysa fallback: entity verilerinden basit özet oluştur
+            if not summary_text:
+                summary_text = self._create_fallback_summary(entities_data, document_type, file_name)
+                
+            if not summary_text or len(summary_text) < 20:
+                logging.warning(f"⚠️ Özet oluşturulamadı: {file_name}")
+                return
+            
+            # Summary node oluştur ve Document'a bağla
+            summary_id = f"summary_{file_name.replace('.', '_').replace(' ', '_')}"
+            
+            query = """
+                MERGE (s:Summary {id: $summary_id})
+                ON CREATE SET 
+                    s.text = $summary_text,
+                    s.documentType = $document_type,
+                    s.fileName = $file_name,
+                    s.generatedBy = $generated_by,
+                    s.createdAt = datetime()
+                ON MATCH SET 
+                    s.text = $summary_text,
+                    s.documentType = $document_type,
+                    s.generatedBy = $generated_by,
+                    s.updatedAt = datetime()
+                WITH s
+                MATCH (d:Document {fileName: $file_name})
+                MERGE (d)-[r:HAS_SUMMARY]->(s)
+                SET r.created_at = datetime()
+                RETURN s.id as summary_id
+            """
+            
+            # LLM kullanıldı mı belirle
+            generated_by = "gemini" if "Gemini" in str(summary_text) else ("llm" if summary_text else "fallback")
+            
+            result = self.graph.query(
+                query,
+                {
+                    "summary_id": summary_id,
+                    "summary_text": summary_text,
+                    "document_type": document_type,
+                    "file_name": file_name,
+                    "generated_by": generated_by
+                },
+                session_params={"database": self.graph._database},
+            )
+            
+            if result:
+                logging.info(f"✅ Document Summary oluşturuldu: {summary_id} ({len(summary_text)} karakter)")
+            
+        except Exception as e:
+            logging.error(f"❌ Document Summary oluşturma hatası: {e}")
+
+    def _create_fallback_summary(self, entities_data: dict, document_type: str, file_name: str) -> str:
+        """
+        LLM başarısız olduğunda entity verilerinden basit özet oluşturur.
+        """
+        try:
+            parts = []
+            
+            # Document type
+            doc_type_tr = {
+                "MAIN_POLICY": "ana poliçe",
+                "ENDORSEMENT": "zeyilname",
+                "CANCELLATION": "iptal belgesi",
+                "RENEWAL": "yenileme belgesi"
+            }.get(document_type, "belge")
+            
+            # Customer
+            customer_data = entities_data.get("customer") or {}
+            customer_name = customer_data.get("name", "").strip()
+            
+            # Insurance Company
+            company_data = entities_data.get("insurance_company") or {}
+            company_name = company_data.get("name", "").strip()
+            
+            # Policy
+            policy_data = entities_data.get("policy") or {}
+            policy_type = policy_data.get("type", "").strip()
+            
+            # Build summary
+            if customer_name and company_name:
+                parts.append(f"Bu belge {customer_name} adına {company_name} tarafından düzenlenmiş bir {doc_type_tr}")
+            elif customer_name:
+                parts.append(f"Bu belge {customer_name} adına düzenlenmiş bir {doc_type_tr}")
+            else:
+                parts.append(f"Bu belge bir {doc_type_tr}")
+            
+            if policy_type:
+                parts[-1] += f" ({policy_type})"
+            parts[-1] += "."
+            
+            # Dates
+            dates_data = entities_data.get("dates") or {}
+            if dates_data.get("start_date") and dates_data.get("end_date"):
+                parts.append(f"Geçerlilik: {dates_data.get('start_date')} - {dates_data.get('end_date')}.")
+            
+            # Premium
+            premium_data = entities_data.get("premium") or {}
+            insurance_amount = entities_data.get("insurance_amount") or {}
+            premium_amount = premium_data.get("amount") or insurance_amount.get("policyPremium")
+            if premium_amount:
+                currency = premium_data.get("currency") or insurance_amount.get("currency", "TRY")
+                parts.append(f"Prim: {premium_amount} {currency}.")
+            
+            # Address
+            address_data = entities_data.get("address") or {}
+            city = address_data.get("city", "")
+            district = address_data.get("district", "")
+            if city:
+                location = f"{district}, {city}" if district else city
+                parts.append(f"Konum: {location}.")
+            
+            return " ".join(parts) if parts else ""
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Fallback summary oluşturma hatası: {e}")
+            return ""
 
     def _update_coverage_premium_from_insurance_amount(
         self, insurance_amount_data: dict, policy_id: str

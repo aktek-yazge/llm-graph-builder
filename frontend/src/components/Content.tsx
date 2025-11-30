@@ -12,7 +12,7 @@ import {
   useMediaQuery,
   useSpotlightContext,
 } from '@neo4j-ndl/react';
-import { ChartBarIconOutline, ChevronDownIconOutline, ChevronUpIconOutline } from '@neo4j-ndl/react/icons';
+import { ChartBarIconOutline, ChevronDownIconOutline, ChevronUpIconOutline, MagnifyingGlassIconOutline, XMarkIconOutline } from '@neo4j-ndl/react/icons';
 import axios from 'axios';
 import React, {
   lazy,
@@ -149,6 +149,9 @@ const Content: React.FC<ContentProps> = ({
     const saved = localStorage.getItem('isQueueProcessingStopped');
     return saved ? JSON.parse(saved) : false;
   });
+
+  // Dosya adı arama filtresi
+  const [nameFilter, setNameFilter] = useState<string>('');
 
   const { setMessages } = useMessageContext();
   const {
@@ -1533,6 +1536,23 @@ const Content: React.FC<ContentProps> = ({
             </Typography>
           </div>
           <div className='enhancement-btn__wrapper'>
+            <TextInput
+              aria-label='Dosya adı ile ara'
+              placeholder='Dosya Adı ile Ara...'
+              value={nameFilter}
+              onChange={(e) => setNameFilter(e.target.value)}
+              size='medium'
+              className='mr-4! w-80'
+              leftIcon={<MagnifyingGlassIconOutline className='n-size-token-5' />}
+              rightIcon={
+                nameFilter ? (
+                  <XMarkIconOutline 
+                    className='n-size-token-5 cursor-pointer' 
+                    onClick={() => setNameFilter('')}
+                  />
+                ) : undefined
+              }
+            />
             <ButtonWithToolTip
               placement='top'
               text='Enhance graph quality'
@@ -1613,6 +1633,8 @@ const Content: React.FC<ContentProps> = ({
           ref={childRef}
           handleGenerateGraph={processWaitingFilesOnRefresh}
           setIsQueueProcessingStopped={setIsQueueProcessingStopped}
+          nameFilter={nameFilter}
+          setNameFilter={setNameFilter}
         ></FileTable>
 
         <Flex className={`p-2.5  mt-1.5 absolute bottom-0 w-full`} justifyContent='space-between' flexDirection={'row'}>

@@ -451,6 +451,40 @@ def create_chunk_vector_index(graph):
         else:
             raise
 
+
+def create_chunk_fulltext_index(graph):
+    """
+    Chunk text alanı için fulltext index oluşturur.
+    Bu index, keyword-based arama için kullanılır ve semantic search'ten bağımsız çalışır.
+    """
+    start_time = time.time()
+    try:
+        # Önce index var mı kontrol et
+        check_index_query = """
+            SHOW INDEXES 
+            YIELD name, type, labelsOrTypes, properties 
+            WHERE name = 'chunk_text_fulltext' AND type = 'FULLTEXT' 
+            RETURN name
+        """
+        existing_index = execute_graph_query(graph, check_index_query)
+        
+        if not existing_index:
+            # Fulltext index oluştur
+            create_index_query = """
+                CREATE FULLTEXT INDEX chunk_text_fulltext IF NOT EXISTS
+                FOR (c:Chunk) ON EACH [c.text]
+            """
+            execute_graph_query(graph, create_index_query)
+            logging.info(f"✅ Chunk fulltext index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+        else:
+            logging.info(f"ℹ️ Chunk fulltext index already exists. Time taken: {time.time() - start_time:.2f} seconds")
+    except Exception as e:
+        if "EquivalentSchemaRuleAlreadyExists" in str(e) or "An equivalent index already exists" in str(e):
+            logging.info("Chunk fulltext index already exists, skipping creation.")
+        else:
+            logging.error(f"❌ Chunk fulltext index creation failed: {e}")
+            raise
+
 def create_entity_vector_index(graph: Neo4jGraph):
     """
     Create a vector index for entity nodes to enable semantic search.
@@ -918,18 +952,26 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
             create_chunk_embeddings_immediate(graph, lst_chunks_including_hash, file_name)
             logging.info(f"✅ Upload sırasında {len(lst_chunks_including_hash)} chunk için embedding oluşturuldu")
             
-            # Embedding'ler oluşturulduktan sonra vector index'i kontrol et/oluştur
+            # Embedding'ler oluşturulduktan sonra vector index ve fulltext index'i kontrol et/oluştur
             try:
                 create_chunk_vector_index(graph)
                 logging.info(f"✅ Vector index checked/created after upload embeddings")
-            except Exception as vector_error:
-                logging.warning(f"⚠️ Vector index creation warning after upload: {vector_error}")
+                
+                # Fulltext index (keyword search için)
+                create_chunk_fulltext_index(graph)
+                logging.info(f"✅ Fulltext index checked/created after upload")
+            except Exception as index_error:
+                logging.warning(f"⚠️ Index creation warning after upload: {index_error}")
                 
         except Exception as e:
             logging.error(f"❌ Upload sırasında embedding oluşturma hatası: {e}")
             # Embedding hatası chunk oluşturmayı durdurmasın - rollback yapma
     
     logging.info(f"✅ Created {len(lst_chunks_including_hash)} chunk nodes and relationships for: {file_name}")
+    
+    # Document status'ünü "Chunked" olarak güncelle
+    await update_document_status_to_chunked(graph, file_name, len(lst_chunks_including_hash))
+    
     return lst_chunks_including_hash  # Extract format: chunk_id ve chunk_doc içeren list
 
 
@@ -1030,6 +1072,39 @@ async def update_document_status_on_error(graph, file_name: str, error_message: 
             
     except Exception as e:
         logging.error(f"❌ Failed to update Document status: {e}")
+
+
+async def update_document_status_to_chunked(graph, file_name: str, chunk_count: int = 0):
+    """
+    Chunking başarıyla tamamlandığında Neo4j'deki Document node'unun status'ünü Chunked olarak günceller.
+    
+    Args:
+        graph: Neo4j graph instance
+        file_name: Dosya adı
+        chunk_count: Oluşturulan chunk sayısı
+    """
+    logging.info(f"📝 Updating Document status to Chunked for: {file_name}")
+    
+    try:
+        update_query = """
+        MATCH (d:Document {fileName: $file_name})
+        SET d.status = 'Chunked',
+            d.chunkNodeCount = $chunk_count,
+            d.updatedAt = datetime()
+        RETURN d.fileName as fileName, d.status as status
+        """
+        result = await asyncio.to_thread(execute_graph_query, graph, update_query, {
+            "file_name": file_name,
+            "chunk_count": chunk_count
+        })
+        
+        if result:
+            logging.info(f"✅ Document status updated to Chunked for: {file_name} (chunk_count: {chunk_count})")
+        else:
+            logging.warning(f"⚠️ Document not found for status update: {file_name}")
+            
+    except Exception as e:
+        logging.error(f"❌ Failed to update Document status to Chunked: {e}")
 
 
 def link_chunks_to_document(graph, file_name):

@@ -111,4 +111,4 @@ RUN mkdir -p /app/output
 
 # Default command - can be overridden in docker-compose
 # Each worker type (main, db_writer, neo4j_writer) uses different queues
-CMD ["python", "-m", "celery", "-A", "src.celery_app", "worker", "--loglevel=info", "--pool=threads", "--concurrency=4", "-Q", "celery,default"]
+CMD ["python", "-m", "celery", "-A", "src.celery_app", "worker", "--loglevel=info", "--pool=threads", "--concurrency=4", "-Q", "celery"]

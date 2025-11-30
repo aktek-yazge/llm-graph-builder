@@ -47,7 +47,6 @@ app.conf.update(
     # Define queues
     task_queues=(
         Queue("celery", default_exchange, routing_key="celery"),
-        Queue("default", default_exchange, routing_key="default"),
         Queue("db_write", db_exchange, routing_key="db_write"),
         Queue("neo4j_write", neo4j_exchange, routing_key="neo4j_write"),
     ),
