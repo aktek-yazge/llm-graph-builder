@@ -7,6 +7,7 @@ import {
   IconButton,
   ProgressBar,
   StatusIndicator,
+  TextInput,
   TextLink,
   Typography,
   useCopyToClipboard,
@@ -18,6 +19,7 @@ import {
   DocumentTextIconSolid,
   ExploreIcon,
   InformationCircleIconOutline,
+  MagnifyingGlassIconOutline,
   XMarkIconOutline,
 } from '@neo4j-ndl/react/icons';
 import {
@@ -75,6 +77,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const [filetypeFilter, setFiletypeFilter] = useState<string>('');
   const [fileSourceFilter, setFileSourceFilter] = useState<string>('');
   const [llmtypeFilter, setLLmtypeFilter] = useState<string>('');
+  const [nameFilter, setNameFilter] = useState<string>('');
   const skipPageResetRef = useRef<boolean>(false);
   const [_, copy] = useCopyToClipboard();
   const { colorMode } = useContext(ThemeWrapperContext);
@@ -277,31 +280,43 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       {
         id: 'select',
         header: ({ table }: { table: Table<CustomFile> }) => {
+          // Filtrelenmiş satırları al (pagination dahil tüm filtrelenmiş satırlar)
+          const filteredRows = table.getFilteredRowModel().rows;
+          
           // V2 dosyaları için daha esnek kontrol: sadece gerçekten işlem yapılan dosyaları disable et
-          // V2 dosyaları queue'da bekliyor olabilir ama seçilebilir olmalı
-          const processingcheck = table.getRowModel().rows.some((i) => {
+          const processingcheck = filteredRows.some((i) => {
             const file = i.original;
-            // V2 dosyaları için: sadece gerçekten işlem yapılan dosyaları disable et
             if (file.fileSource === 'V2 Queue') {
-              // V2 dosyaları için: "Processing Graph", "Processing Chunks", "Extracting" seçilebilir
-              // Sadece "Processing" (genel) veya "Uploading" disable olsun
               return (
                 file.status === 'Processing' && !file.status?.includes('Graph') && !file.status?.includes('Chunks')
               );
             }
-            // V1 dosyaları için: eski mantık
             return file.status === 'Processing';
           });
+          
+          // Filtrelenmiş satırların hepsi seçili mi kontrol et
+          const selectableRows = filteredRows.filter(row => row.getCanSelect());
+          const allFilteredSelected = selectableRows.length > 0 && 
+            selectableRows.every(row => row.getIsSelected());
+          
+          // Filtrelenmiş satırlar için toggle handler
+          const handleToggleAllFiltered = () => {
+            const shouldSelect = !allFilteredSelected;
+            selectableRows.forEach(row => {
+              row.toggleSelected(shouldSelect);
+            });
+          };
+          
           return (
             <Checkbox
               ariaLabel='header-checkbox'
-              isChecked={table.getIsAllRowsSelected()}
-              onChange={table.getToggleAllRowsSelectedHandler()}
+              isChecked={allFilteredSelected}
+              onChange={handleToggleAllFiltered}
               isDisabled={processingcheck}
               htmlAttributes={{
                 title: processingcheck
                   ? `Files are still processing please select individual checkbox for deletion`
-                  : 'select all rows for deletion',
+                  : `Select all ${selectableRows.length} filtered rows`,
               }}
             />
           );
@@ -360,8 +375,40 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
             </div>
           );
         },
-        header: () => <span>Name</span>,
+        header: () => (
+          <Flex flexDirection='column' gap='1'>
+            <span>Name</span>
+            <TextInput
+              aria-label='Search files'
+              placeholder='Search...'
+              value={nameFilter}
+              onChange={(e) => {
+                setNameFilter(e.target.value);
+                table.getColumn('name')?.setFilterValue(e.target.value);
+              }}
+              size='small'
+              fluid
+              leftIcon={<MagnifyingGlassIconOutline className='n-size-token-4' />}
+              rightIcon={
+                nameFilter ? (
+                  <XMarkIconOutline 
+                    className='n-size-token-4 cursor-pointer' 
+                    onClick={() => {
+                      setNameFilter('');
+                      table.getColumn('name')?.setFilterValue('');
+                    }}
+                  />
+                ) : undefined
+              }
+              htmlAttributes={{
+                onClick: (e: React.MouseEvent) => e.stopPropagation(),
+                onKeyDown: (e: React.KeyboardEvent) => e.stopPropagation(),
+              }}
+            />
+          </Flex>
+        ),
         footer: (info) => info.column.id,
+        filterFn: 'nameFilter' as any,
       }),
       columnHelper.accessor((row) => row.status, {
         id: 'status',
@@ -511,43 +558,115 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
                 ),
                 onClick: () => {
                   setStatusFilter('All');
-                  table.getColumn('status')?.setFilterValue(true);
+                  table.getColumn('status')?.setFilterValue('All');
                   skipPageResetRef.current = true;
                 },
               },
               {
                 title: (
                   <span className={`${statusFilter === 'Completed' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                    <StatusIndicator type='success'></StatusIndicator> Completed Files
+                    <StatusIndicator type='success'></StatusIndicator> Completed
                   </span>
                 ),
                 onClick: () => {
                   setStatusFilter('Completed');
-                  table.getColumn('status')?.setFilterValue(true);
+                  table.getColumn('status')?.setFilterValue('Completed');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'Chunked' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='success'></StatusIndicator> Chunked
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('Chunked');
+                  table.getColumn('status')?.setFilterValue('Chunked');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'Processing' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='warning'></StatusIndicator> Processing
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('Processing');
+                  table.getColumn('status')?.setFilterValue('Processing');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'Chunking' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='warning'></StatusIndicator> Chunking
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('Chunking');
+                  table.getColumn('status')?.setFilterValue('Chunking');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'ReadyChunking' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='info'></StatusIndicator> Ready for Chunking
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('ReadyChunking');
+                  table.getColumn('status')?.setFilterValue('ReadyChunking');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'ReadyGraph' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='success'></StatusIndicator> Ready for Graph
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('ReadyGraph');
+                  table.getColumn('status')?.setFilterValue('ReadyGraph');
+                  skipPageResetRef.current = true;
+                },
+              },
+              {
+                title: (
+                  <span className={`${statusFilter === 'Queued' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
+                    <StatusIndicator type='info'></StatusIndicator> Queued
+                  </span>
+                ),
+                onClick: () => {
+                  setStatusFilter('Queued');
+                  table.getColumn('status')?.setFilterValue('Queued');
                   skipPageResetRef.current = true;
                 },
               },
               {
                 title: (
                   <span className={`${statusFilter === 'New' ? 'n-bg-palette-primary-bg-selected' : 'p-2'} p-2`}>
-                    <StatusIndicator type='info'></StatusIndicator> New Files
+                    <StatusIndicator type='info'></StatusIndicator> New
                   </span>
                 ),
                 onClick: () => {
                   setStatusFilter('New');
-                  table.getColumn('status')?.setFilterValue(true);
+                  table.getColumn('status')?.setFilterValue('New');
                   skipPageResetRef.current = true;
                 },
               },
               {
                 title: (
                   <span className={`${statusFilter === 'Failed' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                    <StatusIndicator type='danger'></StatusIndicator> Failed Files
+                    <StatusIndicator type='danger'></StatusIndicator> Failed
                   </span>
                 ),
                 onClick: () => {
                   setStatusFilter('Failed');
-                  table.getColumn('status')?.setFilterValue(true);
+                  table.getColumn('status')?.setFilterValue('Failed');
                   skipPageResetRef.current = true;
                 },
               },
@@ -844,6 +963,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       filetypeFilter,
       llmtypeFilter,
       fileSourceFilter,
+      nameFilter,
       isReadOnlyUser,
       colorMode,
       isReadOnlyUser,
@@ -871,12 +991,56 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     },
     onRowSelectionChange: setRowSelection,
     filterFns: {
-      statusFilter: (row, columnId, filterValue) => {
-        if (statusFilter === 'All') {
-          return row;
+      nameFilter: (row, columnId, filterValue) => {
+        if (!filterValue || filterValue === '') {
+          return true;
         }
-        const value = filterValue ? row.original[columnId] === statusFilter : row.original[columnId];
-        return value;
+        const name = (row.original.name || '') as string;
+        return name.toLowerCase().includes(filterValue.toLowerCase());
+      },
+      statusFilter: (row, columnId, filterValue) => {
+        // filterValue artık filter adını içeriyor (örn: 'Completed', 'Chunked', vb.)
+        const currentFilter = filterValue || statusFilter;
+        
+        if (!currentFilter || currentFilter === 'All') {
+          return true;
+        }
+        const status = row.original[columnId] as string;
+        
+        // Exact match for specific statuses
+        if (currentFilter === 'Completed') {
+          return status === 'Completed' || status.includes('Completed');
+        }
+        if (currentFilter === 'Chunked') {
+          return status === 'Chunked' || status === 'Ready for Graph' || status === 'Embedded and Ready for Graph';
+        }
+        if (currentFilter === 'Processing') {
+          return status === 'Processing' || status === 'Processing Chunks' || 
+                 status === 'Processing Graph' || status === 'Processing Embeddings' || 
+                 status === 'Extracting';
+        }
+        if (currentFilter === 'Chunking') {
+          return status === 'Processing Chunks' || status === 'Chunking';
+        }
+        if (currentFilter === 'ReadyChunking') {
+          return status === 'Ready for Chunking';
+        }
+        if (currentFilter === 'ReadyGraph') {
+          return status === 'Ready for Graph' || status === 'Embedded and Ready for Graph' || 
+                 status === 'Chunked';
+        }
+        if (currentFilter === 'Queued') {
+          return status === 'Queued' || status === 'Queued for Chunking' || 
+                 status === 'Queued for Graph' || status === 'Queued for Extraction';
+        }
+        if (currentFilter === 'New') {
+          return status === 'New';
+        }
+        if (currentFilter === 'Failed') {
+          return status === 'Failed';
+        }
+        
+        return status === currentFilter;
       },
       fileTypeFilter: (row) => {
         if (filetypeFilter === 'All') {
@@ -909,6 +1073,63 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   useEffect(() => {
     skipPageResetRef.current = false;
   }, [filesData.length]);
+
+  // filesData güncellendiğinde, filtreye uymayan seçimleri temizle
+  // Örn: Processing filtresinde 4 dosya seçili, 1'i Completed olunca 3 kalmalı
+  useEffect(() => {
+    if (!statusFilter || statusFilter === 'All' || statusFilter === '') {
+      return; // Filter yoksa veya "All" ise bir şey yapma
+    }
+    
+    // Mevcut seçili satırları al
+    const selectedRows = table.getSelectedRowModel().rows;
+    if (selectedRows.length === 0) return;
+    
+    // Filtrelenmiş satırların ID'lerini al
+    const filteredRowIds = new Set(table.getFilteredRowModel().rows.map(r => r.id));
+    
+    // Seçili ama artık filtrede olmayan satırları bul
+    const rowsToDeselect = selectedRows.filter(row => !filteredRowIds.has(row.id));
+    
+    if (rowsToDeselect.length > 0) {
+      // Bu satırların seçimini kaldır
+      rowsToDeselect.forEach(row => {
+        row.toggleSelected(false);
+      });
+      console.log(`🔄 ${rowsToDeselect.length} satır filtreye uymadığı için seçimden çıkarıldı`);
+    }
+  }, [filesData, statusFilter, table]);
+
+  // Filter senkronizasyonu - statusFilter değiştiğinde veya table yeniden oluştuğunda filter'ı uygula
+  useEffect(() => {
+    if (statusFilter && statusFilter !== '') {
+      table.getColumn('status')?.setFilterValue(statusFilter);
+      // Filter değiştiğinde mevcut seçimleri temizle
+      table.resetRowSelection();
+    }
+  }, [statusFilter, table]);
+
+  // Diğer filterler için de senkronizasyon
+  useEffect(() => {
+    if (filetypeFilter && filetypeFilter !== '') {
+      table.getColumn('type')?.setFilterValue(filetypeFilter);
+      table.resetRowSelection();
+    }
+  }, [filetypeFilter, table]);
+
+  useEffect(() => {
+    if (fileSourceFilter && fileSourceFilter !== '') {
+      table.getColumn('source')?.setFilterValue(fileSourceFilter);
+      table.resetRowSelection();
+    }
+  }, [fileSourceFilter, table]);
+
+  useEffect(() => {
+    if (llmtypeFilter && llmtypeFilter !== '') {
+      table.getColumn('model')?.setFilterValue(llmtypeFilter);
+      table.resetRowSelection();
+    }
+  }, [llmtypeFilter, table]);
 
   const handleFileUploadError = (error: AxiosError) => {
     // @ts-ignore

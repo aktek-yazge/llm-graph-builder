@@ -1,4 +1,8 @@
 .DS_Store
+# Celery worker logs
+celery_worker/logs/
+logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

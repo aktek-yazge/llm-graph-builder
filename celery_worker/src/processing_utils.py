@@ -18,6 +18,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.shared.common_fn import formatted_time, create_graph_database_connection
+# Async DB writes via RabbitMQ queue - ensures data persistence even if worker crashes
+from src.db_writer import enqueue_db_write, enqueue_chunking_update
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -880,7 +882,19 @@ class FileProcessor:
                             min_chunk_size = 150
                             raw_chunks = []
                             separators = ["## ", "\n\n", "\n"]
-                            current_text = markdown_text
+                            
+                            # <CHUNK> tag'lerini temizle (markdown'da kalmış olabilir)
+                            import re
+                            chunk_tag_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+                            # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
+                            chunk_matches = chunk_tag_pattern.findall(markdown_text)
+                            if chunk_matches:
+                                # Tag'li markdown - tag'lerin içini al
+                                current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
+                                logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
+                            else:
+                                # Tag'siz markdown - orijinal text'i kullan
+                                current_text = markdown_text
                             
                             for sep in separators:
                                 if sep in current_text:
@@ -953,6 +967,22 @@ class FileProcessor:
                         logging.error(f"❌ Failed to create Neo4j nodes: {str(neo4j_error)}")
                         import traceback
                         logging.error(f"Traceback: {traceback.format_exc()}")
+                        
+                        # Rollback: Yarım kalan chunk'ları temizle
+                        try:
+                            from src.make_relationships import rollback_chunks_for_file, update_document_status_on_error
+                            logging.info(f"🔄 Attempting rollback for partial chunks: {normalized_filename}")
+                            rollback_result = await rollback_chunks_for_file(graph, normalized_filename)
+                            if rollback_result.get('success'):
+                                logging.info(f"✅ Rollback successful: deleted {rollback_result.get('deleted_chunks', 0)} chunks")
+                            else:
+                                logging.warning(f"⚠️ Rollback failed: {rollback_result.get('error', 'Unknown error')}")
+                            
+                            # Neo4j Document status'ünü Failed yap
+                            await update_document_status_on_error(graph, normalized_filename, str(neo4j_error)[:500])
+                        except Exception as rollback_error:
+                            logging.error(f"❌ Rollback error: {rollback_error}")
+                        
                         # Neo4j hatası kritik - chunking failed olarak işaretle ve exception fırlat
                         file_record.chunking_status = "failed"
                         file_record.processing_error = f"Neo4j error: {str(neo4j_error)[:500]}"
@@ -962,12 +992,16 @@ class FileProcessor:
                         raise  # Celery retry mekanizmasını tetikle
                     
                     # Mark as chunked - sadece Neo4j başarılı olursa buraya ulaşır
-                    file_record.chunking_status = "chunked"
-                    file_record.chunking_completed_at = datetime.now(timezone.utc)
-                    file_record.status = "uploaded"
-                    db_session.commit()
+                    # ✅ Async DB write via RabbitMQ - ensures persistence even if worker crashes
+                    enqueue_db_write(file_record.id, {
+                        "chunking_status": "chunked",
+                        "chunking_completed_at": datetime.now(timezone.utc),
+                        "status": "uploaded",
+                        "markdown_path": file_record.markdown_path,
+                        "reason": "Chunking completed successfully (markdown exists + Neo4j nodes)"
+                    })
                     logging.info(
-                        f"✅ V2: Chunking completed (markdown exists + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id})"
+                        f"✅ V2: Chunking completed (markdown exists + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id}) - DB update queued"
                     )
                 else:
                     # V2 Chunking: Use pre-extracted images with Gemini OCR (copied from backend/score.py)
@@ -1251,7 +1285,19 @@ class FileProcessor:
                             # Markdown'ı raw chunk'lara ayır (separator bazlı)
                             raw_chunks = []
                             separators = ["## ", "\n\n", "\n"]
-                            current_text = markdown_text
+                            
+                            # <CHUNK> tag'lerini temizle (markdown'da kalmış olabilir)
+                            import re
+                            chunk_tag_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
+                            # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
+                            chunk_matches = chunk_tag_pattern.findall(markdown_text)
+                            if chunk_matches:
+                                # Tag'li markdown - tag'lerin içini al
+                                current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
+                                logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
+                            else:
+                                # Tag'siz markdown - orijinal text'i kullan
+                                current_text = markdown_text
                             
                             for sep in separators:
                                 if sep in current_text:
@@ -1360,28 +1406,27 @@ class FileProcessor:
                     # ========================================
 
                     # Markdown path'i kaydet - sadece Neo4j başarılı olursa buraya ulaşır
-                    file_record.markdown_path = markdown_path
-                    file_record.chunking_status = "chunked"
-                    file_record.chunking_completed_at = datetime.now(timezone.utc)
-                    file_record.status = "uploaded"  # Reset status so frontend can proceed
-                    db_session.commit()
+                    # ✅ Async DB write via RabbitMQ - ensures persistence even if worker crashes
+                    enqueue_db_write(file_record.id, {
+                        "markdown_path": markdown_path,
+                        "chunking_status": "chunked",
+                        "chunking_completed_at": datetime.now(timezone.utc),
+                        "status": "uploaded",  # Reset status so frontend can proceed
+                        "reason": "Chunking completed successfully (markdown created + Neo4j nodes)"
+                    })
                     
                     logging.info(
-                        f"✅ V2: Chunking completed (markdown created + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id})"
+                        f"✅ V2: Chunking completed (markdown created + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id}) - DB update queued"
                     )
 
-                # Refresh to check status
-                db_session.refresh(file_record)
-                if file_record.chunking_status == "chunked":
-                    # Chunking tamamlandı, graph creation için queue'ya alınacak
-                    # Status'u "uploaded" olarak bırak (graph creation queue'ya alınırken "queued" yapılacak)
-                    # Sadece chunking_status="chunked" olduğundan emin ol
-                    file_record.reason = "Chunking completed successfully"
-                    db_session.commit()
-                    logging.info(
-                        f"✅ V2: Chunking completed for: {file_record.original_name} (ID: {file_record.id}), will be queued for graph creation"
-                    )
-                else:
+                # Neo4j yazımı başarılı olduysa (exception fırlatılmadı), chunking tamamlandı kabul et
+                # DB güncellemesi async yapıldı, refresh yapmaya gerek yok
+                logging.info(
+                    f"✅ V2: Chunking completed for: {file_record.original_name} (ID: {file_record.id}), will be queued for graph creation"
+                )
+                
+                # Not: Aşağıdaki else bloğu artık kullanılmıyor çünkü Neo4j hatası exception fırlatır
+                if False:  # Backward compatibility için tutuldu, çalışmayacak
                     logging.warning(
                         f"⚠️ V2: Chunking status unexpected for: {file_record.original_name} (status: {file_record.chunking_status})"
                     )

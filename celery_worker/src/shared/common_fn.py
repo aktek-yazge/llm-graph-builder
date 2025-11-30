@@ -84,9 +84,10 @@ def create_graph_database_connection(uri, userName, password, database):
     uri = os.environ.get("NEO4J_URI")
   
   # Environment'tan timeout ve connection ayarlarını al
-  connection_timeout = int(os.environ.get("NEO4J_CONNECTION_TIMEOUT", "30"))
-  read_timeout = int(os.environ.get("NEO4J_READ_TIMEOUT", "120"))
-  write_timeout = int(os.environ.get("NEO4J_WRITE_TIMEOUT", "120"))
+  # Default değerler artırıldı - uzak Neo4j server'lar için daha uzun timeout gerekli
+  connection_timeout = int(os.environ.get("NEO4J_CONNECTION_TIMEOUT", "60"))
+  read_timeout = int(os.environ.get("NEO4J_READ_TIMEOUT", "300"))
+  write_timeout = int(os.environ.get("NEO4J_WRITE_TIMEOUT", "300"))
   max_connection_lifetime = int(os.environ.get("NEO4J_MAX_CONNECTION_LIFETIME", "300"))
   # Default pool size: 50, but for V2 batch processing with 40 files and parallel batches, increase to 100
   # Each file can have multiple parallel batch queries, so we need more connections
@@ -240,7 +241,21 @@ def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDo
   
   return graph_document_list
 
-def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=3, delay=2):
+def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=5, delay=3):
+   """
+   Neo4j query'sini timeout ve deadlock hatalarına karşı retry mekanizması ile çalıştırır.
+   
+   Args:
+       graph: Neo4jGraph instance
+       query: Cypher query
+       params: Query parametreleri
+       max_retries: Maksimum retry sayısı (default: 5)
+       delay: İlk retry için bekleme süresi (exponential backoff uygulanır)
+   """
+   # Environment'tan retry ayarlarını al
+   max_retries = int(os.environ.get("NEO4J_MAX_RETRIES", str(max_retries)))
+   delay = int(os.environ.get("NEO4J_RETRY_DELAY", str(delay)))
+   
    retries = 0
    current_delay = delay
    while retries < max_retries:

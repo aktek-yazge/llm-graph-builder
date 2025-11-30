@@ -243,50 +243,59 @@ const Content: React.FC<ContentProps> = ({
   }, [connectionStatus, isAuthenticated, isFirstTimeUser]);
 
   // V2 Selected File Count ve kategorileri güncellemek için useEffect
+  // rowSelection state'i doğrudan kullanılarak hesaplama yapılıyor (childRef yerine)
   useEffect(() => {
-    // filesData'dan seçili V2 dosyalarını al
-    const selectedV2FileIds = new Set<number>();
-
-    // FileTable'daki checkbox state'ini oku
-    const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
-    v2Files.forEach((f: CustomFile) => {
-      if (f.v2FileId) {
-        selectedV2FileIds.add(f.v2FileId);
-      }
-    });
-
-    if (selectedV2FileIds.size === 0) {
+    // rowSelection'dan seçili ID'leri al (format: {id: true, id2: true, ...})
+    const selectedIds = Object.keys(rowSelection).filter(id => rowSelection[id]);
+    
+    if (selectedIds.length === 0) {
       setV2FilesCategorized({ pendingChunking: 0, readyForGraph: 0, pendingEndorsement: 0, completed: 0 });
       setV2SelectedFileCount(0);
       return;
     }
 
-    // filesData'dan seçili V2 dosyalarını al ve kategorize et
+    // filesData'dan seçili dosyaları al (rowSelection ID'leri ile eşleştir)
     const selectedFiles = filesData.filter(
-      (f: CustomFile) => f.fileSource === 'V2 Queue' && f.v2FileId && selectedV2FileIds.has(f.v2FileId)
+      (f: CustomFile) => f.fileSource === 'V2 Queue' && selectedIds.includes(f.id)
     );
 
     const totalCount = selectedFiles.length;
 
+    // Kategorileri hesapla - dosyaların güncel status'lerini kullan
     const pendingChunking = selectedFiles.filter(
-      (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'ready'
+      (f: CustomFile) => f.chunking_status === 'ready' || f.status === 'Ready for Chunking'
     ).length;
     
     const extractingImages = selectedFiles.filter(
-      (f: CustomFile) => f.upload_status === 'uploaded' && f.chunking_status === 'extracting'
+      (f: CustomFile) => f.chunking_status === 'extracting' || f.status === 'Extracting'
     ).length;
 
     const readyForGraph = selectedFiles.filter(
-      (f: CustomFile) => f.chunking_status === 'chunked' && f.graph_status === 'pending'
+      (f: CustomFile) => (f.chunking_status === 'chunked' && f.graph_status === 'pending') || 
+                         f.status === 'Ready for Graph' || f.status === 'Chunked'
     ).length;
 
     const pendingEndorsement = selectedFiles.filter(
-      (f: CustomFile) => f.graph_status === 'pending_endorsement'
+      (f: CustomFile) => f.graph_status === 'pending_endorsement' || f.status === 'Pending Endorsement'
+    ).length;
+    
+    const processing = selectedFiles.filter(
+      (f: CustomFile) => f.status?.includes('Processing') || f.chunking_status === 'chunking' || 
+                         f.graph_status === 'processing'
     ).length;
 
     setV2SelectedFileCount(totalCount);
 
     setV2FilesCategorized({ pendingChunking, readyForGraph, pendingEndorsement, completed: 0 });
+    
+    // Debug log
+    console.log('📊 V2 Files Categorized:', { 
+      total: totalCount, 
+      pendingChunking, 
+      readyForGraph, 
+      processing,
+      pendingEndorsement 
+    });
   }, [filesData, rowSelection]);
 
   const handleDropdownChange = (selectedOption: OptionType | null | void) => {
@@ -874,20 +883,29 @@ const Content: React.FC<ContentProps> = ({
     }
   };
 
-  const selectedfileslength = useMemo(
-    () => childRef.current?.getSelectedRows().length,
-    [childRef.current?.getSelectedRows()]
-  );
+  // Seçili dosya sayısını rowSelection ve filesData'dan hesapla
+  // Sadece filesData'da var olan ve seçili olan dosyaları say
+  const selectedfileslength = useMemo(() => {
+    const selectedIds = Object.keys(rowSelection).filter(id => rowSelection[id]);
+    // filesData'da var olan seçili dosyaları filtrele
+    const validSelectedFiles = filesData.filter(f => selectedIds.includes(f.id));
+    return validSelectedFiles.length;
+  }, [rowSelection, filesData]);
+
+  // Seçili dosyaları hesapla (diğer useMemo'lar için)
+  const selectedFiles = useMemo(() => {
+    const selectedIds = Object.keys(rowSelection).filter(id => rowSelection[id]);
+    return filesData.filter(f => selectedIds.includes(f.id));
+  }, [rowSelection, filesData]);
 
   const newFilecheck = useMemo(
-    () =>
-      childRef.current?.getSelectedRows().filter((f) => f.status === 'New' || f.status == 'Ready to Reprocess').length,
-    [childRef.current?.getSelectedRows()]
+    () => selectedFiles.filter((f) => f.status === 'New' || f.status === 'Ready to Reprocess' || f.status === 'Ready for Chunking').length,
+    [selectedFiles]
   );
 
   const completedfileNo = useMemo(
-    () => childRef.current?.getSelectedRows().filter((f) => f.status === 'Completed').length,
-    [childRef.current?.getSelectedRows()]
+    () => selectedFiles.filter((f) => f.status === 'Completed' || f.status?.includes('Completed')).length,
+    [selectedFiles]
   );
 
   const dropdowncheck = useMemo(

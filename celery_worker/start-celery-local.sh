@@ -11,6 +11,31 @@
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# ============================================================================
+# LOGGING SETUP - Kalıcı log dosyaları
+# ============================================================================
+LOG_DIR="${SCRIPT_DIR}/logs"
+mkdir -p "$LOG_DIR"
+
+# Log dosyaları - tarih ve saat ile (okunabilir format)
+DATE_STAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+MAIN_LOG="${LOG_DIR}/main-worker_${DATE_STAMP}.log"
+DB_LOG="${LOG_DIR}/db-writer_${DATE_STAMP}.log"
+NEO4J_LOG="${LOG_DIR}/neo4j-writer_${DATE_STAMP}.log"
+FLOWER_LOG="${LOG_DIR}/flower_${DATE_STAMP}.log"
+MASTER_LOG="${LOG_DIR}/master_${DATE_STAMP}.log"
+
+# Log fonksiyonu
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$msg"
+    echo "$msg" >> "$MASTER_LOG"
+}
+
+log "=========================================="
+log "🚀 CELERY WORKERS STARTING"
+log "==========================================" 
+
 # Set environment variables
 export PYTHONPATH="$SCRIPT_DIR"
 export ENV=development
@@ -19,6 +44,17 @@ export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export QUEUE_DB_URL=postgresql://postgres:postgres@localhost:5432/llm_graph_builder
 export CELERY_BROKER_URL=amqp://guest:guest@localhost:5672//
 export CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@localhost:5432/llm_graph_builder
+
+# Neo4j Timeout & Performance Settings
+# Uzak Neo4j sunucuları için timeout değerleri artırıldı
+export NEO4J_CONNECTION_TIMEOUT="${NEO4J_CONNECTION_TIMEOUT:-60}"
+export NEO4J_READ_TIMEOUT="${NEO4J_READ_TIMEOUT:-300}"
+export NEO4J_WRITE_TIMEOUT="${NEO4J_WRITE_TIMEOUT:-300}"
+export NEO4J_MAX_RETRIES="${NEO4J_MAX_RETRIES:-5}"
+export NEO4J_RETRY_DELAY="${NEO4J_RETRY_DELAY:-3}"
+
+# Chunk işleme batch boyutu - küçük değer = daha az timeout riski
+export CHUNK_CREATION_BATCH_SIZE="${CHUNK_CREATION_BATCH_SIZE:-20}"
 
 # Change to the script directory
 cd "$SCRIPT_DIR"
@@ -32,12 +68,13 @@ MAIN_CONCURRENCY="${CELERY_CONCURRENCY:-8}"
 # DB/Neo4j writers use low concurrency to prevent connection issues
 WRITER_CONCURRENCY="${CELERY_WRITER_CONCURRENCY:-2}"
 
-echo "🚀 Starting Celery Workers with DB Write Queue Architecture..."
-echo "📊 Pool: ${POOL_TYPE}"
-echo "📊 Main Worker Concurrency: ${MAIN_CONCURRENCY}"
-echo "📊 DB/Neo4j Writer Concurrency: ${WRITER_CONCURRENCY}"
-echo "📊 Flower dashboard: http://localhost:5555"
-echo ""
+log "🚀 Starting Celery Workers with DB Write Queue Architecture..."
+log "📊 Pool: ${POOL_TYPE}"
+log "📊 Main Worker Concurrency: ${MAIN_CONCURRENCY}"
+log "📊 DB/Neo4j Writer Concurrency: ${WRITER_CONCURRENCY}"
+log "📊 Flower dashboard: http://localhost:5555"
+log "📁 Log directory: ${LOG_DIR}"
+log ""
 
 # Generate unique worker IDs
 MAIN_WORKER_ID="main-worker-${RANDOM}"
@@ -45,75 +82,110 @@ DB_WRITER_ID="db-writer-${RANDOM}"
 NEO4J_WRITER_ID="neo4j-writer-${RANDOM}"
 
 # Start Main Worker - handles celery and default queues (chunking, graph, embeddings)
-echo "🔧 Starting Main Worker (${MAIN_WORKER_ID})..."
+log "🔧 Starting Main Worker (${MAIN_WORKER_ID})..."
 uv run python -m celery -A src.celery_app worker \
     --loglevel=info \
     --pool=${POOL_TYPE} \
     --concurrency=${MAIN_CONCURRENCY} \
     -Q celery,default \
     -E \
-    -n "${MAIN_WORKER_ID}@%h" &
+    -n "${MAIN_WORKER_ID}@%h" 2>&1 | tee -a "$MAIN_LOG" &
 MAIN_WORKER_PID=$!
-echo "✅ Main Worker PID: $MAIN_WORKER_PID"
+log "✅ Main Worker PID: $MAIN_WORKER_PID, Log: $MAIN_LOG"
 
 # Start DB Writer Worker - dedicated for PostgreSQL writes
-echo "🗄️ Starting DB Writer (${DB_WRITER_ID})..."
+log "🗄️ Starting DB Writer (${DB_WRITER_ID})..."
 uv run python -m celery -A src.celery_app worker \
     --loglevel=info \
     --pool=${POOL_TYPE} \
     --concurrency=${WRITER_CONCURRENCY} \
     -Q db_write \
     -E \
-    -n "${DB_WRITER_ID}@%h" &
+    -n "${DB_WRITER_ID}@%h" 2>&1 | tee -a "$DB_LOG" &
 DB_WRITER_PID=$!
-echo "✅ DB Writer PID: $DB_WRITER_PID"
+log "✅ DB Writer PID: $DB_WRITER_PID, Log: $DB_LOG"
 
 # Start Neo4j Writer Worker - dedicated for Neo4j writes
-echo "🔗 Starting Neo4j Writer (${NEO4J_WRITER_ID})..."
+log "🔗 Starting Neo4j Writer (${NEO4J_WRITER_ID})..."
 uv run python -m celery -A src.celery_app worker \
     --loglevel=info \
     --pool=${POOL_TYPE} \
     --concurrency=${WRITER_CONCURRENCY} \
     -Q neo4j_write \
     -E \
-    -n "${NEO4J_WRITER_ID}@%h" &
+    -n "${NEO4J_WRITER_ID}@%h" 2>&1 | tee -a "$NEO4J_LOG" &
 NEO4J_WRITER_PID=$!
-echo "✅ Neo4j Writer PID: $NEO4J_WRITER_PID"
+log "✅ Neo4j Writer PID: $NEO4J_WRITER_PID, Log: $NEO4J_LOG"
 
 # Start Flower only if port 5555 is not in use
 # Enable unauthenticated API for Grow/Shrink pool controls
 export FLOWER_UNAUTHENTICATED_API=true
 if ! nc -z localhost 5555 2>/dev/null; then
-    uv run python -m celery -A src.celery_app flower --port=5555 &
+    uv run python -m celery -A src.celery_app flower --port=5555 2>&1 | tee -a "$FLOWER_LOG" &
     FLOWER_PID=$!
-    echo "✅ Flower started (PID: $FLOWER_PID)"
+    log "✅ Flower started (PID: $FLOWER_PID), Log: $FLOWER_LOG"
 else
-    echo "🌸 Flower is already running on port 5555 (skipping)"
+    log "🌸 Flower is already running on port 5555 (skipping)"
     FLOWER_PID=""
 fi
 
-echo ""
-echo "📋 Worker Summary:"
-echo "   Main Worker:   PID=$MAIN_WORKER_PID, Queues=celery,default, Concurrency=$MAIN_CONCURRENCY"
-echo "   DB Writer:     PID=$DB_WRITER_PID, Queue=db_write, Concurrency=$WRITER_CONCURRENCY"
-echo "   Neo4j Writer:  PID=$NEO4J_WRITER_PID, Queue=neo4j_write, Concurrency=$WRITER_CONCURRENCY"
-echo ""
-echo "Press Ctrl+C to stop all workers..."
+log ""
+log "📋 Worker Summary:"
+log "   Main Worker:   PID=$MAIN_WORKER_PID, Queues=celery,default, Concurrency=$MAIN_CONCURRENCY"
+log "   DB Writer:     PID=$DB_WRITER_PID, Queue=db_write, Concurrency=$WRITER_CONCURRENCY"
+log "   Neo4j Writer:  PID=$NEO4J_WRITER_PID, Queue=neo4j_write, Concurrency=$WRITER_CONCURRENCY"
+log ""
+log "Press Ctrl+C to stop all workers..."
+
+# ============================================================================
+# WORKER MONITORING - Worker ölümlerini tespit et
+# ============================================================================
+monitor_workers() {
+    while true; do
+        sleep 30  # Her 30 saniyede kontrol et
+        
+        # Main Worker kontrolü
+        if ! kill -0 $MAIN_WORKER_PID 2>/dev/null; then
+            log "💀 ALERT: Main Worker (PID: $MAIN_WORKER_PID) DIED!"
+            log "   Check log: $MAIN_LOG"
+            log "   Last 20 lines:"
+            tail -20 "$MAIN_LOG" >> "$MASTER_LOG" 2>/dev/null
+        fi
+        
+        # DB Writer kontrolü
+        if ! kill -0 $DB_WRITER_PID 2>/dev/null; then
+            log "💀 ALERT: DB Writer (PID: $DB_WRITER_PID) DIED!"
+            log "   Check log: $DB_LOG"
+        fi
+        
+        # Neo4j Writer kontrolü
+        if ! kill -0 $NEO4J_WRITER_PID 2>/dev/null; then
+            log "💀 ALERT: Neo4j Writer (PID: $NEO4J_WRITER_PID) DIED!"
+            log "   Check log: $NEO4J_LOG"
+        fi
+    done
+}
+
+# Monitoring'i arka planda başlat
+monitor_workers &
+MONITOR_PID=$!
 
 # Trap Ctrl+C and kill all processes
 cleanup() {
-    echo ""
-    echo "🛑 Stopping all workers..."
+    log ""
+    log "🛑 Stopping all workers..."
+    kill $MONITOR_PID 2>/dev/null
     kill $MAIN_WORKER_PID 2>/dev/null
     kill $DB_WRITER_PID 2>/dev/null
     kill $NEO4J_WRITER_PID 2>/dev/null
     if [ -n "$FLOWER_PID" ]; then
         kill $FLOWER_PID 2>/dev/null
     fi
-    echo "✅ All workers stopped."
+    log "✅ All workers stopped."
+    log "📁 Logs saved in: $LOG_DIR"
     exit
 }
-trap cleanup INT
+trap cleanup INT TERM
 
 # Wait for all processes
 wait

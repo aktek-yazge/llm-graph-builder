@@ -666,10 +666,16 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     previous_chunk_id = None
     offset = 0
     
+    # <CHUNK> tag temizleme için regex pattern (bir kez compile et)
+    import re
+    chunk_tag_pattern = re.compile(r'</?CHUNK>', re.IGNORECASE)
+    
     for i, chunk in enumerate(chunks):
         # Extract'daki gibi content normalizasyon
         content = chunk.page_content.strip()
         content = normalize_unicode_text(content)
+        # <CHUNK> tag'lerini temizle (güvenlik için - her durumda)
+        content = chunk_tag_pattern.sub('', content).strip()
         
         # Position ve lokasyon bazlı unique ID oluştur (content duplicate'lar için)
         # Bu yaklaşım aynı content'in farklı lokasyonlarda farklı chunk'lar olmasını sağlar
@@ -800,7 +806,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         )
     """
     # Process chunks in smaller batches to avoid memory issues and timeouts
-    chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "50"))
+    # Default 20 - daha küçük batch'ler timeout riskini azaltır
+    chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "20"))
     total_chunks = len(batch_data)
     logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} for file: {file_name}")
     
@@ -836,62 +843,77 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     logging.info(f"🔄 Starting {batch_count} batches in parallel for file: {file_name}")
     results = await asyncio.gather(*batch_tasks, return_exceptions=True)
     
-    # Check for errors
+    # Check for errors in batch processing
     error_count = sum(1 for r in results if isinstance(r, Exception))
     if error_count > 0:
         logging.warning(f"⚠️ {error_count} out of {batch_count} batches failed for file: {file_name}")
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logging.error(f"   ❌ Batch {i+1} error: {result}")
+        # Batch hatası kritik - rollback yap ve exception fırlat
+        logging.error(f"🔄 ROLLBACK triggered due to batch errors for file: {file_name}")
+        await rollback_chunks_for_file(graph, file_name)
+        await update_document_status_on_error(graph, file_name, f"Batch processing failed: {error_count} batches failed")
+        raise Exception(f"Chunk batch processing failed for {file_name}: {error_count} out of {batch_count} batches failed")
     else:
         logging.info(f"✅ All {batch_count} batches completed successfully for file: {file_name}")
     
-    # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
-    first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
-    logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
-    query_to_create_FIRST_relation = """ 
-        UNWIND $relationships AS relationship
-        OPTIONAL MATCH (d:Document {fileName: $f_name})
-        MATCH (c:Chunk {id: relationship.chunk_id})
-        FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (d)-[:FIRST_CHUNK]->(c))
+    # FIRST_CHUNK ve NEXT_CHUNK ilişkilerini oluştur (hata durumunda rollback)
+    try:
+        # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
+        first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
+        logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
+        query_to_create_FIRST_relation = """ 
+            UNWIND $relationships AS relationship
+            OPTIONAL MATCH (d:Document {fileName: $f_name})
+            MATCH (c:Chunk {id: relationship.chunk_id})
+            FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
+                    MERGE (d)-[:FIRST_CHUNK]->(c))
+            """
+        await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": relationships})
+        
+        # Debug: FIRST_CHUNK ilişkilerini kontrol et
+        first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
+        first_check_result = await asyncio.to_thread(execute_graph_query, graph, first_check_query, {"file_name": file_name})
+        logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
+        
+        # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
+        logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
+        
+        # Önce mevcut chunk'ların position'larını kontrol et
+        position_check_query = """
+            MATCH (c:Chunk {fileName: $file_name})
+            RETURN c.position as position, c.id as chunk_id
+            ORDER BY c.position
         """
-    await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": relationships})
+        existing_positions = await asyncio.to_thread(execute_graph_query, graph, position_check_query, {"file_name": file_name})
+        
+        if existing_positions:
+            logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
+            for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
+                logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
+            if len(existing_positions) > 10:
+                logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
+        
+        query_to_create_NEXT_relation = """
+            MATCH (c1:Chunk {fileName: $file_name})
+            MATCH (c2:Chunk {fileName: $file_name})
+            WHERE c2.position = c1.position + 1
+            MERGE (c1)-[:NEXT_CHUNK]->(c2)
+            RETURN count(*) as created_count
+        """
+        next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
+        logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using position-based approach")
+        
+    except Exception as relationship_error:
+        # İlişki oluşturma hatası - rollback yap
+        logging.error(f"❌ Relationship creation failed for {file_name}: {relationship_error}")
+        logging.info(f"🔄 ROLLBACK triggered due to relationship error for file: {file_name}")
+        await rollback_chunks_for_file(graph, file_name)
+        await update_document_status_on_error(graph, file_name, f"Relationship creation failed: {str(relationship_error)[:300]}")
+        raise  # Exception'ı üst katmana ilet
     
-    # Debug: FIRST_CHUNK ilişkilerini kontrol et
-    first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
-    first_check_result = await asyncio.to_thread(execute_graph_query, graph, first_check_query, {"file_name": file_name})
-    logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
-    
-    # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
-    logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
-    
-    # Önce mevcut chunk'ların position'larını kontrol et
-    position_check_query = """
-        MATCH (c:Chunk {fileName: $file_name})
-        RETURN c.position as position, c.id as chunk_id
-        ORDER BY c.position
-    """
-    existing_positions = await asyncio.to_thread(execute_graph_query, graph, position_check_query, {"file_name": file_name})
-    
-    if existing_positions:
-        logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
-        for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
-            logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
-        if len(existing_positions) > 10:
-            logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
-    
-    query_to_create_NEXT_relation = """
-        MATCH (c1:Chunk {fileName: $file_name})
-        MATCH (c2:Chunk {fileName: $file_name})
-        WHERE c2.position = c1.position + 1
-        MERGE (c1)-[:NEXT_CHUNK]->(c2)
-        RETURN count(*) as created_count
-    """
-    next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
-    logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using position-based approach")
-    
-    # Embedding'leri oluştur (eğer isteniyorsa)
+    # Embedding'leri oluştur (eğer isteniyorsa) - embedding hatası rollback tetiklemez
     if generate_embedding:
         logging.info(f"🔄 Upload sırasında embedding oluşturuluyor...")
         try:
@@ -908,10 +930,109 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
                 
         except Exception as e:
             logging.error(f"❌ Upload sırasında embedding oluşturma hatası: {e}")
-            # Embedding hatası chunk oluşturmayı durdurmasın
+            # Embedding hatası chunk oluşturmayı durdurmasın - rollback yapma
     
     logging.info(f"✅ Created {len(lst_chunks_including_hash)} chunk nodes and relationships for: {file_name}")
     return lst_chunks_including_hash  # Extract format: chunk_id ve chunk_doc içeren list
+
+
+async def rollback_chunks_for_file(graph, file_name: str):
+    """
+    Hata durumunda bir dosya için oluşturulmuş chunk'ları ve ilişkilerini siler.
+    Bu fonksiyon partial failure durumlarında veri tutarlılığı için kullanılır.
+    
+    Args:
+        graph: Neo4j graph instance
+        file_name: Rollback yapılacak dosya adı
+    
+    Returns:
+        dict: Silinen chunk ve ilişki sayıları
+    """
+    logging.info(f"🔄 ROLLBACK: Starting rollback for file: {file_name}")
+    
+    try:
+        # 1. Önce mevcut durumu kontrol et
+        check_query = """
+        MATCH (c:Chunk {fileName: $file_name})
+        OPTIONAL MATCH (c)-[r1:PART_OF]->()
+        OPTIONAL MATCH ()-[r2:FIRST_CHUNK]->(c)
+        OPTIONAL MATCH (c)-[r3:NEXT_CHUNK]->()
+        OPTIONAL MATCH ()-[r4:NEXT_CHUNK]->(c)
+        RETURN count(DISTINCT c) as chunk_count,
+               count(r1) as part_of_count,
+               count(r2) as first_chunk_count,
+               count(r3) + count(r4) as next_chunk_count
+        """
+        check_result = await asyncio.to_thread(execute_graph_query, graph, check_query, {"file_name": file_name})
+        
+        if check_result and check_result[0]['chunk_count'] > 0:
+            chunk_count = check_result[0]['chunk_count']
+            logging.info(f"🔍 ROLLBACK: Found {chunk_count} chunks to delete for file: {file_name}")
+            
+            # 2. Tüm ilişkileri ve chunk'ları sil (DETACH DELETE ile)
+            delete_query = """
+            MATCH (c:Chunk {fileName: $file_name})
+            DETACH DELETE c
+            RETURN count(*) as deleted_count
+            """
+            delete_result = await asyncio.to_thread(execute_graph_query, graph, delete_query, {"file_name": file_name})
+            deleted_count = delete_result[0]['deleted_count'] if delete_result else 0
+            
+            logging.info(f"✅ ROLLBACK: Successfully deleted {deleted_count} chunks and their relationships for file: {file_name}")
+            
+            return {
+                'success': True,
+                'deleted_chunks': deleted_count,
+                'file_name': file_name
+            }
+        else:
+            logging.info(f"ℹ️ ROLLBACK: No chunks found to delete for file: {file_name}")
+            return {
+                'success': True,
+                'deleted_chunks': 0,
+                'file_name': file_name
+            }
+            
+    except Exception as e:
+        logging.error(f"❌ ROLLBACK: Failed to rollback chunks for file {file_name}: {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'file_name': file_name
+        }
+
+
+async def update_document_status_on_error(graph, file_name: str, error_message: str):
+    """
+    Hata durumunda Neo4j'deki Document node'unun status'ünü Failed olarak günceller.
+    
+    Args:
+        graph: Neo4j graph instance
+        file_name: Dosya adı
+        error_message: Hata mesajı
+    """
+    logging.info(f"📝 Updating Document status to Failed for: {file_name}")
+    
+    try:
+        update_query = """
+        MATCH (d:Document {fileName: $file_name})
+        SET d.status = 'Failed',
+            d.errorMessage = $error_message,
+            d.updatedAt = datetime()
+        RETURN d.fileName as fileName, d.status as status
+        """
+        result = await asyncio.to_thread(execute_graph_query, graph, update_query, {
+            "file_name": file_name,
+            "error_message": error_message[:500] if error_message else "Unknown error"
+        })
+        
+        if result:
+            logging.info(f"✅ Document status updated to Failed for: {file_name}")
+        else:
+            logging.warning(f"⚠️ Document not found for status update: {file_name}")
+            
+    except Exception as e:
+        logging.error(f"❌ Failed to update Document status: {e}")
 
 
 def link_chunks_to_document(graph, file_name):
