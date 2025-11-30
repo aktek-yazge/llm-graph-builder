@@ -6,18 +6,10 @@ import difflib
 from neo4j.exceptions import TransientError, ServiceUnavailable, SessionExpired
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import (
-    create_gcs_bucket_folder_name_hashed,
     delete_uploaded_local_file,
     load_embedding_model,
 )
-from src.document_sources.gcs_bucket import delete_file_from_gcs
-from src.shared.constants import (
-    BUCKET_UPLOAD,
-    NODEREL_COUNT_QUERY_WITH_COMMUNITY,
-    NODEREL_COUNT_QUERY_WITHOUT_COMMUNITY,
-)
 from src.entities.source_node import sourceNode
-from src.communities import MAX_COMMUNITY_LEVELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
 from src.entity_resolver import resolve_entity_before_creation
@@ -286,10 +278,6 @@ class graphDBdataAccess:
                         d.processedAt = datetime(),
                         d.lastProcessedAt = datetime(),
                         d.processingTime = 0,
-                        d.nodeCount = 0,
-                        d.relationshipCount = 0,
-                        d.total_chunks = 0,
-                        d.processed_chunk = 0,
                         d.is_cancelled = false,
                         d.errorMessage = '',
                         d.model = 'unknown'
@@ -346,11 +334,8 @@ class graphDBdataAccess:
                 """MERGE(d:Document {fileName :$fn}) SET d.id = $fn, d.fileSize = $fs, d.fileType = $ft ,
                             d.status = $st, d.url = $url, d.awsAccessKeyId = $awsacc_key_id, 
                             d.fileSource = $f_source, d.processedAt = $c_at, d.lastProcessedAt = $u_at, 
-                            d.processingTime = $pt, d.errorMessage = $e_message, d.nodeCount= $n_count, 
-                            d.relationshipCount = $r_count, d.model= $model, d.gcsBucket=$gcs_bucket, 
-                            d.gcsBucketFolder= $gcs_bucket_folder, d.language= $language,d.gcsProjectId= $gcs_project_id,
-                            d.is_cancelled=False, d.total_chunks=$total_chunks, d.processed_chunk=$processed_chunk,
-                            d.access_token=$access_token, d.doc_link=$doc_link, d.page_images=$page_images""",
+                            d.processingTime = $pt, d.errorMessage = $e_message, d.model= $model, d.language= $language,
+                            d.is_cancelled=False, d.access_token=$access_token, d.doc_link=$doc_link, d.page_images=$page_images""",
                 {
                     "fn": obj_source_node.file_name,
                     "fs": obj_source_node.file_size,
@@ -363,20 +348,11 @@ class graphDBdataAccess:
                     "u_at": obj_source_node.created_at,
                     "pt": getattr(obj_source_node, "processing_time", 0),
                     "e_message": "",
-                    "n_count": getattr(obj_source_node, "node_count", 0),
-                    "r_count": getattr(obj_source_node, "relationship_count", 0),
                     "model": obj_source_node.model,
-                    "gcs_bucket": getattr(obj_source_node, "gcsBucket", ""),
-                    "gcs_bucket_folder": getattr(
-                        obj_source_node, "gcsBucketFolder", ""
-                    ),
                     "language": getattr(obj_source_node, "language", ""),
-                    "gcs_project_id": getattr(obj_source_node, "gcsProjectId", ""),
                     "access_token": getattr(obj_source_node, "access_token", ""),
                     "doc_link": getattr(obj_source_node, "doc_link", ""),
                     "page_images": getattr(obj_source_node, "page_images", []),
-                    "total_chunks": getattr(obj_source_node, "total_chunks", 0),
-                    "processed_chunk": getattr(obj_source_node, "processed_chunk", 0),
                 },
                 session_params={"database": self.graph._database},
             )
@@ -523,26 +499,11 @@ class graphDBdataAccess:
                     obj_source_node.processing_time.total_seconds(), 2
                 )
 
-            if obj_source_node.node_count is not None:
-                params["nodeCount"] = obj_source_node.node_count
-
-            if obj_source_node.relationship_count is not None:
-                params["relationshipCount"] = obj_source_node.relationship_count
-
             if obj_source_node.model is not None and obj_source_node.model != "":
                 params["model"] = obj_source_node.model
 
-            if (
-                obj_source_node.total_chunks is not None
-                and obj_source_node.total_chunks != 0
-            ):
-                params["total_chunks"] = obj_source_node.total_chunks
-
             if obj_source_node.is_cancelled is not None:
                 params["is_cancelled"] = obj_source_node.is_cancelled
-
-            if obj_source_node.processed_chunk is not None:
-                params["processed_chunk"] = obj_source_node.processed_chunk
 
             if obj_source_node.retry_condition is not None:
                 params["retry_condition"] = obj_source_node.retry_condition
@@ -822,9 +783,8 @@ class graphDBdataAccess:
     def get_current_status_document_node(self, file_name):
         query = """
                 MATCH(d:Document {fileName : $file_name}) RETURN d.status AS Status , d.processingTime AS processingTime, 
-                d.nodeCount AS nodeCount, d.model as model, d.relationshipCount as relationshipCount,
-                d.total_chunks AS total_chunks , d.fileSize as fileSize, 
-                d.is_cancelled as is_cancelled, d.processed_chunk as processed_chunk, d.fileSource as fileSource,
+                d.model as model, d.fileSize as fileSize, 
+                d.is_cancelled as is_cancelled, d.fileSource as fileSource,
                 d.processedAt AS processed_time
                 """
         param = {"file_name": file_name}
@@ -878,10 +838,6 @@ class graphDBdataAccess:
                         d.processedAt = datetime(),
                         d.lastProcessedAt = datetime(),
                         d.processingTime = 0,
-                        d.nodeCount = 0,
-                        d.relationshipCount = 0,
-                        d.total_chunks = 0,
-                        d.processed_chunk = 0,
                         d.is_cancelled = false
                     ON MATCH SET 
                         d.lastProcessedAt = datetime(),
@@ -914,7 +870,6 @@ class graphDBdataAccess:
 
         filename_list = list(map(str.strip, json.loads(filenames)))
         source_types_list = list(map(str.strip, json.loads(source_types)))
-        gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
 
         log_delete(
             f"Starting deletion process for {len(filename_list)} files: {filename_list}"
@@ -925,16 +880,11 @@ class graphDBdataAccess:
 
         for file_name, source_type in zip(filename_list, source_types_list):
             merged_file_path = os.path.join(merged_dir, file_name)
-            if source_type == "local file" and gcs_file_cache == "True":
-                folder_name = create_gcs_bucket_folder_name_hashed(uri, file_name)
-                delete_file_from_gcs(BUCKET_UPLOAD, folder_name, file_name)
-                log_delete(f"File deleted from GCS bucket: {file_name}")
-            else:
-                logging.info(
-                    f"Deleted File Path: {merged_file_path} and Deleted File Name : {file_name}"
-                )
-                delete_uploaded_local_file(merged_file_path, file_name)
-                log_delete(f"File deleted from local storage: {file_name}")
+            logging.info(
+                f"Deleted File Path: {merged_file_path} and Deleted File Name : {file_name}"
+            )
+            delete_uploaded_local_file(merged_file_path, file_name)
+            log_delete(f"File deleted from local storage: {file_name}")
 
         query_to_delete_document = """
             MATCH (d:Document)
@@ -1003,26 +953,12 @@ class graphDBdataAccess:
             DETACH DELETE d
             } IN TRANSACTIONS OF 1 ROWS
             """
-        query_to_delete_communities = """
-            MATCH (c:`__Community__`)
-            WHERE c.level = 0 AND NOT EXISTS { ()-[:IN_COMMUNITY]->(c) }
-            DETACH DELETE c
-            WITH 1 AS dummy
-            UNWIND range(1, $max_level)  AS level
-            CALL (level) {
-                MATCH (c:`__Community__`)
-                WHERE c.level = level AND NOT EXISTS { ()-[:PARENT_COMMUNITY]->(c) }
-                DETACH DELETE c
-                }
-        """
         param = {"filename_list": filename_list, "source_types_list": source_types_list}
-        community_param = {"max_level": MAX_COMMUNITY_LEVELS}
         if deleteEntities == "true":
             log_delete(
                 f"Executing comprehensive deletion (documents + entities) for {len(filename_list)} files"
             )
             result = self.execute_query(query_to_delete_document_and_entities, param)
-            _ = self.execute_query(query_to_delete_communities, community_param)
             log_delete(
                 f"Successfully deleted {len(filename_list)} documents with entities: {filename_list}"
             )
@@ -1365,57 +1301,6 @@ class graphDBdataAccess:
             session_params={"database": self.graph._database},
         )
         return "Drop and Re-Create vector index succesfully"
-
-    def update_node_relationship_count(self, document_name):
-        logging.info("updating node and relationship count")
-        label_query = """CALL db.labels"""
-        community_flag = {"label": "__Community__"} in self.execute_query(label_query)
-        if (not document_name) and (community_flag):
-            result = self.execute_query(NODEREL_COUNT_QUERY_WITH_COMMUNITY)
-        elif (not document_name) and (not community_flag):
-            return []
-        else:
-            param = {"document_name": document_name}
-            result = self.execute_query(NODEREL_COUNT_QUERY_WITHOUT_COMMUNITY, param)
-        response = {}
-        if result:
-            for record in result:
-                filename = record.get("filename", None)
-                chunkNodeCount = int(record.get("chunkNodeCount", 0))
-                chunkRelCount = int(record.get("chunkRelCount", 0))
-                entityNodeCount = int(record.get("entityNodeCount", 0))
-                entityEntityRelCount = int(record.get("entityEntityRelCount", 0))
-                if (not document_name) and (community_flag):
-                    communityNodeCount = int(record.get("communityNodeCount", 0))
-                    communityRelCount = int(record.get("communityRelCount", 0))
-                else:
-                    communityNodeCount = 0
-                    communityRelCount = 0
-                # Sadece toplamları hesapla, ayrıntıları Document'a kaydetme
-                nodeCount = chunkNodeCount + entityNodeCount + communityNodeCount
-                relationshipCount = (
-                    chunkRelCount + entityEntityRelCount + communityRelCount
-                )
-                update_query = """
-                MATCH (d:Document {fileName: $filename})
-                SET d.nodeCount = $nodeCount,
-                    d.relationshipCount = $relationshipCount
-                """
-                self.execute_query(
-                    update_query,
-                    {
-                        "filename": filename,
-                        "nodeCount": nodeCount,
-                        "relationshipCount": relationshipCount,
-                    },
-                )
-
-                response[filename] = {
-                    "nodeCount": nodeCount,
-                    "relationshipCount": relationshipCount,
-                }
-
-        return response
 
     def get_nodelabels_relationships(self):
         node_query = """
@@ -2092,841 +1977,6 @@ class graphDBdataAccess:
         except Exception as e:
             logging.error(f"❌ Entity vector index oluşturma genel hatası: {e}")
             raise e
-
-    def _create_policy_related_nodes(
-        self, policy_info: dict, policy_id: str, file_name: str
-    ):
-        """
-        ⚠️ DEPRECATED: Bu metod artık kullanılmamaktadır.
-        Bunun yerine create_comprehensive_policy_entities() kullanın.
-
-        Policy bilgilerinden Customer, PolicyYear, InsuredItem ve PolicyType node'larını oluşturur
-        """
-        logging.warning(
-            f"⚠️ DEPRECATED: _create_policy_related_nodes() çağrısı. Bunun yerine comprehensive extraction kullanın."
-        )
-        try:
-            # Customer node oluştur
-            customer_name = policy_info.get("customer_name", "").strip()
-            if customer_name:
-                self._create_customer_node(customer_name, policy_id, file_name)
-
-            # PolicyYear node oluştur
-            year = policy_info.get("year", "").strip()
-            if year:
-                self._create_policy_year_node(year, policy_id)
-
-            # InsuredItem node oluştur
-            insured_item = policy_info.get("insured_item", "").strip()
-            if insured_item:
-                self._create_insured_item_node(insured_item, policy_id)
-
-            # PolicyType node oluştur
-            policy_type = policy_info.get("policy_type", "").strip()
-            if policy_type:
-                self._create_policy_type_node(policy_type, policy_id)
-
-        except Exception as e:
-            logging.error(f"Policy related node'ları oluşturma hatası: {e}")
-
-    def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
-        """Customer node oluşturur ve ilişkilendirir"""
-        try:
-            # Entity resolution kontrolü
-            new_entity = {
-                "id": customer_name,
-                "name": customer_name,
-                "entity_type": "Customer",
-            }
-
-            existing_entity_id = resolve_entity_before_creation(
-                new_entity, self.graph, "Customer"
-            )
-            if existing_entity_id:
-                logging.info(
-                    f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}"
-                )
-
-                # Mevcut entity ile ilişkileri oluştur
-                link_queries = [
-                    # Customer -> Document HAS_DOC ilişkisi
-                    """
-                        MATCH (c) WHERE elementId(c) = $entity_id
-                        MATCH (d:Document {fileName: $file_name})
-                        MERGE (c)-[r:HAS_DOC]->(d)
-                        SET r.created_at = datetime()
-                        SET c.updatedAt = datetime()
-                        RETURN count(r) as links_created
-                    """,
-                    # Customer -> Policy HAS_POLICY ilişkisi
-                    """
-                        MATCH (c) WHERE elementId(c) = $entity_id
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (c)-[r:HAS_POLICY]->(p)
-                        SET r.created_at = datetime()
-                        RETURN count(r) as links_created
-                    """,
-                ]
-
-                for query in link_queries:
-                    self.graph.query(
-                        query,
-                        {
-                            "entity_id": existing_entity_id,
-                            "file_name": file_name,
-                            "policy_id": policy_id,
-                        },
-                        session_params={"database": self.graph._database},
-                    )
-
-                logging.info(
-                    f"Mevcut Customer ile ilişkiler oluşturuldu: {customer_name}"
-                )
-                return
-
-            # Customer node oluştur veya güncelle - case insensitive normalization ile
-            create_customer_query = """
-                // Önce normalize edilmiş isimle eşleşen customer ara
-                OPTIONAL MATCH (existing:Customer)
-                WHERE apoc.text.clean(existing.name) = apoc.text.clean($customer_name)
-                
-                WITH existing, 
-                     CASE WHEN existing IS NULL THEN $customer_name ELSE existing.name END as final_name
-                
-                MERGE (c:Customer {name: final_name})
-                ON CREATE SET 
-                    c.createdAt = datetime(),
-                    c.fullName = final_name,
-                    c.normalizedName = apoc.text.clean($customer_name)
-                ON MATCH SET 
-                    c.updatedAt = datetime(),
-                    c.normalizedName = apoc.text.clean($customer_name)
-                RETURN c.name as customer_name
-            """
-
-            result = self.graph.query(
-                create_customer_query,
-                {"customer_name": customer_name},
-                session_params={"database": self.graph._database},
-            )
-
-            if result:
-                logging.info(f"Customer node oluşturuldu/güncellendi: {customer_name}")
-
-                # Customer -> Document HAS_DOC ilişkisi - apoc.text.clean ile güvenli arama
-                customer_doc_query = """
-                    MATCH (c:Customer)
-                    WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
-                    MATCH (d:Document {fileName: $file_name})
-                    MERGE (c)-[r:HAS_DOC]->(d)
-                    SET r.created_at = datetime()
-                    RETURN count(r) as links_created
-                """
-
-                self.graph.query(
-                    customer_doc_query,
-                    {"customer_name": customer_name, "file_name": file_name},
-                    session_params={"database": self.graph._database},
-                )
-
-                # Customer -> Policy HAS_POLICY ilişkisi - apoc.text.clean ile güvenli arama
-                customer_policy_query = """
-                    MATCH (c:Customer)
-                    WHERE apoc.text.clean(c.name) CONTAINS apoc.text.clean($customer_name)
-                    MATCH (p:Policy {id: $policy_id})
-                    MERGE (c)-[r:HAS_POLICY]->(p)
-                    SET r.created_at = datetime()
-                    RETURN count(r) as links_created
-                """
-
-                self.graph.query(
-                    customer_policy_query,
-                    {"customer_name": customer_name, "policy_id": policy_id},
-                    session_params={"database": self.graph._database},
-                )
-
-                logging.info(f"Customer ilişkileri oluşturuldu: {customer_name}")
-
-        except Exception as e:
-            logging.error(f"Customer node oluşturma hatası: {e}")
-
-    def _create_policy_year_node(self, year: str, policy_id: str):
-        """PolicyYear node oluşturur ve ilişkilendirir"""
-        try:
-            # PolicyYear node oluştur (sadece bir kez)
-            create_year_query = """
-                MERGE (py:PolicyYear {name: $year})
-                ON CREATE SET 
-                    py.year = toInteger($year),
-                    py.createdAt = datetime()
-                ON MATCH SET 
-                    py.updatedAt = datetime()
-                RETURN py.name as year_name
-            """
-
-            result = self.graph.query(
-                create_year_query,
-                {"year": year},
-                session_params={"database": self.graph._database},
-            )
-
-            if result:
-                logging.info(f"PolicyYear node oluşturuldu/güncellendi: {year}")
-
-                # Policy -> PolicyYear HAS_YEAR ilişkisi
-                policy_year_query = """
-                    MATCH (p:Policy {id: $policy_id})
-                    MATCH (py:PolicyYear {name: $year})
-                    MERGE (p)-[r:HAS_YEAR]->(py)
-                    SET r.created_at = datetime()
-                    RETURN count(r) as links_created
-                """
-
-                self.graph.query(
-                    policy_year_query,
-                    {"policy_id": policy_id, "year": year},
-                    session_params={"database": self.graph._database},
-                )
-
-                logging.info(
-                    f"Policy-PolicyYear ilişkisi oluşturuldu: {policy_id} -> {year}"
-                )
-
-        except Exception as e:
-            logging.error(f"PolicyYear node oluşturma hatası: {e}")
-
-    def _create_insured_item_node(self, insured_item: str, policy_id: str):
-        """InsuredItem node oluşturur ve ilişkilendirir"""
-        try:
-            # InsuredItem node oluştur
-            create_item_query = """
-                MERGE (ii:InsuredItem {name: $insured_item})
-                ON CREATE SET 
-                    ii.description = $insured_item,
-                    ii.createdAt = datetime()
-                ON MATCH SET 
-                    ii.updatedAt = datetime()
-                RETURN ii.name as item_name
-            """
-
-            result = self.graph.query(
-                create_item_query,
-                {"insured_item": insured_item},
-                session_params={"database": self.graph._database},
-            )
-
-            if result:
-                logging.info(
-                    f"InsuredItem node oluşturuldu/güncellendi: {insured_item}"
-                )
-
-                # Policy -> InsuredItem HAS_INSURED_ITEM ilişkisi
-                policy_item_query = """
-                    MATCH (p:Policy {id: $policy_id})
-                    MATCH (ii:InsuredItem {name: $insured_item})
-                    MERGE (p)-[r:HAS_INSURED_ITEM]->(ii)
-                    SET r.created_at = datetime()
-                    RETURN count(r) as links_created
-                """
-
-                self.graph.query(
-                    policy_item_query,
-                    {"policy_id": policy_id, "insured_item": insured_item},
-                    session_params={"database": self.graph._database},
-                )
-
-                logging.info(
-                    f"Policy-InsuredItem ilişkisi oluşturuldu: {policy_id} -> {insured_item}"
-                )
-
-        except Exception as e:
-            logging.error(f"InsuredItem node oluşturma hatası: {e}")
-
-    def _create_policy_type_node(self, policy_type: str, policy_id: str):
-        """PolicyType node oluşturur ve ilişkilendirir"""
-        try:
-            # PolicyType node oluştur
-            create_type_query = """
-                MERGE (pt:PolicyType {name: $policy_type})
-                ON CREATE SET 
-                    pt.typeName = $policy_type,
-                    pt.createdAt = datetime()
-                ON MATCH SET 
-                    pt.updatedAt = datetime()
-                RETURN pt.name as type_name
-            """
-
-            result = self.graph.query(
-                create_type_query,
-                {"policy_type": policy_type},
-                session_params={"database": self.graph._database},
-            )
-
-            if result:
-                logging.info(f"PolicyType node oluşturuldu/güncellendi: {policy_type}")
-
-                # Policy -> PolicyType HAS_TYPE ilişkisi
-                policy_type_query = """
-                    MATCH (p:Policy {id: $policy_id})
-                    MATCH (pt:PolicyType {name: $policy_type})
-                    MERGE (p)-[r:HAS_TYPE]->(pt)
-                    SET r.created_at = datetime()
-                    RETURN count(r) as links_created
-                """
-
-                self.graph.query(
-                    policy_type_query,
-                    {"policy_id": policy_id, "policy_type": policy_type},
-                    session_params={"database": self.graph._database},
-                )
-
-                logging.info(
-                    f"Policy-PolicyType ilişkisi oluşturuldu: {policy_id} -> {policy_type}"
-                )
-
-        except Exception as e:
-            logging.error(f"PolicyType node oluşturma hatası: {e}")
-
-    def extract_policy_info_from_filename(self, file_name: str) -> dict:
-        """
-        ⚠️ DEPRECATED: Bu metod artık kullanılmamaktadır.
-        Bunun yerine extract_comprehensive_policy_entities_with_llm() kullanın.
-
-        LLM kullanarak önce dosya isminden, başarısız olursa poliçe görselinden bilgileri çıkarır.
-
-        Örnek: "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf"
-        """
-        logging.warning(
-            f"⚠️ DEPRECATED: extract_policy_info_from_filename() çağrısı. Bunun yerine extract_comprehensive_policy_entities_with_llm() kullanın."
-        )
-        import os
-        import json
-
-        try:
-            # Dosya uzantısını kaldır
-            base_name = os.path.splitext(file_name)[0]
-
-            # Turkish karakterleri normalize et
-            from src.utf8_utils import normalize_unicode_text
-
-            base_name = normalize_unicode_text(base_name)
-
-            logging.info(
-                f"📝 Dosya isminden poliçe bilgisi çıkarma denemesi: {file_name}"
-            )
-
-            try:
-                # İlk olarak dosya isminden LLM ile çıkarma dene
-                policy_info = self._extract_policy_info_with_llm(base_name)
-
-                if policy_info and policy_info.get("customer_name"):
-                    # Policy ID'yi oluştur
-                    policy_id = base_name.strip()
-                    policy_info["policy_id"] = policy_id
-                    policy_info["policy_name"] = policy_id
-                    policy_info["extraction_method"] = "filename"
-
-                    # Zorunlu alanları kontrol et: sadece customer_name ve document_type
-                    required_fields = ["customer_name", "document_type"]
-                    missing_fields = []
-
-                    for field in required_fields:
-                        if not policy_info.get(field, "").strip():
-                            missing_fields.append(field)
-
-                    if missing_fields:
-                        logging.info(
-                            f"📝 Dosya isminden çıkarıldı ama eksik alanlar var: {missing_fields}"
-                        )
-                        # Eksik alanlar için görsel analizi yap
-                    else:
-                        logging.info(
-                            f"✅ Dosya isminden LLM ile tam çıkarım başarılı ama görsel analizi de yapılacak: {policy_info}"
-                        )
-                        # Tam çıkarım başarılı olsa da, görsel analizini yap (daha detaylı ve güvenilir bilgi için)
-                else:
-                    logging.info(f"📝 Dosya isminden çıkarım başarısız veya eksik")
-                    policy_info = {}  # Boş dict, image extraction için
-
-            except Exception as filename_error:
-                logging.warning(f"⚠️ Dosya isminden çıkarma başarısız: {filename_error}")
-
-            # Dosya isminden başarısız olduysa veya eksik alanlar varsa, görsel analizi dene
-            logging.info(
-                f"🖼️ Poliçe görselinden eksik bilgileri tamamlama denemesi: {file_name}"
-            )
-
-            # İlk sayfa görsel yolunu al
-            first_page_path = self._get_first_page_image_path(file_name)
-
-            if first_page_path:
-                # Görseldan LLM ile çıkarma dene
-                image_policy_info = self._extract_policy_info_from_image(
-                    first_page_path, file_name
-                )
-
-                if image_policy_info and not image_policy_info.get("extraction_failed"):
-                    # Dosya isminden çıkarılan bilgiler varsa, dosya ismi bilgilerini öncelikli tut
-                    if policy_info and policy_info.get("customer_name"):
-                        logging.info(
-                            f"📝 Dosya isminden mevcut bilgiler: {policy_info}"
-                        )
-                        logging.info(
-                            f"🖼️ Görseldan çıkarılan bilgiler: {image_policy_info}"
-                        )
-
-                        # Dosya ismi bilgilerini öncelikli tut, görsel bilgileri ile tamamla
-                        final_info = policy_info.copy()
-
-                        # Policy number'ı mutlaka görseldan al (dosya isminde aranmaz)
-                        if image_policy_info.get("policy_number", "").strip():
-                            final_info["policy_number"] = image_policy_info[
-                                "policy_number"
-                            ]
-                            logging.info(
-                                f"✅ Policy number görseldan alındı: {image_policy_info['policy_number']}"
-                            )
-
-                        # Dosya isminde eksik olan diğer alanları görseldan tamamla
-                        image_fields = [
-                            "policy_type",
-                            "year",
-                            "document_type",
-                            "insured_item",
-                        ]
-                        for field in image_fields:
-                            if (
-                                not final_info.get(field, "").strip()
-                                and image_policy_info.get(field, "").strip()
-                            ):
-                                final_info[field] = image_policy_info[field]
-                                logging.info(
-                                    f"✅ Eksik alan görseldan tamamlandı - {field}: {image_policy_info[field]}"
-                                )
-
-                        # Extraction method'u güncelle
-                        final_info["extraction_method"] = "filename+image"
-
-                        # Hala eksik olan önemli alanları default değerlerle doldur
-                        if not final_info.get("policy_type", "").strip():
-                            final_info["policy_type"] = "Sigorta Poliçesi"
-                            logging.info(
-                                f"⚙️ Policy type default atandı: {final_info['policy_type']}"
-                            )
-
-                        if not final_info.get("document_type", "").strip():
-                            final_info["document_type"] = "MAIN_POLICY"
-                            logging.info(
-                                f"⚙️ Document type default atandı: {final_info['document_type']}"
-                            )
-
-                        if not final_info.get("year", "").strip():
-                            final_info["year"] = "2024"
-                            logging.info(f"⚙️ Year default atandı: {final_info['year']}")
-
-                        logging.info(
-                            f"✅ Final bilgiler (dosya ismi öncelikli + görsel tamamlama): {final_info}"
-                        )
-                        return final_info
-                    else:
-                        # Dosya isminden hiç bilgi çıkarılamamışsa, görsel bilgilerini kullan
-                        if image_policy_info.get("customer_name"):
-                            # Policy ID'yi oluştur
-                            policy_id = base_name.strip()
-                            image_policy_info["policy_id"] = policy_id
-                            image_policy_info["policy_name"] = policy_id
-                            image_policy_info["extraction_method"] = "image_vision"
-
-                            logging.info(
-                                f"✅ Görseldan Vision LLM ile başarıyla çıkarıldı: {image_policy_info}"
-                            )
-                            return image_policy_info
-                else:
-                    logging.warning(f"⚠️ Görseldan çıkarma başarısız veya eksik bilgi")
-            else:
-                logging.warning(f"⚠️ İlk sayfa görseli bulunamadı: {file_name}")
-
-            # Her iki yöntem de başarısız olduysa, fallback bilgileri oluştur
-            logging.warning(
-                f"⚠️ Hem dosya ismi hem görsel analizi başarısız, fallback bilgiler oluşturuluyor"
-            )
-
-            # Dosya isminden en azından customer_name çıkarmaya çalış
-            fallback_info = {
-                "policy_id": base_name.strip(),
-                "policy_name": base_name.strip(),
-                "customer_name": base_name.strip(),  # Fallback: file name as customer
-                "policy_type": "Sigorta Poliçesi",
-                "document_type": "MAIN_POLICY",
-                "extraction_method": "fallback",
-            }
-
-            logging.info(f"⚙️ Fallback bilgiler oluşturuldu: {fallback_info}")
-            return fallback_info
-
-        except Exception as e:
-            error_msg = f"Poliçe bilgisi çıkarma hatası ({file_name}): {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
-
-    def _extract_policy_info_with_llm(
-        self, file_name: str, model: str = "openai_gpt_4o_mini"
-    ) -> dict:
-        """
-        LLM kullanarak dosya isminden poliçe bilgilerini çıkarır.
-        """
-        try:
-            from src.llm import get_llm
-
-            # Upload endpoint'ten gelen model parametresini kullan
-            llm, _ = get_llm(model)
-
-            # Prompt oluştur
-            prompt = f"""
-Verilen dosya isminden sigorta poliçesi bilgilerini çıkar ve JSON formatında döndür.
-
-Dosya ismi: "{file_name}"
-
-Çıkarılacak bilgiler (ZORUNLU alanlar işaretli):
-- customer_name: Müşteri ismi (ad soyad veya kurum ismi) - ZORUNLU (dosya isminde net olarak varsa)
-- year: Poliçe yılı - ZORUNLU (dosya isminde açıkça belirtilmişse, yoksa boş bırak)
-- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, Ortak Alan, vb.) - ZORUNLU (dosya isminde belirtilmişse)
-- insured_item: Sigortalanan eşya/konum (ev adresi, araç, vb.) - (varsa, net olarak belirtilmişse)
-- policy_number: Poliçe numarası (dosya isminde yoksa boş bırak)
-- renewal_number: Yenileme/ana poliçe numarası (zeyilnameler için, varsa)
-- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION) - ZORUNLU
-
-Poliçe türü belirleme kuralları:
-- "Konut", "Residence", "Apartman" → "Konut Sigortası"
-- "DASK", "Deprem" → "DASK Sigortası"
-- "Kasko" → "Kasko Sigortası"
-- "Trafik" → "Trafik Sigortası"
-- "Ortak Alan", "Ortak", "Sitesi" → "Ortak Alan Sigortası"
-- "Sağlık", "Health" → "Sağlık Sigortası"
-- "Hayat", "Life" → "Hayat Sigortası"
-- Belirtilmemişse → "Sigorta Poliçesi"
-
-Belge türü belirleme kuralları (ÖNEMLİ - Kesin uygula):
-- ENDORSEMENT: Zeyilname/Ek belge (dosya isminde şu kelimeler varsa MUTLAKA ENDORSEMENT): 
-  * "zeyilname", "zeyl", "zeyli", "zeyil"
-  * "ek", "ilave", "lave", "eklem"
-  * "tadilat", "değişiklik", "düzeltme"
-  * "teminat", "endorsement", "addendum"
-  * "YMM", "İlave Zeyli", "Ek Teminat"
-- RENEWAL: Yenileme (dosya isminde "yenileme", "renewal", "galileme" varsa)
-- CANCELLATION: İptal (dosya isminde "iptal", "fesih", "cancellation" varsa)
-- MAIN_POLICY: Ana poliçe (yukarıdaki hiçbiri yoksa)
-
-Örnekler:
-- "Ayça Dinçkök Galata Residance D6 Konut 2020.pdf" → customer_name: "Ayça Dinçkök", year: "2020", policy_type: "Konut Sigortası", insured_item: "Galata Residance D6", document_type: "MAIN_POLICY"
-- "Mehmet Yılmaz BMW X5 Kasko Zeyilname 2023.pdf" → customer_name: "Mehmet Yılmaz", year: "2023", policy_type: "Kasko Sigortası", insured_item: "BMW X5", document_type: "ENDORSEMENT"
-- "Asude Sitesi Yönetimi Ortak Alan Poliçesi.pdf" → customer_name: "Asude Sitesi Yönetimi", policy_type: "Ortak Alan Sigortası", insured_item: "Asude Sitesi", document_type: "MAIN_POLICY"
-
-UYARI: 
-- Dosya isminde NET OLARAK belirtilmeyen bilgileri UYDURMA
-- Emin olmadığın alanları boş bırak
-- Sadece dosya isminde AÇIKÇA görünen bilgileri çıkar
-- ZORUNLU alanlar (customer_name, document_type) dosya isminde çıkarılamazsa boş JSON döndür
-
-Sadece JSON formatında yanıt ver, başka açıklama ekleme:
-{{
-    "customer_name": "...",
-    "year": "...",
-    "policy_type": "...",
-    "insured_item": "...",
-    "policy_number": "...",
-    "renewal_number": "...",
-    "document_type": "..."
-}}
-"""
-
-            # LLM'den yanıt al
-            response = llm.invoke(prompt)
-            response_text = response.content.strip()
-
-            # JSON parse et
-            try:
-                # JSON kısmını ayıkla
-                if "{" in response_text and "}" in response_text:
-                    start_idx = response_text.find("{")
-                    end_idx = response_text.rfind("}") + 1
-                    json_text = response_text[start_idx:end_idx]
-                    policy_info = json.loads(json_text)
-
-                    # Boş değerleri temizle ve UTF-8 normalize et
-                    cleaned_info = {}
-                    for key, value in policy_info.items():
-                        if value and value.strip() and value.strip() != "...":
-                            # UTF-8 normalizasyon uygula
-                            from src.utf8_utils import normalize_unicode_text
-
-                            normalized_value = normalize_unicode_text(value.strip())
-                            cleaned_info[key] = normalized_value
-
-                    logging.info(
-                        f"✅ LLM başarıyla poliçe bilgilerini çıkardı (UTF-8 normalized): {cleaned_info}"
-                    )
-
-                    # Zorunlu alanları kontrol et: sadece customer_name ve document_type (diğerleri varsa çıkar, yoksa boş)
-                    required_fields = ["customer_name", "document_type"]
-                    missing_fields = []
-
-                    for field in required_fields:
-                        if not cleaned_info.get(field, "").strip():
-                            missing_fields.append(field)
-
-                    if missing_fields:
-                        logging.warning(
-                            f"LLM zorunlu alanları çıkaramadı - Eksik alanlar: {missing_fields}"
-                        )
-                        return (
-                            {}
-                        )  # Boş dict döndür, üst seviyede image extraction yapılacak
-
-                    return cleaned_info
-                else:
-                    error_msg = "LLM yanıtında JSON formatı bulunamadı"
-                    logging.error(error_msg)
-                    logging.error(f"LLM yanıtı: {response_text}")
-                    raise ValueError(error_msg)
-
-            except json.JSONDecodeError as e:
-                error_msg = f"LLM yanıtı JSON parse edilemedi: {e}"
-                logging.error(error_msg)
-                logging.error(f"LLM yanıtı: {response_text}")
-                raise ValueError(error_msg)
-
-        except Exception as e:
-            error_msg = f"LLM ile poliçe bilgisi çıkarma hatası: {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
-
-    def _extract_policy_info_from_image(
-        self, image_path: str, file_name: str, model: str = "openai_gpt_4o_mini"
-    ) -> dict:
-        """
-        LLM kullanarak poliçe sayfa görselinden poliçe bilgilerini çıkarır.
-        """
-        try:
-            from src.llm import get_llm
-            import base64
-            import os
-            import requests
-            import urllib.parse
-
-            # Upload endpoint'ten gelen model parametresini kullan
-            llm, _ = get_llm(model)
-
-            # Image'ı base64'e çevir
-            image_base64 = None
-
-            # Önce local dosya sisteminde dene
-            if os.path.exists(image_path):
-                with open(image_path, "rb") as image_file:
-                    image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
-                logging.info(f"Resim local dosya sisteminden okundu: {image_path}")
-            else:
-                # Local dosya bulunamazsa, images endpoint'ini kullan
-                try:
-                    # Image path'den dosya adını çıkar
-                    image_filename = os.path.basename(image_path)
-                    # URL encode et
-                    encoded_image_name = urllib.parse.quote(image_filename, safe="")
-                    # Images endpoint URL'i oluştur
-                    base_url = os.getenv("BASE_URL", "http://localhost:8000")
-                    image_url = f"{base_url}/images/{encoded_image_name}"
-
-                    # HTTP isteği ile resmi al
-                    response = requests.get(image_url, timeout=30)
-                    if response.status_code == 200:
-                        image_base64 = base64.b64encode(response.content).decode(
-                            "utf-8"
-                        )
-                        logging.info(f"Resim images endpoint'inden okundu: {image_url}")
-                    else:
-                        logging.error(
-                            f"Images endpoint'den resim alınamadı: {image_url} (Status: {response.status_code})"
-                        )
-                        return {}
-                except Exception as e:
-                    logging.error(f"Images endpoint'den resim okuma hatası: {e}")
-                    return {}
-
-            if not image_base64:
-                logging.error(f"Resim okunamadı: {image_path}")
-                return {}
-
-            # Prompt oluştur
-            prompt = f"""
-Bu bir sigorta poliçesi belgesinin ilk sayfasıdır. Görüntüden poliçe bilgilerini çıkar ve JSON formatında döndür.
-
-Dosya ismi referansı: "{file_name}"
-
-Çıkarılacak bilgiler (ZORUNLU alanlar işaretli):
-- customer_name: Poliçe sahibinin tam ismi (ad soyad veya kurum ismi) - ZORUNLU
-- year: Poliçe yılı (Tanzim tarihi, Başlangıç tarihi, Başlama tarihi, Yürürlük tarihi'nden çıkar - sadece yılı al) - ZORUNLU
-- policy_type: Poliçe türü (Konut, DASK, Kasko, Trafik, Sağlık, Hayat, Ortak Alan Sigortası, vb.) - ZORUNLU
-- insured_item: Sigortalanan eşya/konum (ev adresi, araç plakası/modeli, vb.) - ZORUNLU
-- policy_number: Poliçe numarası - ZORUNLU (belgede mutlaka bulunur, "Poliçe No", "Policy No", "Poliçe Numarası" gibi alanları ara)
-- renewal_number: Yenileme/ana poliçe numarası (zeyilnameler için, varsa)
-- document_type: Belge türü (MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION) - ZORUNLU
-
-ÖNEMLİ - Year (Yıl) Çıkarımı İçin:
-- "Tanzim Tarihi", "Başlangıç Tarihi", "Başlama Tarihi", "Yürürlük Tarihi", "Poliçe Başlangıcı" gibi alanları ara
-- Bu tarihlerden sadece YIL kısmını al (örn: 15.03.2023 tarihinden sadece "2023")
-- Doğum tarihi, kayıt tarihi gibi kişisel tarihleri kullanma
-- Belge üzerinde birden fazla tarih varsa, poliçe başlangıç/tanzim tarihini öncelikle
-
-Poliçe türü belirleme kuralları:
-- Konut/Residence/Apartman sigortası → "Konut Sigortası"
-- DASK/Deprem sigortası → "DASK Sigortası"
-- Kasko sigortası → "Kasko Sigortası"
-- Trafik sigortası → "Trafik Sigortası"
-- Ortak Alan/Site sigortası → "Ortak Alan Sigortası"
-- Sağlık sigortası → "Sağlık Sigortası"
-- Hayat sigortası → "Hayat Sigortası"
-- Belirsizse → "Sigorta Poliçesi"
-
-Belge türü belirleme:
-- Ana poliçe belgesi ise → "MAIN_POLICY"
-- Zeyilname/Ek/Tadilat ise → "ENDORSEMENT"
-- Yenileme belgesi ise → "RENEWAL"
-- İptal/Fesih belgesi ise → "CANCELLATION"
-
-Metin NET OKUNMUYORSA veya ZORUNLU alanlar (customer_name, year, policy_type, insured_item, policy_number, document_type) çıkarılamazsa, boş bir JSON döndür: {{"extraction_failed": true}}
-
-UYARI: policy_number çıkarılamazsa extraction_failed: true döndür.
-
-Sadece JSON formatında yanıt ver, başka açıklama ekleme:
-{{
-    "customer_name": "...",
-    "year": "...",
-    "policy_type": "...",
-    "insured_item": "...",
-    "policy_number": "...",
-    "renewal_number": "...",
-    "document_type": "..."
-}}
-"""
-
-            # Vision API çağrısı
-            from langchain_core.messages import HumanMessage
-
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
-                    },
-                ]
-            )
-
-            response = llm.invoke([message])
-            response_text = response.content.strip()
-
-            # JSON parse et
-            try:
-                if "{" in response_text and "}" in response_text:
-                    start_idx = response_text.find("{")
-                    end_idx = response_text.rfind("}") + 1
-                    json_text = response_text[start_idx:end_idx]
-                    policy_info = json.loads(json_text)
-
-                    # Extraction failed kontrolü
-                    if policy_info.get("extraction_failed"):
-                        logging.warning(
-                            f"Vision LLM görüntüden bilgi çıkaramadı: {image_path}"
-                        )
-                        return {}
-
-                    # Boş değerleri temizle ve UTF-8 normalize et
-                    cleaned_info = {}
-                    for key, value in policy_info.items():
-                        if value and value.strip() and value.strip() != "...":
-                            from src.utf8_utils import normalize_unicode_text
-
-                            normalized_value = normalize_unicode_text(value.strip())
-                            cleaned_info[key] = normalized_value
-
-                    # Zorunlu alanları kontrol et: customer_name, policy_type, year, document_type, policy_number
-                    required_fields = [
-                        "customer_name",
-                        "policy_type",
-                        "year",
-                        "document_type",
-                        "policy_number",
-                    ]
-                    missing_fields = []
-
-                    for field in required_fields:
-                        if not cleaned_info.get(field, "").strip():
-                            missing_fields.append(field)
-
-                    if missing_fields:
-                        logging.warning(
-                            f"Vision LLM zorunlu alanları çıkaramadı - Eksik alanlar: {missing_fields}"
-                        )
-                        return {}  # Boş dict döndür
-
-                    logging.info(
-                        f"✅ Vision LLM başarıyla poliçe bilgilerini çıkardı: {cleaned_info}"
-                    )
-                    return cleaned_info
-                else:
-                    logging.error(
-                        f"Vision LLM yanıtında JSON formatı bulunamadı: {response_text}"
-                    )
-                    return {}
-
-            except json.JSONDecodeError as e:
-                logging.error(f"Vision LLM yanıtı JSON parse edilemedi: {e}")
-                return {}
-
-        except Exception as e:
-            logging.error(f"Vision LLM ile poliçe bilgisi çıkarma hatası: {e}")
-            return {}
-
-    def _get_first_page_image_path(self, file_name: str) -> str:
-        """
-        Document node'dan ilk sayfa görsel dosyasının yolunu alır.
-        Local dosya yoksa images endpoint için dosya adını döndürür.
-        """
-        try:
-            # Document node'dan page_images listesini al
-            query = """
-                MATCH (d:Document {fileName: $file_name}) 
-                RETURN d.page_images AS page_images
-            """
-
-            result = self.execute_query(query, {"file_name": file_name})
-
-            if result and len(result) > 0 and result[0].get("page_images"):
-                page_images = result[0]["page_images"]
-                if isinstance(page_images, list) and len(page_images) > 0:
-                    first_page_path = page_images[0]
-                    # Path'in var olduğunu kontrol et
-                    import os
-
-                    if os.path.exists(first_page_path):
-                        logging.info(
-                            f"İlk sayfa görsel dosyası bulundu: {first_page_path}"
-                        )
-                        return first_page_path
-                    else:
-                        # Local dosya yoksa, images endpoint için dosya adını döndür
-                        # Bu durumda path sadece dosya adı olacak (S3'ten)
-                        logging.info(
-                            f"İlk sayfa görsel dosyası local'da yok, images endpoint kullanılacak: {first_page_path}"
-                        )
-                        return first_page_path
-
-            logging.warning(f"Document için page_images bulunamadı: {file_name}")
-            return None
-
-        except Exception as e:
-            logging.error(f"İlk sayfa görsel yolu alma hatası: {e}")
-            return None
 
     def get_websource_url(self, file_name):
         logging.info("Checking if same title with different URL exist in db ")

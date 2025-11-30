@@ -310,12 +310,6 @@ def close_db_connection(graph, api_name):
       logging.info(f"closing connection for {api_name} api")
       # graph._driver.close()   
   
-def create_gcs_bucket_folder_name_hashed(uri, file_name):
-  folder_name = uri + file_name
-  folder_name_sha1 = hashlib.sha1(folder_name.encode())
-  folder_name_sha1_hashed = folder_name_sha1.hexdigest()
-  return folder_name_sha1_hashed
-
 def formatted_time(current_time):
   formatted_time = current_time.strftime('%Y-%m-%d %H:%M:%S %Z')
   return str(formatted_time)

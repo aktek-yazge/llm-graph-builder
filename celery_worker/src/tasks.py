@@ -1,11 +1,8 @@
 import logging
 import asyncio
-import nest_asyncio
 from datetime import datetime, timezone
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
-# Allow nested event loops - required for gevent + asyncio compatibility
-nest_asyncio.apply()
 from src.celery_app import app
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.processing_utils import GeminiOCRException, GeminiRateLimitException

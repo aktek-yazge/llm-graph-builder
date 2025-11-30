@@ -16,10 +16,10 @@ from pathlib import Path
 from datetime import datetime, timezone
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
-from src.shared.common_fn import formatted_time, create_graph_database_connection
+from src.models.file_queue_models import get_file_queue_db, UploadedFile
+from src.shared.common_fn import  create_graph_database_connection
 # Async DB writes via RabbitMQ queue - ensures data persistence even if worker crashes
-from src.db_writer import enqueue_db_write, enqueue_chunking_update
+from src.db_writer import enqueue_db_write
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -559,8 +559,6 @@ async def processing_source_v2(
         obj_source_node.file_name = normalize_file_name(file_name)
         obj_source_node.status = "Processing"
         obj_source_node.model = model
-        obj_source_node.processed_chunk = 0
-        obj_source_node.total_chunks = len(pages)  # Page sayısı
         
         start_update_status = time.time()
         await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
@@ -644,22 +642,6 @@ async def processing_source_v2(
             await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
             raise last_error
         
-        # Final counts update - async
-        start_count_update = time.time()
-        try:
-            counts = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
-            node_count = counts[file_name].get("nodeCount", 0)
-            rel_count = counts[file_name].get("relationshipCount", 0)
-            elapsed_count_update = time.time() - start_count_update
-            uri_latency["count_update"] = f"{elapsed_count_update:.2f}"
-            logging.info(f"✅ Final counts: {node_count} nodes, {rel_count} relationships")
-        except Exception as count_error:
-            elapsed_count_update = time.time() - start_count_update
-            uri_latency["count_update"] = f"FAILED - {elapsed_count_update:.2f}"
-            logging.error(f"❌ Count update hatası: {count_error}")
-            node_count = 0
-            rel_count = 0
-        
         # Status'u Completed olarak güncelle
         end_time = datetime.now()
         processed_time = end_time - start_time
@@ -669,9 +651,6 @@ async def processing_source_v2(
         obj_source_node.status = "Completed"
         obj_source_node.processing_time = processed_time
         obj_source_node.updated_at = end_time
-        obj_source_node.node_count = node_count
-        obj_source_node.relationship_count = rel_count
-        obj_source_node.processed_chunk = len(pages)  # Tüm pages işlendi
         
         # Final status update - async
         await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
@@ -679,14 +658,11 @@ async def processing_source_v2(
         total_processing_time = time.time() - start_time.timestamp()
         uri_latency["total_processing_time"] = f"{total_processing_time:.2f}"
         
-        logging.info(f"✅ V2 Processing completed for: {file_name}")
-        logging.info(f"📊 Results: {node_count} nodes, {rel_count} relationships in {total_processing_time:.2f}s")
+        logging.info(f"✅ V2 Processing completed for: {file_name} in {total_processing_time:.2f}s")
         
         # Response
         response = {
             "fileName": file_name,
-            "nodeCount": node_count,
-            "relationshipCount": rel_count,
             "total_processing_time": round(processed_time.total_seconds(), 2),
             "status": "Completed",
             "model": model,
@@ -1689,9 +1665,6 @@ class FileProcessor:
                 return
 
             logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
-            logging.info(
-                f"📊 Result: {response.get('nodeCount', 0)} nodes, {response.get('relationshipCount', 0)} relationships"
-            )
             logging.info(f"⏱️ Latency details: {latency}")
 
             # Check if Policy node was created in Neo4j
@@ -1791,24 +1764,14 @@ class FileProcessor:
                     # Continue without embeddings
 
             # Response'tan istatistikleri al
-            node_count = response.get("nodeCount", 0) if response else 0
-            relationship_count = response.get("relationshipCount", 0) if response else 0
             processing_time = response.get("total_processing_time", 0) if response else 0
-
-            # Check if graph creation actually created nodes and relationships
-            if node_count == 0 and relationship_count == 0:
-                logging.warning(
-                    f"⚠️ V2 Graph extraction completed but no nodes or relationships created for: {normalized_filename}"
-                )
 
             # Graph creation tamamlandı, status güncelle
             file_record.graph_status = "completed"
             file_record.graph_completed_at = datetime.now(timezone.utc)
             file_record.status = "completed"
-            file_record.node_count = node_count
-            file_record.relationship_count = relationship_count
             file_record.processing_time = processing_time
-            file_record.reason = f"Graph creation completed successfully. Nodes: {node_count}, Relationships: {relationship_count}"
+            file_record.reason = "Graph creation completed successfully"
 
             db_session.commit()
 
@@ -1850,7 +1813,7 @@ class FileProcessor:
                 )
 
             logging.info(
-                f"✅ V2 Graph creation completed for: {file_record.original_name} - Nodes: {file_record.node_count}, Rels: {file_record.relationship_count}"
+                f"✅ V2 Graph creation completed for: {file_record.original_name}"
             )
 
         except Exception as e:
@@ -2142,112 +2105,6 @@ class FileProcessor:
 
             logging.error(f"Traceback: {traceback.format_exc()}")
 
-    async def process_file_content(self, file_record: UploadedFile) -> bool:
-        """
-        Process file content using adapted upload_file logic
-        Returns True if successful, False otherwise
-        """
-        try:
-            # Validate file exists
-            file_path = Path(file_record.file_path)
-            if not file_path.exists():
-                logging.error(f"File not found: {file_path}")
-                return False
-
-            # Create graph database connection
-            # If username/password not in file_record, will use environment variables
-            graph = create_graph_database_connection(
-                file_record.neo4j_uri,
-                None,  # username - will use NEO4J_USERNAME from env if None
-                None,  # password - will use NEO4J_PASSWORD from env if None
-                file_record.neo4j_database,
-            )
-
-            if not graph:
-                logging.error("Failed to create graph database connection")
-                return False
-
-            # Prepare file for processing - move to merged directory
-            merged_dir = Path(__file__).parent.parent / "merged_files"
-            merged_dir.mkdir(exist_ok=True)
-
-            merged_file_path = merged_dir / file_record.filename
-
-            # Copy file to merged directory (upload_file expects it there)
-            import shutil
-
-            shutil.copy2(file_path, merged_file_path)
-            logging.info(f"📁 File copied to processing directory: {merged_file_path}")
-
-            # Create a mock UploadFile object for upload_file function
-            # FastAPI UploadFile has a 'file' attribute that is a file-like object
-            class MockFile:
-                """File-like object that wraps a file path"""
-
-                def __init__(self, file_path):
-                    self.file_path = file_path
-                    self._file = None
-
-                def read(self):
-                    if self._file is None:
-                        self._file = open(self.file_path, "rb")
-                    return self._file.read()
-
-                def close(self):
-                    if self._file:
-                        self._file.close()
-                        self._file = None
-
-            class MockUploadFile:
-                """Mock FastAPI UploadFile for background processing"""
-
-                def __init__(self, file_path):
-                    self.file_path = file_path
-                    self.filename = Path(file_path).name
-                    self.file = MockFile(
-                        file_path
-                    )  # FastAPI UploadFile has 'file' attribute
-                    # Get file size for size attribute
-                    try:
-                        self.size = os.path.getsize(file_path)
-                    except OSError:
-                        self.size = 0
-
-            mock_file = MockUploadFile(merged_file_path)
-
-            # Use asyncio.to_thread for CPU-intensive upload_file operation
-            result = await asyncio.to_thread(
-                upload_file,
-                graph=graph,
-                model=file_record.model_used or "openai_gpt_4o_mini",
-                chunk=mock_file,
-                chunk_number=1,  # Single file (already merged)
-                total_chunks=1,
-                originalname=file_record.filename,
-                uri=file_record.neo4j_uri,
-                chunk_dir=str(merged_dir / "chunks"),  # Won't be used for single file
-                merged_dir=str(merged_dir),
-                generate_embedding=file_record.generate_embedding or "false",
-            )
-
-            # Check if processing was successful
-            if result and "Success" in str(result):
-                logging.info(
-                    f"✅ upload_file completed successfully for: {file_record.filename}"
-                )
-                return True
-            else:
-                logging.error(
-                    f"❌ upload_file returned error for: {file_record.filename} - Result: {result}"
-                )
-                return False
-
-        except Exception as e:
-            logging.error(f"❌ Error in process_file_content: {e}")
-            import traceback
-
-            logging.error(traceback.format_exc())
-            return False
 
     def get_processing_status(self) -> Dict[str, Any]:
         """Get current processing status"""
@@ -2283,40 +2140,3 @@ def stop_processing_loop():
     processor = get_background_processor()
     processor.stop_background_processing()
 
-
-# Manual processing function for immediate use
-async def process_file_immediately(file_id: int) -> bool:
-    """
-    Process a specific file immediately (bypass queue)
-    Returns True if successful
-    """
-    try:
-        db = get_file_queue_db()
-        file_record = db.get_file_by_id(file_id)
-
-        if not file_record:
-            logging.error(f"File not found: {file_id}")
-            return False
-
-        processor = FileProcessor()
-        processor.current_task_id = file_id
-
-        # Update to processing status
-        db.update_file_status(file_id, FileStatus.PROCESSING)
-
-        # Process the file
-        success = await processor.process_file_content(file_record)
-
-        # Update final status
-        if success:
-            db.update_file_status(file_id, FileStatus.COMPLETED, reason="Immediate processing completed successfully")
-        else:
-            db.update_file_status(
-                file_id, FileStatus.ERROR, "Immediate processing failed", reason="Immediate processing failed during content extraction"
-            )
-
-        return success
-
-    except Exception as e:
-        logging.error(f"❌ Immediate processing failed for file {file_id}: {e}")
-        return False
