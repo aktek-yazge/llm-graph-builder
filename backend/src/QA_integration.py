@@ -16,7 +16,6 @@ import tempfile
 import os
 
 from langchain_neo4j import Neo4jVector
-from langchain_neo4j import Neo4jChatMessageHistory
 from langchain_neo4j import GraphCypherQAChain
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -221,101 +220,8 @@ logging.getLogger("langchain.retrievers").setLevel(logging.INFO)
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
 EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL) 
 
-class SessionChatHistory:
-    history_dict = {}
-    neo4j_sessions = {}  # session_id -> Neo4jChatMessageHistory instance
-    _lock = threading.Lock()  # Thread safety için
-
-    @classmethod
-    def get_chat_history(cls, session_id):
-        """Retrieve or create chat message history for a given session ID."""
-        if session_id not in cls.history_dict:
-            logging.info(f"Creating new ChatMessageHistory Local for session ID: {session_id}")
-            cls.history_dict[session_id] = ChatMessageHistory()
-        else:
-            logging.info(f"Retrieved existing ChatMessageHistory Local for session ID: {session_id}")
-        return cls.history_dict[session_id]
-    
-    @classmethod
-    def get_or_create_neo4j_session(cls, graph, session_id, write_access=True):
-        """
-        Session ID için Neo4jChatMessageHistory instance'ını getir veya oluştur.
-        In-Memory cache kullanarak performansı optimize eder.
-        Server restart sonrası existing session'ları duplicate etmeden kullanır.
-        
-        Args:
-            graph: Neo4j graph connection
-            session_id: Session identifier
-            write_access: Whether to allow write operations
-            
-        Returns:
-            Neo4jChatMessageHistory instance
-        """
-        with cls._lock:
-            if session_id not in cls.neo4j_sessions:
-                logging.info(f"Session not in cache, checking Neo4j for session ID: {session_id}")
-                
-                if write_access:
-                    # LOCAL CACHE BOŞ İSE: Neo4j'de session var mı kontrol et
-                    try:
-                        result = graph.query(
-                            "MATCH (s:Session {id: $session_id}) RETURN s.id as session_id LIMIT 1",
-                            {"session_id": session_id}
-                        )
-                        session_exists = len(result) > 0
-                        
-                        if session_exists:
-                            logging.info(f"Existing session found in Neo4j, using existing for: {session_id}")
-                            # Existing session için yeni instance oluştur (duplicate yaratmaz)
-                            cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
-                                graph=graph,
-                                session_id=session_id,
-                                window=50  # 50 * 2 = 100 mesaj almak için
-                            )
-                        else:
-                            logging.info(f"Creating new session in Neo4j for: {session_id}")
-                            cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
-                                graph=graph,
-                                session_id=session_id,
-                                window=50  # 50 * 2 = 100 mesaj almak için
-                            )
-                            
-                    except Exception as e:
-                        logging.warning(f"Error checking session existence: {e}")
-                        # Hata durumunda normal flow ile devam et
-                        cls.neo4j_sessions[session_id] = Neo4jChatMessageHistory(
-                            graph=graph,
-                            session_id=session_id,
-                            window=50  # 50 * 2 = 100 mesaj almak için
-                        )
-                else:
-                    # Write access olmadığında local history kullan
-                    return cls.get_chat_history(session_id)
-            else:
-                logging.info(f"Retrieved cached Neo4jChatMessageHistory for session ID: {session_id}")
-            
-            return cls.neo4j_sessions[session_id]
-    
-    @classmethod
-    def clear_neo4j_session(cls, session_id):
-        """Belirli bir Neo4j session'ını cache'den temizle."""
-        with cls._lock:
-            if session_id in cls.neo4j_sessions:
-                logging.info(f"Clearing cached Neo4j session: {session_id}")
-                del cls.neo4j_sessions[session_id]
-    
-    @classmethod
-    def clear_all_neo4j_sessions(cls):
-        """Tüm Neo4j session cache'ini temizle."""
-        with cls._lock:
-            logging.info(f"Clearing all cached Neo4j sessions: {len(cls.neo4j_sessions)} sessions")
-            cls.neo4j_sessions.clear()
-    
-    @classmethod
-    def get_active_neo4j_sessions(cls):
-        """Aktif Neo4j session sayısını döndür."""
-        with cls._lock:
-            return list(cls.neo4j_sessions.keys())
+## Neo4j SessionChatHistory class kaldırıldı - PostgreSQL kullanılıyor
+## Bkz: src/shared/postgres_chat_history.py
 
 class CustomCallback(BaseCallbackHandler):
 
@@ -344,33 +250,8 @@ class CustomCallback(BaseCallbackHandler):
             print(f"First document preview: {documents[0].page_content[:100]}...")
         print("===========================================")
 
-def get_history_by_session_id(session_id, graph=None, write_access=False):
-    """
-    Session ID'ye göre chat history'sini getir.
-    Eğer graph verilirse Neo4j cache'ini kullan, yoksa local cache kullan.
-    
-    Args:
-        session_id: Session identifier
-        graph: Neo4j graph connection (opsiyonel)
-        write_access: Neo4j session için write access
-        
-    Returns:
-        ChatMessageHistory veya Neo4jChatMessageHistory instance
-    """
-    try:
-        if graph:
-            # Neo4j cache'den getir veya oluştur
-            return SessionChatHistory.get_or_create_neo4j_session(
-                graph=graph, 
-                session_id=session_id, 
-                write_access=write_access
-            )
-        else:
-            # Local cache'den getir
-            return SessionChatHistory.get_chat_history(session_id)
-    except Exception as e:
-        logging.error(f"Failed to get history for session ID '{session_id}': {e}")
-        raise
+## get_history_by_session_id kaldırıldı - PostgreSQL kullanılıyor
+## Bkz: src/shared/postgres_chat_history.py -> create_postgres_chat_message_history
 
 def get_total_tokens(ai_response, llm):
     try:
@@ -1641,23 +1522,8 @@ def process_graph_response(model, graph, question, messages, history):
             "user": "chatbot"
         }
 
-def create_neo4j_chat_message_history(graph, session_id, write_access=True):
-    """
-    Creates and returns a Neo4jChatMessageHistory instance using in-memory cache.
-    Bu fonksiyon artık cache kullanarak performansı optimize eder.
-    """
-    try:
-        # Cache'den session'ı getir veya oluştur
-        history = SessionChatHistory.get_or_create_neo4j_session(
-            graph=graph, 
-            session_id=session_id, 
-            write_access=write_access
-        )
-        return history
-
-    except Exception as e:
-        logging.error(f"Error creating Neo4jChatMessageHistory: {e}")
-        raise 
+## create_neo4j_chat_message_history kaldırıldı - PostgreSQL kullanılıyor
+## Bkz: src/shared/postgres_chat_history.py -> create_postgres_chat_message_history
 
 def get_chat_mode_settings(mode,settings_map=CHAT_MODE_CONFIG_MAP):
     default_settings = settings_map[CHAT_DEFAULT_MODE]

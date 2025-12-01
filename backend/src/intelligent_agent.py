@@ -1835,30 +1835,24 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         if session_id:
             logger.info(f"Session ID: {session_id}")
 
-        # Conversation history al (eğer session_id varsa)
+        # Conversation history al (eğer session_id varsa) - PostgreSQL kullan
         conversation_context = ""
         previous_messages = []
         if session_id:
-            from src.QA_integration import get_history_by_session_id
+            from src.shared.postgres_chat_history import create_postgres_chat_message_history
 
-            conversation_context = get_history_by_session_id(
-                session_id, self.graph, write_access=True
-            )
-            if conversation_context and hasattr(conversation_context, "messages"):
+            conversation_history = create_postgres_chat_message_history(session_id)
+            if conversation_history and hasattr(conversation_history, "messages"):
                 logger.info(
-                    f"Conversation history alındı: {len(conversation_context.messages)} mesaj"
+                    f"Conversation history alındı (PostgreSQL): {len(conversation_history.messages)} mesaj"
                 )
                 
                 # DEBUG: Mesajları detaylı logla
-                for i, msg in enumerate(conversation_context.messages):
+                for i, msg in enumerate(conversation_history.messages):
                     logger.info(f"DEBUG Mesaj {i}: type={type(msg)}, content_length={len(msg.content) if hasattr(msg, 'content') else 'N/A'}, role={getattr(msg, 'role', 'N/A')}")
 
-                # Son mesajı hariç tut (henüz işlenen soruyu dahil etme)
-                all_messages = (
-                    conversation_context.messages[:-1]
-                    if conversation_context.messages
-                    else []
-                )
+                # Tüm geçmiş mesajları al (yeni soru henüz kaydedilmedi)
+                all_messages = list(conversation_history.messages)
 
                 # Son 40 mesajı al (son mesaj hariç)
                 recent_messages = (
