@@ -74,7 +74,8 @@ services:
     # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
-      - postgres_data_prod:/var/lib/postgresql/data
+      # Host'ta sakla - docker volume'dan daha garanti, docker system prune'dan etkilenmez
+      - ~/postgres-data-prod:/var/lib/postgresql/data
     logging:
       driver: "json-file"
       options:
@@ -85,55 +86,8 @@ services:
       - llm-graph-builder_prod
     restart: unless-stopped
 
-  # Celery Worker - Background Tasks
-  celery_worker:
-    build:
-      context: ./celery_worker
-      dockerfile: Dockerfile
-    container_name: celery-worker-prod
-    command: uv run celery -A src.celery_app worker --loglevel=info --concurrency=4
-    env_file:
-      - ./backend/.env
-    environment:
-      - PYTHONPATH=/code
-      - ENV=production
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
-    volumes:
-      - ~/sqlite-db:/code/backend/sqlite-data
-      - llm-graph-output-prod:/code/backend/output
-    depends_on:
-      - backend
-      - rabbitmq
-      - neo4j
-      - postgres
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-        labels: "container_name=celery-worker-prod"
-    networks:
-      - llm-graph-builder_prod
-    restart: unless-stopped
-
-  # Flower - Celery Dashboard
-  flower:
-    image: mher/flower
-    container_name: flower-prod
-    command: celery flower
-    environment:
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - FLOWER_PORT=5555
-    ports:
-      - "5555:5555"
-    depends_on:
-      - rabbitmq
-      - celery_worker
-    networks:
-      - llm-graph-builder_prod
-    restart: unless-stopped
+  # Celery Workers - celery_worker/docker-compose.yml ile ayrı çalıştırılır
+  # Flower Dashboard - celery_worker/docker-compose.yml ile ayrı çalıştırılır
 
   # Frontend - Production servisi
   frontend:
@@ -269,4 +223,4 @@ volumes:
   neo4j_plugins_prod_2:
   neo4j_import_prod_2:
   llm-graph-output-prod:
-  postgres_data_prod:
+  # postgres_data_prod kaldırıldı - ~/postgres-data-prod host dizininde saklanıyor

@@ -66,7 +66,7 @@ cd "$SCRIPT_DIR"
 POOL_TYPE="${CELERY_POOL:-threads}"
 MAIN_CONCURRENCY="${CELERY_CONCURRENCY:-8}"
 # DB/Neo4j writers use low concurrency to prevent connection issues
-WRITER_CONCURRENCY="${CELERY_WRITER_CONCURRENCY:-2}"
+WRITER_CONCURRENCY="${CELERY_WRITER_CONCURRENCY:-1}"
 
 log "🚀 Starting Celery Workers with DB Write Queue Architecture..."
 log "📊 Pool: ${POOL_TYPE}"

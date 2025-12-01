@@ -6,6 +6,11 @@
 #   - Neo4j Writer: Dedicated worker for Neo4j writes (single connection, batch writes)
 #   - Flower: Monitoring dashboard
 #
+# Pool Types:
+#   - prefork: Multi-process, supports Flower Grow/Shrink (default for Docker/Linux)
+#   - threads: Multi-thread, does NOT support Grow/Shrink (stable on Mac)
+#   - gevent: Greenlets, supports Grow/Shrink (requires gevent package)
+#
 # External Dependencies (set in .env):
 #   - RabbitMQ: CELERY_BROKER_URL
 #   - PostgreSQL: QUEUE_DB_URL, CELERY_RESULT_BACKEND
@@ -35,16 +40,17 @@ services:
   main_worker:
     image: celery-worker:latest
     container_name: celery-main-worker
+    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=${CELERY_POOL:-prefork}
       --concurrency=${MAIN_CONCURRENCY:-8}
       -Q celery
       -E
       -n main-worker@%h
     env_file:
-      - .env
+      - .preview.env
     environment:
       - PYTHONPATH=/app
       - ENV=${ENV:-production}
@@ -82,16 +88,17 @@ services:
   db_writer:
     image: celery-worker:latest
     container_name: celery-db-writer
+    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=${CELERY_POOL:-prefork}
       --concurrency=${WRITER_CONCURRENCY:-2}
       -Q db_write
       -E
       -n db-writer@%h
     env_file:
-      - .env
+      - .preview.env
     environment:
       - PYTHONPATH=/app
       - ENV=${ENV:-production}
@@ -127,16 +134,17 @@ services:
   neo4j_writer:
     image: celery-worker:latest
     container_name: celery-neo4j-writer
+    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=${CELERY_POOL:-prefork}
       --concurrency=${WRITER_CONCURRENCY:-2}
       -Q neo4j_write
       -E
       -n neo4j-writer@%h
     env_file:
-      - .env
+      - .preview.env
     environment:
       - PYTHONPATH=/app
       - ENV=${ENV:-production}
@@ -170,17 +178,17 @@ services:
   # FLOWER - Monitoring Dashboard
   # ============================================
   flower:
-    image: mher/flower:2.0
+    image: mher/flower
     container_name: celery-flower
-    command: >
-      celery flower
-      --broker=${CELERY_BROKER_URL}
-      --port=5555
+    # Broker URL'i env_file'dan otomatik okur (CELERY_BROKER_URL)
+    command: celery flower --port=5555
     env_file:
       - .env
     environment:
       - FLOWER_PORT=5555
+      # API erişimi için authentication - default: admin:admin
       - FLOWER_BASIC_AUTH=${FLOWER_AUTH:-admin:admin}
+      # Grow/Shrink pool controls için unauthenticated API gerekli
       - FLOWER_UNAUTHENTICATED_API=true
     ports:
       - "5555:5555"
@@ -189,6 +197,11 @@ services:
         limits:
           memory: 256m
           cpus: "0.5"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - celery-network
     restart: unless-stopped

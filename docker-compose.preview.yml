@@ -15,6 +15,56 @@ services:
         max-size: "500m"
         max-file: "10"
         labels: "container_name=jaeger-preview"
+    networks:
+      - llm-graph-builder_preview
+    restart: unless-stopped
+
+  # RabbitMQ - Message Broker
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-preview
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      # Disable consumer timeout for long-running tasks (default is 30min = 1800000ms)
+      # Use 'infinity' to completely disable, or high value like 7200000 (2 hours)
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=rabbitmq-preview"
+    networks:
+      - llm-graph-builder_preview
+    restart: unless-stopped
+
+  # PostgreSQL - Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-preview
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=llm_graph_builder
+    # Increase max_connections for high concurrency workloads
+    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    volumes:
+      # Host'ta sakla - docker volume'dan daha garanti, docker system prune'dan etkilenmez
+      - ~/postgres-data-preview:/var/lib/postgresql/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+        labels: "container_name=postgres-preview"
+    networks:
+      - llm-graph-builder_preview
     restart: unless-stopped
 
   # Backend - preview servisi
@@ -31,6 +81,9 @@ services:
       - PYTHONPATH=/code
       - ENV=preview
       - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
+      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
     volumes:
       # Persist queue.db in user's home directory - survives container/image deletion
       # Mount directory so Docker can auto-create the file
@@ -45,14 +98,17 @@ services:
         max-size: "500m"
         max-file: "10"
         labels: "container_name=backend-preview"
+    networks:
+      - llm-graph-builder_preview
     restart: unless-stopped
-    # depends_on:
-    #   - jaeger
+    depends_on:
+      - rabbitmq
+      - postgres
 
   # Frontend - preview servisi
   frontend:
-    # depends_on:
-    #   - backend
+    depends_on:
+      - backend
     build:
       context: ./frontend
       dockerfile: Dockerfile # Production Dockerfile
@@ -69,8 +125,15 @@ services:
         max-size: "500m"
         max-file: "10"
         labels: "container_name=frontend-preview"
+    networks:
+      - llm-graph-builder_preview
     restart: unless-stopped
 
-  # Neo4j ve Qdrant servisleri default bridge network üzerinde mevcut
+  # Neo4j ve Qdrant servisleri harici olarak çalıştırılmalı
   # Bu servisler kaldırıldı - mevcut servisler kullanılır
-# Network tanımı kaldırıldı - default bridge network otomatik kullanılır
+
+networks:
+  llm-graph-builder_preview:
+    driver: bridge
+
+# Named volumes kaldırıldı - veriler host dizinlerinde saklanıyor
