@@ -174,18 +174,40 @@ MONITOR_PID=$!
 cleanup() {
     log ""
     log "🛑 Stopping all workers..."
+    
+    # Monitor'u durdur
     kill $MONITOR_PID 2>/dev/null
-    kill $MAIN_WORKER_PID 2>/dev/null
-    kill $DB_WRITER_PID 2>/dev/null
-    kill $NEO4J_WRITER_PID 2>/dev/null
-    if [ -n "$FLOWER_PID" ]; then
-        kill $FLOWER_PID 2>/dev/null
-    fi
+    
+    # 1. Önce worker isimlerine göre öldür (en güvenilir yöntem)
+    # Bu, uv run'ın spawn ettiği child process'leri de yakalar
+    pkill -9 -f "celery.*${MAIN_WORKER_ID}" 2>/dev/null
+    pkill -9 -f "celery.*${DB_WRITER_ID}" 2>/dev/null
+    pkill -9 -f "celery.*${NEO4J_WRITER_ID}" 2>/dev/null
+    pkill -9 -f "celery.*flower.*5555" 2>/dev/null
+    
+    # 2. Kayıtlı PID'leri ve child'larını öldür (yedek)
+    for pid in $MAIN_WORKER_PID $DB_WRITER_PID $NEO4J_WRITER_PID $FLOWER_PID; do
+        if [ -n "$pid" ]; then
+            # Child process'leri öldür
+            pkill -9 -P $pid 2>/dev/null
+            # Parent'ı öldür
+            kill -9 $pid 2>/dev/null
+        fi
+    done
+    
+    # 3. Kısa bekle ve kalan varsa temizle
+    sleep 0.5
+    
+    # Bu script'in başlattığı tüm uv/celery process'lerini temizle
+    pkill -9 -f "uv run.*celery.*${MAIN_WORKER_ID}" 2>/dev/null
+    pkill -9 -f "uv run.*celery.*${DB_WRITER_ID}" 2>/dev/null
+    pkill -9 -f "uv run.*celery.*${NEO4J_WRITER_ID}" 2>/dev/null
+    
     log "✅ All workers stopped."
     log "📁 Logs saved in: $LOG_DIR"
-    exit
+    exit 0
 }
-trap cleanup INT TERM
+trap cleanup INT TERM HUP  # HUP = terminal kapandığında da cleanup çalışsın
 
 # Wait for all processes
 wait
