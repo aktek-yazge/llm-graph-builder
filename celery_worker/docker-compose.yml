@@ -194,7 +194,7 @@ services:
       # Grow/Shrink pool controls için unauthenticated API gerekli
       - FLOWER_UNAUTHENTICATED_API=true
     ports:
-      - "5556:5555"
+      - "5555:5555"
     deploy:
       resources:
         limits:
