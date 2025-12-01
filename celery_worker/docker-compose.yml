@@ -80,6 +80,7 @@ services:
         max-file: "5"
     networks:
       - llm-graph-builder_preview
+      - workspace_llm-graph-builder_net
     restart: unless-stopped
 
   # ============================================
@@ -126,6 +127,7 @@ services:
         max-file: "3"
     networks:
       - llm-graph-builder_preview
+      - workspace_llm-graph-builder_net
     restart: unless-stopped
 
   # ============================================
@@ -172,6 +174,7 @@ services:
         max-file: "3"
     networks:
       - llm-graph-builder_preview
+      - workspace_llm-graph-builder_net
     restart: unless-stopped
 
   # ============================================
@@ -183,7 +186,7 @@ services:
     # Broker URL'i env_file'dan otomatik okur (CELERY_BROKER_URL)
     command: celery flower --port=5555
     env_file:
-      - .env
+      - .preview.env
     environment:
       - FLOWER_PORT=5555
       # API erişimi için authentication - default: admin:admin
@@ -191,7 +194,7 @@ services:
       # Grow/Shrink pool controls için unauthenticated API gerekli
       - FLOWER_UNAUTHENTICATED_API=true
     ports:
-      - "5555:5555"
+      - "5556:5555"
     deploy:
       resources:
         limits:
@@ -204,11 +207,15 @@ services:
         max-file: "3"
     networks:
       - llm-graph-builder_preview
+      - workspace_llm-graph-builder_net
     restart: unless-stopped
 
-# docker-compose.preview.yml ile aynı network - RabbitMQ ve PostgreSQL'e erişim için
+# External networks - RabbitMQ ve PostgreSQL'e erişim için
+# İki network seçeneği: dev veya preview ortamına bağlanmak için
 networks:
   llm-graph-builder_preview:
+    external: true
+  workspace_llm-graph-builder_net:
     external: true
 
 volumes:
