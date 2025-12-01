@@ -79,8 +79,7 @@ services:
         max-size: "100m"
         max-file: "5"
     networks:
-      - llm-graph-builder_preview
-      - workspace_llm-graph-builder_net
+      - preview
     restart: unless-stopped
 
   # ============================================
@@ -126,8 +125,7 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - llm-graph-builder_preview
-      - workspace_llm-graph-builder_net
+      - preview
     restart: unless-stopped
 
   # ============================================
@@ -173,8 +171,7 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - llm-graph-builder_preview
-      - workspace_llm-graph-builder_net
+      - preview
     restart: unless-stopped
 
   # ============================================
@@ -206,17 +203,15 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - llm-graph-builder_preview
-      - workspace_llm-graph-builder_net
+      - preview
     restart: unless-stopped
 
 # External networks - RabbitMQ ve PostgreSQL'e erişim için
 # İki network seçeneği: dev veya preview ortamına bağlanmak için
 networks:
-  llm-graph-builder_preview:
+  preview:
     external: true
-  workspace_llm-graph-builder_net:
-    external: true
+    name: llm-graph-builder_preview
 
 volumes:
   output_data:

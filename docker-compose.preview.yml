@@ -16,7 +16,7 @@ services:
         max-file: "10"
         labels: "container_name=jaeger-preview"
     networks:
-      - llm-graph-builder_preview
+      - preview
     restart: unless-stopped
 
   # RabbitMQ - Message Broker
@@ -39,7 +39,7 @@ services:
         max-file: "10"
         labels: "container_name=rabbitmq-preview"
     networks:
-      - llm-graph-builder_preview
+      - preview
     restart: unless-stopped
 
   # PostgreSQL - Database
@@ -64,7 +64,7 @@ services:
         max-file: "10"
         labels: "container_name=postgres-preview"
     networks:
-      - llm-graph-builder_preview
+      - preview
     restart: unless-stopped
 
   # Backend - preview servisi
@@ -81,9 +81,9 @@ services:
       - PYTHONPATH=/code
       - ENV=preview
       - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres-preview:5432/llm_graph_builder
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq-preview:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres-preview:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
     volumes:
       # Persist queue.db in user's home directory - survives container/image deletion
       # Mount directory so Docker can auto-create the file
@@ -99,11 +99,11 @@ services:
         max-file: "10"
         labels: "container_name=backend-preview"
     networks:
-      - llm-graph-builder_preview
+      - preview
     restart: unless-stopped
     depends_on:
-      - rabbitmq-preview
-      - postgres-preview
+      - rabbitmq
+      - postgres
 
   # Frontend - preview servisi
   frontend:
@@ -126,14 +126,14 @@ services:
         max-file: "10"
         labels: "container_name=frontend-preview"
     networks:
-      - llm-graph-builder_preview
+      - preview
     restart: unless-stopped
 
   # Neo4j ve Qdrant servisleri harici olarak çalıştırılmalı
   # Bu servisler kaldırıldı - mevcut servisler kullanılır
 
 networks:
-  llm-graph-builder_preview:
+  preview:
     driver: bridge
 
 # Named volumes kaldırıldı - veriler host dizinlerinde saklanıyor
