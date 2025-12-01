@@ -28,6 +28,7 @@ from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
 from src.schema_extractor import get_compact_schema
+from src.shared.schema_cache import get_cached_schema, get_schema_cache
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 # sklearn is only needed for similarity calculations, which is done in celery_worker
@@ -228,20 +229,41 @@ class IntelligentAgent:
             self.system_prompt_cache = "⚠️ System prompt oluşturulamadı - LLM bağlantısını kontrol edin"
 
     def _initialize_schema_cache(self):
-        """Schema bilgisini başlangıçta bir kez al ve cache'le"""
+        """
+        Schema bilgisini GlobalSchemaCache'den al (server startup'ta yüklenmiş)
+        Artık Neo4j'den çekmiyor - RAM'deki global cache'i kullanıyor
+        """
         try:
-            logger.info("📋 Neo4j schema bilgisi başlangıçta alınıyor (agent yaratılırken)...")
-            self.schema_cache = get_compact_schema(self.graph)
-            logger.info(f"✅ Schema cache'lendi: {len(self.schema_cache)} karakter")
-            logger.info("🎯 Schema agent oluşturulurken hazırlandı - ilk mesajda cache'den alınacak!")
+            # GlobalSchemaCache'den al (server startup'ta yüklenmiş olmalı)
+            database_url = os.environ.get("NEO4J_URI", "default")
+            cache_status = get_schema_cache().get_cache_status()
+            
+            if cache_status['has_cached_schema']:
+                # RAM'de zaten var, direkt al
+                self.schema_cache = get_cached_schema(database_url, self.graph)
+                logger.info(
+                    f"✅ IntelligentAgent: Schema GlobalSchemaCache'den alındı "
+                    f"(version: {cache_status['cached_version']}, {len(self.schema_cache)} karakter)"
+                )
+            else:
+                # RAM'de yok, GlobalSchemaCache üzerinden yükle (bu Neo4j'den çekecek)
+                logger.info("📋 IntelligentAgent: Schema GlobalSchemaCache'de yok, yükleniyor...")
+                self.schema_cache = get_cached_schema(database_url, self.graph)
+                logger.info(f"✅ IntelligentAgent: Schema yüklendi ({len(self.schema_cache)} karakter)")
+                
         except Exception as e:
-            logger.error(f"❌ Schema cache'leme hatası: {e}")
-            self.schema_cache = "⚠️ Schema bilgisi alınamadı - Graph database bağlantısını kontrol edin"
+            logger.error(f"❌ IntelligentAgent schema cache hatası: {e}")
+            # Fallback: Eski yöntemle al
+            try:
+                logger.warning("⚠️ Fallback: get_compact_schema ile çekiliyor...")
+                self.schema_cache = get_compact_schema(self.graph)
+            except:
+                self.schema_cache = "⚠️ Schema bilgisi alınamadı"
 
     def get_cached_schema(self) -> str:
-        """Cache'lenmiş schema bilgisini döndür"""
+        """Cache'lenmiş schema bilgisini döndür - GlobalSchemaCache kullanır"""
         if self.schema_cache is None or not self.schema_cache:
-            logger.warning("⚠️ Schema cache boş, yeniden alınıyor...")
+            logger.warning("⚠️ Schema cache boş, GlobalSchemaCache'den alınıyor...")
             self._initialize_schema_cache()
         return self.schema_cache
 

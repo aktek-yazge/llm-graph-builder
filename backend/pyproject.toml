@@ -19,6 +19,7 @@ dependencies = [
     # Database
     "sqlalchemy==2.0.41",
     "psycopg2-binary==2.9.10",
+    "asyncpg==0.30.0",
     "asyncio==3.4.3",
     "async-timeout==5.0.1",
     
@@ -56,8 +57,9 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi",
     
     # LangChain Ecosystem (minimal - only for API endpoints, not processing)
+    # NOT: langchain 1.x breaking changes içeriyor, 0.3.x'te kalıyoruz
     "langchain==0.3.27",
-    "langchain-core>=0.3.78",
+    "langchain-core>=0.3.78,<1.0.0",
     "langchain-community==0.3.30",
     "langchain-neo4j==0.4.0",
     "langchain-openai==0.3.35",

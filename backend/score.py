@@ -708,6 +708,51 @@ async def lifespan(app: FastAPI):
         "ℹ️ V2 Background processor manuel başlatmaya ayarlı. Başlatmak için /api/v2/processing/start endpoint'ini kullanın."
     )
 
+    # 🚀 SERVER STARTUP: PostgreSQL Chat History tablolarını oluştur
+    try:
+        from src.shared.postgres_chat_history import init_chat_history_tables
+        init_chat_history_tables()  # Sync fonksiyon
+        logging.info("✅ Server Startup: PostgreSQL chat history tabloları hazır")
+    except Exception as pg_error:
+        logging.warning(f"⚠️ Server Startup: PostgreSQL chat history tablo hatası: {pg_error}")
+
+    # 🚀 SERVER STARTUP: Global Schema Cache'i önceden yükle
+    try:
+        neo4j_uri = os.environ.get("NEO4J_URI")
+        neo4j_username = os.environ.get("NEO4J_USERNAME")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
+        
+        if neo4j_uri and neo4j_username and neo4j_password:
+            logging.info("📋 Server Startup: Global Schema Cache yükleniyor...")
+            
+            from src.shared.common_fn import create_graph_database_connection
+            from src.shared.schema_cache import get_cached_schema, get_schema_cache
+            
+            # Neo4j bağlantısı oluştur
+            graph = create_graph_database_connection(
+                neo4j_uri, neo4j_username, neo4j_password, neo4j_database
+            )
+            
+            # Schema'yı RAM'e yükle
+            schema = get_cached_schema(neo4j_uri, graph)
+            version = get_schema_cache().get_current_version(neo4j_uri)
+            
+            logging.info(
+                f"✅ Server Startup: Schema RAM'e yüklendi - "
+                f"Version: {version}, Length: {len(schema) if schema else 0} karakter"
+            )
+        else:
+            logging.warning(
+                "⚠️ Server Startup: NEO4J credentials eksik, schema yüklenemedi. "
+                "İlk soru geldiğinde yüklenecek."
+            )
+    except Exception as schema_error:
+        logging.warning(
+            f"⚠️ Server Startup: Schema yükleme hatası: {schema_error}. "
+            f"İlk soru geldiğinde yüklenecek."
+        )
+
     yield
     # Shutdown - here you can add cleanup code if needed
     try:
@@ -2937,7 +2982,7 @@ async def clear_chat_bot(
                 clear_chat_history, graph=graph, session_id=session_id
             )
             db_clear_result = "db_cleared"
-            print(f"✅ Neo4j'den chat history temizlendi - Session: {session_id}")
+            print(f"✅ PostgreSQL'den chat history temizlendi - Session: {session_id}")
 
             # 🆕 CLEAR CHAT'TEN SONRA YENİ SESSION ID İLE AGENT OLUŞTUR (eğer new_session_id gönderildiyse)
             if model and new_session_id and db_clear_result == "db_cleared":
@@ -2952,43 +2997,12 @@ async def clear_chat_bot(
                     )
 
                     # 🆕 FastAgent için şema cache'ini doldur (yeni session için)
-                    try:
-                        from src.workflow.fast_agent_integration_simple import (
-                            get_or_create_fast_agent,
-                        )
-
-                        fast_agent = await get_or_create_fast_agent(model, graph)
-                        # Session bazlı cache durumunu kontrol et
-                        cache_before = new_session_id in fast_agent.schema_cache
-                        logging.info(
-                            f"📋 FastAgent CLEAR_CHAT: Session {new_session_id} için cache durumu (önce): {cache_before}"
-                        )
-
-                        # Yeni session için şema bilgisini önceden al ve cache'le
-                        schema_info = fast_agent._get_schema_for_session(new_session_id)
-
-                        # Cache durumunu tekrar kontrol et
-                        cache_after = new_session_id in fast_agent.schema_cache
-                        logging.info(
-                            f"📋 FastAgent CLEAR_CHAT: Session {new_session_id} için cache durumu (sonra): {cache_after}, Schema length: {len(schema_info) if schema_info else 0}"
-                        )
-
-                        if schema_info:
-                            print(
-                                f"✅ FastAgent: Session {new_session_id} için şema cache'lendi - Schema length: {len(schema_info)}"
-                            )
-                        else:
-                            print(
-                                f"⚠️ FastAgent: Session {new_session_id} için şema alınamadı"
-                            )
-                    except Exception as fast_agent_error:
-                        logging.error(
-                            f"⚠️ FastAgent şema cache hatası - Session {new_session_id}: {fast_agent_error}",
-                            exc_info=True,
-                        )
-                        print(
-                            f"⚠️ FastAgent şema cache hatası - Session {new_session_id}: {fast_agent_error}"
-                        )
+                    # NOT: Schema artık clear_chat'te pre-fetch edilmiyor
+                    # GlobalSchemaCache ile ilk soru geldiğinde on-demand yüklenecek
+                    logging.info(
+                        f"📋 FastAgent CLEAR_CHAT: Schema pre-fetch atlandı - "
+                        f"Session {new_session_id} için schema ilk soruda yüklenecek"
+                    )
                 except Exception as agent_error:
                     new_agent_result = (
                         f"new_session_agent_creation_failed: {str(agent_error)}"

@@ -1822,6 +1822,23 @@ class FileProcessor:
                     f"⚠️ Could not sync graph status to Neo4j: {str(sync_error)}"
                 )
 
+            # Schema değişti - Global schema cache version'ını artır
+            # Bu sayede chat tarafı yeni şemayı alacak
+            try:
+                # Backend path'ini ekle (schema_cache backend'de)
+                if backend_path not in sys.path:
+                    sys.path.insert(0, backend_path)
+                from src.shared.schema_cache import increment_schema_version
+                database_url = uri  # Neo4j connection URL
+                new_version = increment_schema_version(database_url)
+                logging.info(
+                    f"📈 Schema version artırıldı: {database_url} → v{new_version}"
+                )
+            except Exception as schema_version_error:
+                logging.warning(
+                    f"⚠️ Schema version artırılamadı: {str(schema_version_error)}"
+                )
+
             logging.info(
                 f"✅ V2 Graph creation completed for: {file_record.original_name}"
             )

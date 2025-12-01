@@ -342,160 +342,26 @@ def create_mcp_server(
     namespace_prefix = _format_namespace(namespace)
     allow_writes = not read_only
 
-    @mcp.tool(
-        name=namespace_prefix + "get_neo4j_schema",
-        annotations=ToolAnnotations(
-            title="Get Neo4j Schema",
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=True,
-        ),
-    )
-    async def get_neo4j_schema() -> list[ToolResult]:
-        """
-        List all nodes, their attributes and their relationships to other nodes in the neo4j database.
-        Uses native Neo4j metadata functions instead of APOC.
-        """
-
-        # Node bilgilerini al
-        get_nodes_query = """
-        CALL db.labels() YIELD label
-        WITH collect(label) as labels
-        UNWIND labels as lbl
-        CALL {
-          WITH lbl
-          MATCH (n) WHERE lbl IN labels(n)
-          WITH count(n) as cnt, collect(properties(n))[0] as sample_props
-          RETURN cnt, keys(sample_props) as props
-        }
-        RETURN lbl as nodeType, cnt as nodeCount, props as properties
-        ORDER BY lbl
-        """
-
-        # Relationship pattern'lerini al
-        get_rels_query = """
-        CALL db.relationshipTypes() YIELD relationshipType
-        CALL {
-          WITH relationshipType
-          MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
-          WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
-               collect(properties(r))[0] as sample_props, count(*) as cnt
-          ORDER BY cnt DESC
-          LIMIT 1
-          RETURN from_node, to_node, keys(sample_props) as rel_props
-        }
-        RETURN relationshipType, from_node, to_node, rel_props
-        ORDER BY relationshipType
-        """
-
-        def clean_schema(schema: dict) -> dict:
-            cleaned = {}
-
-            for key, entry in schema.items():
-                new_entry = {"type": entry["type"]}
-                if "count" in entry:
-                    new_entry["count"] = entry["count"]
-
-                labels = entry.get("labels", [])
-                if labels:
-                    new_entry["labels"] = labels
-
-                props = entry.get("properties", {})
-                clean_props = {}
-                for pname, pinfo in props.items():
-                    cp = {}
-                    if "indexed" in pinfo:
-                        cp["indexed"] = pinfo["indexed"]
-                    if "type" in pinfo:
-                        cp["type"] = pinfo["type"]
-                    if cp:
-                        clean_props[pname] = cp
-                if clean_props:
-                    new_entry["properties"] = clean_props
-
-                if entry.get("relationships"):
-                    rels_out = {}
-                    for rel_name, rel in entry["relationships"].items():
-                        cr = {}
-                        if "direction" in rel:
-                            cr["direction"] = rel["direction"]
-                        # nested labels
-                        rlabels = rel.get("labels", [])
-                        if rlabels:
-                            cr["labels"] = rlabels
-                        # nested properties
-                        rprops = rel.get("properties", {})
-                        clean_rprops = {}
-                        for rpname, rpinfo in rprops.items():
-                            crp = {}
-                            if "indexed" in rpinfo:
-                                crp["indexed"] = rpinfo["indexed"]
-                            if "type" in rpinfo:
-                                crp["type"] = rpinfo["type"]
-                            if crp:
-                                clean_rprops[rpname] = crp
-                        if clean_rprops:
-                            cr["properties"] = clean_rprops
-
-                        if cr:
-                            rels_out[rel_name] = cr
-
-                    if rels_out:
-                        new_entry["relationships"] = rels_out
-
-                cleaned[key] = new_entry
-
-            return cleaned
-
-        try:
-            # Node bilgilerini al
-            nodes_result = await neo4j_driver.execute_query(
-                get_nodes_query,
-                routing_control=RoutingControl.READ,
-                database_=database,
-                result_transformer_=lambda r: r.data(),
-            )
-
-            # Relationship bilgilerini al
-            rels_result = await neo4j_driver.execute_query(
-                get_rels_query,
-                routing_control=RoutingControl.READ,
-                database_=database,
-                result_transformer_=lambda r: r.data(),
-            )
-
-            # Validate results
-            if nodes_result is None:
-                logger.error(
-                    "get_neo4j_schema: neo4j_driver.execute_query returned None for nodes_result"
-                )
-                raise ToolError("Neo4j driver returned no nodes result (None)")
-
-            if rels_result is None:
-                logger.error(
-                    "get_neo4j_schema: neo4j_driver.execute_query returned None for rels_result"
-                )
-                raise ToolError("Neo4j driver returned no relationships result (None)")
-
-            logger.debug(
-                f"Found {len(nodes_result)} nodes and {len(rels_result)} relationship types"
-            )
-
-            # Yeni format'a çevir
-            minimal_schema = _create_direct_schema_format(nodes_result, rels_result)
-
-            return ToolResult(content=[TextContent(type="text", text=minimal_schema)])
-
-        except ClientError as e:
-            raise ToolError(f"Neo4j Client Error: {e}")
-
-        except Neo4jError as e:
-            raise ToolError(f"Neo4j Error: {e}")
-
-        except Exception as e:
-            logger.error(f"Error retrieving Neo4j database schema: {e}")
-            raise ToolError(f"Unexpected Error: {e}")
+    # =====================================================================
+    # get_neo4j_schema TOOL DISABLED
+    # Şema bilgisi artık prompt'a önceden ekleniyor (GlobalSchemaCache)
+    # Bu tool gereksiz DB çağrısı yapıyor, performans için devre dışı bırakıldı
+    # =====================================================================
+    # @mcp.tool(
+    #     name=namespace_prefix + "get_neo4j_schema",
+    #     annotations=ToolAnnotations(
+    #         title="Get Neo4j Schema",
+    #         readOnlyHint=True,
+    #         destructiveHint=False,
+    #         idempotentHint=True,
+    #         openWorldHint=True,
+    #     ),
+    # )
+    # async def get_neo4j_schema() -> list[ToolResult]:
+    #     """
+    #     DISABLED: Schema is now pre-loaded into prompt via GlobalSchemaCache
+    #     """
+    #     pass
 
     @mcp.tool(
         name=namespace_prefix + "read_neo4j_cypher",

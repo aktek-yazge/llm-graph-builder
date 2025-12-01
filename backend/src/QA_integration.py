@@ -403,28 +403,17 @@ def get_total_tokens(ai_response, llm):
     return total_tokens
 
 def clear_chat_history(graph, session_id, local=False):
+    """
+    Chat history'sini temizle.
+    Artık PostgreSQL kullanıyor (Neo4j yerine).
+    """
     try:
-        if not local:
-            # Cache'den Neo4j session'ını al (yeni oluşturmak yerine)
-            history = SessionChatHistory.get_or_create_neo4j_session(
-                graph=graph,
-                session_id=session_id,
-                write_access=True
-            )
-        else:
-            # Local history al
-            history = get_history_by_session_id(session_id)
+        # PostgreSQL chat history kullan
+        from src.shared.postgres_chat_history import PostgresSessionChatHistory
         
-        # Neo4j işlemini retry ile koru
-        if not local:
-            retry_neo4j_operation(lambda: history.clear())
-        else:
-            history.clear()
-
-        # Cache'den de session'ı temizle
-        if not local:
-            SessionChatHistory.clear_neo4j_session(session_id)
-        logging.info(f"Cleared session {session_id} from cache and database")
+        # PostgreSQL'den session'ı temizle
+        PostgresSessionChatHistory.clear_session(session_id)
+        logging.info(f"✅ Cleared session {session_id} from PostgreSQL")
 
         return {
             "session_id": session_id, 
@@ -1966,7 +1955,9 @@ async def analyze_files_with_llm(files: Dict[str, List[Dict[str, str]]], model, 
 def QA_RAG(graph,model, question, document_names, session_id, mode, write_access=True, intelligent_agent=None):
     logging.info(f"Chat Mode: {mode}")
 
-    history = create_neo4j_chat_message_history(graph, session_id, write_access)
+    # PostgreSQL chat history kullan
+    from src.shared.postgres_chat_history import create_postgres_chat_message_history
+    history = create_postgres_chat_message_history(session_id, write_access)
     messages = history.messages
 
     user_question = HumanMessage(content=question)
@@ -2836,7 +2827,9 @@ async def QA_RAG_stream(graph, model, question, document_names, session_id, mode
     logging.info(f"Streaming Chat Mode: {mode}")
     
     try:
-        history = create_neo4j_chat_message_history(graph, session_id, write_access)
+        # PostgreSQL chat history kullan
+        from src.shared.postgres_chat_history import create_postgres_chat_message_history
+        history = create_postgres_chat_message_history(session_id, write_access)
         messages = history.messages
 
         # print("history: ", history)

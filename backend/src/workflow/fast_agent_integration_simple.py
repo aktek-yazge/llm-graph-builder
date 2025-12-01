@@ -14,6 +14,9 @@ import urllib.parse
 from typing import AsyncGenerator, Dict, Any, Optional, List, Set
 from datetime import datetime
 
+# Global Schema Cache import
+from src.shared.schema_cache import get_cached_schema, get_schema_cache
+
 # Logging ayarları
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -258,8 +261,8 @@ class FastAgentIntegration:
         self.intelligent_agent = (
             None  # IntelligentAgent instance for page_link handling
         )
-        # Session bazlı şema cache'i (session ID'ye göre cache'lenecek)
-        self.schema_cache: Dict[str, str] = {}  # session_id -> schema_string
+        # NOT: Schema cache artık global olarak yönetiliyor (src.shared.schema_cache)
+        # Version-based cache: PostgreSQL'de version, RAM'de schema tutuluyor
 
         # IntelligentAgent'ı initialize et (graph varsa)
         if self.graph:
@@ -277,8 +280,17 @@ class FastAgentIntegration:
 
     def _get_schema_for_session(self, session_id: str) -> str:
         """
-        Session ID'ye göre şema bilgisini al veya cache'den döndür
-        Aynı session için şema cache'den alınacak (graph instance değişse bile)
+        Global schema cache kullanarak şema bilgisini al
+        
+        Version-based cache:
+        - PostgreSQL'de version tutulur
+        - Version değişmemişse RAM'den şema alınır (hızlı)
+        - Version değişmişse Neo4j'den yeni şema çekilir
+        
+        Bu sayede:
+        - Tüm session'lar aynı şemayı paylaşır
+        - Yeni belge yüklenince version artar, şema otomatik güncellenir
+        - Server restart'ta PostgreSQL'den version korunur
         """
         if not session_id:
             return ""
@@ -288,70 +300,29 @@ class FastAgentIntegration:
             logging.warning(f"⚠️ FastAgent: Graph yok, şema bilgisi alınamadı")
             return ""
 
-        # Cache durumunu kontrol et (session ID'ye göre)
-        cache_exists = session_id in self.schema_cache
-        cache_size = len(self.schema_cache)
-
-        logging.info(
-            f"📋 FastAgent _get_schema_for_session: Session {session_id}, Cache'de var mı: {cache_exists}, Toplam cache: {cache_size}"
-        )
-
-        # Cache'de varsa döndür
-        if cache_exists:
-            logging.info(
-                f"✅ FastAgent: Session {session_id} için şema cache'den alındı ({len(self.schema_cache[session_id])} karakter)"
-            )
-            return self.schema_cache[session_id]
-
-        # Cache'de yok - şema bilgisini al ve cache'le
         try:
+            # Database URL'ini environment'tan al (server startup ile aynı)
+            database_url = os.environ.get("NEO4J_URI", "default")
+            
+            # Global cache'den şema al (version kontrolü otomatik yapılır)
+            cache_status = get_schema_cache().get_cache_status()
             logging.info(
-                f"📋 FastAgent: Session {session_id} için şema bilgisi alınıyor (tool formatında)..."
+                f"📋 FastAgent: Schema cache durumu - RAM'de var: {cache_status['has_cached_schema']}, "
+                f"Version: {cache_status['cached_version']}, DB_URL: {database_url[:30]}..."
             )
-
-            # Tool'daki query'leri kullan (get_neo4j_schema tool'undan)
-            get_nodes_query = """
-            CALL db.labels() YIELD label
-            WITH collect(label) as labels
-            UNWIND labels as lbl
-            CALL {
-              WITH lbl
-              MATCH (n) WHERE lbl IN labels(n)
-              WITH count(n) as cnt, collect(properties(n))[0] as sample_props
-              RETURN cnt, keys(sample_props) as props
-            }
-            RETURN lbl as nodeType, cnt as nodeCount, props as properties
-            ORDER BY lbl
-            """
-
-            get_rels_query = """
-            CALL db.relationshipTypes() YIELD relationshipType
-            CALL {
-              WITH relationshipType
-              MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
-              WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
-                   collect(properties(r))[0] as sample_props, count(*) as cnt
-              ORDER BY cnt DESC
-              LIMIT 1
-              RETURN from_node, to_node, keys(sample_props) as rel_props
-            }
-            RETURN relationshipType, from_node, to_node, rel_props
-            ORDER BY relationshipType
-            """
-
-            # Query'leri çalıştır
-            nodes_result = self.graph.query(get_nodes_query)
-            rels_result = self.graph.query(get_rels_query)
-
-            # Tool'daki _create_direct_schema_format fonksiyonunu kullan
-            schema_string = self._create_direct_schema_format(nodes_result, rels_result)
-
-            # Session bazlı cache'le
-            self.schema_cache[session_id] = schema_string
-            logging.info(
-                f"✅ FastAgent: Session {session_id} için şema cache'lendi ({len(schema_string)} karakter)"
-            )
+            
+            schema_string = get_cached_schema(database_url, self.graph)
+            
+            if schema_string:
+                logging.info(
+                    f"✅ FastAgent: Şema alındı ({len(schema_string)} karakter) - "
+                    f"Version: {get_schema_cache().get_current_version(database_url)}"
+                )
+            else:
+                logging.warning("⚠️ FastAgent: Şema boş döndü")
+            
             return schema_string
+            
         except Exception as e:
             logging.error(f"❌ FastAgent: Şema bilgisi alınamadı: {e}", exc_info=True)
             return ""
@@ -497,13 +468,13 @@ class FastAgentIntegration:
 
         try:
             logging.info(
-                f"FastAgent GET HISTORY: create_neo4j_chat_message_history çağrılıyor..."
+                f"FastAgent GET HISTORY: PostgreSQL chat history alınıyor..."
             )
-            from src.QA_integration import create_neo4j_chat_message_history
+            from src.shared.postgres_chat_history import create_postgres_chat_message_history
 
-            # Neo4j chat history'sini al
-            conversation_history = create_neo4j_chat_message_history(
-                graph=self.graph, session_id=session_id, write_access=True
+            # PostgreSQL chat history'sini al
+            conversation_history = create_postgres_chat_message_history(
+                session_id=session_id, write_access=True
             )
 
             logging.info(
@@ -513,7 +484,7 @@ class FastAgentIntegration:
             if conversation_history and hasattr(conversation_history, "messages"):
                 total_messages = len(conversation_history.messages)
                 logging.info(
-                    f"FastAgent GET HISTORY: Neo4j'den {total_messages} mesaj bulundu"
+                    f"FastAgent GET HISTORY: PostgreSQL'den {total_messages} mesaj bulundu"
                 )
 
                 # Mesaj detaylarını logla
@@ -526,15 +497,13 @@ class FastAgentIntegration:
                         f"FastAgent GET HISTORY: Mesaj {i+1}/{total_messages}: type={msg_type}, content_preview='{content_preview}...'"
                     )
 
-                # Son mesajı hariç tut (henüz işlenen soruyu dahil etme)
-                all_messages = (
-                    conversation_history.messages[:-1]
-                    if conversation_history.messages
-                    else []
-                )
+                # Tüm geçmiş mesajları al (yeni soru henüz kaydedilmedi)
+                # NOT: Yeni soru history alındıktan SONRA kaydediliyor, 
+                # bu yüzden tüm mesajları dahil ediyoruz
+                all_messages = list(conversation_history.messages)
 
                 logging.info(
-                    f"FastAgent GET HISTORY: Son mesaj hariç tutuldu, kalan mesaj sayısı: {len(all_messages)}"
+                    f"FastAgent GET HISTORY: Toplam {len(all_messages)} mesaj alındı"
                 )
 
                 # Son 40 mesajı al (intelligent_agent ile aynı)
@@ -777,14 +746,14 @@ class FastAgentIntegration:
 
         try:
             logging.info(
-                f"FastAgent SAVE HISTORY: create_neo4j_chat_message_history çağrılıyor..."
+                f"FastAgent SAVE HISTORY: PostgreSQL chat history alınıyor..."
             )
-            from src.QA_integration import create_neo4j_chat_message_history
+            from src.shared.postgres_chat_history import create_postgres_chat_message_history
             from langchain_core.messages import HumanMessage, AIMessage
 
-            # Neo4j chat history'sini al (write_access=True ile)
-            conversation_history = create_neo4j_chat_message_history(
-                graph=self.graph, session_id=session_id, write_access=True
+            # PostgreSQL chat history'sini al
+            conversation_history = create_postgres_chat_message_history(
+                session_id=session_id, write_access=True
             )
 
             logging.info(
@@ -815,7 +784,7 @@ class FastAgentIntegration:
                 f"FastAgent SAVE HISTORY: Mesaj içeriği (ilk 100 kar): '{content_preview}...'"
             )
 
-            # Neo4j'ye kaydet (otomatik olarak)
+            # PostgreSQL'e kaydet
             logging.info(f"FastAgent SAVE HISTORY: add_message() çağrılıyor...")
             conversation_history.add_message(message)
 
@@ -834,7 +803,7 @@ class FastAgentIntegration:
 
         except Exception as e:
             logging.error(
-                f"FastAgent SAVE HISTORY: HATA - Neo4j'ye mesaj kaydedilemedi: {e}",
+                f"FastAgent SAVE HISTORY: HATA - PostgreSQL'e mesaj kaydedilemedi: {e}",
                 exc_info=True,
             )
             # Local fallback artık yok - hata durumunda logla ama devam et
@@ -1078,22 +1047,23 @@ async def get_or_create_fast_agent(
         _global_fast_agent = FastAgentIntegration(model=model, graph=graph)
         logging.info(f"🆕 FastAgent: Yeni global instance oluşturuldu - Model: {model}")
     else:
-        # Mevcut instance var - sadece model ve graph'ı güncelle (cache korunur)
-        schema_cache_size = len(_global_fast_agent.schema_cache)
+        # Mevcut instance var - sadece model ve graph'ı güncelle
+        # NOT: Schema cache artık global olarak yönetiliyor (src.shared.schema_cache)
+        cache_status = get_schema_cache().get_cache_status()
 
         if _global_fast_agent.model != model:
-            # Model değişmişse sadece model'i güncelle (cache korunur - şema session'a bağlı)
             logging.info(
-                f"🔄 FastAgent: Model güncelleniyor ({_global_fast_agent.model} -> {model}), cache korunuyor ({schema_cache_size} session)"
+                f"🔄 FastAgent: Model güncelleniyor ({_global_fast_agent.model} -> {model}), "
+                f"global schema cache version: {cache_status['cached_version']}"
             )
             _global_fast_agent.model = model
             # FastAgent app'i None yap (lazy initialization ile yeni model ile oluşturulacak)
             _global_fast_agent.fast_agent_app = None
 
         if graph and _global_fast_agent.graph != graph:
-            # Graph connection değişmişse güncelle (cache korunur - session bazlı cache)
             logging.info(
-                f"🔄 FastAgent: Graph connection güncelleniyor (cache korunuyor - {schema_cache_size} session)"
+                f"🔄 FastAgent: Graph connection güncelleniyor, "
+                f"global schema cache version: {cache_status['cached_version']}"
             )
             _global_fast_agent.graph = graph
             # IntelligentAgent'ı yeniden initialize et
