@@ -233,6 +233,122 @@ AGENT_CACHE_CLEANUP_COUNT = int(
 )  # Temizleme sırasında silinecek session sayısı
 
 
+def _sync_status_to_neo4j(neo4j_uri: str, neo4j_database: str, filename: str, 
+                          upload_status: str, chunking_status: str, graph_status: str, embedding_status: str) -> None:
+    """
+    Neo4j'e status sync eder.
+    Bu fonksiyon SENKRON çalışır - asyncio.to_thread ile çağrılmalı.
+    """
+    from src.models.status_sync import sync_queue_db_status_to_neo4j
+    from src.shared.common_fn import create_graph_database_connection
+    
+    graph_connection = create_graph_database_connection(
+        neo4j_uri,
+        os.environ.get("NEO4J_USERNAME"),
+        os.environ.get("NEO4J_PASSWORD"),
+        neo4j_database,
+    )
+    sync_queue_db_status_to_neo4j(
+        graph=graph_connection,
+        file_name=filename,
+        upload_status=upload_status,
+        chunking_status=chunking_status,
+        graph_status=graph_status,
+        embedding_status=embedding_status,
+        database=neo4j_database,
+    )
+
+
+def _cleanup_neo4j_for_file(neo4j_uri: str, neo4j_database: str, filename: str, original_name: str) -> str:
+    """
+    Neo4j'den dosyaya ait chunk, entity ve document node'larını siler.
+    Bu fonksiyon SENKRON çalışır - asyncio.to_thread ile çağrılmalı.
+    """
+    from src.shared.common_fn import create_graph_database_connection
+    
+    try:
+        graph_connection = create_graph_database_connection(
+            neo4j_uri,
+            os.environ.get("NEO4J_USERNAME"),
+            os.environ.get("NEO4J_PASSWORD"),
+            neo4j_database,
+        )
+        
+        # Step 1: Delete chunks and their direct relationships
+        delete_chunks_query = """
+        MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
+        DETACH DELETE c
+        RETURN count(c) as deletedChunks
+        """
+        chunk_result = graph_connection.query(delete_chunks_query, {"fileName": filename})
+        deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
+        
+        # Step 2: Delete document-related entities (Policy and connected nodes)
+        delete_entities_query = """
+        MATCH (d:Document {fileName: $fileName})
+        
+        // Find Policy nodes connected via DOCUMENTED_IN
+        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
+        
+        // Find all nodes connected to Policy (1-2 hops)
+        OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
+        WHERE relatedNode IS NOT NULL
+          AND NOT relatedNode:Document 
+          AND NOT relatedNode:Chunk
+          AND NOT relatedNode:`__Community__`
+        
+        // Safety check: only delete if not connected to other documents
+        WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
+        WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
+            AND NOT EXISTS {
+                MATCH (node)-[*1..3]-(otherDoc:Document)
+                WHERE otherDoc.fileName <> $fileName
+            }] AS safeNodes
+        
+        // Delete safe nodes and policy
+        FOREACH (node IN safeNodes | DETACH DELETE node)
+        WITH d, p, size(safeNodes) as deletedRelated
+        
+        // Delete policy if exists
+        DETACH DELETE p
+        
+        RETURN deletedRelated
+        """
+        entity_result = graph_connection.query(delete_entities_query, {"fileName": filename})
+        deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
+        
+        # Step 3: Clean up orphan nodes (nodes with no relationships)
+        cleanup_orphans_query = """
+        MATCH (n)
+        WHERE NOT n:Document 
+          AND NOT n:Chunk 
+          AND NOT n:`__Community__`
+          AND NOT EXISTS { (n)--() }
+        DETACH DELETE n
+        RETURN count(n) as deletedOrphans
+        """
+        orphan_result = graph_connection.query(cleanup_orphans_query)
+        deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
+        
+        # Step 4: Delete the Document node itself
+        delete_document_query = """
+        MATCH (d:Document {fileName: $fileName})
+        DETACH DELETE d
+        RETURN count(d) as deletedDocuments
+        """
+        doc_result = graph_connection.query(delete_document_query, {"fileName": filename})
+        deleted_documents = doc_result[0]["deletedDocuments"] if doc_result else 0
+        
+        total_deleted = deleted_chunks + deleted_entities + deleted_orphans + deleted_documents
+        if total_deleted > 0:
+            return f"{deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans, {deleted_documents} document"
+        return None
+        
+    except Exception as e:
+        logging.warning(f"⚠️ Neo4j cleanup error for {original_name}: {str(e)}")
+        return None
+
+
 def get_cached_agent(
     session_id: str, graph: Neo4jGraph, model_name: str
 ) -> IntelligentAgent:
@@ -6321,80 +6437,23 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
                     else:
                         logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
                     
-                    # Delete existing chunks and related entities from Neo4j (preserve Document)
+                    # Delete existing chunks, related entities and Document node from Neo4j
+                    # Use asyncio.to_thread to avoid blocking the event loop
                     try:
-                        from src.shared.common_fn import create_graph_database_connection
                         neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
                         neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
                         
                         if neo4j_uri:
-                            graph_connection = create_graph_database_connection(
+                            # Run Neo4j cleanup in a thread to avoid blocking
+                            cleanup_result = await asyncio.to_thread(
+                                _cleanup_neo4j_for_file,
                                 neo4j_uri,
-                                os.environ.get("NEO4J_USERNAME"),
-                                os.environ.get("NEO4J_PASSWORD"),
                                 neo4j_database,
+                                file_record.filename,
+                                file_record.original_name
                             )
-                            
-                            # Step 1: Delete chunks and their direct relationships
-                            delete_chunks_query = """
-                            MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-                            DETACH DELETE c
-                            RETURN count(c) as deletedChunks
-                            """
-                            chunk_result = graph_connection.query(delete_chunks_query, {"fileName": file_record.filename})
-                            deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
-                            
-                            # Step 2: Delete document-related entities (Policy and connected nodes)
-                            # Find all nodes connected to this document through any path (up to 3 hops)
-                            delete_entities_query = """
-                            MATCH (d:Document {fileName: $fileName})
-                            
-                            // Find Policy nodes connected via DOCUMENTED_IN
-                            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-                            
-                            // Find all nodes connected to Policy (1-2 hops)
-                            OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
-                            WHERE relatedNode IS NOT NULL
-                              AND NOT relatedNode:Document 
-                              AND NOT relatedNode:Chunk
-                              AND NOT relatedNode:`__Community__`
-                            
-                            // Safety check: only delete if not connected to other documents
-                            WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
-                            WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
-                                AND NOT EXISTS {
-                                    MATCH (node)-[*1..3]-(otherDoc:Document)
-                                    WHERE otherDoc.fileName <> $fileName
-                                }] AS safeNodes
-                            
-                            // Delete safe nodes and policy
-                            FOREACH (node IN safeNodes | DETACH DELETE node)
-                            WITH d, p, size(safeNodes) as deletedRelated
-                            
-                            // Delete policy if exists
-                            DETACH DELETE p
-                            
-                            RETURN deletedRelated
-                            """
-                            entity_result = graph_connection.query(delete_entities_query, {"fileName": file_record.filename})
-                            deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
-                            
-                            # Step 3: Clean up orphan nodes (nodes with no relationships)
-                            cleanup_orphans_query = """
-                            MATCH (n)
-                            WHERE NOT n:Document 
-                              AND NOT n:Chunk 
-                              AND NOT n:`__Community__`
-                              AND NOT EXISTS { (n)--() }
-                            DETACH DELETE n
-                            RETURN count(n) as deletedOrphans
-                            """
-                            orphan_result = graph_connection.query(cleanup_orphans_query)
-                            deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
-                            
-                            total_deleted = deleted_chunks + deleted_entities + deleted_orphans
-                            if total_deleted > 0:
-                                logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans")
+                            if cleanup_result:
+                                logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {cleanup_result}")
                         else:
                             logging.warning("⚠️ Neo4j URI not configured, skipping chunk deletion")
                     except Exception as neo4j_error:
@@ -6573,79 +6632,23 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
             else:
                 logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
             
-            # Delete existing chunks and related entities from Neo4j (preserve Document)
+            # Delete existing chunks, related entities and Document node from Neo4j
+            # Use asyncio.to_thread to avoid blocking the event loop
             try:
-                from src.shared.common_fn import create_graph_database_connection
                 neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
                 neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
                 
                 if neo4j_uri:
-                    graph_connection = create_graph_database_connection(
+                    # Run Neo4j cleanup in a thread to avoid blocking
+                    cleanup_result = await asyncio.to_thread(
+                        _cleanup_neo4j_for_file,
                         neo4j_uri,
-                        os.environ.get("NEO4J_USERNAME"),
-                        os.environ.get("NEO4J_PASSWORD"),
                         neo4j_database,
+                        file_record.filename,
+                        file_record.original_name
                     )
-                    
-                    # Step 1: Delete chunks and their direct relationships
-                    delete_chunks_query = """
-                    MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-                    DETACH DELETE c
-                    RETURN count(c) as deletedChunks
-                    """
-                    chunk_result = graph_connection.query(delete_chunks_query, {"fileName": file_record.filename})
-                    deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
-                    
-                    # Step 2: Delete document-related entities (Policy and connected nodes)
-                    delete_entities_query = """
-                    MATCH (d:Document {fileName: $fileName})
-                    
-                    // Find Policy nodes connected via DOCUMENTED_IN
-                    OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-                    
-                    // Find all nodes connected to Policy (1-2 hops)
-                    OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
-                    WHERE relatedNode IS NOT NULL
-                      AND NOT relatedNode:Document 
-                      AND NOT relatedNode:Chunk
-                      AND NOT relatedNode:`__Community__`
-                    
-                    // Safety check: only delete if not connected to other documents
-                    WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
-                    WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
-                        AND NOT EXISTS {
-                            MATCH (node)-[*1..3]-(otherDoc:Document)
-                            WHERE otherDoc.fileName <> $fileName
-                        }] AS safeNodes
-                    
-                    // Delete safe nodes and policy
-                    FOREACH (node IN safeNodes | DETACH DELETE node)
-                    WITH d, p, size(safeNodes) as deletedRelated
-                    
-                    // Delete policy if exists
-                    DETACH DELETE p
-                    
-                    RETURN deletedRelated
-                    """
-                    entity_result = graph_connection.query(delete_entities_query, {"fileName": file_record.filename})
-                    deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
-                    
-                    # Step 3: Clean up orphan nodes (nodes with no relationships)
-                    cleanup_orphans_query = """
-                    MATCH (n)
-                    WHERE NOT n:Document 
-                      AND NOT n:Chunk 
-                      AND NOT n:`__Community__`
-                      AND NOT EXISTS { (n)--() }
-                    DETACH DELETE n
-                    RETURN count(n) as deletedOrphans
-                    """
-                    orphan_result = graph_connection.query(cleanup_orphans_query)
-                    deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
-                    
-                    total_deleted = deleted_chunks + deleted_entities + deleted_orphans
-                    if total_deleted > 0:
-                        logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans")
+                    if cleanup_result:
+                        logging.info(f"🗑️ Neo4j cleanup for {file_record.original_name}: {cleanup_result}")
                 else:
                     logging.warning("⚠️ Neo4j URI not configured, skipping chunk deletion")
             except Exception as neo4j_error:
@@ -6677,31 +6680,22 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
             file_record.graph_completed_at = None
             logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
 
-        # Sync status to Neo4j
+        # Sync status to Neo4j - use asyncio.to_thread to avoid blocking
         try:
-            # Get graph credentials
-            from src.models.status_sync import sync_queue_db_status_to_neo4j
-            from src.shared.common_fn import create_graph_database_connection
-
-            # Neo4j connection details
             neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
             neo4j_database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
 
             if neo4j_uri:
-                graph_connection = create_graph_database_connection(
+                # Run sync in a thread to avoid blocking the event loop
+                await asyncio.to_thread(
+                    _sync_status_to_neo4j,
                     neo4j_uri,
-                    os.environ.get("NEO4J_USERNAME"),
-                    os.environ.get("NEO4J_PASSWORD"),
                     neo4j_database,
-                )
-                sync_queue_db_status_to_neo4j(
-                    graph=graph_connection,
-                    file_name=file_record.filename,
-                    upload_status=file_record.upload_status,
-                    chunking_status=file_record.chunking_status,
-                    graph_status=file_record.graph_status,
-                    embedding_status=file_record.embedding_status,
-                    database=neo4j_database,
+                    file_record.filename,
+                    file_record.upload_status,
+                    file_record.chunking_status,
+                    file_record.graph_status,
+                    file_record.embedding_status,
                 )
                 logging.info(
                     f"✅ Successfully synced reset status to Neo4j for: {file_record.filename}"

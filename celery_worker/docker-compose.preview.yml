@@ -47,6 +47,7 @@ services:
       - PYTHONIOENCODING=utf-8
     volumes:
       - ${OUTPUT_VOLUME:-output_data}:/app/output
+      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
     deploy:
       resources:
         limits:
@@ -93,6 +94,8 @@ services:
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
     deploy:
       resources:
         limits:

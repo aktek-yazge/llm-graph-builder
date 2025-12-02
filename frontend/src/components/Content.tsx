@@ -1284,29 +1284,63 @@ const Content: React.FC<ContentProps> = ({
           showErrorToast(`Chunking reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
         }
       } else {
-        // Seçili dosyalar için tek tek çağrı yap
-        showNormalToast(`${v2FileIds.length} dosya için chunking reset ediliyor${deleteMarkdown ? ' (markdown silinecek)' : ''}...`);
+        // Seçili dosyalar için 50'lik batch'ler halinde paralel çağrı yap
+        const BATCH_SIZE = 50;
+        const totalFiles = v2FileIds.length;
+        const totalBatches = Math.ceil(totalFiles / BATCH_SIZE);
+        
+        showNormalToast(`${totalFiles} dosya için chunking reset ediliyor (${totalBatches} batch)${deleteMarkdown ? ' (markdown silinecek)' : ''}...`);
+        
         let successCount = 0;
         let failCount = 0;
 
-        for (const fileId of v2FileIds) {
-          try {
-            const response = await resetFileStageAPI(fileId, 'chunking', deleteMarkdown);
-            if (response.status === 'Success' || response.status === 'success') {
+        // Dosyaları 50'lik batch'lere böl
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+          const start = batchIndex * BATCH_SIZE;
+          const end = Math.min(start + BATCH_SIZE, totalFiles);
+          const batchFileIds = v2FileIds.slice(start, end);
+          
+          console.log(`📦 Batch ${batchIndex + 1}/${totalBatches}: ${batchFileIds.length} dosya işleniyor...`);
+          
+          // Batch içindeki tüm istekleri paralel olarak gönder
+          const batchPromises = batchFileIds.map(async (fileId) => {
+            try {
+              const response = await resetFileStageAPI(fileId, 'chunking', deleteMarkdown);
+              if (response.status === 'Success' || response.status === 'success') {
+                return { success: true, fileId };
+              } else {
+                return { success: false, fileId, error: response.message || 'Bilinmeyen hata' };
+              }
+            } catch (error: any) {
+              const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
+              return { success: false, fileId, error: errorMsg };
+            }
+          });
+
+          // Batch sonuçlarını bekle
+          const batchResults = await Promise.all(batchPromises);
+          
+          // Sonuçları say
+          batchResults.forEach((result) => {
+            if (result.success) {
               successCount++;
             } else {
               failCount++;
-              showErrorToast(`Dosya ${fileId} reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
+              console.error(`❌ Dosya ${result.fileId}: ${result.error}`);
             }
-          } catch (error: any) {
-            failCount++;
-            const errorMsg = error.response?.data?.message || error.message || 'Reset hatası';
-            showErrorToast(`Dosya ${fileId}: ${errorMsg}`);
+          });
+          
+          // Progress göster
+          if (totalBatches > 1) {
+            showNormalToast(`Batch ${batchIndex + 1}/${totalBatches} tamamlandı (${successCount}/${totalFiles})`);
           }
         }
 
         if (successCount > 0) {
-          showSuccessToast(`✓ ${successCount} dosya chunking reset edildi${deleteMarkdown ? ' (markdown silindi)' : ''}`);
+          showSuccessToast(`✓ ${successCount}/${totalFiles} dosya chunking reset edildi${deleteMarkdown ? ' (markdown silindi)' : ''}${failCount > 0 ? ` (${failCount} başarısız)` : ''}`);
+        }
+        if (failCount > 0 && successCount === 0) {
+          showErrorToast(`Tüm dosyalar başarısız oldu (${failCount} hata)`);
         }
         childRef.current?.reloadV2Files?.();
       }
