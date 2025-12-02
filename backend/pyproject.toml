@@ -8,6 +8,7 @@ dependencies = [
     # FastAPI Core
     "fastapi==0.115.12",
     "uvicorn==0.34.3",
+    "gunicorn==23.0.0",
     "python-multipart==0.0.20",
     "pydantic==2.11.7",
     "pydantic-settings==2.10.1",
