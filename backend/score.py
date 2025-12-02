@@ -843,6 +843,15 @@ def get_system_stats():
         memory = psutil.virtual_memory()
         load_avg = os.getloadavg()  # 1, 5, 15 dakika load average
         
+        # Disk bilgileri
+        disk = psutil.disk_usage('/')
+        disk_total_gb = round(disk.total / (1024**3), 2)
+        disk_used_gb = round(disk.used / (1024**3), 2)
+        # free değerini total - used olarak hesapla (APFS tutarsızlıklarını önlemek için)
+        disk_free_gb = round(disk_total_gb - disk_used_gb, 2)
+        # Yüzdeyi de used/total olarak hesapla
+        disk_percent = round((disk_used_gb / disk_total_gb) * 100, 1) if disk_total_gb > 0 else 0
+        
         host_stats = {
             "cpu_percent": cpu_percent,
             "cpu_count": cpu_count,
@@ -856,6 +865,12 @@ def get_system_stats():
                 "used_gb": round(memory.used / (1024**3), 2),
                 "available_gb": round(memory.available / (1024**3), 2),
                 "percent": memory.percent,
+            },
+            "disk": {
+                "total_gb": disk_total_gb,
+                "used_gb": disk_used_gb,
+                "free_gb": disk_free_gb,
+                "percent": disk_percent,
             },
         }
         

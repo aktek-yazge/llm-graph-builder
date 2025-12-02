@@ -24,3 +24,14 @@ body {
 .ndl-modal-backdrop {
   display: none !important;
 }
+
+/* Progress bar color classes */
+.progress-success .ndl-progress-bar-fill {
+  background-color: #22c55e !important;
+}
+.progress-warning .ndl-progress-bar-fill {
+  background-color: #eab308 !important;
+}
+.progress-danger .ndl-progress-bar-fill {
+  background-color: #ef4444 !important;
+}

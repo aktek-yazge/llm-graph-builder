@@ -24,6 +24,12 @@ export interface HostStats {
     available_gb: number;
     percent: number;
   };
+  disk: {
+    total_gb: number;
+    used_gb: number;
+    free_gb: number;
+    percent: number;
+  };
 }
 
 export interface SystemStatsResponse {
