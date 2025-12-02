@@ -19,3 +19,8 @@ body {
 .ndl-progress-bar-wrapper .ndl-header .ndl-heading::after{
   animation: none !important;
 }
+
+/* Tooltip backdrop'ını tamamen kaldır - sadece Dialog kendi backdrop'ını kullanmalı */
+.ndl-modal-backdrop {
+  display: none !important;
+}
