@@ -48,7 +48,8 @@ RUN apt-get update && \
        python3-dbus \
        python3-gi \
        python3-setuptools \
-       python3-wheel && \
+       python3-wheel \
+       docker.io && \
    apt-get clean && \
    rm -rf /var/lib/apt/lists/*
 
@@ -77,4 +78,5 @@ RUN cd /code && uv sync --frozen --no-dev
 COPY . /code
 
 # Set command with UTF-8 encoding support using uv
-CMD ["uv", "run", "gunicorn", "score:app", "--workers", "8", "--threads", "8", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "600", "--preload"]
+# Use uvicorn worker for ASGI (FastAPI) compatibility
+CMD ["uv", "run", "gunicorn", "score:app", "--bind", "0.0.0.0:8000", "--timeout", "600", "--preload", "-k", "uvicorn.workers.UvicornWorker"]

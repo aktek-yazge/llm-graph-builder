@@ -827,6 +827,94 @@ if is_gemini_enabled:
 app.add_api_route("/health", health([healthy_condition, healthy]))
 
 
+@app.get("/system/stats")
+def get_system_stats():
+    """
+    Sistem yükü ve Docker konteyner istatistiklerini döndürür.
+    CPU, RAM kullanımı ve çalışan Docker konteynerlerinin detayları.
+    """
+    import subprocess
+    import psutil
+    
+    try:
+        # Host sistem bilgileri
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        cpu_count = psutil.cpu_count()
+        memory = psutil.virtual_memory()
+        load_avg = os.getloadavg()  # 1, 5, 15 dakika load average
+        
+        host_stats = {
+            "cpu_percent": cpu_percent,
+            "cpu_count": cpu_count,
+            "load_average": {
+                "1min": round(load_avg[0], 2),
+                "5min": round(load_avg[1], 2),
+                "15min": round(load_avg[2], 2),
+            },
+            "memory": {
+                "total_gb": round(memory.total / (1024**3), 2),
+                "used_gb": round(memory.used / (1024**3), 2),
+                "available_gb": round(memory.available / (1024**3), 2),
+                "percent": memory.percent,
+            },
+        }
+        
+        # Docker konteyner istatistikleri
+        docker_stats = []
+        try:
+            # docker stats komutunu çalıştır
+            result = subprocess.run(
+                [
+                    "docker", "stats", "--no-stream", 
+                    "--format", "{{.Container}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    parts = line.split('\t')
+                    if len(parts) >= 7:
+                        # CPU ve Memory yüzdesini parse et
+                        cpu_str = parts[2].replace('%', '').strip()
+                        mem_str = parts[4].replace('%', '').strip()
+                        
+                        docker_stats.append({
+                            "container_id": parts[0][:12],
+                            "name": parts[1],
+                            "cpu_percent": float(cpu_str) if cpu_str else 0,
+                            "mem_usage": parts[3],
+                            "mem_percent": float(mem_str) if mem_str else 0,
+                            "net_io": parts[5],
+                            "block_io": parts[6],
+                        })
+        except subprocess.TimeoutExpired:
+            logging.warning("Docker stats command timed out")
+        except FileNotFoundError:
+            logging.warning("Docker command not found")
+        except Exception as docker_error:
+            logging.warning(f"Error getting docker stats: {docker_error}")
+        
+        return {
+            "status": "Success",
+            "data": {
+                "host": host_stats,
+                "containers": docker_stats,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+        
+    except Exception as e:
+        logging.exception(f"Error getting system stats: {e}")
+        return {
+            "status": "Failed",
+            "error": str(e),
+        }
+
+
 @app.get("/files/{file_name:path}")
 async def serve_document_file(file_name: str, inline: bool = False):
     """

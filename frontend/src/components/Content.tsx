@@ -12,7 +12,7 @@ import {
   useMediaQuery,
   useSpotlightContext,
 } from '@neo4j-ndl/react';
-import { ChartBarIconOutline, ChevronDownIconOutline, ChevronUpIconOutline, MagnifyingGlassIconOutline, XMarkIconOutline } from '@neo4j-ndl/react/icons';
+import { ChartBarIconOutline, ChevronDownIconOutline, ChevronUpIconOutline, MagnifyingGlassIconOutline, ServerStackIconOutline, XMarkIconOutline } from '@neo4j-ndl/react/icons';
 import axios from 'axios';
 import React, {
   lazy,
@@ -75,6 +75,7 @@ import GraphEnhancementDialog from './Popups/GraphEnhancementDialog';
 import PostProcessingToast from './Popups/GraphEnhancementDialog/PostProcessingCheckList/PostProcessingToast';
 
 import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
+import SystemMonitorModal from './Popups/SystemMonitorModal';
 import ProcessingStats from './ProcessingStats';
 import ButtonWithToolTip from './UI/ButtonWithToolTip';
 import DatabaseStatusIcon from './UI/DatabaseStatusIcon';
@@ -111,6 +112,7 @@ const Content: React.FC<ContentProps> = ({
   const [showRetryPopup, toggleRetryPopup] = useReducer((state) => !state, false);
   const [showChunkPopup, toggleChunkPopup] = useReducer((state) => !state, false);
   const [showStatsModal, setShowStatsModal] = useState<boolean>(false);
+  const [showSystemMonitorModal, setShowSystemMonitorModal] = useState<boolean>(false);
   const [chunksLoading, toggleChunksLoading] = useReducer((state) => !state, false);
   const [currentPage, setCurrentPage] = useState<number>(0);
   const [totalPageCount, setTotalPageCount] = useState<number | null>(null);
@@ -1566,6 +1568,16 @@ const Content: React.FC<ContentProps> = ({
             </ButtonWithToolTip>
             <ButtonWithToolTip
               placement='top'
+              text='Sistem kaynak kullanımını izle'
+              label='System Monitor'
+              className='mr-2!'
+              onClick={() => setShowSystemMonitorModal(true)}
+              size={isTablet ? 'small' : 'medium'}
+            >
+              <ServerStackIconOutline className="n-size-token-6" />
+            </ButtonWithToolTip>
+            <ButtonWithToolTip
+              placement='top'
               text='View Processing Statistics'
               label='View Stats'
               className='mr-2!'
@@ -1603,6 +1615,8 @@ const Content: React.FC<ContentProps> = ({
 
 
         <ProcessingStats files={filesData} open={showStatsModal} onClose={() => setShowStatsModal(false)} />
+
+        <SystemMonitorModal open={showSystemMonitorModal} onClose={() => setShowSystemMonitorModal(false)} />
 
         <FileTable
           connectionStatus={connectionStatus}

@@ -17,7 +17,7 @@ services:
         labels: "container_name=jaeger-preview"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # RabbitMQ - Message Broker
   rabbitmq:
@@ -40,7 +40,7 @@ services:
         labels: "container_name=rabbitmq-preview"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # PostgreSQL - Database
   postgres:
@@ -65,7 +65,7 @@ services:
         labels: "container_name=postgres-preview"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # Backend - preview servisi
   backend:
@@ -92,6 +92,8 @@ services:
       # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
       # Backend creates output/document_name/ structure with PDF, images, and markdown files
       - ~/llm-graph-output:/code/backend/output
+      # Docker socket for system monitoring (docker stats)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     logging:
       driver: "json-file"
       options:
@@ -100,15 +102,13 @@ services:
         labels: "container_name=backend-preview"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
     depends_on:
       - rabbitmq
       - postgres
 
   # Frontend - preview servisi
   frontend:
-    depends_on:
-      - backend
     build:
       context: ./frontend
       dockerfile: Dockerfile # Production Dockerfile
@@ -127,7 +127,7 @@ services:
         labels: "container_name=frontend-preview"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # Neo4j ve Qdrant servisleri harici olarak çalıştırılmalı
   # Bu servisler kaldırıldı - mevcut servisler kullanılır
