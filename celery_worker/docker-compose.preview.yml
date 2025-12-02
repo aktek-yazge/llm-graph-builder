@@ -1,13 +1,14 @@
-# Docker Compose for Celery Workers - LOCAL/DEV Environment
+# Docker Compose for Celery Workers - PREVIEW Environment
 # 
-# Bu dosya DEV ortamı için - Docker network içindeki RabbitMQ ve PostgreSQL'e bağlanır
-# .env dosyasını kullanır (rabbitmq-dev, postgres-dev hostnames)
+# Bu dosya PREVIEW ortamı için - Docker network içindeki RabbitMQ ve PostgreSQL'e bağlanır
+# .preview.env dosyasını kullanır (container hostname'leri: rabbitmq-dev, postgres-dev)
 #
 # Usage:
-#   docker-compose up -d                        # Start all services
-#   docker-compose up -d --scale main_worker=3  # Scale main workers
-#   docker-compose logs -f main_worker          # View logs
-#   docker-compose build celery_base            # Rebuild image
+#   docker-compose -f docker-compose.preview.yml --env-file .preview.env up -d
+#   docker-compose -f docker-compose.preview.yml logs -f main_worker
+#   docker-compose -f docker-compose.preview.yml down
+#
+# Kısa yol: ./start-docker-preview.sh
 
 services:
   # ============================================
@@ -26,21 +27,21 @@ services:
   # ============================================
   main_worker:
     image: celery-worker:latest
-    container_name: celery-main-worker-dev
-    # threads: Mac'te stabil (prefork Mac'te crash yapar)
+    container_name: celery-main-worker
+    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=${CELERY_POOL:-prefork}
       --concurrency=${MAIN_CONCURRENCY:-8}
       -Q celery
       -E
       -n main-worker@%h
     env_file:
-      - .env
+      - .preview.env
     environment:
       - PYTHONPATH=/app
-      - ENV=${ENV:-development}
+      - ENV=${ENV:-preview}
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
@@ -66,7 +67,7 @@ services:
         max-size: "100m"
         max-file: "5"
     networks:
-      - dev
+      - preview
     restart: unless-stopped
 
   # ============================================
@@ -74,20 +75,21 @@ services:
   # ============================================
   db_writer:
     image: celery-worker:latest
-    container_name: celery-db-writer-dev
+    container_name: celery-db-writer
+    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=${CELERY_POOL:-prefork}
       --concurrency=${WRITER_CONCURRENCY:-2}
       -Q db_write
       -E
       -n db-writer@%h
     env_file:
-      - .env
+      - .preview.env
     environment:
       - PYTHONPATH=/app
-      - ENV=${ENV:-development}
+      - ENV=${ENV:-preview}
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
@@ -111,7 +113,7 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - dev
+      - preview
     restart: unless-stopped
 
   # ============================================
@@ -121,20 +123,21 @@ services:
   # Gelecekte queue-based yazma istenirse comment'leri kaldırın
   # neo4j_writer:
   #   image: celery-worker:latest
-  #   container_name: celery-neo4j-writer-dev
+  #   container_name: celery-neo4j-writer
+  #   # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
   #   command: >
   #     python -m celery -A src.celery_app worker
   #     --loglevel=${LOG_LEVEL:-info}
-  #     --pool=${CELERY_POOL:-threads}
+  #     --pool=${CELERY_POOL:-prefork}
   #     --concurrency=${WRITER_CONCURRENCY:-2}
   #     -Q neo4j_write
   #     -E
   #     -n neo4j-writer@%h
   #   env_file:
-  #     - .env
+  #     - .preview.env
   #   environment:
   #     - PYTHONPATH=/app
-  #     - ENV=${ENV:-development}
+  #     - ENV=${ENV:-preview}
   #     - LANG=C.UTF-8
   #     - LC_ALL=C.UTF-8
   #     - PYTHONIOENCODING=utf-8
@@ -158,7 +161,7 @@ services:
   #       max-size: "50m"
   #       max-file: "3"
   #   networks:
-  #     - dev
+  #     - preview
   #   restart: unless-stopped
 
   # ============================================
@@ -166,16 +169,16 @@ services:
   # ============================================
   flower:
     image: mher/flower
-    container_name: celery-flower-dev
+    container_name: celery-flower
     command: celery flower --port=5555
     env_file:
-      - .env
+      - .preview.env
     environment:
       - FLOWER_PORT=5555
       - FLOWER_BASIC_AUTH=${FLOWER_AUTH:-admin:admin}
       - FLOWER_UNAUTHENTICATED_API=true
     ports:
-      - "5555:5555"
+      - "5556:5555"
     deploy:
       resources:
         limits:
@@ -187,14 +190,16 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - dev
+      - preview
     restart: unless-stopped
 
-# Dev ortamı network'ü (rabbitmq-dev, postgres-dev ile aynı)
+# Preview ortamı network'ü (root docker-compose.preview.yml'de tanımlı)
+# Docker Compose network adını project_name + network_name olarak oluşturur
 networks:
-  dev:
+  preview:
     external: true
-    name: workspace_llm-graph-builder_net
+    name: llm-graph-builder_preview
 
 volumes:
   output_data:
+
