@@ -105,17 +105,19 @@ uv run python -m celery -A src.celery_app worker \
 DB_WRITER_PID=$!
 log "✅ DB Writer PID: $DB_WRITER_PID, Log: $DB_LOG"
 
-# Start Neo4j Writer Worker - dedicated for Neo4j writes
-log "🔗 Starting Neo4j Writer (${NEO4J_WRITER_ID})..."
-uv run python -m celery -A src.celery_app worker \
-    --loglevel=info \
-    --pool=${POOL_TYPE} \
-    --concurrency=${WRITER_CONCURRENCY} \
-    -Q neo4j_write \
-    -E \
-    -n "${NEO4J_WRITER_ID}@%h" 2>&1 | tee -a "$NEO4J_LOG" &
-NEO4J_WRITER_PID=$!
-log "✅ Neo4j Writer PID: $NEO4J_WRITER_PID, Log: $NEO4J_LOG"
+# ⚠️ DISABLED: main_worker doğrudan Neo4j'ye yazıyor
+# Neo4j Writer Worker - dedicated for Neo4j writes
+# log "🔗 Starting Neo4j Writer (${NEO4J_WRITER_ID})..."
+# uv run python -m celery -A src.celery_app worker \
+#     --loglevel=info \
+#     --pool=${POOL_TYPE} \
+#     --concurrency=${WRITER_CONCURRENCY} \
+#     -Q neo4j_write \
+#     -E \
+#     -n "${NEO4J_WRITER_ID}@%h" 2>&1 | tee -a "$NEO4J_LOG" &
+# NEO4J_WRITER_PID=$!
+# log "✅ Neo4j Writer PID: $NEO4J_WRITER_PID, Log: $NEO4J_LOG"
+NEO4J_WRITER_PID=""
 
 # Start Flower only if port 5555 is not in use
 # Enable unauthenticated API for Grow/Shrink pool controls
@@ -133,7 +135,8 @@ log ""
 log "📋 Worker Summary:"
 log "   Main Worker:   PID=$MAIN_WORKER_PID, Queue=celery, Concurrency=$MAIN_CONCURRENCY"
 log "   DB Writer:     PID=$DB_WRITER_PID, Queue=db_write, Concurrency=$WRITER_CONCURRENCY"
-log "   Neo4j Writer:  PID=$NEO4J_WRITER_PID, Queue=neo4j_write, Concurrency=$WRITER_CONCURRENCY"
+# log "   Neo4j Writer:  PID=$NEO4J_WRITER_PID, Queue=neo4j_write, Concurrency=$WRITER_CONCURRENCY"
+log "   Neo4j Writer:  DISABLED (main_worker handles Neo4j writes)"
 log ""
 log "Press Ctrl+C to stop all workers..."
 
@@ -158,11 +161,11 @@ monitor_workers() {
             log "   Check log: $DB_LOG"
         fi
         
-        # Neo4j Writer kontrolü
-        if ! kill -0 $NEO4J_WRITER_PID 2>/dev/null; then
-            log "💀 ALERT: Neo4j Writer (PID: $NEO4J_WRITER_PID) DIED!"
-            log "   Check log: $NEO4J_LOG"
-        fi
+        # Neo4j Writer kontrolü (disabled - main_worker handles Neo4j writes)
+        # if [ -n "$NEO4J_WRITER_PID" ] && ! kill -0 $NEO4J_WRITER_PID 2>/dev/null; then
+        #     log "💀 ALERT: Neo4j Writer (PID: $NEO4J_WRITER_PID) DIED!"
+        #     log "   Check log: $NEO4J_LOG"
+        # fi
     done
 }
 

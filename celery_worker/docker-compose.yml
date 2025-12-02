@@ -27,12 +27,13 @@ services:
   main_worker:
     image: celery-worker:latest
     container_name: celery-main-worker-dev
-    # threads: Mac'te stabil (prefork Mac'te crash yapar)
+    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
+    # autoscale: min 8, max 64 process
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
-      --concurrency=${MAIN_CONCURRENCY:-8}
+      --pool=prefork
+      --autoscale=16,4
       -Q celery
       -E
       -n main-worker@%h
@@ -49,10 +50,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8g
+          memory: 16g
           cpus: "4"
         reservations:
-          memory: 2g
+          memory: 6g
           cpus: "1"
     healthcheck:
       test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
@@ -75,10 +76,11 @@ services:
   db_writer:
     image: celery-worker:latest
     container_name: celery-db-writer-dev
+    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-threads}
+      --pool=prefork
       --concurrency=${WRITER_CONCURRENCY:-2}
       -Q db_write
       -E
@@ -117,15 +119,16 @@ services:
   # ============================================
   # NEO4J WRITER - Neo4j Writes
   # ============================================
-  # ⚠️ DISABLED: Şu an kullanılmıyor - main_worker doğrudan Neo4j'ye yazıyor
+  # ⚠️ DISABLED: main_worker doğrudan Neo4j'ye yazıyor
   # Gelecekte queue-based yazma istenirse comment'leri kaldırın
   # neo4j_writer:
   #   image: celery-worker:latest
   #   container_name: celery-neo4j-writer-dev
+  #   # prefork: Docker/Linux için
   #   command: >
   #     python -m celery -A src.celery_app worker
   #     --loglevel=${LOG_LEVEL:-info}
-  #     --pool=${CELERY_POOL:-threads}
+  #     --pool=prefork
   #     --concurrency=${WRITER_CONCURRENCY:-2}
   #     -Q neo4j_write
   #     -E
