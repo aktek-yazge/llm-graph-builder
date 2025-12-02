@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stop Celery Workers in Docker
+# Stop Celery Workers in Docker - DEV Environment
 #
 # Usage: ./stop-docker.sh [service_name]
 # Examples:
@@ -11,15 +11,16 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
-echo "🛑 Stopping Celery Workers (Docker)..."
+COMPOSE_FILE="docker-compose.yml"
+
+echo "🛑 Stopping Celery Workers (DEV)..."
 
 if [ -n "$1" ]; then
     echo "   Service: $1"
-    docker-compose stop "$1"
+    docker compose -f "$COMPOSE_FILE" stop "$1"
 else
-    docker-compose down
+    docker compose -f "$COMPOSE_FILE" down
 fi
 
 echo ""
 echo "✅ Stopped!"
-

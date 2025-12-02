@@ -24,4 +24,9 @@ fi
 
 echo ""
 echo "✅ Stopped!"
-
+echo ""
+echo "📊 Status:"
+docker compose -f "$COMPOSE_FILE" ps
+echo ""
+echo "📋 To restart:"
+echo "  ./start-docker-preview.sh    # Start all workers"

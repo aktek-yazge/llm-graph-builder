@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Celery Workers in Docker - PREVIEW Environment
 # Uses docker-compose.preview.yml with .preview.env
-# Connects to rabbitmq-dev, postgres-dev in Docker network
+# Connects to rabbitmq, postgres in preview Docker network
 #
 # Usage: ./start-docker-preview.sh [service_name]
 # Examples:
@@ -16,17 +16,36 @@ cd "$SCRIPT_DIR"
 
 COMPOSE_FILE="docker-compose.preview.yml"
 ENV_FILE=".preview.env"
+NETWORK_NAME="llm-graph-builder_preview"
 
 echo "🚀 Starting Celery Workers (PREVIEW)..."
 echo "   Compose: $COMPOSE_FILE"
 echo "   Env: $ENV_FILE"
+echo "   Network: $NETWORK_NAME"
 echo ""
+
+# Check if preview network exists
+if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    echo "❌ Error: Network '$NETWORK_NAME' not found!"
+    echo ""
+    echo "   Please start the preview environment first:"
+    echo "   cd .. && docker-compose -f docker-compose.preview.yml up -d rabbitmq postgres"
+    echo ""
+    exit 1
+fi
+
+# Check if .preview.env exists
+if [ ! -f "$ENV_FILE" ]; then
+    echo "❌ Error: $ENV_FILE not found!"
+    echo "   Please create .preview.env from .preview.env.example"
+    exit 1
+fi
 
 if [ -n "$1" ]; then
     echo "   Service: $1"
     docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d "$1"
 else
-    echo "   Services: main_worker, db_writer, neo4j_writer, flower"
+    echo "   Services: main_worker, db_writer, flower"
     docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d
 fi
 
