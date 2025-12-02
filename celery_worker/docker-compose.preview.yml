@@ -28,12 +28,15 @@ services:
   main_worker:
     image: celery-worker:latest
     container_name: celery-main-worker
-    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
+    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
+    # concurrency: Başlangıç worker sayısı (Flower'dan artırılabilir/azaltılabilir)
+    # Flower UI: Workers > Worker Name > Pool > Grow/Shrink butonları
+    # NOT: autoscale KULLANMA - Flower'dan yapılan değişiklikler kalıcı olsun
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-prefork}
-      --concurrency=${MAIN_CONCURRENCY:-8}
+      --pool=prefork
+      --concurrency=12
       -Q celery
       -E
       -n main-worker@%h
@@ -51,11 +54,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8g
-          cpus: "4"
+          memory: 24g
+          cpus: "6"
         reservations:
-          memory: 2g
-          cpus: "1"
+          memory: 8g
+          cpus: "2"
     healthcheck:
       test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
       interval: 30s
@@ -69,7 +72,7 @@ services:
         max-file: "5"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # ============================================
   # DB WRITER - PostgreSQL Writes
@@ -77,12 +80,12 @@ services:
   db_writer:
     image: celery-worker:latest
     container_name: celery-db-writer
-    # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
+    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
-      --pool=${CELERY_POOL:-prefork}
-      --concurrency=${WRITER_CONCURRENCY:-2}
+      --pool=prefork
+      --concurrency=${WRITER_CONCURRENCY:-4}
       -Q db_write
       -E
       -n db-writer@%h
@@ -99,11 +102,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: "2"
+          memory: 4g
+          cpus: "4"
         reservations:
-          memory: 512m
-          cpus: "0.5"
+          memory: 1g
+          cpus: "1"
     healthcheck:
       test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
       interval: 30s
@@ -117,7 +120,7 @@ services:
         max-file: "3"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
   # ============================================
   # NEO4J WRITER - Neo4j Writes
@@ -194,7 +197,7 @@ services:
         max-file: "3"
     networks:
       - preview
-    restart: unless-stopped
+    restart: always
 
 # Preview ortamı network'ü (root docker-compose.preview.yml'de tanımlı)
 # Docker Compose network adını project_name + network_name olarak oluşturur

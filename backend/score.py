@@ -5414,129 +5414,14 @@ async def start_chunking(file_id: str):
             f"🔄 Started chunking for file {file_id_int}: {file_record.original_name}"
         )
 
-        # Database'den dosya yolunu al
-        file_path = file_record.file_path
-
-        if not os.path.exists(file_path):
-            # Dosya local'de yok, S3'ten indirmeyi dene
-            logging.warning(
-                f"⚠️ File not found locally: {file_path}. Attempting to download from S3 and extract images..."
-            )
-
-            s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
-            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-            aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-
-            if s3_bucket and aws_access_key_id and aws_secret_access_key:
-                try:
-                    import boto3
-                    from botocore.exceptions import ClientError
-                    from pathlib import Path
-
-                    # S3 key'ini oluştur (documents/{doc_name}/{filename})
-                    normalized_filename = file_record.filename
-                    doc_name = Path(normalized_filename).stem
-                    s3_key = f"documents/{doc_name}/{normalized_filename}"
-
-                    # S3 client oluştur
-                    s3_client = boto3.client(
-                        "s3",
-                        aws_access_key_id=aws_access_key_id,
-                        aws_secret_access_key=aws_secret_access_key,
-                    )
-
-                    # S3'te dosya var mı kontrol et
-                    try:
-                        s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
-                        logging.info(f"✅ File found in S3: s3://{s3_bucket}/{s3_key}")
-
-                        # Local dizini oluştur
-                        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-                        # PDF'i S3'ten indir
-                        logging.info(f"📥 Downloading PDF from S3: {s3_key}")
-                        s3_client.download_file(s3_bucket, s3_key, file_path)
-                        logging.info(f"✅ PDF downloaded successfully to: {file_path}")
-
-                        # Dosya indirildi, şimdi image extraction yapılması için status'ü güncelle
-                        # Image extraction yapılması için chunking_status'ü "ready" yap ve upload_status'ü kontrol et
-                        file_record.chunking_status = "ready"  # Ready for chunking
-                        file_record.upload_status = "uploaded"  # PDF indirildi
-                        file_record.status = "uploaded"  # Ana status'ü güncelle
-                        db_session.commit()
-                        db_session.close()
-
-                        logging.info(
-                            f"✅ PDF downloaded from S3, file {file_id_int} is ready for chunking"
-                        )
-
-                        return create_api_response(
-                            "Success",
-                            message=f"File downloaded from S3. Image extraction started. Chunking will begin after image extraction completes.",
-                            data={
-                                "file_id": file_id_int,
-                                "status": "downloaded_from_s3",
-                                "chunking_status": "ready",
-                            },
-                        )
-
-                    except ClientError as e:
-                        if e.response["Error"]["Code"] == "404" or e.response["Error"]["Code"] == "NoSuchKey":
-                            # S3'te de yok, dosyanın tekrar upload edilmesi gerekiyor
-                            error_message = f"File not found locally and not found in S3. Please re-upload the file: {file_record.original_name}"
-                            file_record.chunking_status = "failed"
-                            file_record.processing_error = error_message[:500]
-                            file_record.reason = f"Chunking failed: {error_message}"
-                            db_session.commit()
-                            db_session.close()
-                            logging.error(f"❌ {error_message}")
-                            return create_api_response(
-                                "Failed",
-                                message=error_message,
-                                data={
-                                    "file_id": file_id_int,
-                                    "requires_reupload": True,
-                                },
-                            )
-                        else:
-                            raise
-
-                except Exception as s3_error:
-                    error_message = f"Failed to download file from S3: {str(s3_error)}. Please re-upload the file: {file_record.original_name}"
-                    file_record.chunking_status = "failed"
-                    file_record.processing_error = error_message[:500]
-                    file_record.reason = f"Chunking failed: {error_message}"
-                    db_session.commit()
-                    db_session.close()
-                    logging.error(f"❌ {error_message}")
-                    return create_api_response(
-                        "Failed",
-                        message=error_message,
-                        data={
-                            "file_id": file_id_int,
-                            "requires_reupload": True,
-                        },
-                    )
-            else:
-                # S3 credentials yok
-                error_message = f"File not found locally and S3 credentials not configured. Please re-upload the file: {file_record.original_name}"
-                file_record.chunking_status = "failed"
-                file_record.processing_error = error_message[:500]
-                file_record.reason = f"Chunking failed: {error_message}"
-                db_session.commit()
-                db_session.close()
-                logging.error(f"❌ {error_message}")
-                return create_api_response(
-                    "Failed",
-                    message=error_message,
-                    data={
-                        "file_id": file_id_int,
-                        "requires_reupload": True,
-                    },
-                )
-
         # Chunking işlemini celery task'e yönlendir
-        celery_app.send_task("src.tasks.chunk_file_task", args=[file_id_int])
+        # NOT: S3'ten dosya indirme ve image işleme Celery Worker tarafından yapılır
+        # Worker, S3'ten image'ları indirir ve Gemini OCR ile markdown oluşturur
+        task_result = celery_app.send_task("src.tasks.chunk_file_task", args=[file_id_int])
+        
+        logging.info(
+            f"📤 Chunking task sent to Celery for file {file_id_int}, task_id: {task_result.id}"
+        )
 
         db_session.close()
         return create_api_response(
