@@ -31,12 +31,21 @@ const ButtonWithToolTip = ({
   color?: 'primary' | 'danger' | undefined;
 }) => {
   const [isHovered, setIsHovered] = useState<boolean>(false);
+  
+  const handleClick: MouseEventHandler<HTMLButtonElement> = (e) => {
+    // Tooltip'i kapat (modal açılırken tooltip'in görünür kalmasını engelle)
+    setIsHovered(false);
+    if (onClick) {
+      onClick(e);
+    }
+  };
+  
   return (
     <Tooltip placement={placement} type='simple'>
       <Tooltip.Trigger hasButtonWrapper>
         <Button
           size={size}
-          onClick={onClick}
+          onClick={handleClick}
           isDisabled={disabled}
           className={className}
           isLoading={loading}
