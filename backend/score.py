@@ -4561,14 +4561,24 @@ async def fetch_chunktext(
 async def backend_connection_configuration():
     try:
         start = time.time()
-        uri = os.getenv("NEO4J_URI")
-        username = os.getenv("NEO4J_USERNAME")
-        database = os.getenv("NEO4J_DATABASE")
-        password = os.getenv("NEO4J_PASSWORD")
+        # Check if using Memgraph or Neo4j
+        graph_db_type = os.getenv("GRAPH_DB_TYPE", "neo4j").lower()
+        
+        if graph_db_type == "memgraph":
+            uri = os.getenv("MEMGRAPH_URI")
+            username = os.getenv("MEMGRAPH_USERNAME", "")
+            database = os.getenv("MEMGRAPH_DATABASE", "memgraph")
+            password = os.getenv("MEMGRAPH_PASSWORD", "")
+        else:
+            uri = os.getenv("NEO4J_URI")
+            username = os.getenv("NEO4J_USERNAME")
+            database = os.getenv("NEO4J_DATABASE")
+            password = os.getenv("NEO4J_PASSWORD")
+        
         gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
-        logging.info(f"🔍 Backend connection config - NEO4J_URI from env: {uri}")
-        if all([uri, username, database, password]):
-            graph = Neo4jGraph()
+        logging.info(f"🔍 Backend connection config - DB_TYPE: {graph_db_type}, URI from env: {uri}")
+        if uri and (graph_db_type == "memgraph" or all([username, database, password])):
+            graph = Neo4jGraph(url=uri, username=username, password=password, database=database)
             logging.info(f"login connection status of object: {graph}")
             if graph is not None:
                 graph_connection = True
