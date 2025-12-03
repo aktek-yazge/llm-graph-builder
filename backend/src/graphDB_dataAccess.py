@@ -521,6 +521,12 @@ class graphDBdataAccess:
 
     def check_account_access(self, database):
         try:
+            # Check if using Memgraph (doesn't support dbms.components())
+            graph_db_type = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+            if graph_db_type == "memgraph":
+                logging.info("Memgraph: Assuming write access (no privilege check needed)")
+                return True
+            
             query_dbms_componenet = "call dbms.components() yield edition"
             result_dbms_componenet = self.graph.query(
                 query_dbms_componenet, session_params={"database": self.graph._database}
@@ -562,6 +568,12 @@ class graphDBdataAccess:
 
     def check_gds_version(self):
         try:
+            # Check if using Memgraph (doesn't have GDS)
+            graph_db_type = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+            if graph_db_type == "memgraph":
+                logging.info("Memgraph: GDS not available (Neo4j-specific)")
+                return False
+            
             gds_procedure_count = """
             SHOW FUNCTIONS YIELD name WHERE name STARTS WITH 'gds.version' RETURN COUNT(*) AS totalGdsProcedures
             """
@@ -593,16 +605,25 @@ class graphDBdataAccess:
         Returns a status of connection from NEO4j is success or failure
         """
 
-        db_vector_dimension = self.graph.query(
-            """SHOW INDEXES YIELD *
-                                    WHERE type = 'VECTOR' AND name = 'vector'
-                                    RETURN options.indexConfig['vector.dimensions'] AS vector_dimensions
-                                """,
-            session_params={"database": self.graph._database},
-        )
+        # Check if using Memgraph (doesn't support SHOW INDEXES YIELD)
+        graph_db_type = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+        
+        if graph_db_type == "memgraph":
+            # Memgraph: Skip vector index check (Memgraph uses different index syntax)
+            db_vector_dimension = []
+            logging.info("Memgraph: Vector index check skipped (not supported)")
+        else:
+            # Neo4j: Use standard SHOW INDEXES query
+            db_vector_dimension = self.graph.query(
+                """SHOW INDEXES YIELD *
+                                        WHERE type = 'VECTOR' AND name = 'vector'
+                                        RETURN options.indexConfig['vector.dimensions'] AS vector_dimensions
+                                    """,
+                session_params={"database": self.graph._database},
+            )
 
         result_chunks = self.graph.query(
-            """match (c:Chunk) return size(c.embedding) as embeddingSize, count(*) as chunks, 
+            """MATCH (c:Chunk) RETURN size(c.embedding) as embeddingSize, count(*) as chunks, 
                                                     count(c.embedding) as hasEmbedding
                                 """,
             session_params={"database": self.graph._database},
