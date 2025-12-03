@@ -58,6 +58,16 @@ class GraphDatabaseAdapter(ABC):
     def show_indexes_query(self) -> str:
         """Generate query to show all indexes"""
         pass
+    
+    @abstractmethod
+    def get_node_properties_query(self) -> str:
+        """Generate query to get all node properties by label"""
+        pass
+    
+    @abstractmethod
+    def get_relationship_types_query(self) -> str:
+        """Generate query to get all relationship types"""
+        pass
 
 
 class Neo4jAdapter(GraphDatabaseAdapter):
@@ -101,6 +111,16 @@ class Neo4jAdapter(GraphDatabaseAdapter):
     
     def show_indexes_query(self) -> str:
         return "SHOW INDEXES YIELD name, type, labelsOrTypes, properties, state RETURN *"
+    
+    def get_node_properties_query(self) -> str:
+        return """
+        CALL db.schema.nodeTypeProperties() 
+        YIELD nodeType, propertyName, propertyTypes
+        RETURN nodeType, collect({property: propertyName, type: propertyTypes[0]}) AS properties
+        """
+    
+    def get_relationship_types_query(self) -> str:
+        return "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
 
 
 class MemgraphAdapter(GraphDatabaseAdapter):
@@ -150,6 +170,23 @@ class MemgraphAdapter(GraphDatabaseAdapter):
     
     def show_indexes_query(self) -> str:
         return "SHOW INDEX INFO"
+    
+    def get_node_properties_query(self) -> str:
+        # Memgraph doesn't have db.schema.nodeTypeProperties, use alternative
+        return """
+        MATCH (n)
+        WITH labels(n) AS nodeLabels, keys(n) AS properties
+        UNWIND nodeLabels AS label
+        UNWIND properties AS property
+        WITH label, property, n
+        RETURN label AS nodeType, 
+               collect(DISTINCT {property: property, type: 'STRING'}) AS properties
+        LIMIT 1000
+        """
+    
+    def get_relationship_types_query(self) -> str:
+        # Memgraph compatible query
+        return "MATCH ()-[r]->() RETURN DISTINCT type(r) AS relationshipType"
 
 
 def get_adapter() -> GraphDatabaseAdapter:

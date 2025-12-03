@@ -4578,7 +4578,39 @@ async def backend_connection_configuration():
         gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
         logging.info(f"🔍 Backend connection config - DB_TYPE: {graph_db_type}, URI from env: {uri}")
         if uri and (graph_db_type == "memgraph" or all([username, database, password])):
-            graph = Neo4jGraph(url=uri, username=username, password=password, database=database)
+            # Memgraph için refresh_schema=False (Neo4j schema sorguları desteklenmiyor)
+            # Schema'yı manuel olarak Memgraph uyumlu sorgularla yükleyeceğiz
+            if graph_db_type == "memgraph":
+                graph = Neo4jGraph(url=uri, username=username, password=password, database=database, refresh_schema=False)
+                # Memgraph için manuel schema yükleme
+                try:
+                    from src.graph_db_adapter import get_db_adapter
+                    adapter = get_db_adapter()
+                    # Labels
+                    labels_result = graph.query(adapter.get_labels_query())
+                    labels = [r.get('label', r) for r in labels_result] if labels_result else []
+                    # Flatten nested lists
+                    flat_labels = []
+                    for l in labels:
+                        if isinstance(l, list):
+                            flat_labels.extend(l)
+                        else:
+                            flat_labels.append(l)
+                    # Relationship types
+                    rel_result = graph.query(adapter.get_relationship_types_query())
+                    rel_types = [r.get('relationshipType', r) for r in rel_result] if rel_result else []
+                    # Set basic schema
+                    graph.structured_schema = {
+                        "node_props": {},
+                        "rel_props": {},
+                        "relationships": [],
+                        "metadata": {"labels": list(set(flat_labels)), "relationship_types": list(set(rel_types))}
+                    }
+                    logging.info(f"✅ Memgraph schema yüklendi: {len(flat_labels)} labels, {len(rel_types)} relationship types")
+                except Exception as schema_err:
+                    logging.warning(f"⚠️ Memgraph schema yükleme hatası (devam ediliyor): {schema_err}")
+            else:
+                graph = Neo4jGraph(url=uri, username=username, password=password, database=database)
             logging.info(f"login connection status of object: {graph}")
             if graph is not None:
                 graph_connection = True
