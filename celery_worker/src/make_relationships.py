@@ -900,10 +900,11 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
         first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
         logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
+        # Memgraph uyumlu: MATCH önce, OPTIONAL MATCH sonra (OPTIONAL MATCH sonrası MATCH yapılamaz)
         query_to_create_FIRST_relation = """ 
             UNWIND $relationships AS relationship
-            OPTIONAL MATCH (d:Document {fileName: $f_name})
             MATCH (c:Chunk {id: relationship.chunk_id})
+            OPTIONAL MATCH (d:Document {fileName: $f_name})
             FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
                     MERGE (d)-[:FIRST_CHUNK]->(c))
             """

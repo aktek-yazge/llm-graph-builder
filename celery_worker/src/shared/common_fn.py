@@ -123,8 +123,13 @@ def create_graph_database_connection(uri, userName, password, database):
   }
   
   db_name = "Memgraph" if graph_db_type == "memgraph" else "Neo4j"
+  
+  # Memgraph doesn't support multi-database, so database should be None
+  if graph_db_type == "memgraph":
+    database = None
+    
   logging.info(f"{db_name} bağlantısı kuruluyor: {uri} (SSL: DISABLED)")
-  logging.info(f"Connection config: timeout={connection_timeout}s, pool_size={max_connection_pool_size}")
+  logging.info(f"Connection config: timeout={connection_timeout}s, pool_size={max_connection_pool_size}, database={database}")
   
   # Both Neo4j and Memgraph use Bolt protocol, so Neo4jGraph works for both
   if enable_user_agent:
@@ -135,7 +140,17 @@ def create_graph_database_connection(uri, userName, password, database):
   else:
     graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, 
                       refresh_schema=False, sanitize=False, driver_config=driver_config,
-                      timeout=read_timeout)    
+                      timeout=read_timeout)
+  
+  # Debug: Check what database LangChain actually set
+  actual_db = getattr(graph, '_database', 'UNKNOWN')
+  logging.info(f"🔍 LangChain Neo4jGraph._database = {actual_db}")
+  
+  # Force override for Memgraph - LangChain may set default "neo4j" even if we pass None
+  if graph_db_type == "memgraph" and actual_db is not None:
+    logging.warning(f"⚠️ Memgraph: Overriding _database from '{actual_db}' to None")
+    graph._database = None
+    
   return graph
 
 
