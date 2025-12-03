@@ -884,9 +884,9 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
                 )
                 logging.info(f"   ✅ Completed batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
                 return result
-        except Exception as e:
-            logging.error(f"   ❌ Error in batch {batch_number} for file {file_name_param}: {e}")
-            raise
+            except Exception as e:
+                logging.error(f"   ❌ Error in batch {batch_number} for file {file_name_param}: {e}")
+                raise
     
     for batch_start in range(0, total_chunks, chunk_batch_size):
         batch_end = min(batch_start + chunk_batch_size, total_chunks)
