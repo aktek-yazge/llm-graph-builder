@@ -7,6 +7,9 @@ from src.celery_app import app
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.processing_utils import GeminiOCRException, GeminiRateLimitException
 
+# Schema version cache - artık belge yüklenince version artırılıyor
+from src.shared.schema_cache import increment_schema_version
+
 # Import DB Write Queue helpers - async writes to PostgreSQL
 from src.db_writer import (
     enqueue_db_write,
@@ -316,6 +319,16 @@ def create_graph_task(self, file_id: int):
         
         # Final check after processing
         raise_if_cancelled(self, file_id, db_session, "after_graph_creation_complete")
+        
+        # 🔄 Schema version'ı artır - yeni belge eklendi, şema değişmiş olabilir
+        try:
+            neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+            if neo4j_uri:
+                new_version = increment_schema_version(neo4j_uri)
+                logging.info(f"📈 Schema version artırıldı: {neo4j_uri} → v{new_version} (file: {file_id})")
+        except Exception as schema_error:
+            # Schema version artırma başarısız olsa bile işleme devam et
+            logging.warning(f"⚠️ Schema version artırılamadı (file {file_id}): {schema_error}")
         
         return file_id
 

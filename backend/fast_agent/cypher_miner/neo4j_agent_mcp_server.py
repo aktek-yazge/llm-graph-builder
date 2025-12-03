@@ -30,12 +30,11 @@ fast = FastAgent("Neo4j Intelligence Agent")
     instruction="""
     Sen Dinkal Sigortaya ait poliçeler hakkında sorulan sorulara cevap veren bir ajansın. 
         
-    Bu bilgilere nasıl erişebileceğini bilmiyorsun. Öğrenmek için get_neo4j_schema sana yol gösterecek.
+    Neo4j veritabanı şema bilgisi prompt'a eklenmiştir. Bu şema bilgisini kullanarak tool çağrıları yap.
     
-    **STRING NORMALİZASYON**: Execute queries exactly as reasoner provides:
-    ```cypher
-    toLower(apoc.text.clean(field)) CONTAINS toLower(apoc.text.clean('value'))
-    ```
+    **STRING NORMALİZASYON**: String karşılaştırmalarında sadece toLower() kullan (apoc.text.clean KULLANMA - yanlış eşleşmelere sebep olur!):
+    - ✅ Doğru: toLower(field) CONTAINS toLower('value')
+    - ❌ Yanlış: apoc.text.clean() - boşlukları kaldırır ve yanlış substring eşleşmelerine sebep olur
     
     Şema bilgisine göre tool çağrıları yaparak sonuca ulaşmaya çalış.
     

@@ -78,7 +78,7 @@ import re
 from urllib.parse import unquote
 from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
-from src.celery_client import celery_app, revoke_celery_task, revoke_celery_tasks
+from src.celery_client import celery_app, revoke_celery_task, revoke_celery_tasks, purge_all_queues, get_queue_stats
 from src.models.file_queue_models import get_file_queue_db
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
@@ -6007,6 +6007,14 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
         # Handle "all" parameter
         if file_id.lower() == "all":
             reset_count = 0  # Initialize reset_count for all stages
+            
+            # 🧹 KUYRUK TEMİZLEME - Tüm bekleyen taskları temizle
+            purge_result = purge_all_queues()
+            if purge_result["success"]:
+                logging.info(f"🧹 Queue purge: {purge_result['message']}")
+            else:
+                logging.warning(f"⚠️ Queue purge warning: {purge_result['message']}")
+            
             if stage == "invalidate":
                  # Invalidate logic for ALL files
                 files_to_check = (
@@ -7222,6 +7230,13 @@ async def start_background_processing():
         from src.models.file_queue_models import get_file_queue_db, UploadedFile
         from sqlalchemy import or_, and_
 
+        # 🧹 KUYRUK TEMİZLEME - Tüm bekleyen taskları temizle
+        purge_result = purge_all_queues()
+        if purge_result["success"]:
+            logging.info(f"🧹 Queue purge (processing/start): {purge_result['message']}")
+        else:
+            logging.warning(f"⚠️ Queue purge warning: {purge_result['message']}")
+
         # Önce yarıda kalan işlemleri resetle
         db = get_file_queue_db()
         db_session = db.get_db_session()
@@ -7296,6 +7311,7 @@ async def start_background_processing():
             data={
                 "status": "reset_completed",
                 "reset_count": reset_count,
+                "queue_purged": purge_result.get("purged_count", 0),
             },
         )
 
@@ -7306,6 +7322,40 @@ async def start_background_processing():
             "Failed",
             message="Failed to reset processing",
             error=error_message,
+        )
+
+
+@app.get("/api/v2/queue/stats")
+async def get_queue_statistics():
+    """Get RabbitMQ queue statistics"""
+    try:
+        stats = get_queue_stats()
+        return create_api_response(
+            "Success" if stats["success"] else "Failed",
+            message=stats["message"],
+            data=stats,
+        )
+    except Exception as e:
+        return create_api_response(
+            "Failed",
+            message=f"Failed to get queue stats: {str(e)}",
+        )
+
+
+@app.post("/api/v2/queue/purge")
+async def purge_queue():
+    """Purge all pending tasks from RabbitMQ queues"""
+    try:
+        result = purge_all_queues()
+        return create_api_response(
+            "Success" if result["success"] else "Failed",
+            message=result["message"],
+            data=result,
+        )
+    except Exception as e:
+        return create_api_response(
+            "Failed",
+            message=f"Failed to purge queue: {str(e)}",
         )
 
 

@@ -85,6 +85,11 @@ services:
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
     volumes:
+      # SOURCE CODE MOUNT - restart ile değişiklikler uygulanır (rebuild gerekmez)
+      - ./backend/src:/code/backend/src:ro
+      - ./backend/mcp-servers:/code/backend/mcp-servers:ro
+      - ./backend/fast_agent:/code/backend/fast_agent:ro
+      - ./backend/fastagent.config.yaml:/code/backend/fastagent.config.yaml:ro
       # Persist queue.db in user's home directory - survives container/image deletion
       # Mount directory so Docker can auto-create the file
       # Backend will use QUEUE_DB_PATH environment variable to write to this location

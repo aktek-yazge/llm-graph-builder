@@ -92,3 +92,103 @@ def get_task_status(task_id: str) -> Optional[str]:
     except Exception as e:
         logging.error(f"❌ Failed to get task status for {task_id}: {str(e)}")
         return None
+
+
+def purge_all_queues() -> dict:
+    """
+    Purge (clear) all messages from RabbitMQ queues.
+    This removes all pending tasks that haven't been picked up by workers yet.
+    
+    Returns:
+        Dict with purged message count or error info
+    """
+    try:
+        # Method 1: Use Celery's built-in purge (clears default queue)
+        purged_count = celery_app.control.purge()
+        logging.info(f"🧹 Purged {purged_count} messages from Celery queues")
+        
+        return {
+            "success": True,
+            "purged_count": purged_count,
+            "message": f"Successfully purged {purged_count} pending tasks from queues"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logging.error(f"❌ Failed to purge queues: {error_msg}")
+        return {
+            "success": False,
+            "purged_count": 0,
+            "message": f"Failed to purge queues: {error_msg}"
+        }
+
+
+def purge_specific_queue(queue_name: str = "celery") -> dict:
+    """
+    Purge a specific RabbitMQ queue by name.
+    
+    Args:
+        queue_name: Name of the queue to purge (default: "celery")
+    
+    Returns:
+        Dict with purged message count or error info
+    """
+    try:
+        from kombu import Connection
+        
+        with Connection(broker_url) as conn:
+            channel = conn.channel()
+            # queue_purge returns the number of messages deleted
+            message_count = channel.queue_purge(queue_name)
+            logging.info(f"🧹 Purged {message_count} messages from queue '{queue_name}'")
+            
+            return {
+                "success": True,
+                "queue_name": queue_name,
+                "purged_count": message_count,
+                "message": f"Successfully purged {message_count} messages from '{queue_name}'"
+            }
+    except Exception as e:
+        error_msg = str(e)
+        logging.error(f"❌ Failed to purge queue '{queue_name}': {error_msg}")
+        return {
+            "success": False,
+            "queue_name": queue_name,
+            "purged_count": 0,
+            "message": f"Failed to purge queue: {error_msg}"
+        }
+
+
+def get_queue_stats() -> dict:
+    """
+    Get statistics about RabbitMQ queues.
+    
+    Returns:
+        Dict with queue statistics
+    """
+    try:
+        # Use Celery's inspect to get active queues and tasks
+        inspect = celery_app.control.inspect()
+        
+        active_tasks = inspect.active() or {}
+        reserved_tasks = inspect.reserved() or {}
+        scheduled_tasks = inspect.scheduled() or {}
+        
+        total_active = sum(len(tasks) for tasks in active_tasks.values())
+        total_reserved = sum(len(tasks) for tasks in reserved_tasks.values())
+        total_scheduled = sum(len(tasks) for tasks in scheduled_tasks.values())
+        
+        return {
+            "success": True,
+            "active_tasks": total_active,      # Currently executing
+            "reserved_tasks": total_reserved,  # Fetched but not yet executing
+            "scheduled_tasks": total_scheduled, # Waiting in queue
+            "workers": list(active_tasks.keys()),
+            "message": f"Active: {total_active}, Reserved: {total_reserved}, Scheduled: {total_scheduled}"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logging.error(f"❌ Failed to get queue stats: {error_msg}")
+        return {
+            "success": False,
+            "message": f"Failed to get queue stats: {error_msg}"
+        }
