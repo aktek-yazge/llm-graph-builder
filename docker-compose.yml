@@ -187,12 +187,13 @@ services:
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false
-      # Memory ayarları - yoğun işlemler için optimize edildi
-      - NEO4J_server_memory_heap_initial__size=6G
-      - NEO4J_server_memory_heap_max__size=12G
-      - NEO4J_server_memory_pagecache_size=6G
-      # Transaction memory limit - yoğun işlemler için yüksek tutuldu
-      - NEO4J_dbms_memory_transaction_total_max=10G
+      # Memory ayarları - 128GB RAM için optimize edildi
+      - NEO4J_server_memory_heap_initial__size=16G
+      - NEO4J_server_memory_heap_max__size=24G
+      # Page Cache - TÜM GRAF VERİSİ RAM'DE! Performans için kritik
+      - NEO4J_server_memory_pagecache_size=48G
+      # Transaction memory limit - yoğun işlemler için
+      - NEO4J_dbms_memory_transaction_total_max=8G
       - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
       - NEO4J_apoc_export_file_enabled=true
@@ -201,7 +202,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 24g
+          memory: 80g
           cpus: "8"
     volumes:
       - neo4j_data_prod_2:/data

@@ -55,10 +55,10 @@ services:
       resources:
         limits:
           memory: 24g
-          cpus: "6"
+          cpus: "10"
         reservations:
           memory: 8g
-          cpus: "2"
+          cpus: "4"
     healthcheck:
       test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
       interval: 30s
@@ -102,11 +102,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4g
+          memory: 8g
           cpus: "4"
         reservations:
-          memory: 1g
-          cpus: "1"
+          memory: 2g
+          cpus: "2"
     healthcheck:
       test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
       interval: 30s

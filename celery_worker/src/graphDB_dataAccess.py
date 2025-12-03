@@ -1726,11 +1726,16 @@ class graphDBdataAccess:
             int: Güncellenen chunk sayısı
         """
         try:
+            # CALL IN TRANSACTIONS ile her 25 chunk'ta commit - timeout önler
             update_query = """
                 UNWIND $batch_data AS row
-                MATCH (c:Chunk {id: row.chunk_id})
-                SET c.embedding = row.embedding
-                RETURN count(c) as updated_count
+                CALL {
+                    WITH row
+                    MATCH (c:Chunk {id: row.chunk_id})
+                    SET c.embedding = row.embedding
+                    RETURN c
+                } IN TRANSACTIONS OF 25 ROWS
+                RETURN count(*) as updated_count
             """
 
             result = self.execute_query(update_query, {"batch_data": batch_data})
@@ -1997,11 +2002,16 @@ class graphDBdataAccess:
             int: Güncellenen entity sayısı
         """
         try:
+            # CALL IN TRANSACTIONS ile her 25 entity'de commit - timeout önler
             update_query = """
                 UNWIND $batch_data AS row
-                MATCH (n) WHERE elementId(n) = row.node_id
-                SET n.embedding = row.embedding
-                RETURN count(n) as updated_count
+                CALL {
+                    WITH row
+                    MATCH (n) WHERE elementId(n) = row.node_id
+                    SET n.embedding = row.embedding
+                    RETURN n
+                } IN TRANSACTIONS OF 25 ROWS
+                RETURN count(*) as updated_count
             """
 
             result = self.execute_query(update_query, {"batch_data": batch_data})

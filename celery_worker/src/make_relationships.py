@@ -229,20 +229,25 @@ def create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name):
     
     if data_for_query:
         # Sadece embedding eksik olan chunk'ları güncelle
+        # CALL IN TRANSACTIONS kullanarak her 25 chunk'ta bir commit yapılır
         query_to_create_embedding = """
             UNWIND $data AS row
-            MATCH (c:Chunk {id: row.chunkId})
-            SET c.embedding = row.embeddings
-            WITH c, row
-            OPTIONAL MATCH (d:Document {fileName: $fileName})
-            FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (c)-[:PART_OF]->(d)
-            )
-            RETURN count(c) as updated_count
+            CALL {
+                WITH row
+                MATCH (c:Chunk {id: row.chunkId})
+                SET c.embedding = row.embeddings
+                WITH c, row
+                OPTIONAL MATCH (d:Document {fileName: $fileName})
+                FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END |
+                    MERGE (c)-[:PART_OF]->(d)
+                )
+                RETURN c
+            } IN TRANSACTIONS OF 25 ROWS
+            RETURN count(*) as updated_count
         """       
         result = execute_graph_query(graph, query_to_create_embedding, params={"fileName": file_name, "data": data_for_query})
         updated_count = result[0]['updated_count'] if result else len(data_for_query)
-        logging.info(f"✅ {updated_count} chunk için embedding başarıyla oluşturuldu")
+        logging.info(f"✅ {updated_count} chunk için embedding başarıyla oluşturuldu (CALL IN TRANSACTIONS)")
     else:
         logging.warning("⚠️ Hiç embedding oluşturulamadı")
 
@@ -287,15 +292,20 @@ def create_chunk_embeddings_immediate(graph, chunkId_chunkDoc_list, file_name):
     
     if data_for_query:
         # Chunk'ları embedding ile güncelle (chunk'lar yeni oluşturuldu, direkt güncelle)
+        # CALL IN TRANSACTIONS ile her 25 chunk'ta commit
         query_to_create_embedding = """
             UNWIND $data AS row
-            MATCH (c:Chunk {id: row.chunkId})
-            SET c.embedding = row.embeddings
-            RETURN count(c) as updated_count
+            CALL {
+                WITH row
+                MATCH (c:Chunk {id: row.chunkId})
+                SET c.embedding = row.embeddings
+                RETURN c
+            } IN TRANSACTIONS OF 25 ROWS
+            RETURN count(*) as updated_count
         """       
         result = execute_graph_query(graph, query_to_create_embedding, params={"data": data_for_query})
         updated_count = result[0]['updated_count'] if result else len(data_for_query)
-        logging.info(f"✅ {updated_count} yeni chunk için embedding başarıyla oluşturuldu")
+        logging.info(f"✅ {updated_count} yeni chunk için embedding oluşturuldu (CALL IN TRANSACTIONS)")
     else:
         logging.warning("⚠️ Hiç embedding oluşturulamadı")
     
@@ -926,15 +936,24 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
             if len(existing_positions) > 10:
                 logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
         
+        # Optimized query with CALL IN TRANSACTIONS: 
+        # - Her 50 satırda auto-commit yapılır
+        # - Transaction lock süresi kısalır
+        # - Timeout riski azalır
         query_to_create_NEXT_relation = """
             MATCH (c1:Chunk {fileName: $file_name})
-            MATCH (c2:Chunk {fileName: $file_name})
-            WHERE c2.position = c1.position + 1
-            MERGE (c1)-[:NEXT_CHUNK]->(c2)
+            WITH c1 ORDER BY c1.position
+            WITH collect(c1) AS chunks
+            UNWIND range(0, size(chunks)-2) AS i
+            WITH chunks[i] AS c1, chunks[i+1] AS c2
+            CALL {
+                WITH c1, c2
+                MERGE (c1)-[:NEXT_CHUNK]->(c2)
+            } IN TRANSACTIONS OF 50 ROWS
             RETURN count(*) as created_count
         """
         next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
-        logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using position-based approach")
+        logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using CALL IN TRANSACTIONS")
         
     except Exception as relationship_error:
         # İlişki oluşturma hatası - rollback yap
