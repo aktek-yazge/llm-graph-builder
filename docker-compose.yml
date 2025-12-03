@@ -203,7 +203,7 @@ services:
       resources:
         limits:
           memory: 80g
-          cpus: "8"
+          cpus: "12"
     volumes:
       - neo4j_data_prod_2:/data
       - neo4j_plugins_prod_2:/plugins
