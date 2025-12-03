@@ -744,14 +744,20 @@ class FileProcessor:
 
     async def process_v2_chunking_batch(self, files: list):
         """Process chunking for a batch of files (eş zamanlı olarak)"""
+        # Memgraph için paralel dosya sayısını sınırla (transaction conflict azaltmak için)
+        max_parallel_files = int(os.environ.get("MAX_PARALLEL_FILES", "5"))
+        file_semaphore = asyncio.Semaphore(max_parallel_files)
+        
         logging.info(
-            f"📖 V2: Starting chunking batch for {len(files)} files (eş zamanlı)"
+            f"📖 V2: Starting chunking batch for {len(files)} files (max {max_parallel_files} concurrent)"
         )
 
-        # Process all files concurrently using asyncio.gather
-        tasks = [
-            self._process_single_file_chunking(file_record) for file_record in files
-        ]
+        async def process_with_semaphore(file_record):
+            async with file_semaphore:
+                return await self._process_single_file_chunking(file_record)
+
+        # Process files with controlled concurrency
+        tasks = [process_with_semaphore(file_record) for file_record in files]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Check for failed files and reset their status
@@ -1900,20 +1906,25 @@ class FileProcessor:
 
     async def process_v2_graph_creation_batch(self, files: list):
         """Process graph creation for a batch of files (eş zamanlı olarak)"""
+        # Memgraph için paralel dosya sayısını sınırla (transaction conflict azaltmak için)
+        max_parallel_files = int(os.environ.get("MAX_PARALLEL_FILES", "5"))
+        file_semaphore = asyncio.Semaphore(max_parallel_files)
+        
         file_ids = [f.id for f in files]
         file_names = [f.original_name for f in files]
         logging.info(
-            f"🎨 V2: Starting graph creation batch for {len(files)} files (eş zamanlı)"
+            f"🎨 V2: Starting graph creation batch for {len(files)} files (max {max_parallel_files} concurrent)"
         )
         logging.info(f"📋 Batch file IDs: {file_ids}")
         logging.info(f"📋 Batch file names: {file_names[:5]}{'...' if len(file_names) > 5 else ''}")
 
-        # Process all files concurrently using asyncio.gather
-        tasks = [
-            self._process_single_file_graph_creation(file_record)
-            for file_record in files
-        ]
-        logging.info(f"✅ V2: Created {len(tasks)} concurrent tasks, starting execution...")
+        async def process_with_semaphore(file_record):
+            async with file_semaphore:
+                return await self._process_single_file_graph_creation(file_record)
+
+        # Process files with controlled concurrency
+        tasks = [process_with_semaphore(file_record) for file_record in files]
+        logging.info(f"✅ V2: Created {len(tasks)} tasks (max {max_parallel_files} concurrent), starting execution...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Log results
