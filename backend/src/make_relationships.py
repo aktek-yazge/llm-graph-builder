@@ -860,25 +860,30 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     """
     # Process chunks in smaller batches to avoid memory issues and timeouts
     chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "50"))
+    # Memgraph için paralel batch sayısını sınırla (transaction conflict azaltmak için)
+    max_parallel_batches = int(os.environ.get("MAX_PARALLEL_BATCHES", "3"))
+    batch_semaphore = asyncio.Semaphore(max_parallel_batches)
+    
     total_chunks = len(batch_data)
-    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} for file: {file_name}")
+    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} (max {max_parallel_batches} parallel) for file: {file_name}")
     
     # Prepare all batch tasks for parallel execution
     batch_tasks = []
     batch_count = (total_chunks + chunk_batch_size - 1) // chunk_batch_size
     
-    # Create async task function (defined outside loop to avoid closure issues)
+    # Create async task function with semaphore to limit concurrency
     async def process_batch(batch_subset_data, batch_number, batch_start_idx, batch_end_idx, file_name_param, total_chunks_param):
-        try:
-            logging.info(f"   🚀 Starting batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
-            result = await asyncio.to_thread(
-                execute_graph_query, 
-                graph, 
-                query_to_create_chunk_and_PART_OF_relation, 
-                {"batch_data": batch_subset_data}
-            )
-            logging.info(f"   ✅ Completed batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
-            return result
+        async with batch_semaphore:
+            try:
+                logging.info(f"   🚀 Starting batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
+                result = await asyncio.to_thread(
+                    execute_graph_query, 
+                    graph, 
+                    query_to_create_chunk_and_PART_OF_relation, 
+                    {"batch_data": batch_subset_data}
+                )
+                logging.info(f"   ✅ Completed batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
+                return result
         except Exception as e:
             logging.error(f"   ❌ Error in batch {batch_number} for file {file_name_param}: {e}")
             raise
@@ -891,8 +896,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         # Create task with all parameters passed explicitly
         batch_tasks.append(process_batch(batch_subset, batch_num, batch_start, batch_end, file_name, total_chunks))
     
-    # Execute all batches in parallel
-    logging.info(f"🔄 Starting {batch_count} batches in parallel for file: {file_name}")
+    # Execute all batches with controlled parallelism (semaphore limits concurrent execution)
+    logging.info(f"🔄 Starting {batch_count} batches (max {max_parallel_batches} concurrent) for file: {file_name}")
     results = await asyncio.gather(*batch_tasks, return_exceptions=True)
     
     # Check for errors
