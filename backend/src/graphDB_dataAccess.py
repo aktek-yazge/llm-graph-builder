@@ -26,6 +26,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Graph database type detection
+GRAPH_DB_TYPE = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+
 
 # Neo4j notification loglarını kapat
 def filter_neo4j_notifications(record):
@@ -1203,7 +1206,11 @@ class graphDBdataAccess:
 
     def update_node_relationship_count(self, document_name):
         logging.info("updating node and relationship count")
-        label_query = """CALL db.labels"""
+        # Memgraph ve Neo4j için farklı label sorguları
+        if GRAPH_DB_TYPE == "memgraph":
+            label_query = """MATCH (n) RETURN DISTINCT labels(n)[0] AS label"""
+        else:
+            label_query = """CALL db.labels() YIELD label RETURN label"""
         community_flag = {"label": "__Community__"} in self.execute_query(label_query)
         if (not document_name) and (community_flag):
             result = self.execute_query(NODEREL_COUNT_QUERY_WITH_COMMUNITY)
@@ -1253,20 +1260,37 @@ class graphDBdataAccess:
         return response
 
     def get_nodelabels_relationships(self):
-        node_query = """
-                    CALL db.labels() YIELD label
-                    WITH label
-                    WHERE NOT label IN ['_Bloom_Perspective_', '__Community__', '__Entity__', 'Session', 'Message']
-                    CALL apoc.cypher.run("MATCH (n:`" + label + "`) RETURN count(n) AS count",{}) YIELD value
-                    WHERE value.count > 0
-                    RETURN label order by label
-                    """
-
-        relation_query = """
+        # Memgraph ve Neo4j için farklı sorgular
+        if GRAPH_DB_TYPE == "memgraph":
+            # Memgraph: APOC yok, basit sorgu kullan
+            node_query = """
+                MATCH (n)
+                WITH DISTINCT labels(n)[0] AS label
+                WHERE label IS NOT NULL 
+                  AND NOT label IN ['_Bloom_Perspective_', '__Community__', '__Entity__', 'Session', 'Message']
+                RETURN label ORDER BY label
+            """
+            relation_query = """
+                MATCH ()-[r]->()
+                WITH DISTINCT type(r) AS relationshipType
+                WHERE NOT relationshipType IN ['HAS_ENTITY', '_Bloom_Perspective_','SIMILAR','IN_COMMUNITY','PARENT_COMMUNITY', 'LAST_MESSAGE', 'NEXT'] 
+                RETURN relationshipType ORDER BY relationshipType
+            """
+        else:
+            # Neo4j: APOC kullan
+            node_query = """
+                CALL db.labels() YIELD label
+                WITH label
+                WHERE NOT label IN ['_Bloom_Perspective_', '__Community__', '__Entity__', 'Session', 'Message']
+                CALL apoc.cypher.run("MATCH (n:`" + label + "`) RETURN count(n) AS count",{}) YIELD value
+                WHERE value.count > 0
+                RETURN label order by label
+            """
+            relation_query = """
                 CALL db.relationshipTypes() yield relationshipType
                 WHERE NOT relationshipType  IN ['HAS_ENTITY', '_Bloom_Perspective_','SIMILAR','IN_COMMUNITY','PARENT_COMMUNITY', 'LAST_MESSAGE', 'NEXT'] 
                 return relationshipType order by relationshipType
-                """
+            """
 
         try:
             node_result = self.execute_query(node_query)

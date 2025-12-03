@@ -201,8 +201,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 24g
-          cpus: "8"
+          memory: 20g
+          cpus: "4"
     volumes:
       - neo4j_data_prod_2:/data
       - neo4j_plugins_prod_2:/plugins

@@ -15,6 +15,11 @@ import json
 from src.shared.constants import CHUNK_CONTINUATION_PROMPT
 from src.llm import get_llm
 import asyncio
+from src.graph_db_adapter import (
+    is_memgraph, is_neo4j, get_db_adapter,
+    create_vector_index_query, check_vector_index_query,
+    vector_search_query
+)
 
 logging.basicConfig(format='%(asctime)s - %(message)s',level='INFO')
 
@@ -432,22 +437,42 @@ def create_relation_between_chunks(graph, file_name, chunks: List[Document], pag
 
 
 def create_chunk_vector_index(graph):
+    """
+    Create vector index for Chunk nodes - supports both Neo4j and Memgraph
+    """
     start_time = time.time()
+    db_type = "Memgraph" if is_memgraph() else "Neo4j"
+    
     try:
-        vector_index_query = "SHOW INDEXES YIELD name, type, labelsOrTypes, properties WHERE name = 'vector' AND type = 'VECTOR' AND 'Chunk' IN labelsOrTypes AND 'embedding' IN properties RETURN name"
-        vector_index = execute_graph_query(graph,vector_index_query)
-        if not vector_index:
-            vector_store = Neo4jVector(embedding=EMBEDDING_FUNCTION,
-                                    graph=graph,
-                                    node_label="Chunk", 
-                                    embedding_node_property="embedding",
-                                    index_name="vector",
-                                    embedding_dimension=EMBEDDING_DIMENSION
-                                    )
-            vector_store.create_new_index()
-            logging.info(f"Index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+        if is_memgraph():
+            # Memgraph: Use direct query to create vector index
+            try:
+                create_query = create_vector_index_query(
+                    "vector", "Chunk", "embedding", EMBEDDING_DIMENSION
+                )
+                execute_graph_query(graph, create_query)
+                logging.info(f"[{db_type}] Chunk vector index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    logging.info(f"[{db_type}] Vector index already exists, skipping creation.")
+                else:
+                    raise
         else:
-            logging.info(f"Index already exist,Skipping creation. Time taken: {time.time() - start_time:.2f} seconds")
+            # Neo4j: Use existing logic with Neo4jVector
+            vector_index_query = check_vector_index_query("vector", "Chunk", "embedding")
+            vector_index = execute_graph_query(graph, vector_index_query)
+            if not vector_index:
+                vector_store = Neo4jVector(embedding=EMBEDDING_FUNCTION,
+                                        graph=graph,
+                                        node_label="Chunk", 
+                                        embedding_node_property="embedding",
+                                        index_name="vector",
+                                        embedding_dimension=EMBEDDING_DIMENSION
+                                        )
+                vector_store.create_new_index()
+                logging.info(f"[{db_type}] Index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+            else:
+                logging.info(f"[{db_type}] Index already exist, skipping creation. Time taken: {time.time() - start_time:.2f} seconds")
     except Exception as e:
         if ("EquivalentSchemaRuleAlreadyExists" in str(e) or "An equivalent index already exists" in str(e)):
             logging.info("Vector index already exists, skipping creation.")
@@ -457,23 +482,41 @@ def create_chunk_vector_index(graph):
 def create_entity_vector_index(graph: Neo4jGraph):
     """
     Create a vector index for entity nodes to enable semantic search.
+    Supports both Neo4j and Memgraph.
     """
     start_time = time.time()
+    db_type = "Memgraph" if is_memgraph() else "Neo4j"
+    
     try:
-        vector_index_query = "SHOW INDEXES YIELD name, type, labelsOrTypes, properties WHERE name = 'entity_vector' AND type = 'VECTOR' AND '__Entity__' IN labelsOrTypes AND 'embedding' IN properties RETURN name"
-        vector_index = execute_graph_query(graph, vector_index_query)
-        if not vector_index:
-            vector_store = Neo4jVector(embedding=EMBEDDING_FUNCTION,
-                                    graph=graph,
-                                    node_label="__Entity__", 
-                                    embedding_node_property="embedding",
-                                    index_name="entity_vector",
-                                    embedding_dimension=EMBEDDING_DIMENSION
-                                    )
-            vector_store.create_new_index()
-            logging.info(f"Entity vector index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+        if is_memgraph():
+            # Memgraph: Use direct query to create vector index
+            try:
+                create_query = create_vector_index_query(
+                    "entity_vector", "__Entity__", "embedding", EMBEDDING_DIMENSION
+                )
+                execute_graph_query(graph, create_query)
+                logging.info(f"[{db_type}] Entity vector index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    logging.info(f"[{db_type}] Entity vector index already exists, skipping creation.")
+                else:
+                    raise
         else:
-            logging.info(f"Entity vector index already exists. Time taken: {time.time() - start_time:.2f} seconds")
+            # Neo4j: Use existing logic with Neo4jVector
+            vector_index_query = check_vector_index_query("entity_vector", "__Entity__", "embedding")
+            vector_index = execute_graph_query(graph, vector_index_query)
+            if not vector_index:
+                vector_store = Neo4jVector(embedding=EMBEDDING_FUNCTION,
+                                        graph=graph,
+                                        node_label="__Entity__", 
+                                        embedding_node_property="embedding",
+                                        index_name="entity_vector",
+                                        embedding_dimension=EMBEDDING_DIMENSION
+                                        )
+                vector_store.create_new_index()
+                logging.info(f"[{db_type}] Entity vector index created successfully. Time taken: {time.time() - start_time:.2f} seconds")
+            else:
+                logging.info(f"[{db_type}] Entity vector index already exists. Time taken: {time.time() - start_time:.2f} seconds")
     except Exception as e:
         if ("EquivalentSchemaRuleAlreadyExists" in str(e) or "An equivalent index already exists" in str(e)):
             logging.info("Entity vector index already exists, skipping creation.")
@@ -482,21 +525,37 @@ def create_entity_vector_index(graph: Neo4jGraph):
 
 def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_threshold: float = None):
     """
-    Create cross-chunk relationships based on vector similarity using Neo4j vector index.
+    Create cross-chunk relationships based on vector similarity.
+    Supports both Neo4j and Memgraph.
     """
     # fallback to environment threshold if not provided
     if similarity_threshold is None:
         similarity_threshold = float(os.getenv('KNN_MIN_SCORE', '0.7'))
-    query = """
-    // Only consider chunks that have embeddings
-    MATCH (c:Chunk {fileName: $fileName})
-    WHERE c.embedding IS NOT NULL
-    CALL db.index.vector.queryNodes('vector', 5, c.embedding) YIELD node AS other, score
-    WHERE other <> c AND score >= $threshold AND id(c) < id(other)
-    // Tek yönlü ilişki kurma (duplikasyon önlemek için ID karşılaştırması)
-    MERGE (c)-[r:SIMILAR]->(other)
-    SET r.score = score
-    """
+    
+    if is_memgraph():
+        # Memgraph vector similarity search syntax
+        query = """
+        MATCH (c:Chunk {fileName: $fileName})
+        WHERE c.embedding IS NOT NULL
+        CALL vector_search.search('vector', 5, c.embedding) YIELD node AS other, distance
+        WITH c, other, 1.0 - distance AS score
+        WHERE other <> c AND score >= $threshold AND id(c) < id(other)
+        MERGE (c)-[r:SIMILAR]->(other)
+        SET r.score = score
+        """
+    else:
+        # Neo4j vector similarity search syntax
+        query = """
+        // Only consider chunks that have embeddings
+        MATCH (c:Chunk {fileName: $fileName})
+        WHERE c.embedding IS NOT NULL
+        CALL db.index.vector.queryNodes('vector', 5, c.embedding) YIELD node AS other, score
+        WHERE other <> c AND score >= $threshold AND id(c) < id(other)
+        // Tek yönlü ilişki kurma (duplikasyon önlemek için ID karşılaştırması)
+        MERGE (c)-[r:SIMILAR]->(other)
+        SET r.score = score
+        """
+    
     execute_graph_query(graph, query, params={"fileName": file_name, "threshold": similarity_threshold})
     
     # Create entity vector index if it doesn't exist

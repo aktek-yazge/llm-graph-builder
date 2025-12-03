@@ -102,6 +102,7 @@ services:
         labels: "container_name=backend-preview"
     networks:
       - preview
+      - memgraph  # Memgraph bağlantısı için (GRAPH_DB_TYPE=memgraph)
     restart: always
     depends_on:
       - rabbitmq
@@ -135,5 +136,9 @@ services:
 networks:
   preview:
     driver: bridge
+  # Memgraph network - GRAPH_DB_TYPE=memgraph kullanıldığında gerekli
+  memgraph:
+    external: true
+    name: memgraph-platform_default
 
 # Named volumes kaldırıldı - veriler host dizinlerinde saklanıyor

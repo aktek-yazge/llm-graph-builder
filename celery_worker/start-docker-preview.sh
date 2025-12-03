@@ -3,11 +3,13 @@
 # Uses docker-compose.preview.yml with .preview.env
 # Connects to rabbitmq, postgres in preview Docker network
 #
-# Usage: ./start-docker-preview.sh [service_name]
+# Usage: ./start-docker-preview.sh [service_name] [--recreate]
 # Examples:
 #   ./start-docker-preview.sh              # Start all services
 #   ./start-docker-preview.sh main_worker  # Start only main worker
 #   ./start-docker-preview.sh flower       # Start only flower
+#   ./start-docker-preview.sh --recreate   # Force recreate all (env changes)
+#   ./start-docker-preview.sh main_worker --recreate  # Force recreate specific service
 
 set -e
 
@@ -41,12 +43,19 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
-if [ -n "$1" ]; then
+# --force-recreate: Env değişiklikleri için container'ları yeniden oluştur
+RECREATE_FLAG=""
+if [ "$2" == "--recreate" ] || [ "$1" == "--recreate" ]; then
+    RECREATE_FLAG="--force-recreate"
+    echo "   Mode: Force recreate"
+fi
+
+if [ -n "$1" ] && [ "$1" != "--recreate" ]; then
     echo "   Service: $1"
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d "$1"
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d $RECREATE_FLAG "$1"
 else
     echo "   Services: main_worker, db_writer, flower"
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d $RECREATE_FLAG
 fi
 
 echo ""

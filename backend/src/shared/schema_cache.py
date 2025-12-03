@@ -29,6 +29,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+# Graph database type detection
+GRAPH_DB_TYPE = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
@@ -239,40 +242,61 @@ class SchemaVersionCache:
     
     def _fetch_from_neo4j(self, graph) -> str:
         """
-        Neo4j'den şema çek
+        Neo4j veya Memgraph'tan şema çek
         Mevcut fast_agent_integration_simple.py'deki mantığı kullanır
         """
         try:
-            # Node'ları al
-            get_nodes_query = """
-            CALL db.labels() YIELD label
-            WITH collect(label) as labels
-            UNWIND labels as lbl
-            CALL {
-              WITH lbl
-              MATCH (n) WHERE lbl IN labels(n)
-              WITH count(n) as cnt, collect(properties(n))[0] as sample_props
-              RETURN cnt, keys(sample_props) as props
-            }
-            RETURN lbl as nodeType, cnt as nodeCount, props as properties
-            ORDER BY lbl
-            """
-            
-            # Relationship'leri al
-            get_rels_query = """
-            CALL db.relationshipTypes() YIELD relationshipType
-            CALL {
-              WITH relationshipType
-              MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
-              WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
-                   collect(properties(r))[0] as sample_props, count(*) as cnt
-              ORDER BY cnt DESC
-              LIMIT 1
-              RETURN from_node, to_node, keys(sample_props) as rel_props
-            }
-            RETURN relationshipType, from_node, to_node, rel_props
-            ORDER BY relationshipType
-            """
+            if GRAPH_DB_TYPE == "memgraph":
+                # Memgraph için basitleştirilmiş sorgular
+                # Node'ları al
+                get_nodes_query = """
+                MATCH (n)
+                WITH labels(n) as lbls, n
+                UNWIND lbls as lbl
+                WITH lbl, count(n) as cnt, collect(keys(n))[0] as props
+                RETURN lbl as nodeType, cnt as nodeCount, props as properties
+                ORDER BY lbl
+                """
+                
+                # Relationship'leri al
+                get_rels_query = """
+                MATCH (a)-[r]->(b)
+                WITH type(r) as relationshipType, labels(a)[0] as from_node, labels(b)[0] as to_node, 
+                     collect(keys(r))[0] as rel_props, count(*) as cnt
+                RETURN DISTINCT relationshipType, from_node, to_node, rel_props
+                ORDER BY relationshipType
+                """
+            else:
+                # Neo4j için orijinal sorgular
+                get_nodes_query = """
+                CALL db.labels() YIELD label
+                WITH collect(label) as labels
+                UNWIND labels as lbl
+                CALL {
+                  WITH lbl
+                  MATCH (n) WHERE lbl IN labels(n)
+                  WITH count(n) as cnt, collect(properties(n))[0] as sample_props
+                  RETURN cnt, keys(sample_props) as props
+                }
+                RETURN lbl as nodeType, cnt as nodeCount, props as properties
+                ORDER BY lbl
+                """
+                
+                # Relationship'leri al
+                get_rels_query = """
+                CALL db.relationshipTypes() YIELD relationshipType
+                CALL {
+                  WITH relationshipType
+                  MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
+                  WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
+                       collect(properties(r))[0] as sample_props, count(*) as cnt
+                  ORDER BY cnt DESC
+                  LIMIT 1
+                  RETURN from_node, to_node, keys(sample_props) as rel_props
+                }
+                RETURN relationshipType, from_node, to_node, rel_props
+                ORDER BY relationshipType
+                """
             
             nodes_result = graph.query(get_nodes_query)
             rels_result = graph.query(get_rels_query)

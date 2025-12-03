@@ -71,17 +71,32 @@ def get_chunk_and_graphDocument(graph_document_list, chunkId_chunkDoc_list):
   return lst_chunk_chunkId_document  
                  
 def create_graph_database_connection(uri, userName, password, database):
+  """
+  Create a connection to the graph database.
+  Supports both Neo4j and Memgraph (via GRAPH_DB_TYPE environment variable).
+  Memgraph also uses the Bolt protocol, so Neo4jGraph from LangChain works with it.
+  """
   enable_user_agent = os.environ.get("ENABLE_USER_AGENT", "False").lower() in ("true", "1", "yes")
+  graph_db_type = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
   
-  # Eğer username veya password boş/None ise, environment variable'lardan al
-  if not userName or (isinstance(userName, str) and userName.strip() == ""):
-    userName = os.environ.get("NEO4J_USERNAME")
-  if not password or (isinstance(password, str) and password.strip() == ""):
-    password = os.environ.get("NEO4J_PASSWORD")
-  if not database or (isinstance(database, str) and database.strip() == ""):
-    database = os.environ.get("NEO4J_DATABASE", "neo4j")
-  if not uri or (isinstance(uri, str) and uri.strip() == ""):
-    uri = os.environ.get("NEO4J_URI")
+  # Check for Memgraph-specific environment variables
+  # When GRAPH_DB_TYPE=memgraph, ALWAYS use MEMGRAPH_* environment variables (override any passed parameters)
+  if graph_db_type == "memgraph":
+    # Memgraph: Her zaman environment variable'lardan al (parametre olarak Neo4j URI gelebilir)
+    userName = os.environ.get("MEMGRAPH_USERNAME", os.environ.get("NEO4J_USERNAME", ""))
+    password = os.environ.get("MEMGRAPH_PASSWORD", os.environ.get("NEO4J_PASSWORD", ""))
+    database = os.environ.get("MEMGRAPH_DATABASE", "memgraph")
+    uri = os.environ.get("MEMGRAPH_URI", os.environ.get("NEO4J_URI"))
+  else:
+    # Neo4j configuration
+    if not userName or (isinstance(userName, str) and userName.strip() == ""):
+      userName = os.environ.get("NEO4J_USERNAME")
+    if not password or (isinstance(password, str) and password.strip() == ""):
+      password = os.environ.get("NEO4J_PASSWORD")
+    if not database or (isinstance(database, str) and database.strip() == ""):
+      database = os.environ.get("NEO4J_DATABASE", "neo4j")
+    if not uri or (isinstance(uri, str) and uri.strip() == ""):
+      uri = os.environ.get("NEO4J_URI")
   
   # Environment'tan timeout ve connection ayarlarını al
   # Default değerler artırıldı - uzak Neo4j server'lar için daha uzun timeout gerekli
@@ -107,9 +122,11 @@ def create_graph_database_connection(uri, userName, password, database):
     'connection_timeout': connection_timeout
   }
   
-  logging.info(f"Neo4j bağlantısı kuruluyor: {uri} (SSL: DISABLED)")
+  db_name = "Memgraph" if graph_db_type == "memgraph" else "Neo4j"
+  logging.info(f"{db_name} bağlantısı kuruluyor: {uri} (SSL: DISABLED)")
   logging.info(f"Connection config: timeout={connection_timeout}s, pool_size={max_connection_pool_size}")
   
+  # Both Neo4j and Memgraph use Bolt protocol, so Neo4jGraph works for both
   if enable_user_agent:
     driver_config['user_agent'] = os.environ.get('NEO4J_USER_AGENT')
     graph = Neo4jGraph(url=uri, database=database, username=userName, password=password, 
@@ -243,7 +260,7 @@ def handle_backticks_nodes_relationship_id_type(graph_document_list:List[GraphDo
 
 def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=5, delay=3):
    """
-   Neo4j query'sini timeout ve deadlock hatalarına karşı retry mekanizması ile çalıştırır.
+   Neo4j/Memgraph query'sini timeout ve transaction çakışma hatalarına karşı retry mekanizması ile çalıştırır.
    
    Args:
        graph: Neo4jGraph instance
@@ -252,9 +269,17 @@ def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=5, de
        max_retries: Maksimum retry sayısı (default: 5)
        delay: İlk retry için bekleme süresi (exponential backoff uygulanır)
    """
+   import random
+   
    # Environment'tan retry ayarlarını al
    max_retries = int(os.environ.get("NEO4J_MAX_RETRIES", str(max_retries)))
-   delay = int(os.environ.get("NEO4J_RETRY_DELAY", str(delay)))
+   delay = float(os.environ.get("NEO4J_RETRY_DELAY", str(delay)))
+   
+   # Memgraph için daha fazla retry ve daha kısa delay
+   graph_db_type = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+   if graph_db_type == "memgraph":
+       max_retries = int(os.environ.get("MEMGRAPH_MAX_RETRIES", "10"))
+       delay = float(os.environ.get("MEMGRAPH_RETRY_DELAY", "0.5"))
    
    retries = 0
    current_delay = delay
@@ -262,14 +287,19 @@ def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=5, de
        try:
            return graph.query(query, params) 
        except TransientError as e:
-           if "DeadlockDetected" in str(e):
+           error_str = str(e)
+           # Neo4j DeadlockDetected veya Memgraph conflicting transactions
+           if "DeadlockDetected" in error_str or "conflicting transactions" in error_str.lower():
                retries += 1
                if retries < max_retries:
-                   logging.warning(f"⚠️ Deadlock detected. Retrying {retries}/{max_retries} in {current_delay} seconds...")
-                   time.sleep(current_delay)
-                   current_delay *= 2  # Exponential backoff
+                   # Jitter ekle - tüm worker'lar aynı anda retry yapmasın
+                   jitter = random.uniform(0, current_delay * 0.5)
+                   wait_time = current_delay + jitter
+                   logging.warning(f"⚠️ Transaction conflict detected. Retrying {retries}/{max_retries} in {wait_time:.2f}s...")
+                   time.sleep(wait_time)
+                   current_delay = min(current_delay * 1.5, 10)  # Max 10 saniye
                else:
-                   logging.error("❌ Failed to execute query after maximum retries due to persistent deadlocks.")
+                   logging.error("❌ Failed to execute query after maximum retries due to persistent conflicts.")
                    raise
            else:
                raise 
@@ -279,14 +309,32 @@ def execute_graph_query(graph: Neo4jGraph, query, params=None, max_retries=5, de
            if "TransactionTimedOut" in error_str or ("Transaction" in error_str and "Timeout" in error_str):
                retries += 1
                if retries < max_retries:
-                   logging.warning(f"⚠️ Transaction timeout detected. Retrying {retries}/{max_retries} in {current_delay} seconds...")
-                   time.sleep(current_delay)
-                   current_delay *= 2  # Exponential backoff
+                   jitter = random.uniform(0, current_delay * 0.5)
+                   wait_time = current_delay + jitter
+                   logging.warning(f"⚠️ Transaction timeout detected. Retrying {retries}/{max_retries} in {wait_time:.2f}s...")
+                   time.sleep(wait_time)
+                   current_delay = min(current_delay * 1.5, 10)
                else:
                    logging.error(f"❌ Transaction timeout after {max_retries} retries. Query: {query[:100]}...")
                    raise
            else:
                # Diğer ClientError'ları direkt fırlat
+               raise
+       except Exception as e:
+           # Memgraph TransientError bazen farklı exception type olarak gelebilir
+           error_str = str(e)
+           if "conflicting transactions" in error_str.lower() or "TransientError" in error_str:
+               retries += 1
+               if retries < max_retries:
+                   jitter = random.uniform(0, current_delay * 0.5)
+                   wait_time = current_delay + jitter
+                   logging.warning(f"⚠️ Memgraph conflict detected. Retrying {retries}/{max_retries} in {wait_time:.2f}s...")
+                   time.sleep(wait_time)
+                   current_delay = min(current_delay * 1.5, 10)
+               else:
+                   logging.error(f"❌ Memgraph conflict after {max_retries} retries.")
+                   raise
+           else:
                raise
    
    logging.error("❌ Failed to execute query after maximum retries.")

@@ -10,10 +10,19 @@ from langchain_core.prompts import ChatPromptTemplate
 from src.shared.constants import GRAPH_CLEANUP_PROMPT
 from src.llm import get_llm
 from src.graphDB_dataAccess import graphDBdataAccess
+from src.graph_db_adapter import (
+    get_db_adapter, is_memgraph, is_neo4j,
+    create_vector_index_query, drop_index_query, 
+    create_fulltext_index_query, get_labels
+)
 import time 
 
+# Database type
+GRAPH_DB_TYPE = os.environ.get("GRAPH_DB_TYPE", "neo4j").lower()
+
+# Neo4j specific queries (kept for backwards compatibility)
 DROP_INDEX_QUERY = "DROP INDEX entities IF EXISTS;"
-LABELS_QUERY = "CALL db.labels()"
+LABELS_QUERY = "CALL db.labels()" if not is_memgraph() else "MATCH (n) RETURN DISTINCT labels(n)[0] AS label"
 FULL_TEXT_QUERY = "CREATE FULLTEXT INDEX entities FOR (n{labels_str}) ON EACH [n.id, n.description];"
 FILTER_LABELS = ["Chunk","Document","__Community__"]
 
@@ -26,6 +35,19 @@ COMMUNITY_INDEX_FULL_TEXT_QUERY = "CREATE FULLTEXT INDEX community_keyword FOR (
 CHUNK_VECTOR_INDEX_NAME = "vector"
 CHUNK_VECTOR_EMBEDDING_DIMENSION = 384
 
+# Use adapter for index queries
+def get_drop_chunk_vector_index_query():
+    return drop_index_query(CHUNK_VECTOR_INDEX_NAME)
+
+def get_create_chunk_vector_index_query(embedding_dimension):
+    return create_vector_index_query(
+        CHUNK_VECTOR_INDEX_NAME, 
+        "Chunk", 
+        "embedding", 
+        embedding_dimension
+    )
+
+# Legacy queries for backwards compatibility
 DROP_CHUNK_VECTOR_INDEX_QUERY = f"DROP INDEX {CHUNK_VECTOR_INDEX_NAME} IF EXISTS;"
 CREATE_CHUNK_VECTOR_INDEX_QUERY = """
 CREATE VECTOR INDEX {index_name} IF NOT EXISTS FOR (c:Chunk) ON c.embedding
@@ -38,37 +60,44 @@ OPTIONS {{
 """
 
 def create_vector_index(driver, index_type, embedding_dimension=None):
-    drop_query = ""
-    query = ""
+    """
+    Create vector index - supports both Neo4j and Memgraph
+    """
+    dimension = embedding_dimension if embedding_dimension else CHUNK_VECTOR_EMBEDDING_DIMENSION
     
     if index_type == CHUNK_VECTOR_INDEX_NAME:
-        drop_query = DROP_CHUNK_VECTOR_INDEX_QUERY
-        query = CREATE_CHUNK_VECTOR_INDEX_QUERY.format(
-            index_name=CHUNK_VECTOR_INDEX_NAME,
-            embedding_dimension=embedding_dimension if embedding_dimension else CHUNK_VECTOR_EMBEDDING_DIMENSION
-        )
+        # Use adapter for database-agnostic queries
+        drop_query = get_drop_chunk_vector_index_query()
+        query = get_create_chunk_vector_index_query(dimension)
     else:
         logging.error(f"Invalid index type provided: {index_type}")
         return
 
     try:
-        logging.info("Starting the process to create vector index.")
+        db_type = "Memgraph" if is_memgraph() else "Neo4j"
+        logging.info(f"Starting the process to create vector index on {db_type}.")
+        
         with driver.session() as session:
-            try:
-                start_step = time.time()
-                session.run(drop_query)
-                logging.info(f"Dropped existing index (if any) in {time.time() - start_step:.2f} seconds.")
-            except Exception as e:
-                logging.error(f"Failed to drop index: {e}")
-                return
+            # For Memgraph, skip drop query as syntax is different
+            if not is_memgraph():
+                try:
+                    start_step = time.time()
+                    session.run(drop_query)
+                    logging.info(f"Dropped existing index (if any) in {time.time() - start_step:.2f} seconds.")
+                except Exception as e:
+                    logging.warning(f"Failed to drop index (may not exist): {e}")
 
             try:
                 start_step = time.time()
                 session.run(query)
                 logging.info(f"Created vector index in {time.time() - start_step:.2f} seconds.")
             except Exception as e:
-                logging.error(f"Failed to create vector index: {e}")
-                return  
+                # Handle "already exists" errors gracefully
+                if "already exists" in str(e).lower() or "equivalent" in str(e).lower():
+                    logging.info(f"Vector index already exists, skipping creation.")
+                else:
+                    logging.error(f"Failed to create vector index: {e}")
+                    return  
     except Exception as e:
         logging.error("An error occurred while creating the vector index.", exc_info=True)
         logging.error(f"Error details: {str(e)}")
@@ -190,12 +219,23 @@ def update_embeddings(rows, graph):
     logging.info(f"update embedding for entities")
     for row in rows:
         normalized_text = normalize_unicode_text(row['text'])
-        row['embedding'] = embeddings.embed_query(normalized_text)                        
-    query = """
-      UNWIND $rows AS row
-      MATCH (e) WHERE elementId(e) = row.elementId
-      CALL db.create.setNodeVectorProperty(e, "embedding", row.embedding)
-      """  
+        row['embedding'] = embeddings.embed_query(normalized_text)
+    
+    # Use different query syntax for Neo4j vs Memgraph
+    if is_memgraph():
+        # Memgraph uses standard SET for vector properties
+        query = """
+          UNWIND $rows AS row
+          MATCH (e) WHERE elementId(e) = row.elementId
+          SET e.embedding = row.embedding
+          """
+    else:
+        # Neo4j uses special procedure for vector properties
+        query = """
+          UNWIND $rows AS row
+          MATCH (e) WHERE elementId(e) = row.elementId
+          CALL db.create.setNodeVectorProperty(e, "embedding", row.embedding)
+          """  
     return execute_graph_query(graph,query,params={'rows':rows})          
 
 def graph_schema_consolidation(graph):

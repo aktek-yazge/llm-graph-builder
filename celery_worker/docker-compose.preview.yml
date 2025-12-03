@@ -72,6 +72,7 @@ services:
         max-file: "5"
     networks:
       - preview
+      - memgraph  # Memgraph bağlantısı için
     restart: always
 
   # ============================================
@@ -120,6 +121,7 @@ services:
         max-file: "3"
     networks:
       - preview
+      - memgraph  # Memgraph bağlantısı için
     restart: always
 
   # ============================================
@@ -197,6 +199,7 @@ services:
         max-file: "3"
     networks:
       - preview
+      - memgraph  # Memgraph bağlantısı için
     restart: always
 
 # Preview ortamı network'ü (root docker-compose.preview.yml'de tanımlı)
@@ -205,6 +208,10 @@ networks:
   preview:
     external: true
     name: llm-graph-builder_preview
+  # Memgraph network - GRAPH_DB_TYPE=memgraph kullanıldığında gerekli
+  memgraph:
+    external: true
+    name: memgraph-platform_default
 
 volumes:
   output_data:
