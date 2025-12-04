@@ -64,7 +64,7 @@ fast = FastAgent("Agent Chaining")
     request_params=RequestParams(max_iterations=15,),
     use_history=True,  # keep conversation history
     # model="gpt-4o-mini",
-    model="gpt-5-mini.low",
+    model="gpt-5",
     
 )
 # @fast.agent(

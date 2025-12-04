@@ -1,15 +1,16 @@
-import { Dialog, Tabs, Typography, Flex, useMediaQuery } from '@neo4j-ndl/react';
-import graphenhancement from '../../../assets/images/graph-enhancements.svg';
-import { Dispatch, SetStateAction, useState } from 'react';
-import DeletePopUpForOrphanNodes from './DeleteTabForOrphanNodes';
-import deleteOrphanAPI from '../../../services/DeleteOrphanNodes';
-import NewEntityExtractionSetting from './EnitityExtraction/NewEntityExtractionSetting';
-import { useFileContext } from '../../../context/UsersFiles';
-import DeduplicationTab from './Deduplication';
 import { tokens } from '@neo4j-ndl/base';
-import PostProcessingCheckList from './PostProcessingCheckList';
-import AdditionalInstructionsText from './AdditionalInstructions';
+import { Dialog, Flex, Tabs, Typography, useMediaQuery } from '@neo4j-ndl/react';
+import { Dispatch, SetStateAction, useState } from 'react';
+import graphenhancement from '../../../assets/images/graph-enhancements.svg';
+import { useFileContext } from '../../../context/UsersFiles';
+import deleteOrphanAPI from '../../../services/DeleteOrphanNodes';
 import { OptionType } from '../../../types';
+import AdditionalInstructionsText from './AdditionalInstructions';
+import DeduplicationTab from './Deduplication';
+import DeletePopUpForOrphanNodes from './DeleteTabForOrphanNodes';
+import NewEntityExtractionSetting from './EnitityExtraction/NewEntityExtractionSetting';
+import PostProcessingCheckList from './PostProcessingCheckList';
+import RelationshipNormalizationTab from './RelationshipNormalizationTab';
 
 export default function GraphEnhancementDialog({
   open,
@@ -178,6 +179,14 @@ export default function GraphEnhancementDialog({
                   >
                     İşlem Sonrası Görevler
                   </Tabs.Tab>
+                  <Tabs.Tab
+                    tabId={5}
+                    htmlAttributes={{
+                      'aria-label': 'İlişki Normalizasyonu',
+                    }}
+                  >
+                    İlişki Normalizasyonu
+                  </Tabs.Tab>
                 </Tabs>
               </Flex>
             </div>
@@ -221,6 +230,9 @@ export default function GraphEnhancementDialog({
         </Tabs.TabPanel>
         <Tabs.TabPanel className='n-flex n-flex-col n-gap-token-4 n-p-token-6' value={activeTab} tabId={4}>
           <PostProcessingCheckList />
+        </Tabs.TabPanel>
+        <Tabs.TabPanel className='n-flex n-flex-col n-gap-token-4 n-p-token-6' value={activeTab} tabId={5}>
+          <RelationshipNormalizationTab />
         </Tabs.TabPanel>
       </Dialog.Content>
     </Dialog>

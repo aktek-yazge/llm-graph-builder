@@ -5925,8 +5925,13 @@ async def start_graph_creation(
 
 
 @app.post("/api/v2/files/{file_id}/create-embeddings")
-async def create_embeddings_for_file(file_id: int):
-    """Create embeddings for chunks of a completed file"""
+async def create_embeddings_for_file(file_id: str):
+    """Create embeddings for chunks of a completed file or all files
+    
+    - If file_id is "all", processes all files with chunking_status="chunked" and embedding_status="pending"
+    - If file_id is comma-separated IDs (e.g., "1,2,3"), processes those specific files
+    - Otherwise, processes single file
+    """
     db_session = None
     try:
         # Get Neo4j credentials from environment
@@ -5940,42 +5945,128 @@ async def create_embeddings_for_file(file_id: int):
                 "Failed", message="Neo4j credentials not configured in backend .env"
             )
 
-        logging.info(
-            f"📊 Embedding creation request for file {file_id}, database={database}"
-        )
-
         db = get_file_queue_db()
         db_session = db.get_db_session()
 
-        file_record = db_session.query(UploadedFile).filter_by(id=file_id).first()
-        if not file_record:
-            return create_api_response("Failed", message="File not found")
-
-        # Check if chunking is completed
-        if file_record.chunking_status != "chunked":
+        # Handle "all" parameter
+        if file_id.lower() == "all":
+            # Get all files ready for embedding
+            files_to_process = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.chunking_status == "chunked")
+                .filter(UploadedFile.embedding_status.in_(["pending", "failed"]))
+                .order_by(UploadedFile.created_at.asc())
+                .all()
+            )
+            
+            if not files_to_process:
+                return create_api_response(
+                    "Success",
+                    message="No files ready for embedding",
+                    data={"queued_count": 0},
+                )
+            
+            queued_count = 0
+            file_ids = []
+            for file_record in files_to_process:
+                file_record.embedding_status = "processing"
+                file_record.embedding_started_at = datetime.now(timezone.utc)
+                file_record.status = "processing"
+                file_ids.append(file_record.id)
+                queued_count += 1
+            
+            db_session.commit()
+            
+            # Send all tasks to Celery
+            for fid in file_ids:
+                celery_app.send_task("src.tasks.create_embeddings_task", args=[fid])
+            
+            logging.info(f"🔄 Started embedding creation for {queued_count} files (all)")
+            
             return create_api_response(
-                "Failed",
-                message=f"Chunking must be completed first (current status: {file_record.chunking_status})",
+                "Success",
+                message=f"Embedding creation started for {queued_count} files",
+                data={"queued_count": queued_count, "file_ids": file_ids},
+            )
+        
+        # Handle comma-separated IDs
+        elif "," in file_id:
+            file_ids = [int(fid.strip()) for fid in file_id.split(",") if fid.strip().isdigit()]
+            
+            if not file_ids:
+                return create_api_response("Failed", message="No valid file IDs provided")
+            
+            files_to_process = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.id.in_(file_ids))
+                .filter(UploadedFile.chunking_status == "chunked")
+                .all()
+            )
+            
+            queued_count = 0
+            queued_ids = []
+            for file_record in files_to_process:
+                if file_record.embedding_status in ["pending", "failed", "completed"]:
+                    file_record.embedding_status = "processing"
+                    file_record.embedding_started_at = datetime.now(timezone.utc)
+                    file_record.status = "processing"
+                    queued_ids.append(file_record.id)
+                    queued_count += 1
+            
+            db_session.commit()
+            
+            # Send all tasks to Celery
+            for fid in queued_ids:
+                celery_app.send_task("src.tasks.create_embeddings_task", args=[fid])
+            
+            logging.info(f"🔄 Started embedding creation for {queued_count} files (batch)")
+            
+            return create_api_response(
+                "Success",
+                message=f"Embedding creation started for {queued_count} files",
+                data={"queued_count": queued_count, "file_ids": queued_ids},
+            )
+        
+        # Handle single file
+        else:
+            try:
+                file_id_int = int(file_id)
+            except ValueError:
+                return create_api_response("Failed", message="Invalid file ID")
+
+            logging.info(
+                f"📊 Embedding creation request for file {file_id_int}, database={database}"
             )
 
-        # Update status to processing
-        file_record.embedding_status = "processing"
-        file_record.embedding_started_at = datetime.now(timezone.utc)
-        file_record.status = "processing"  # Set general status to processing
-        db_session.commit()
+            file_record = db_session.query(UploadedFile).filter_by(id=file_id_int).first()
+            if not file_record:
+                return create_api_response("Failed", message="File not found")
 
-        logging.info(
-            f"🔄 Started embedding creation for file {file_id}: {file_record.original_name}"
-        )
+            # Check if chunking is completed
+            if file_record.chunking_status != "chunked":
+                return create_api_response(
+                    "Failed",
+                    message=f"Chunking must be completed first (current status: {file_record.chunking_status})",
+                )
 
-        # Embedding işlemini Celery task'e yönlendir
-        celery_app.send_task("src.tasks.create_embeddings_task", args=[file_id])
+            # Update status to processing
+            file_record.embedding_status = "processing"
+            file_record.embedding_started_at = datetime.now(timezone.utc)
+            file_record.status = "processing"  # Set general status to processing
+            db_session.commit()
 
-        return create_api_response(
-            "Success",
-            message="Embedding creation started",
-            data={"file_id": file_id, "embedding_status": "processing"},
-        )
+            logging.info(
+                f"🔄 Started embedding creation for file {file_id_int}: {file_record.original_name}"
+            )
+
+            # Embedding işlemini Celery task'e yönlendir
+            celery_app.send_task("src.tasks.create_embeddings_task", args=[file_id_int])
+
+            return create_api_response(
+                "Success",
+                message="Embedding creation started",
+                data={"file_id": file_id_int, "embedding_status": "processing"},
+            )
     except Exception as e:
         error_message = str(e)
         logging.error(
@@ -9122,6 +9213,158 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
         #return create_api_response(
             #"Failed", message="Immediate processing failed", error=error_message
         #)
+
+
+# ============================================================================
+# RELATIONSHIP NORMALIZATION ENDPOINTS
+# ============================================================================
+
+from src.relationship_normalizer import (
+    preview_normalization,
+    apply_normalization,
+    get_all_relationship_types,
+)
+
+
+@app.post("/relationship_normalization/preview")
+async def relationship_normalization_preview(
+    uri: str = Form(...),
+    userName: str = Form(...),
+    password: str = Form(...),
+    database: str = Form(...),
+):
+    """
+    Relationship type'larını analiz et ve normalizasyon önizlemesi oluştur.
+    LLM ile benzer relationship'leri gruplar.
+    """
+    try:
+        from langchain_community.graphs import Neo4jGraph
+        from langchain_openai import ChatOpenAI
+        
+        logging.info(f"🔍 Relationship normalization preview başlatılıyor: {uri}")
+        
+        # Neo4j bağlantısı
+        graph = Neo4jGraph(
+            url=uri,
+            username=userName,
+            password=password,
+            database=database
+        )
+        
+        # LLM - gpt-4o-mini kullan (hızlı ve ucuz)
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0
+        )
+        
+        # Preview oluştur
+        preview = preview_normalization(graph, llm)
+        
+        logging.info(f"✅ Preview tamamlandı: {preview['total_types']} type, {len(preview['groups'])} grup")
+        
+        return create_api_response(
+            "Success",
+            data=preview,
+            message=f"Found {preview['total_types']} relationship types, grouped into {len(preview['groups'])} categories"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Relationship normalization preview hatası: {e}")
+        return create_api_response(
+            "Failed",
+            message=f"Preview failed: {str(e)}"
+        )
+
+
+@app.post("/relationship_normalization/apply")
+async def relationship_normalization_apply(
+    uri: str = Form(...),
+    userName: str = Form(...),
+    password: str = Form(...),
+    database: str = Form(...),
+    groups: str = Form(...),  # JSON string
+):
+    """
+    Onaylanan normalizasyonu Neo4j'de uygula.
+    groups: [{"suggested_name": "...", "original_types": [...], "needs_change": true}, ...]
+    """
+    try:
+        import json
+        from langchain_community.graphs import Neo4jGraph
+        
+        logging.info(f"🔄 Relationship normalization apply başlatılıyor: {uri}")
+        
+        # Groups JSON parse
+        groups_data = json.loads(groups)
+        
+        # Neo4j bağlantısı
+        graph = Neo4jGraph(
+            url=uri,
+            username=userName,
+            password=password,
+            database=database
+        )
+        
+        # Normalizasyonu uygula
+        result = apply_normalization(graph, groups_data)
+        
+        if result["success"]:
+            logging.info(f"✅ Normalization tamamlandı: {result['total_changed']} relationship güncellendi")
+            return create_api_response(
+                "Success",
+                data=result,
+                message=f"Successfully updated {result['total_changed']} relationships"
+            )
+        else:
+            logging.warning(f"⚠️ Normalization kısmen başarılı: {len(result['errors'])} hata")
+            return create_api_response(
+                "Partial",
+                data=result,
+                message=f"Completed with {len(result['errors'])} errors"
+            )
+        
+    except Exception as e:
+        logging.error(f"❌ Relationship normalization apply hatası: {e}")
+        return create_api_response(
+            "Failed",
+            message=f"Apply failed: {str(e)}"
+        )
+
+
+@app.get("/relationship_normalization/types")
+async def get_relationship_types(
+    uri: str,
+    userName: str,
+    password: str,
+    database: str,
+):
+    """
+    Mevcut relationship type'larını listele (LLM olmadan, sadece veritabanı).
+    """
+    try:
+        from langchain_community.graphs import Neo4jGraph
+        
+        graph = Neo4jGraph(
+            url=uri,
+            username=userName,
+            password=password,
+            database=database
+        )
+        
+        types = get_all_relationship_types(graph)
+        
+        return create_api_response(
+            "Success",
+            data={"types": types, "total": len(types)},
+            message=f"Found {len(types)} relationship types"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Get relationship types hatası: {e}")
+        return create_api_response(
+            "Failed",
+            message=f"Failed to get types: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

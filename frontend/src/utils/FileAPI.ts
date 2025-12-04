@@ -329,8 +329,9 @@ export const startEndorsementGraphCreationAPI = async (
 };
 
 // Start embedding creation for file chunks
+// fileId can be: number, "all", or comma-separated IDs like "1,2,3"
 export const startEmbeddingAPI = async (
-  fileId: number
+  fileId: number | string
 ): Promise<any> => {
   const urlEmbedding = `${url()}/api/v2/files/${fileId}/create-embeddings`;
   const method: Method = 'post';

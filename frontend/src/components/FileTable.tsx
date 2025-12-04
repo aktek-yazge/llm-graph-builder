@@ -1179,7 +1179,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     reloadV2Files();
   }, [reloadV2Files]);
 
-  // V2 dosyaları için periyodik polling (her 3 saniyede bir)
+  // V2 dosyaları için periyodik polling (her 5 saniyede bir)
   useEffect(() => {
     // V2 dosyaları var mı kontrol et
     const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
@@ -1187,10 +1187,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
       return;
     }
 
-    // Her 3 saniyede bir durumları güncelle (tüm V2 dosyaları için)
+    // Her 5 saniyede bir durumları güncelle (tüm V2 dosyaları için)
     const interval = setInterval(() => {
       reloadV2Files();
-    }, 3000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [filesData, reloadV2Files]);

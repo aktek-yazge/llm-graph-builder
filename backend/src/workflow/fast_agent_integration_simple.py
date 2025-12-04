@@ -46,7 +46,7 @@ except ImportError as e:
             return text
 
 
-def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
+def create_fast_agent_app(model: str = "gpt-5") -> FastAgent:
     """gds_fetcher.py ile aynı basit yaklaşımla FastAgent uygulaması oluştur"""
 
     app = FastAgent("Neo4j Query Agent")
@@ -79,12 +79,23 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         
         Öncelik sırası (şemaya göre):
         1. Şemada soruya uygun NODE türü varsa → O node'u ve relationship'lerini kullan
-        2. Node bulunamazsa → `read_neo4j_cypher_with_embedding` TOOL'U İLE Chunk'larda embedding araması yap
-        3. En son seçenek → Document.fileName üzerinde text arama
+        2. Sonuç boş gelirse → Alternatif yazımları dene (sadece soyisim, farklı case vb.)
+        3. Hala bulunamazsa → Kullanıcıya sor veya alternatif öner
+        
+        ⛔ METADATA vs İÇERİK AYRIMI:
+        
+        METADATA SORULARI → Şemadaki node property'lerini kullan, Embedding KULLANMA!
+        - İsim, numara, tarih, sayı, kod gibi yapısal veriler
+        - "Kaç tane?", "Kim?", "Hangi?", "Listele" türü sorular
+        - Boş sonuç gelirse → Alternatif yazım dene, kullanıcıya sor
+        
+        İÇERİK SORULARI → Embedding KULLAN!
+        - "Ne yazıyor?", "Açıklaması ne?", "Detayları neler?" türü sorular
+        - Chunk.text içinde anlamsal arama gerektiren durumlar
         
         ### ADIM 2: EMBEDDING ARAMASI (read_neo4j_cypher_with_embedding TOOL'U)
         
-        **BU TOOL'U MUTLAKA KULLAN** - İçerik araması gerektiğinde!
+        ⚠️ SADECE İÇERİK/ANLAM SORULARI İÇİN KULLAN!
         
         `read_neo4j_cypher_with_embedding` tool'u iki parametre alır:
         - `query_text`: Aranacak içerik kavramları (zengin terimler)
@@ -112,12 +123,22 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
         
         ❌ apoc.text.clean() kullanma - yanlış eşleşmelere sebep olur
         
-        ## SORGU YAPISI
+        ## SORGU YAPISI (Neo4j 5.x Uyumlu)
         
         - Şemadan relationship'leri kontrol et, sadece şemada olanları kullan
         - Gereksiz OPTIONAL MATCH kullanma
         - İlişki zorunlu ise MATCH, opsiyonel ise OPTIONAL MATCH
         - Önce ana node'u bul, sonra ilişkili node'ları ara
+        
+        ⚠️ Neo4j 5.x ZORUNLU KURALLAR:
+        - ❌ size((pattern)) KULLANMA - deprecated!
+        - ✅ COUNT { (pattern) } kullan (pattern sayma için)
+        - ❌ length(pattern) KULLANMA
+        - ✅ size(collection) sadece liste uzunluğu için kullan
+        
+        Örnek:
+        - ❌ size((n)-[:REL]->()) → Hata verir!
+        - ✅ COUNT { (n)-[:REL]->() } → Doğru kullanım
         
         ## CHUNK ARAMASI
         
@@ -156,7 +177,7 @@ def create_fast_agent_app(model: str = "gpt-5-mini.low") -> FastAgent:
 class FastAgentIntegration:
     """FastAgent'i chat_bot_stream'e entegre eden sınıf - Conversation History ile"""
 
-    def __init__(self, model: str = "gpt-5-mini.low", graph=None):
+    def __init__(self, model: str = "gpt-5", graph=None):
         self.model = model
         self.fast_agent_app = None
         self.graph = graph  # Neo4j graph connection for persistent history
@@ -941,7 +962,7 @@ _global_fast_agent = None
 
 
 async def get_or_create_fast_agent(
-    model: str = "gpt-5-mini.low", graph=None
+    model: str = "gpt-5", graph=None
 ) -> FastAgentIntegration:
     """Global FastAgent instance'ını al veya oluştur"""
     global _global_fast_agent
@@ -988,7 +1009,7 @@ async def get_or_create_fast_agent(
 
 async def stream_fast_agent_response(
     question: str,
-    model: str = "gpt-5-mini.low",
+    model: str = "gpt-5",
     session_id: str = None,
     graph=None,
     **kwargs,

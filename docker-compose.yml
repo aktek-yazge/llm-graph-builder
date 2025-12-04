@@ -150,13 +150,15 @@ services:
       - NEO4J_server_memory_heap_initial__size=4G
       - NEO4J_server_memory_heap_max__size=8G
       - NEO4J_server_memory_pagecache_size=4G
-      # Transaction memory limit - yoğun işlemler için yüksek tutuldu
-      - NEO4J_dbms_memory_transaction_total_max=8G
+      # Transaction memory limit - yoğun işlemler için (16GB'a artırıldı)
+      - NEO4J_dbms_memory_transaction_total_max=16G
       - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
       - NEO4J_apoc_export_file_enabled=true
       - NEO4J_apoc_import_file_enabled=true
       - NEO4J_apoc_import_file_use__neo4j__config=true
+      # Java Vector API - optimal vector performance için
+      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
     deploy:
       resources:
         limits:
@@ -187,23 +189,30 @@ services:
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false
-      # Memory ayarları - 128GB RAM için optimize edildi
-      - NEO4J_server_memory_heap_initial__size=16G
-      - NEO4J_server_memory_heap_max__size=24G
-      # Page Cache - TÜM GRAF VERİSİ RAM'DE! Performans için kritik
-      - NEO4J_server_memory_pagecache_size=48G
-      # Transaction memory limit - yoğun işlemler için
-      - NEO4J_dbms_memory_transaction_total_max=8G
+      # Memory ayarları - 128GB RAM için optimize edildi (ARTTIRILDI)
+      - NEO4J_server_memory_heap_initial__size=24G
+      - NEO4J_server_memory_heap_max__size=32G
+      # Page Cache - TÜM GRAF VERİSİ RAM'DE! Performans için kritik (ARTTIRILDI)
+      - NEO4J_server_memory_pagecache_size=56G
+      # Transaction memory limit - yoğun işlemler için (24GB'a artırıldı)
+      - NEO4J_dbms_memory_transaction_total_max=24G
+      # Transaction timeout - uzun sorgular için (5 dakika)
+      - NEO4J_db_transaction_timeout=5m
+      - NEO4J_dbms_transaction_timeout=5m
+      # Lock acquisition timeout
+      - NEO4J_dbms_lock_acquisition_timeout=2m
       - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
       - NEO4J_apoc_export_file_enabled=true
       - NEO4J_apoc_import_file_enabled=true
       - NEO4J_apoc_import_file_use__neo4j__config=true
+      # Java Vector API - optimal vector performance için
+      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
     deploy:
       resources:
         limits:
-          memory: 80g
-          cpus: "12"
+          memory: 110g
+          cpus: "14"
     volumes:
       - neo4j_data_prod_2:/data
       - neo4j_plugins_prod_2:/plugins

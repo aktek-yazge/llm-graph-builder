@@ -46,8 +46,8 @@ const V2FileQueue: React.FC = () => {
 
   useEffect(() => {
     fetchV2Files();
-    // Poll every 3 seconds for status updates
-    const interval = setInterval(fetchV2Files, 3000);
+    // Poll every 5 seconds for status updates
+    const interval = setInterval(fetchV2Files, 5000);
     return () => clearInterval(interval);
   }, [fetchV2Files]);
 

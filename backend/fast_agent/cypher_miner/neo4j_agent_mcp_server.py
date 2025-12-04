@@ -68,7 +68,7 @@ fast = FastAgent("Neo4j Intelligence Agent")
         max_iterations=15,  # Daha az iteration
     ),
     use_history=True,     # History'yi kapatıyoruz
-    model="gpt-5-mini.low",   # Daha hızlı model
+    model="gpt-5",   # Daha hızlı model
     
 )
 async def main():

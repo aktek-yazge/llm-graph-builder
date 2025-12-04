@@ -239,48 +239,171 @@ class SchemaVersionCache:
     
     def _fetch_from_neo4j(self, graph) -> str:
         """
-        Neo4j'den şema çek
-        Mevcut fast_agent_integration_simple.py'deki mantığı kullanır
+        Neo4j'den şema çek - ÖNCE hafif sorgu, sonra Langchain
         """
         try:
-            # Node'ları al
-            get_nodes_query = """
-            CALL db.labels() YIELD label
-            WITH collect(label) as labels
-            UNWIND labels as lbl
-            CALL {
-              WITH lbl
-              MATCH (n) WHERE lbl IN labels(n)
-              WITH count(n) as cnt, collect(properties(n))[0] as sample_props
-              RETURN cnt, keys(sample_props) as props
-            }
-            RETURN lbl as nodeType, cnt as nodeCount, props as properties
-            ORDER BY lbl
-            """
+            # 1. ÖNCE en hafif sorguyu dene (timeout riski düşük)
+            lightweight = self._fetch_schema_lightweight(graph)
+            if lightweight and not lightweight.startswith("⚠️"):
+                logger.info("✅ Lightweight schema başarılı")
+                return lightweight
             
-            # Relationship'leri al
-            get_rels_query = """
-            CALL db.relationshipTypes() YIELD relationshipType
-            CALL {
-              WITH relationshipType
-              MATCH (a)-[r]->(b) WHERE type(r) = relationshipType
-              WITH labels(a)[0] as from_node, labels(b)[0] as to_node, 
-                   collect(properties(r))[0] as sample_props, count(*) as cnt
-              ORDER BY cnt DESC
-              LIMIT 1
-              RETURN from_node, to_node, keys(sample_props) as rel_props
-            }
-            RETURN relationshipType, from_node, to_node, rel_props
-            ORDER BY relationshipType
-            """
+            # 2. Hafif sorgu başarısız olursa, mevcut schema'yı kullan
+            if hasattr(graph, 'schema') and graph.schema:
+                logger.info("✅ Mevcut graph.schema kullanılıyor")
+                return graph.schema
             
-            nodes_result = graph.query(get_nodes_query)
-            rels_result = graph.query(get_rels_query)
-            
-            return self._create_schema_format(nodes_result, rels_result)
+            return lightweight  # Hata mesajını döndür
             
         except Exception as e:
             logger.error(f"❌ Neo4j şema çekme hatası: {e}")
+            return f"⚠️ Şema alınamadı: {str(e)}"
+    
+    def _format_langchain_schema(self, structured: dict) -> str:
+        """Langchain structured schema'yı formatla"""
+        lines = []
+        
+        # Node properties
+        node_props = structured.get("node_props", {})
+        for node_type, props in node_props.items():
+            prop_str = ",".join([f"{p['property']}:{p.get('type', 'str')[:3]}" for p in props])
+            lines.append(f"({node_type}){{{prop_str}}}")
+        
+        # Relationships
+        relationships = structured.get("relationships", [])
+        for rel in relationships:
+            start = rel.get("start", "?")
+            rel_type = rel.get("type", "?")
+            end = rel.get("end", "?")
+            lines.append(f"({start})-[:{rel_type}]->({end})")
+        
+        if not lines:
+            return "⚠️ Şema boş"
+        
+        return "\n".join(lines)
+    
+    def _fetch_schema_lightweight(self, graph) -> str:
+        """
+        Hafif şema sorgusu - Token tasarrufu için minimal format
+        
+        Format:
+        # NODES
+        (NodeName:count){prop1:type,prop2:type,...}
+        
+        # RELATIONSHIPS
+        (FromNode)-[:REL_TYPE]->(ToNode)
+        """
+        try:
+            logger.info("🔍 Neo4j'den şema çekiliyor (hafif sorgu)...")
+            
+            # Tip kısaltmaları
+            type_mapping = {
+                "createdAt": "dt", "updatedAt": "dt",
+                "created_at": "dt", "updated_at": "dt",
+                "amount": "float", "count": "int", "year": "int", "month": "int",
+            }
+            
+            # 1. Node label'larını ve sayılarını al
+            labels_query = """
+            CALL db.labels() YIELD label
+            CALL {
+                WITH label
+                MATCH (n) WHERE label IN labels(n)
+                RETURN count(n) as cnt
+            }
+            RETURN label, cnt
+            ORDER BY cnt DESC
+            """
+            
+            try:
+                labels_result = graph.query(labels_query)
+            except:
+                # Fallback: sadece label listesi
+                labels_result = graph.query("CALL db.labels() YIELD label RETURN label, 0 as cnt")
+            
+            labels_with_count = [(r["label"], r["cnt"]) for r in labels_result] if labels_result else []
+            logger.info(f"📋 {len(labels_with_count)} node label bulundu")
+            
+            # 2. Her label için property'leri al (sampling)
+            node_props = {}
+            for label, _ in labels_with_count:  # Tüm label'lar
+                try:
+                    prop_query = f"MATCH (n:`{label}`) RETURN keys(n) as props LIMIT 1"
+                    prop_result = graph.query(prop_query)
+                    if prop_result and prop_result[0].get("props"):
+                        # Gereksiz property'leri filtrele
+                        props = [p for p in prop_result[0]["props"] 
+                                if p not in ["embedding", "id", "uuid", "elementId"]]
+                        node_props[label] = props  # Tüm property'ler
+                except:
+                    pass
+            
+            # 3. Relationship pattern'larını al (APOC olmadan - sampling ile)
+            rel_patterns_query = """
+            CALL db.relationshipTypes() YIELD relationshipType as type
+            RETURN type
+            """
+            rel_types_result = graph.query(rel_patterns_query)
+            rel_types = [r["type"] for r in rel_types_result] if rel_types_result else []
+            
+            # Her rel type için TÜM unique pattern'leri bul
+            patterns = []
+            for rel_type in rel_types:  # Tüm relationship type'lar
+                try:
+                    # DISTINCT ile tüm unique from->to kombinasyonlarını al
+                    pattern_query = f"""
+                    MATCH (a)-[r:`{rel_type}`]->(b)
+                    RETURN DISTINCT labels(a)[0] as fromLabel, labels(b)[0] as toLabel
+                    """
+                    pattern_result = graph.query(pattern_query)
+                    for row in pattern_result:
+                        from_label = row.get("fromLabel", "?")
+                        to_label = row.get("toLabel", "?")
+                        patterns.append((from_label, rel_type, to_label))
+                except:
+                    pass
+            
+            logger.info(f"📋 {len(patterns)} relationship pattern bulundu")
+            
+            # 4. Format oluştur
+            lines = ["# NODES"]
+            for label, count in labels_with_count:
+                props = node_props.get(label, [])
+                props_with_types = []
+                for prop in props:
+                    if prop in type_mapping:
+                        prop_type = type_mapping[prop]
+                    elif any(x in prop.lower() for x in ["id", "name", "text", "content", "title"]):
+                        prop_type = "str"
+                    elif any(x in prop.lower() for x in ["date", "time"]):
+                        prop_type = "dt"
+                    elif any(x in prop.lower() for x in ["count", "number", "amount", "year"]):
+                        prop_type = "int"
+                    else:
+                        prop_type = "str"
+                    props_with_types.append(f"{prop}:{prop_type}")
+                
+                if props_with_types:
+                    lines.append(f"({label}:{count}){{{','.join(props_with_types)}}}")
+                else:
+                    lines.append(f"({label}:{count})")
+            
+            lines.append("")
+            lines.append("# RELATIONSHIPS")
+            
+            seen_patterns = set()
+            for from_label, rel_type, to_label in patterns:
+                pattern = f"({from_label})-[:{rel_type}]->({to_label})"
+                if pattern not in seen_patterns:
+                    seen_patterns.add(pattern)
+                    lines.append(pattern)
+            
+            schema = "\n".join(lines)
+            logger.info(f"✅ Schema oluşturuldu: {len(schema)} karakter, {len(labels_with_count)} node, {len(seen_patterns)} pattern")
+            return schema
+            
+        except Exception as e:
+            logger.error(f"❌ Lightweight schema hatası: {e}")
             return f"⚠️ Şema alınamadı: {str(e)}"
     
     def _create_schema_format(self, nodes_result, rels_result) -> str:
@@ -310,7 +433,7 @@ class SchemaVersionCache:
             
             # İlk 6 property'yi kısa tip bilgisiyle al
             props_with_types = []
-            for prop_name in properties[:6]:
+            for prop_name in properties:
                 if prop_name in type_mapping:
                     prop_type = type_mapping[prop_name]
                 elif any(x in prop_name.lower() for x in ["id", "name", "address", "content"]):
@@ -334,7 +457,7 @@ class SchemaVersionCache:
             
             # Relationship properties (ilk 3)
             rel_props_with_types = []
-            for prop_name in (rel_props or [])[:3]:
+            for prop_name in (rel_props or []):
                 prop_type = type_mapping.get(prop_name, "str")
                 rel_props_with_types.append(f"{prop_name}:{prop_type}")
             

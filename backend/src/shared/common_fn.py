@@ -129,7 +129,11 @@ def create_graph_database_connection(uri, userName, password, database):
 
 def load_embedding_model(embedding_model_name: str):
     if embedding_model_name == "openai":
-        embeddings = OpenAIEmbeddings()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            embeddings = OpenAIEmbeddings(api_key=api_key)
+        else:
+            embeddings = OpenAIEmbeddings()
         dimension = 1536
         logging.info(f"Embedding: Using OpenAI Embeddings , Dimension:{dimension}")
     elif embedding_model_name == "vertexai":        

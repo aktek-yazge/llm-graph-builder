@@ -40,6 +40,9 @@ except ImportError:
         """Fallback embedding model loader"""
         try:
             from langchain_openai import OpenAIEmbeddings
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                return OpenAIEmbeddings(api_key=api_key), 1536
             return OpenAIEmbeddings(), 1536
         except ImportError:
             raise ImportError("OpenAI embeddings not available")

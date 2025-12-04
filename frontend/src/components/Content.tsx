@@ -53,7 +53,6 @@ import {
   deleteFileFromQueueAPI,
   extractAPI,
   getBackgroundProcessingStatusAPI,
-  getFileStatusAPI,
   resetFileStageAPI,
   startBackgroundProcessingAPI,
   startChunkingAPI,
@@ -703,7 +702,7 @@ const Content: React.FC<ContentProps> = ({
 
   const handleCreateEmbeddingsForV2 = async () => {
     const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
-    const chunkedFiles = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status === 'pending');
+    const chunkedFiles = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status !== 'processing');
 
     if (!chunkedFiles || chunkedFiles.length === 0) {
       showErrorToast('Embedding oluşturmak için chunked edilmiş dosya seçiniz');
@@ -714,75 +713,33 @@ const Content: React.FC<ContentProps> = ({
       setIsExtractLoading(true);
       showNormalToast(`${chunkedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
 
-      // Seçili chunked dosyalar için embedding oluştur
-      const processFile = async (file: CustomFile) => {
-        if (!file.v2FileId) {
-          return;
-        }
-        try {
-          const response = await startEmbeddingAPI(file.v2FileId);
-          if (response.status === 'Success' || response.status === 'success') {
-            // Polling'i background'da çalıştır
-            const pollStatus = async () => {
-              let attempts = 0;
-              const maxAttempts = 600;
+      // Tüm dosya ID'lerini virgülle ayırarak TEK bir API çağrısı yap
+      const fileIds = chunkedFiles
+        .filter((f: CustomFile) => f.v2FileId)
+        .map((f: CustomFile) => f.v2FileId)
+        .join(',');
 
-              while (attempts < maxAttempts) {
-                await new Promise((resolve) => setTimeout(resolve, 5000));
-
-                try {
-                  const statusResponse = await getFileStatusAPI(file.v2FileId!);
-                  const fileStatus = statusResponse?.data?.embedding_status;
-                  const elapsedSeconds = attempts * 5;
-
-                  if (fileStatus === 'completed') {
-                    showSuccessToast(`✓ Dosya ${file.name} embedding oluşturma tamamlandı`);
-                    childRef.current?.reloadV2Files?.();
-                    break;
-                  }
-                  if (fileStatus === 'failed') {
-                    showErrorToast(`✗ Dosya ${file.name} embedding oluşturma başarısız`);
-                    childRef.current?.reloadV2Files?.();
-                    break;
-                  }
-                  if (elapsedSeconds > 0 && elapsedSeconds % 30 === 0) {
-                    showNormalToast(`⏱ Embedding oluşturuluyor... (${Math.floor(elapsedSeconds / 60)} dk)`);
-                  }
-                } catch (err) {
-                  // Continue polling
-                }
-                attempts++;
-              }
-            };
-
-            pollStatus();
-          } else {
-            showErrorToast(
-              `Dosya ${file.name} embedding oluşturma başarısız: ${response.message || 'Bilinmeyen hata'}`
-            );
-          }
-        } catch (error: any) {
-          const errorMsg = error.response?.data?.message || error.message || 'Embedding hatası';
-          showErrorToast(`Dosya ${file.name}: ${errorMsg}`);
-        }
-      };
-
-      for (const file of chunkedFiles) {
-        await processFile(file);
+      if (!fileIds) {
+        showErrorToast('Geçerli dosya ID\'si bulunamadı');
+        return;
       }
 
-      // Tüm dosyalar queue'landıktan sonra file listesini yenile
-      showNormalToast(`✓ ${chunkedFiles.length} dosya için embedding oluşturma başlatıldı`);
+      // Toplu embedding başlat (tek API çağrısı)
+      const response = await startEmbeddingAPI(fileIds as any);
       
-      // İlk refresh - processing status'ünü görmek için
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      childRef.current?.reloadV2Files?.();
-      
-      // İkinci refresh - emin olmak için
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      childRef.current?.reloadV2Files?.();
-    } catch (error) {
-      showErrorToast('Embedding oluşturma işlemi başlatılamadı');
+      if (response.status === 'Success' || response.status === 'success') {
+        const queuedCount = response.data?.queued_count || chunkedFiles.length;
+        showSuccessToast(`✓ ${queuedCount} dosya için embedding oluşturma başlatıldı`);
+        
+        // Dosya listesini yenile - polling FileTable tarafından otomatik yapılacak
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        childRef.current?.reloadV2Files?.();
+      } else {
+        showErrorToast(`Embedding oluşturma başarısız: ${response.message || 'Bilinmeyen hata'}`);
+      }
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.message || error.message || 'Embedding hatası';
+      showErrorToast(`Embedding işlemi başlatılamadı: ${errorMsg}`);
     } finally {
       setIsExtractLoading(false);
     }
