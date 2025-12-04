@@ -188,9 +188,9 @@ class FileQueueDatabase:
         pool_config = {}
         if "sqlite" not in self.db_url:
             pool_config = {
-                "pool_size": 10,           # Base connections (reduced from 100)
-                "max_overflow": 20,        # Extra connections when needed (reduced from 200)
-                "pool_timeout": 30,        # Wait up to 30s for connection
+                "pool_size": 20,           # Base connections (increased for high concurrency)
+                "max_overflow": 40,        # Extra connections when needed (total max: 60)
+                "pool_timeout": 60,        # Wait up to 60s for connection
                 "pool_recycle": 300,       # Recycle connections every 5 min (faster cleanup)
                 "pool_pre_ping": True,     # Check connection health before use
             }
