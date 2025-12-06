@@ -477,6 +477,57 @@ class FileQueueDatabase:
         finally:
             db.close()
 
+    def get_files_summary(self) -> List[dict]:
+        """Get only id and status fields for all files (optimized for large datasets)"""
+        db = self.get_db_session()
+        try:
+            # Sadece gerekli kolonları çek (çok daha hızlı!)
+            results = db.query(
+                UploadedFile.id,
+                UploadedFile.status,
+                UploadedFile.upload_status,
+                UploadedFile.chunking_status,
+                UploadedFile.graph_status,
+                UploadedFile.embedding_status
+            ).order_by(UploadedFile.created_at.desc()).all()
+            
+            return [
+                {
+                    "id": r.id,
+                    "status": r.status,
+                    "upload_status": r.upload_status,
+                    "chunking_status": r.chunking_status,
+                    "graph_status": r.graph_status,
+                    "embedding_status": r.embedding_status,
+                    "_detail": False
+                }
+                for r in results
+            ]
+        finally:
+            db.close()
+
+    def get_files_with_details(self, limit: int = 100, offset: int = 0) -> List[UploadedFile]:
+        """Get files with full details (paginated)"""
+        db = self.get_db_session()
+        try:
+            return db.query(UploadedFile)\
+                .order_by(UploadedFile.created_at.desc())\
+                .offset(offset)\
+                .limit(limit)\
+                .all()
+        finally:
+            db.close()
+
+    def get_files_by_ids(self, file_ids: List[int]) -> List[UploadedFile]:
+        """Get files by specific IDs (for filtered views)"""
+        db = self.get_db_session()
+        try:
+            return db.query(UploadedFile)\
+                .filter(UploadedFile.id.in_(file_ids))\
+                .all()
+        finally:
+            db.close()
+
     def update_file_status(
         self, file_id: int, new_status: FileStatus, error_message: str = None, reason: str = None
     ) -> bool:

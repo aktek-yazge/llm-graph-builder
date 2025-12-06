@@ -598,10 +598,13 @@ class graphDBdataAccess:
             session_params={"database": self.graph._database},
         )
 
+        # Optimize: Sadece chunk var mı kontrol et (tüm chunk'ları saymak çok yavaş - 500K+ chunk olabilir)
         result_chunks = self.graph.query(
-            """match (c:Chunk) return size(c.embedding) as embeddingSize, count(*) as chunks, 
-                                                    count(c.embedding) as hasEmbedding
-                                """,
+            """MATCH (c:Chunk) 
+               WITH c LIMIT 1
+               RETURN size(c.embedding) as embeddingSize, 1 as chunks, 
+                      CASE WHEN c.embedding IS NOT NULL THEN 1 ELSE 0 END as hasEmbedding
+            """,
             session_params={"database": self.graph._database},
         )
 

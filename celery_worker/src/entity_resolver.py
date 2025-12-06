@@ -200,7 +200,7 @@ class EntityResolver:
         combined_text = " | ".join(text_parts)
         
         # Embedding oluştur
-        embedding = self.embedding_model.encode([combined_text])
+        embedding = self.embedding_model.encode([combined_text], show_progress_bar=False)
         return embedding[0]
         
     def find_similar_entities(self, 

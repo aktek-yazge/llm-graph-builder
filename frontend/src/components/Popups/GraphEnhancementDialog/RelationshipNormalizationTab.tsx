@@ -212,9 +212,9 @@ export default function RelationshipNormalizationTab() {
                 <Flex justifyContent='space-between' alignItems='flex-start'>
                   <Flex alignItems='flex-start' gap='3'>
                     <Checkbox
-                      checked={group.selected}
+                      isChecked={group.selected}
                       onChange={() => handleToggleGroup(index)}
-                      aria-label={`Select ${group.suggested_name}`}
+                      ariaLabel={`Select ${group.suggested_name}`}
                     />
                     <div>
                       <Flex alignItems='center' gap='2' className='mb-2'>

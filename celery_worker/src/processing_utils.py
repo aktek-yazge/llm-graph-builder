@@ -128,6 +128,100 @@ def _call_gemini_with_retry(client, model: str, contents: list, page_info: str =
         )
 
 
+def _ocr_page_with_gpt5(image_bytes: bytes, page_idx: int, total_pages: int, previous_context: str = "") -> str:
+    """
+    GPT-5 ile tek sayfa OCR - Gemini başarısız olduğunda fallback olarak kullanılır.
+    
+    Args:
+        image_bytes: Sayfa görüntüsünün binary içeriği
+        page_idx: Sayfa numarası (1'den başlar)
+        total_pages: Toplam sayfa sayısı
+        previous_context: Önceki sayfanın son 1000 karakteri (bağlam için)
+    
+    Returns:
+        str: Sayfa için markdown içeriği, başarısız olursa boş string
+    """
+    try:
+        import openai
+        import base64
+        
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            logging.warning("❌ OPENAI_API_KEY bulunamadı, GPT-5 OCR atlanıyor")
+            return ""
+        
+        client = openai.OpenAI(api_key=api_key)
+        
+        # Image'ı base64'e çevir
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Context string hazırla
+        context_str = ""
+        if previous_context:
+            context_str = f"\n\nÖNCEKİ SAYFA BAĞLAMI (devam eden cümleleri birleştirmek için kullan):\n{previous_context}\n"
+        
+        # First page için özel talimatlar
+        first_page_instructions = """
+İLK SAYFA ÖZEL TALİMATLAR (Sigorta Poliçesi Header):
+Bu sayfa muhtemelen EN KRİTİK poliçe bilgilerini içerir:
+- QR kodları, barkodları ve logoları YOKSAY - SADECE METİN'e odaklan
+- TÜM yapılandırılmış form verilerini çıkar:
+  * Poliçe başlığı (örn: "TRAFİK SİGORTA POLİÇESİ", "KONUT POLİÇESİ")
+  * Tarihler: Başlama Tarihi, Bitiş Tarihi, Tanzim Tarihi
+  * Poliçe numaraları: Poliçe No, Yenileme No, Zeyil No
+  * Acente bilgileri: Acente Kodu, Acente Ünvanı
+  * "Sigortalı" bölümündeki şirket/kişi adı, adres, telefon, TC/Vergi No
+  * Araç bilgileri: Marka, Model, Plaka, Motor No (trafik poliçeleri için)
+  * Mülk bilgileri: Riziko Adresi (gayrimenkul poliçeleri için)
+- Bu EN ÖNEMLİ sayfa - HER alanı titizlikle çıkar!
+""" if page_idx == 1 else ""
+        
+        prompt = f"""Sen bir OCR ve Semantik Chunking uzmanısın.
+Bu, {total_pages} sayfalık bir belgenin {page_idx}. sayfası.
+{first_page_instructions}
+GÖREV:
+1. Bu belge sayfasını temiz markdown'a çevir.
+2. Semantik olarak ilişkili metinleri <CHUNK>...</CHUNK> etiketleri ile grupla.
+3. ```markdown etiketleri``` KULLANMA.
+4. Tüm metin, tablo ve yapıyı gösterildiği gibi aynen çıkar.
+
+KRİTİK CHUNKING KURALLARI:
+1. **BAŞLIKLAR VE İÇERİK:** Başlığı takip eden içerikle BİRLİKTE grupla. ASLA sadece başlık içeren chunk oluşturma.
+2. **TABLOLAR:** Tablo başlığını tabloyla BİRLİKTE grupla.
+3. **ANAHTAR-DEĞER ÇİFTLERİ:** Bölüm başlıklarını anahtar-değer çiftleriyle grupla.
+4. **İMZALAR VE FOOTER:** Tüm imza blokları, tarihler ve footer bilgilerini TEK bir chunk'ta grupla.
+{context_str}
+SADECE <CHUNK> etiketleriyle markdown içeriğini döndür, başka hiçbir şey yazma."""
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1
+        )
+        
+        result = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
+        if result:
+            logging.info(f"✅ GPT-5 OCR başarılı: sayfa {page_idx}/{total_pages} ({len(result)} karakter)")
+        return result
+        
+    except Exception as e:
+        logging.warning(f"⚠️ GPT-5 OCR hatası (sayfa {page_idx}): {e}")
+        return ""
+
+
 def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     """
     Gemini 2.0 Flash ile image'ları markdown'a çevirme ve belge tipini tespit etme (sync function for executor)
@@ -316,9 +410,25 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                     context_str = f"\n\nCONTEXT FROM PREVIOUS PAGE (Use this to handle split sentences/paragraphs):\n{previous_page_context}\n"
 
                 # Send to Gemini with new SDK
+                # First page has special instructions for policy headers
+                first_page_instructions = """
+FIRST PAGE SPECIAL INSTRUCTIONS (Insurance Policy Header):
+This page likely contains the MOST CRITICAL policy information:
+- IGNORE QR codes, barcodes, and logos - focus on TEXT ONLY
+- Extract ALL structured form data including:
+  * Policy title (e.g., "TRAFİK SİGORTA POLİÇESİ", "KONUT POLİÇESİ")
+  * Dates: Başlama Tarihi, Bitiş Tarihi, Tanzim Tarihi
+  * Policy numbers: Poliçe No, Yenileme No, Zeyil No
+  * Agency info: Acente Kodu, Acente Ünvanı
+  * Customer section "Sigortalı" with company/person name, address, phone, TC/Vergi No
+  * Vehicle info: Marka, Model, Plaka, Motor No, Şasi No (for traffic policies)
+  * Property info: Riziko Adresi (for property policies)
+- This is the MOST IMPORTANT page - extract EVERY field meticulously!
+""" if idx == 1 else ""
+                
                 prompt_text = f"""You are an AI expert in OCR and Semantic Chunking.
 This is page {idx} of {len(sorted_images)} of a document.
-
+{first_page_instructions}
 TASK:
 1. Convert this document page to clean markdown.
 2. Group semantically related text into chunks wrapped in <CHUNK>...</CHUNK> tags.
@@ -342,7 +452,15 @@ CRITICAL CHUNKING RULES:
 5. **GENERAL:** Avoid creating very small chunks (1-2 lines) unless they are completely independent. Prefer merging with the preceding or following context.
 
 REPETITIVE CONTENT HANDLING:
-{f"- IGNORE headers and footers that are repeated from the first page (e.g., document titles, logos, standard footers).\n- Extract ONLY the unique content of this page.\n- Do NOT extract the main document title if it appears again." if idx > 1 else ""}
+{f'''- IGNORE only purely decorative headers/footers (logos, page numbers, company contact info that repeats).
+- ALWAYS EXTRACT critical document data even if it contains the document title:
+  * Policy holder names (Sigortalı, Sigorta Ettiren)
+  * Policy numbers (Poliçe No, Yenileme No)
+  * Dates (Başlama/Bitiş Tarihi, Tanzim Tarihi)
+  * Addresses (Riziko Adresi, customer address)
+  * TC Kimlik numbers
+  * Premium and coverage amounts
+- Page 2 of insurance documents typically contains THE MOST IMPORTANT DATA - extract it completely!''' if idx > 1 else ""}
 
 CONTEXT HANDLING:
 {context_str}
@@ -379,9 +497,19 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
                         f"✅ Gemini 2.0 Flash processed page {idx}/{len(sorted_images)}: {source_name} ({len(current_page_text)} chars)"
                     )
                 else:
-                    logging.warning(
-                        f"Gemini returned empty response for {os.path.basename(img_path)}"
-                    )
+                    # Gemini boş döndü, GPT-5 ile retry yap
+                    logging.warning(f"Gemini returned empty response for {os.path.basename(img_path)}, trying GPT-5...")
+                    gpt5_text = _ocr_page_with_gpt5(image_bytes, idx, len(sorted_images), previous_page_context)
+                    if gpt5_text:
+                        current_page_text = gpt5_text
+                        if idx < len(sorted_images):
+                            markdown_text += current_page_text + "\n\n[PAGE BREAK]\n\n"
+                        else:
+                            markdown_text += current_page_text
+                        previous_page_context = current_page_text[-1000:] if len(current_page_text) > 1000 else current_page_text
+                        logging.info(f"✅ GPT-5 processed page {idx}/{len(sorted_images)}: ({len(current_page_text)} chars)")
+                    else:
+                        logging.warning(f"Both Gemini and GPT-5 returned empty for {os.path.basename(img_path)}")
             except (GeminiOCRException, GeminiRateLimitException) as e:
                 # Re-raise Gemini specific exceptions - these should fail the task
                 logging.error(f"❌ Gemini OCR failed for {img_ref}: {e}")
@@ -1430,14 +1558,12 @@ class FileProcessor:
                 )
                 if file_record:
                     file_record.chunking_status = "failed"
+                    file_record.status = "failed"  # Ana status da failed olmalı
                     file_record.processing_error = str(chunk_error)[:500]
                     file_record.reason = f"Chunking failed: {str(chunk_error)}"
-                    # Remove from queue so it doesn't block other files
-                    if file_record.status in ("queued", "processing"):
-                        file_record.status = "uploaded"
                     db_session.commit()
                     logging.info(
-                        f"🔄 V2: Removed failed chunking file {file_record.id} ({file_record.original_name}) from queue"
+                        f"❌ V2: Chunking failed for file {file_record.id} ({file_record.original_name})"
                     )
             finally:
                 db_session.close()
@@ -1515,6 +1641,7 @@ class FileProcessor:
             if not markdown_path or not os.path.exists(markdown_path):
                 logging.error(f"❌ Markdown file not found: {markdown_path}")
                 file_record.graph_status = "failed"
+                file_record.status = "failed"  # Ana status da failed olmalı
                 file_record.processing_error = "Markdown file not found"
                 file_record.reason = "Graph creation failed: Markdown file not found"
                 db_session.commit()
@@ -1669,6 +1796,7 @@ class FileProcessor:
                     f"❌ V2 Graph extraction failed for: {normalized_filename} - {error_message}"
                 )
                 file_record.graph_status = "failed"
+                file_record.status = "failed"  # Ana status da failed olmalı
                 file_record.processing_error = error_message[:500]
                 file_record.reason = f"Graph extraction failed: {error_message}"
                 db_session.commit()
@@ -1714,6 +1842,7 @@ class FileProcessor:
                         error_message = f"Endorsement node was not created for document: {normalized_filename}"
                         logging.error(f"❌ {error_message}")
                         file_record.graph_status = "failed"
+                        file_record.status = "failed"  # Ana status da failed olmalı
                         file_record.processing_error = error_message[:500]
                         file_record.reason = f"Graph verification failed: {error_message}"
                         db_session.commit()
@@ -1728,6 +1857,7 @@ class FileProcessor:
                     )
                     logging.error(f"❌ {error_message}")
                     file_record.graph_status = "failed"
+                    file_record.status = "failed"  # Ana status da failed olmalı
                     file_record.processing_error = error_message[:500]
                     file_record.reason = f"Graph verification failed: {error_message}"
                     db_session.commit()
@@ -1852,6 +1982,7 @@ class FileProcessor:
 
             if db_session and file_record:
                 file_record.graph_status = "failed"
+                file_record.status = "failed"  # Ana status da failed olmalı
                 file_record.processing_error = str(e)[:500]
                 file_record.reason = f"Graph creation failed: {str(e)}"
                 db_session.commit()
@@ -1957,6 +2088,7 @@ class FileProcessor:
                     # If chunking failed, mark graph creation as failed too
                     if file_record.chunking_status == "failed":
                         file_record.graph_status = "failed"
+                        file_record.status = "failed"  # Ana status da failed olmalı
                         file_record.processing_error = f"Graph creation skipped: Chunking failed - {file_record.processing_error or 'Unknown error'}"
                         db_session.commit()
                         logging.info(f"❌ V2: Graph creation marked as failed due to chunking failure for: {file_record.original_name}")
@@ -2112,14 +2244,12 @@ class FileProcessor:
                 )
                 if file_record:
                     file_record.graph_status = "failed"
+                    file_record.status = "failed"  # Ana status da failed olmalı
                     file_record.processing_error = str(graph_error)[:500]
                     file_record.reason = f"Graph creation failed: {str(graph_error)}"
-                    # Remove from queue so it doesn't block other files
-                    if file_record.status in ("queued", "processing"):
-                        file_record.status = "uploaded"
                     db_session.commit()
                     logging.info(
-                        f"🔄 V2: Removed failed graph creation file {file_record.id} ({file_record.original_name}) from queue"
+                        f"❌ V2: Graph creation failed for file {file_record.id} ({file_record.original_name})"
                     )
             finally:
                 db_session.close()

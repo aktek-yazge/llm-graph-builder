@@ -5,6 +5,7 @@ Kullanım: python test_schema.py
 """
 
 import sys
+import time
 sys.path.insert(0, 'src')
 
 from langchain_community.graphs import Neo4jGraph
@@ -14,6 +15,100 @@ NEO4J_URL = 'bolt://3.76.55.209:7688'
 NEO4J_USER = 'neo4j'
 NEO4J_PASS = 'qwerty5555'
 NEO4J_DB = 'neo4j'
+
+
+def fetch_schema_apoc(graph) -> str:
+    """
+    APOC ile şema çekme - TEK SORGU ile tüm bilgi
+    
+    Format:
+    # NODES
+    (NodeName:count){prop1:type,prop2:type,...}
+    
+    # RELATIONSHIPS
+    (FromNode)-[:REL_TYPE]->(ToNode)
+    """
+    print("🔍 APOC meta.schema() ile şema çekiliyor...")
+    start_time = time.time()
+    
+    try:
+        # APOC meta.schema() - TEK SORGU
+        result = graph.query("CALL apoc.meta.schema() YIELD value RETURN value")
+        if not result:
+            print("❌ APOC sonuç döndürmedi")
+            return ""
+        
+        schema_data = result[0]["value"]
+        elapsed = time.time() - start_time
+        print(f"⏱️ APOC sorgusu: {elapsed:.2f} saniye")
+        
+        # Tip dönüşümü
+        type_map = {
+            "STRING": "str", "INTEGER": "int", "FLOAT": "float",
+            "BOOLEAN": "bool", "DATE_TIME": "dt", "DATE": "dt",
+            "LOCAL_DATE_TIME": "dt", "LIST": "list"
+        }
+        
+        # Node'ları ve Relationship'leri ayır
+        nodes = {}
+        relationships = []
+        
+        for name, info in schema_data.items():
+            if info.get("type") == "node":
+                # Node bilgisi
+                count = info.get("count", 0)
+                props = []
+                for prop_name, prop_info in info.get("properties", {}).items():
+                    if prop_name not in ["embedding", "id", "uuid", "elementId"]:
+                        prop_type = type_map.get(prop_info.get("type", "STRING"), "str")
+                        props.append(f"{prop_name}:{prop_type}")
+                nodes[name] = {"count": count, "props": props}
+                
+                # Bu node'un relationship'leri
+                for rel_name, rel_info in info.get("relationships", {}).items():
+                    direction = rel_info.get("direction", "out")
+                    target_labels = rel_info.get("labels", [])
+                    for target in target_labels:
+                        if direction == "out":
+                            relationships.append((name, rel_name, target))
+                        else:
+                            relationships.append((target, rel_name, name))
+            
+            elif info.get("type") == "relationship":
+                # Relationship type bilgisi (ayrıca tutulabilir)
+                pass
+        
+        # Format oluştur
+        lines = ["# NODES"]
+        # Count'a göre sırala
+        sorted_nodes = sorted(nodes.items(), key=lambda x: x[1]["count"], reverse=True)
+        for label, info in sorted_nodes:
+            count = info["count"]
+            props = info["props"]
+            if props:
+                lines.append(f"({label}:{count}){{{','.join(props)}}}")  # TÜM property'ler
+            else:
+                lines.append(f"({label}:{count})")
+        
+        lines.append("")
+        lines.append("# RELATIONSHIPS")
+        
+        # Unique pattern'ler - HİÇBİR FİLTRE YOK
+        seen = set()
+        for from_l, rel, to_l in relationships:
+            pattern = f"({from_l})-[:{rel}]->({to_l})"
+            if pattern not in seen:
+                seen.add(pattern)
+                lines.append(pattern)
+        
+        schema = "\n".join(lines)
+        print(f"✅ APOC Schema: {len(schema)} karakter, {len(sorted_nodes)} node, {len(seen)} pattern")
+        return schema
+        
+    except Exception as e:
+        print(f"❌ APOC hatası: {e}")
+        return ""
+
 
 def fetch_schema_lightweight(graph) -> str:
     """
@@ -146,12 +241,65 @@ if __name__ == "__main__":
         database=NEO4J_DB
     )
     
-    schema = fetch_schema_lightweight(graph)
-    
+    # ========== APOC TEST ==========
     print("\n" + "="*60)
-    print("SCHEMA ÇIKTISI:")
+    print("1️⃣ APOC META.SCHEMA() TESTİ")
     print("="*60)
-    print(schema)
+    start1 = time.time()
+    schema_apoc = fetch_schema_apoc(graph)
+    time_apoc = time.time() - start1
+    
+    print("\n--- APOC ÇIKTISI ---")
+    print(schema_apoc)
+    # if len(schema_apoc) > 2000:
+    #     print(f"... ({len(schema_apoc) - 2000} karakter daha)")
+    
+    # ========== LIGHTWEIGHT TEST ==========
+    # print("\n" + "="*60)
+    # print("2️⃣ LIGHTWEIGHT (MEVCUT) TESTİ")
+    # print("="*60)
+    # start2 = time.time()
+    # schema_light = fetch_schema_lightweight(graph)
+    # time_light = time.time() - start2
+    
+    # print("\n--- LIGHTWEIGHT ÇIKTISI ---")
+    # print(schema_light[:2000] if len(schema_light) > 2000 else schema_light)
+    # if len(schema_light) > 2000:
+    #     print(f"... ({len(schema_light) - 2000} karakter daha)")
+    
+    # ========== SchemaVersionCache ENTEGRASYON TESTİ ==========
+    print("\n" + "="*60)
+    print("3️⃣ SchemaVersionCache ENTEGRASYON TESTİ")
     print("="*60)
-    print(f"\nToplam: {len(schema)} karakter")
+    from src.shared.schema_cache import SchemaVersionCache
+    
+    cache = SchemaVersionCache()
+    cache.invalidate_cache()  # RAM cache'i temizle
+    
+    start3 = time.time()
+    schema_cached = cache.get_schema(NEO4J_URL, graph)
+    time_cached = time.time() - start3
+    
+    # print(f"\n⏱️ SchemaVersionCache süresi: {time_cached:.2f} saniye")
+    # print(f"📏 Schema boyutu: {len(schema_cached)} karakter")
+    # print("\n--- İLK 1500 KARAKTER ---")
+    # print(schema_cached[:1500])
+    
+    # ========== KARŞILAŞTIRMA ==========
+    # print("\n" + "="*60)
+    # print("📊 KARŞILAŞTIRMA")
+    # print("="*60)
+    # print(f"{'Yöntem':<25} {'Süre (sn)':<12} {'Boyut (char)':<15}")
+    # print("-"*55)
+    # print(f"{'APOC (direkt)':<25} {time_apoc:<12.2f} {len(schema_apoc):<15}")
+    # print(f"{'Lightweight (direkt)':<25} {time_light:<12.2f} {len(schema_light):<15}")
+    # print(f"{'SchemaVersionCache':<25} {time_cached:<12.2f} {len(schema_cached):<15}")
+    # print("-"*55)
+    
+    # if time_apoc < time_light:
+    #     print(f"✅ APOC {time_light/time_apoc:.1f}x daha hızlı!")
+    # else:
+    #     print(f"✅ Lightweight {time_apoc/time_light:.1f}x daha hızlı!")
+    
+    # print(f"\n🎯 SchemaVersionCache artık APOC kullanıyor: {'✅ Evet' if time_cached < 10 else '❌ Hayır'}")
 

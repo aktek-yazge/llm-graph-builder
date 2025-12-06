@@ -1,8 +1,6 @@
 from langchain_text_splitters import TokenTextSplitter
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 from langchain_neo4j import Neo4jGraph
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.text_splitter import MarkdownTextSplitter
 import logging
 # YouTube transcript functions moved to celery_worker
 # Backend should not import youtube_transcript_api

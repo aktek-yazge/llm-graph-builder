@@ -14,42 +14,59 @@ import { showErrorToast, showSuccessToast } from '../../utils/Toasts';
 
 interface V2File {
   id: number;
-  filename: string;
-  original_name: string;
-  file_size: number;
-  upload_date: string;
+  original_name?: string;
+  file_size?: number;
+  upload_date?: string;
   upload_status: 'uploaded' | 'uploading' | 'failed';
   chunking_status: 'pending' | 'chunking' | 'chunked' | 'failed';
   graph_status: 'pending' | 'processing' | 'completed' | 'failed';
+  processing_error?: string;
+  _detail?: boolean; // true if full details are loaded
 }
+
+const PAGE_SIZE = 50; // Items per page
 
 const V2FileQueue: React.FC = () => {
   const [files, setFiles] = useState<V2File[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedFileIds, setSelectedFileIds] = useState<Set<number>>(new Set());
+  const [currentPage, setCurrentPage] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const { userCredentials } = useCredentials();
 
-  // Fetch V2 files
+  // Fetch V2 files with pagination
   const fetchV2Files = useCallback(async () => {
     try {
       setIsLoading(true);
-      const response = await getQueuedFilesAPI();
+      const detailOffset = currentPage * PAGE_SIZE;
+      console.log(`📄 Fetching files: page=${currentPage}, offset=${detailOffset}, limit=${PAGE_SIZE}`);
+      const response = await getQueuedFilesAPI(PAGE_SIZE, detailOffset);
       if (response?.status === 'Success' && response?.data?.files) {
         setFiles(response.data.files);
+        setTotalCount(response.data.total_count || response.data.files.length);
+        console.log(`✅ Received ${response.data.files.length} files, detail_offset=${response.data.detail_offset}`);
       }
     } catch (error) {
       showErrorToast('Failed to fetch queue files');
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [currentPage]);
 
   useEffect(() => {
+    console.log(`🔄 Page changed to ${currentPage}, fetching new data...`);
     fetchV2Files();
     // Poll every 5 seconds for status updates
     const interval = setInterval(fetchV2Files, 5000);
     return () => clearInterval(interval);
   }, [fetchV2Files]);
+
+  // Calculate pagination - files from detail range have full data
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE);
+  // Backend'den gelen dosyalar zaten sıralı, sadece mevcut sayfa aralığını göster
+  const startIdx = currentPage * PAGE_SIZE;
+  const endIdx = Math.min(startIdx + PAGE_SIZE, files.length);
+  const displayedFiles = files.slice(startIdx, endIdx);
 
   const handleSelectFile = (fileId: number) => {
     const newSelected = new Set(selectedFileIds);
@@ -138,10 +155,11 @@ const V2FileQueue: React.FC = () => {
     try {
       setIsLoading(true);
       const fileIds = Array.from(selectedFileIds);
-      console.log(`✨ Starting graph creation for ${fileIds.length} files`);
+      console.log(`✨ Starting graph creation for ${fileIds.length} files: ${fileIds.join(', ')}`);
 
-      // Use "all" parameter for batch processing (backend will handle batching)
-      const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
+      // Send selected file IDs - single ID or comma-separated for multiple
+      const fileIdParam = fileIds.length === 1 ? fileIds[0] : fileIds.join(',');
+      const response = await startGraphCreationAPI(fileIdParam, 'openai_gpt_4o_mini', false);
 
       if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
         const processedCount = response.data?.processed_count || fileIds.length;
@@ -273,7 +291,7 @@ const V2FileQueue: React.FC = () => {
               Filename
             </Typography>
             <Typography variant='body-medium' className='col-span-1 font-semibold'>
-              Size
+              Date
             </Typography>
             <Typography variant='body-medium' className='col-span-2 font-semibold'>
               Upload
@@ -299,7 +317,7 @@ const V2FileQueue: React.FC = () => {
               </Typography>
             </div>
           ) : (
-            files.map((file) => (
+            displayedFiles.map((file) => (
               <div key={file.id} className='p-4 hover:bg-gray-50 transition-colors'>
                 <div className='grid grid-cols-12 gap-3 items-center'>
                   {/* Checkbox */}
@@ -310,16 +328,16 @@ const V2FileQueue: React.FC = () => {
                   {/* Filename */}
                   <div className='col-span-2'>
                     <Typography variant='body-medium' className='font-medium truncate'>
-                      {file.original_name}
+                      {file.original_name || `File #${file.id}`}
                     </Typography>
                     <Typography variant='body-small' className='text-gray-500'>
-                      {formatFileSize(file.file_size)}
+                      {file.file_size ? formatFileSize(file.file_size) : '-'}
                     </Typography>
                   </div>
 
-                  {/* Size */}
+                  {/* Upload Date */}
                   <Typography variant='body-small' className='col-span-1'>
-                    {formatFileSize(file.file_size)}
+                    {file.upload_date ? new Date(file.upload_date).toLocaleDateString('tr-TR') : '-'}
                   </Typography>
 
                   {/* Upload Stage */}
@@ -396,7 +414,7 @@ const V2FileQueue: React.FC = () => {
                     <IconButton
                       size='small'
                       ariaLabel='Delete file'
-                      onClick={() => handleDeleteFile(file.id, file.original_name)}
+                      onClick={() => handleDeleteFile(file.id, file.original_name || `File #${file.id}`)}
                       isDisabled={isLoading}
                     >
                       <TrashIconOutline className='w-4 h-4' />
@@ -407,6 +425,50 @@ const V2FileQueue: React.FC = () => {
             ))
           )}
         </div>
+
+        {/* Pagination Controls */}
+        {totalPages > 1 && (
+          <div className='bg-gray-50 border-t p-3'>
+            <Flex justifyContent='space-between' alignItems='center'>
+              <Typography variant='body-small' className='text-gray-600'>
+                Showing {currentPage * PAGE_SIZE + 1}-{Math.min((currentPage + 1) * PAGE_SIZE, totalCount)} of {totalCount} files
+              </Typography>
+              <Flex className='gap-2'>
+                <Button
+                  size='small'
+                  onClick={() => setCurrentPage(0)}
+                  isDisabled={currentPage === 0 || isLoading}
+                >
+                  ⏮ First
+                </Button>
+                <Button
+                  size='small'
+                  onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
+                  isDisabled={currentPage === 0 || isLoading}
+                >
+                  ◀ Prev
+                </Button>
+                <Typography variant='body-medium' className='px-3 py-1 bg-white border rounded'>
+                  Page {currentPage + 1} / {totalPages}
+                </Typography>
+                <Button
+                  size='small'
+                  onClick={() => setCurrentPage(Math.min(totalPages - 1, currentPage + 1))}
+                  isDisabled={currentPage >= totalPages - 1 || isLoading}
+                >
+                  Next ▶
+                </Button>
+                <Button
+                  size='small'
+                  onClick={() => setCurrentPage(totalPages - 1)}
+                  isDisabled={currentPage >= totalPages - 1 || isLoading}
+                >
+                  Last ⏭
+                </Button>
+              </Flex>
+            </Flex>
+          </div>
+        )}
       </div>
 
       {/* Info */}

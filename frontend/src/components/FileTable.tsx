@@ -52,10 +52,10 @@ import cancelAPI from '../services/CancelAPI';
 import subscribe from '../services/PollingAPI';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
 import { ChildRef, CustomFile, FileTableProps, SourceNode, UserCredentials, statusupdate } from '../types';
-import { batchSize, llms } from '../utils/Constants';
-import { getQueuedFilesAPI, startChunkingAPI, startGraphCreationAPI } from '../utils/FileAPI';
+import { batchSize } from '../utils/Constants';
+import { getFileDetailsByIdsAPI, getQueuedFilesAPI, startChunkingAPI, startGraphCreationAPI } from '../utils/FileAPI';
 import { showErrorToast, showNormalToast } from '../utils/Toasts';
-import { capitalizeWithUnderscore, statusCheck, url } from '../utils/Utils';
+import { statusCheck, url } from '../utils/Utils';
 import { normalizeFileName } from '../utils/utf8';
 import BreakDownPopOver from './BreakDownPopOver';
 import CustomProgressBar from './UI/CustomProgressBar';
@@ -86,117 +86,132 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   // V2 Queue işlemleri için state
   const [v2SelectedFileIds, setV2SelectedFileIds] = useState<Set<number>>(new Set());
   const [v2ProcessingFileId, setV2ProcessingFileId] = useState<number | null>(null);
+  
+  // Pagination state for API detail loading
+  const [currentPageIndex, setCurrentPageIndex] = useState<number>(0);
+  const PAGE_SIZE = 100;
+  
+  // Detail cache - yüklenen detayları sakla, list API tarafından ezilmesin
+  const detailCacheRef = useRef<Map<number, any>>(new Map());
 
   // V2 Reset fonksiyonu - process'te takılan dosyaları pending'e çeker
   // V2 Queue dosyalarını yeniden yükle
-  const reloadV2Files = useCallback(async () => {
+  const reloadV2Files = useCallback(async (pageIndex: number = currentPageIndex) => {
     try {
-      const response = await getQueuedFilesAPI();
+      const detailOffset = pageIndex * PAGE_SIZE;
+      console.log(`📄 FileTable: Fetching files page=${pageIndex}, offset=${detailOffset}, limit=${PAGE_SIZE}`);
+      const response = await getQueuedFilesAPI(PAGE_SIZE, detailOffset);
       if (response?.status === 'Success' && response?.data?.files) {
+        // API'den gelen detayları cache'e ekle
+        response.data.files.forEach((file: any) => {
+          if (file._detail === true) {
+            detailCacheRef.current.set(file.id, file);
+          }
+        });
+        
         const v2Files = response.data.files.map((file: any) => {
+          // Cache'de detay varsa kullan (filter sonrası yüklenen detaylar için)
+          // ÖNEMLİ: API'den gelen status alanları (file) cache'deki eski değerleri (cachedDetail) ezmeli!
+          const cachedDetail = detailCacheRef.current.get(file.id);
+          // Önce cache (detay bilgileri: name, size vs.), sonra API (güncel status'ler)
+          const f = cachedDetail 
+            ? { ...cachedDetail, ...file, _detail: true }  // API status'leri öncelikli!
+            : file;
+          
           // V2 Workflow: status belirleme
           // status alanı + chunking_status/graph_status alanlarına bakarak durumu belirle
           let status = 'New';
 
           // status = "processing" kontrolü (herhangi bir işlem yapılıyor)
-          if (file.status === 'processing') {
-            if (file.embedding_status === 'processing') {
-              status = 'Processing Embeddings'; // Embedding oluşturuluyor
-            } else if (file.graph_status === 'processing') {
-              status = 'Processing Graph'; // Graph creation yapılıyor
-            } else if (file.chunking_status === 'chunking') {
-              status = 'Processing Chunks'; // Chunking yapılıyor
-            } else if (file.chunking_status === 'extracting') {
-              status = 'Extracting'; // Image extraction yapılıyor
+          if (f.status === 'processing') {
+            if (f.embedding_status === 'processing') {
+              status = 'Processing Embeddings';
+            } else if (f.graph_status === 'processing') {
+              status = 'Processing Graph';
+            } else if (f.chunking_status === 'chunking') {
+              status = 'Processing Chunks';
+            } else if (f.chunking_status === 'extracting') {
+              status = 'Extracting';
             } else {
-              status = 'Processing'; // Genel processing
+              status = 'Processing';
             }
           }
-          // status = "queued" kontrolü (kuyrukta bekliyor)
-          else if (file.status === 'queued') {
-            if (file.chunking_status === 'ready' && file.graph_status === 'pending') {
-              status = 'Queued for Chunking'; // Chunking kuyruğunda bekliyor
-            } else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
-              status = 'Queued for Graph'; // Graph creation kuyruğunda bekliyor
-            } else if (file.chunking_status === 'pending') {
-              status = 'Queued for Extraction'; // Image extraction kuyruğunda bekliyor
+          // status = "queued" kontrolü
+          else if (f.status === 'queued') {
+            if (f.chunking_status === 'ready' && f.graph_status === 'pending') {
+              status = 'Queued for Chunking';
+            } else if (f.chunking_status === 'chunked' && f.graph_status === 'pending') {
+              status = 'Queued for Graph';
+            } else if (f.chunking_status === 'pending') {
+              status = 'Queued for Extraction';
             } else {
-              status = 'Queued'; // Genel queue
+              status = 'Queued';
             }
           }
           // status = "completed" kontrolü
-          else if (file.status === 'completed' || file.graph_status === 'completed') {
-            // Embedding tamamlandıysa bunu göster
-            if (file.embedding_status === 'completed') {
+          else if (f.status === 'completed' || f.graph_status === 'completed') {
+            if (f.embedding_status === 'completed') {
               status = 'Completed (with Embeddings)';
-            } else if (file.embedding_status === 'failed') {
+            } else if (f.embedding_status === 'failed') {
               status = 'Completed (Failed Embedding)';
             } else {
               status = 'Completed';
             }
           }
-          // pending_endorsement kontrolü (endorsement'lar için özel durum)
-          else if (file.graph_status === 'pending_endorsement') {
-            status = 'Pending Endorsement'; // Endorsement olarak işaretlenmiş, graph creation bekliyor
+          // pending_endorsement kontrolü
+          else if (f.graph_status === 'pending_endorsement') {
+            status = 'Pending Endorsement';
           }
-          // Diğer durumlar (status = "uploaded" veya diğer)
-          else if (file.chunking_status === 'failed' || file.graph_status === 'failed' || file.embedding_status === 'failed') {
-              status = 'Failed';
+          // Diğer durumlar
+          else if (f.chunking_status === 'failed' || f.graph_status === 'failed' || f.embedding_status === 'failed') {
+            status = 'Failed';
           } 
-          // Chunked ve embedding tamamlanmış ama graph bekliyor
-          else if (file.chunking_status === 'chunked' && file.embedding_status === 'completed' && file.graph_status === 'pending') {
-              status = 'Embedded and Ready for Graph';
+          else if (f.chunking_status === 'chunked' && f.embedding_status === 'completed' && f.graph_status === 'pending') {
+            status = 'Embedded and Ready for Graph';
           }
-          // Chunked ama graph bekliyor (embedding yok)
-          else if (file.chunking_status === 'chunked' && file.graph_status === 'pending') {
-              status = 'Ready for Graph'; // Chunking tamamlandı, graph creation bekliyor
-            } else if (file.chunking_status === 'chunked') {
-              status = 'Chunked'; // Chunking tamamlandı
-            } else if (file.chunking_status === 'ready') {
-              status = 'Ready for Chunking'; // Image extraction tamamlandı, chunking'e hazır
-            } else if (file.chunking_status === 'pending') {
-              status = 'Extracting'; // Image extraction bekliyor (upload sonrası)
-            }
+          else if (f.chunking_status === 'chunked' && f.graph_status === 'pending') {
+            status = 'Ready for Graph';
+          } else if (f.chunking_status === 'chunked') {
+            status = 'Chunked';
+          } else if (f.chunking_status === 'ready') {
+            status = 'Ready for Chunking';
+          } else if (f.chunking_status === 'pending') {
+            status = 'Extracting';
+          }
 
           return {
-            id: `v2_${file.id}`, // Unique ID for V2 files
-            name: file.original_name,
-            size: file.file_size || 0, // File size in bytes
-            status, // Mapped status
+            id: `v2_${f.id}`,
+            name: f.original_name || (f._detail === false ? '' : `File #${f.id}`),
+            size: f.file_size || 0,
+            status,
             fileSource: 'V2 Queue',
-            sourceUrl: file.original_name ? `${url()}/files/${encodeURIComponent(file.original_name)}?inline=true` : '',
-            fileType: file.filename?.split('.').pop()?.toUpperCase() || 'PDF',
+            sourceUrl: f.original_name ? `${url()}/files/${encodeURIComponent(f.original_name)}?inline=true` : '',
+            fileType: f.filename?.split('.').pop()?.toUpperCase() || 'PDF',
             nodesCount: 0,
             relationshipsCount: 0,
             processingProgress:
-              // Embedding processing stage
-              file.embedding_status === 'processing'
-                ? 90
-                : file.embedding_status === 'completed'
-                  ? 100
-                  // Graph processing stage
-                  : file.graph_status === 'processing'
-                    ? 75
-                    : file.graph_status === 'completed'
-                      ? 100
-                      // Chunking stage  
-                      : file.chunking_status === 'chunked'
-                        ? 100
-                        : file.chunking_status === 'chunking'
-                          ? 50
-                          : file.chunking_status === 'extracting'
-                            ? 25
-                            : 0,
-            model: file.model_used || 'Not set',
+              f.embedding_status === 'processing' ? 90
+              : f.embedding_status === 'completed' ? 100
+              : f.graph_status === 'processing' ? 75
+              : f.graph_status === 'completed' ? 100
+              : f.chunking_status === 'chunked' ? 100
+              : f.chunking_status === 'chunking' ? 50
+              : f.chunking_status === 'extracting' ? 25
+              : 0,
+            model: f.model_used || 'Not set',
             processingTotalTime: '0',
             chunkNodeCount: 0,
             chunkRelCount: 0,
-            // V2 stage info
-            v2FileId: file.id,
-            upload_status: file.upload_status,
-            chunking_status: file.chunking_status,
-            graph_status: file.graph_status,
-            embedding_status: file.embedding_status,
+            v2FileId: f.id,
+            upload_status: f.upload_status,
+            chunking_status: f.chunking_status,
+            graph_status: f.graph_status,
+            embedding_status: f.embedding_status,
+            _detail: f._detail === true,
+            // Status completion timestamps
+            chunking_completed_at: f.chunking_completed_at,
+            graph_completed_at: f.graph_completed_at,
+            embedding_completed_at: f.embedding_completed_at,
           };
         });
 
@@ -206,7 +221,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     } catch (error) {
       // Failed silently
     }
-  }, [setFilesData]);
+  }, [setFilesData, currentPageIndex]);
 
   // V2 Reset fonksiyonu - process'te takılan dosyaları pending'e çeker
   const resetV2FileStage = useCallback(async (
@@ -365,12 +380,11 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           // V2 Queue dosyaları için link oluştur
           if (fileSource === 'V2 Queue' && sourceUrl) {
             return (
-              <div className='textellipsis'>
+              <div className='textellipsis' title={fileName}>
                 <TextLink
                   type='external'
                   target='_blank'
                   href={sourceUrl}
-                  title={fileName}
                 >
                   {fileName}
                 </TextLink>
@@ -703,149 +717,56 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         header: () => <span>Size (KB)</span>,
         footer: (info) => info.column.id,
       }),
-      columnHelper.accessor((row) => row, {
-        id: 'source',
+      columnHelper.accessor((row) => row.chunking_completed_at, {
+        id: 'chunkingCompletedAt',
         cell: (info) => {
-          if (
-            info.row.original.fileSource === 'youtube' ||
-            info.row.original.fileSource === 'Wikipedia' ||
-            info.row.original.fileSource === 'web-url'
-          ) {
-            return (
-              <Flex>
-                <span>
-                  <TextLink type='external' target='_blank' href={info.row.original.sourceUrl}>
-                    {info.row.original.fileSource}
-                  </TextLink>
-                </span>
-              </Flex>
-            );
-          }
+          const completedAt = info.getValue();
+          if (!completedAt) return <span className='text-gray-400'>-</span>;
+          const date = new Date(completedAt);
           return (
-            <div>
-              <span>{info.row.original.fileSource}</span>
-            </div>
+            <span title={date.toLocaleString('tr-TR')} className='text-xs'>
+              {date.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' })}
+              {' '}
+              {date.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+            </span>
           );
         },
-        header: () => <span>Source</span>,
+        header: () => <span>Chunked</span>,
         footer: (info) => info.column.id,
-        filterFn: 'fileSourceFilter' as any,
-        meta: {
-          columnActions: {
-            actions: [
-              {
-                title: (
-                  <span className={`${fileSourceFilter === 'All' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                    All Sources
-                  </span>
-                ),
-                onClick: () => {
-                  setFileSourceFilter('All');
-                  table.getColumn('source')?.setFilterValue(true);
-                },
-              },
-              ...Array.from(new Set(filesData.map((f) => f.fileSource))).map((t) => {
-                return {
-                  title: (
-                    <span className={`${t === fileSourceFilter ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                      {t}
-                    </span>
-                  ),
-                  onClick: () => {
-                    setFileSourceFilter(t as string);
-                    table.getColumn('source')?.setFilterValue(true);
-                    skipPageResetRef.current = true;
-                  },
-                };
-              }),
-            ],
-            hasDefaultSortingActions: false,
-          },
-        },
       }),
-      columnHelper.accessor((row) => row, {
-        id: 'type',
+      columnHelper.accessor((row) => row.graph_completed_at, {
+        id: 'graphCompletedAt',
         cell: (info) => {
+          const completedAt = info.getValue();
+          if (!completedAt) return <span className='text-gray-400'>-</span>;
+          const date = new Date(completedAt);
           return (
-            <div>
-              <span>{info.row.original.type}</span>
-            </div>
+            <span title={date.toLocaleString('tr-TR')} className='text-xs'>
+              {date.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' })}
+              {' '}
+              {date.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+            </span>
           );
         },
-        header: () => <span>Type</span>,
+        header: () => <span>Graph</span>,
         footer: (info) => info.column.id,
-        filterFn: 'fileTypeFilter' as any,
-        meta: {
-          columnActions: {
-            actions: [
-              {
-                title: (
-                  <span className={`${filetypeFilter === 'All' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                    All Types
-                  </span>
-                ),
-                onClick: () => {
-                  setFiletypeFilter('All');
-                  table.getColumn('type')?.setFilterValue(true);
-                },
-              },
-              ...Array.from(new Set(filesData.map((f) => f.type))).map((t) => {
-                return {
-                  title: (
-                    <span className={`${t === filetypeFilter ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>{t}</span>
-                  ),
-                  onClick: () => {
-                    setFiletypeFilter(t as string);
-                    table.getColumn('type')?.setFilterValue(true);
-                    skipPageResetRef.current = true;
-                  },
-                };
-              }),
-            ],
-            hasDefaultSortingActions: false,
-          },
-        },
       }),
-      columnHelper.accessor((row) => row.model, {
-        id: 'model',
+      columnHelper.accessor((row) => row.embedding_completed_at, {
+        id: 'embeddingCompletedAt',
         cell: (info) => {
-          const model = info.getValue();
-          return <i>{capitalizeWithUnderscore(model)}</i>;
+          const completedAt = info.getValue();
+          if (!completedAt) return <span className='text-gray-400'>-</span>;
+          const date = new Date(completedAt);
+          return (
+            <span title={date.toLocaleString('tr-TR')} className='text-xs'>
+              {date.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' })}
+              {' '}
+              {date.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          );
         },
-        header: () => <span>Model</span>,
+        header: () => <span>Embed</span>,
         footer: (info) => info.column.id,
-        filterFn: 'llmTypeFilter' as any,
-        meta: {
-          columnActions: {
-            actions: [
-              {
-                title: (
-                  <span className={`${llmtypeFilter === 'All' ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>
-                    All
-                  </span>
-                ),
-                onClick: () => {
-                  setLLmtypeFilter('All');
-                  table.getColumn('model')?.setFilterValue(true);
-                  skipPageResetRef.current = true;
-                },
-              },
-              ...llms.map((m) => {
-                return {
-                  title: (
-                    <span className={`${m === llmtypeFilter ? 'n-bg-palette-primary-bg-selected' : ''} p-2`}>{m}</span>
-                  ),
-                  onClick: () => {
-                    setLLmtypeFilter(m);
-                    table.getColumn('model')?.setFilterValue(true);
-                    skipPageResetRef.current = true;
-                  },
-                };
-              }),
-            ],
-            hasDefaultSortingActions: false,
-          },
-        },
       }),
       columnHelper.accessor((row) => row.nodesCount, {
         id: 'NodesCount',
@@ -969,12 +890,25 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     state: {
       columnFilters,
       rowSelection,
-    },
-    initialState: {
       pagination: {
-        pageSize: 100,
+        pageIndex: currentPageIndex,
+        pageSize: PAGE_SIZE,
       },
     },
+    onPaginationChange: (updater) => {
+      // React Table pagination state updater
+      const newState = typeof updater === 'function' 
+        ? updater({ pageIndex: currentPageIndex, pageSize: PAGE_SIZE })
+        : updater;
+      
+      if (newState.pageIndex !== currentPageIndex) {
+        console.log(`📄 Page changed: ${currentPageIndex} -> ${newState.pageIndex}`);
+        setCurrentPageIndex(newState.pageIndex);
+        // Yeni sayfa için detayları yükle
+        reloadV2Files(newState.pageIndex);
+      }
+    },
+    manualPagination: false, // Client-side pagination (tüm veri yüklenmiş)
     onRowSelectionChange: setRowSelection,
     filterFns: {
       nameFilter: (row, columnId, filterValue) => {
@@ -1194,6 +1128,74 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 
     return () => clearInterval(interval);
   }, [filesData, reloadV2Files]);
+
+  // Filtre veya sayfa değiştiğinde, görünen dosyaların detaylarını yükle
+  const loadMissingDetails = useCallback(async () => {
+    // Filtrelenmiş ve sayfalanmış satırları al
+    const visibleRows = table.getRowModel().rows;
+    
+    // Detayı olmayan dosyaları bul (v2FileId varsa ve _detail yoksa)
+    const missingDetailIds: number[] = [];
+    visibleRows.forEach(row => {
+      const file = row.original;
+      // V2 file ve detay yüklenmemişse VE cache'de de yoksa
+      if (file.v2FileId && !file._detail && file.fileSource === 'V2 Queue') {
+        if (!detailCacheRef.current.has(file.v2FileId)) {
+          missingDetailIds.push(file.v2FileId);
+        }
+      }
+    });
+
+    if (missingDetailIds.length === 0) {
+      return;
+    }
+
+    console.log(`📄 Loading missing details for ${missingDetailIds.length} files:`, missingDetailIds);
+    
+    try {
+      const response = await getFileDetailsByIdsAPI(missingDetailIds);
+      if (response?.status === 'Success' && response?.data?.files) {
+        // Detayları cache'e ekle
+        response.data.files.forEach((f: any) => {
+          detailCacheRef.current.set(f.id, f);
+        });
+
+        // filesData'yı güncelle
+        setFilesData(prevFiles => prevFiles.map(file => {
+          if (file.v2FileId && detailCacheRef.current.has(file.v2FileId)) {
+            const detail = detailCacheRef.current.get(file.v2FileId);
+            return {
+              ...file,
+              name: detail.original_name || file.name,
+              size: detail.file_size || file.size,
+              chunking_completed_at: detail.chunking_completed_at,
+              graph_completed_at: detail.graph_completed_at,
+              embedding_completed_at: detail.embedding_completed_at,
+              _detail: true,
+            };
+          }
+          return file;
+        }));
+        
+        console.log(`✅ Loaded ${response.data.files.length} details, cache size: ${detailCacheRef.current.size}`);
+      }
+    } catch (error) {
+      console.error('Failed to load missing details:', error);
+    }
+  }, [table, setFilesData]);
+
+  // Filtre değiştiğinde detayları yükle
+  useEffect(() => {
+    // Filtre aktifse ve tablo hazırsa detayları yükle
+    const hasActiveFilter = statusFilter || filetypeFilter !== 'All' || fileSourceFilter !== 'All' || nameFilter;
+    if (hasActiveFilter) {
+      // Kısa bir gecikme ile yükle (tablo render olduktan sonra)
+      const timer = setTimeout(() => {
+        loadMissingDetails();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [statusFilter, filetypeFilter, fileSourceFilter, nameFilter, currentPageIndex, loadMissingDetails]);
 
   const cancelHandler = async (fileName: string, id: string, fileSource: string) => {
     // V2 Queue dosyası mı kontrol et
@@ -1478,63 +1480,52 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           return;
         }
 
-        // Check if all V2 files are selected
-        const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
-        const isAllSelected = allV2Files.length > 0 && selectedV2Files.length === allV2Files.length;
-
         try {
-          if (isAllSelected) {
-            // Use "all" parameter - backend will filter files by status
-            showNormalToast('Tüm hazır dosyalar için graph oluşturuluyor...');
-            const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
-            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
-              const processedCount = response.data?.processed_count || 0;
-              showNormalToast(`✓ Graph creation started for ${processedCount} file(s)`);
-            } else {
-              showErrorToast(`Failed to start graph creation: ${response.message || 'Unknown error'}`);
-            }
-          } else {
-            // Chunked olanları filtrele
-            const chunkedFiles = selectedV2Files.filter(
-              (f) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
-            );
-            const notChunkedFiles = selectedV2Files.filter(
-              (f) => f.chunking_status !== 'chunked' || f.graph_status === 'completed'
-            );
+          // Her zaman seçilen dosyaların ID'lerini gönder (artık 'all' kullanmıyoruz)
+          // Chunked olanları filtrele
+          const chunkedFiles = selectedV2Files.filter(
+            (f) => f.chunking_status === 'chunked' && f.graph_status !== 'completed'
+          );
+          const notChunkedFiles = selectedV2Files.filter(
+            (f) => f.chunking_status !== 'chunked' || f.graph_status === 'completed'
+          );
 
-            if (chunkedFiles.length === 0) {
-              showErrorToast('Seçilen dosyaların hiçbiri graph oluşturmaya hazır değildir.');
-              return;
-            }
-
-            // Uyar varsa göster
-            if (notChunkedFiles.length > 0) {
-              showNormalToast(
-                `⚠️ ${notChunkedFiles.length} dosya henüz hazır değil, sadece ${chunkedFiles.length} dosya için graph oluşturulacak`
-              );
-            }
-
-            // Dosyaların durumunu Processing olarak güncelle (UI'de göstermek için)
-            setFilesData((prev) =>
-              prev.map((f) => {
-                if (chunkedFiles.some((cf) => cf.v2FileId === f.v2FileId)) {
-                  return { ...f, status: 'Processing', processingProgress: 50 };
-                }
-                return f;
-              })
-            );
-
-            // Birden fazla dosya seçilmişse, "all" parametresi kullan (backend batch batch işleyecek)
-            // Backend zaten batch batch işlemek için dosyaları işaretliyor
-            showNormalToast(`${chunkedFiles.length} dosya için graph oluşturuluyor (batch batch işlenecek)...`);
-            const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
-            if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
-              const processedCount = response.data?.processed_count || chunkedFiles.length;
-              showNormalToast(`✓ Graph creation started for ${processedCount} file(s) (batch batch işlenecek)`);
-            } else {
-              showErrorToast(`Failed to start graph creation: ${response.message || 'Unknown error'}`);
-            }
+          if (chunkedFiles.length === 0) {
+            showErrorToast('Seçilen dosyaların hiçbiri graph oluşturmaya hazır değildir.');
+            return;
           }
+
+          // Uyar varsa göster
+          if (notChunkedFiles.length > 0) {
+            showNormalToast(
+              `⚠️ ${notChunkedFiles.length} dosya henüz hazır değil, sadece ${chunkedFiles.length} dosya için graph oluşturulacak`
+            );
+          }
+
+          // Dosyaların durumunu Processing olarak güncelle (UI'de göstermek için)
+          setFilesData((prev) =>
+            prev.map((f) => {
+              if (chunkedFiles.some((cf) => cf.v2FileId === f.v2FileId)) {
+                return { ...f, status: 'Processing', processingProgress: 50 };
+              }
+              return f;
+            })
+          );
+
+          // Seçilen dosyaların ID'lerini gönder (virgülle ayrılmış veya tek ID)
+          const fileIds = chunkedFiles.map((f) => f.v2FileId).filter((id): id is number => id !== undefined);
+          const fileIdParam = fileIds.length === 1 ? String(fileIds[0]) : fileIds.join(',');
+          
+          showNormalToast(`${chunkedFiles.length} dosya için graph oluşturuluyor...`);
+          console.log(`📤 Sending graph creation request for file IDs: ${fileIdParam}`);
+          const response = await startGraphCreationAPI(fileIdParam, 'openai_gpt_4o_mini', false);
+          if (response.status === 'Success' || response.status === 'success' || response.data?.status === 'success') {
+            const processedCount = response.data?.processed_count || chunkedFiles.length;
+            showNormalToast(`✓ Graph creation started for ${processedCount} file(s)`);
+          } else {
+            showErrorToast(`Failed to start graph creation: ${response.message || 'Unknown error'}`);
+          }
+          
           setV2SelectedFileIds(new Set());
 
           // İlk refresh - processing status'ünü görmek için
@@ -1640,3 +1631,4 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
 };
 
 export default React.memo(forwardRef(FileTable));
+

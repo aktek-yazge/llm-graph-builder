@@ -38,6 +38,11 @@ export interface CustomFileBase extends Partial<globalThis.File> {
   // V2 Queue fields
   v2FileId?: number;
   upload_status?: string;
+  _detail?: boolean; // True if full details are loaded from API
+  // Status completion timestamps
+  chunking_completed_at?: string;
+  graph_completed_at?: string;
+  embedding_completed_at?: string;
   chunking_status?: string;
   graph_status?: string;
   embedding_status?: string;

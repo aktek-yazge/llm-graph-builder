@@ -1,5 +1,5 @@
 from langchain_neo4j import Neo4jGraph
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 from src.shared.common_fn import load_embedding_model,execute_graph_query
 from src.shared.common_fn import load_embedding_model,execute_graph_query
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
@@ -677,9 +677,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     Returns:
         List of created chunk IDs with chunk documents (extract format)
     """
-    logging.info(f"🔄 STARTING CHUNK CREATION FOR UPLOAD")
-    logging.info(f"📁 File: {file_name}")
-    logging.info(f"🧩 Input chunks count: {len(chunks)}")
+    # Verbose start logging disabled - keep only essential log
+    logging.info(f"🔄 Processing {len(chunks)} chunks for {file_name}")
     logging.info(f"🖼️ Page images: {len(page_images) if page_images else 0}")
     logging.info(f"⚡ Generate embedding: {generate_embedding}")
     
@@ -728,8 +727,9 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         location_identifier = f"{file_name}::pos_{position}::page_{page_num}::content_{content_hash}"
         current_chunk_id = hashlib.sha1(location_identifier.encode('utf-8')).hexdigest()
         
-        logging.info(f"� CHUNK #{position}: ID={current_chunk_id[:8]}..., Page={page_num}, Length={len(content)}")
-        logging.info(f"   📍 Location ID: pos_{position}::page_{page_num}::content_{content_hash}")
+        # Verbose chunk logging disabled
+        # logging.info(f"� CHUNK #{position}: ID={current_chunk_id[:8]}..., Page={page_num}, Length={len(content)}")
+        # logging.info(f"   📍 Location ID: pos_{position}::page_{page_num}::content_{content_hash}")
         
         if i > 0:
             offset += len(chunks[i-1].page_content)
@@ -742,15 +742,16 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         # Aynı content'in farklı yerlerde olup olmadığını kontrol et (bilgi amaçlı)
         similar_content_count = sum(1 for item in lst_chunks_including_hash 
                                    if item['chunk_doc'].page_content.strip() == content)
-        if similar_content_count > 0:
-            logging.info(f"   � INFO: Similar content found in {similar_content_count} previous chunk(s) - this is normal for headers/footers")
+        # Verbose similar content logging disabled
+        # if similar_content_count > 0:
+        #     logging.info(f"   � INFO: Similar content found in {similar_content_count} previous chunk(s) - this is normal for headers/footers")
+        # logging.info(f"   📝 Content preview: '{content_preview}'")
         
-        logging.info(f"   📝 Content preview: '{content_preview}'")
-        
-        if i > 0:
-            logging.info(f"🔗 RELATIONSHIP: Chunk #{position-1} (ID={previous_chunk_id[:8] if previous_chunk_id else 'None'}...) -> Chunk #{position} (ID={current_chunk_id[:8]}...)")
-        else:
-            logging.info(f"🏁 FIRST_CHUNK: Chunk #{position} (ID={current_chunk_id[:8]}...)")
+        # Verbose relationship logging disabled
+        # if i > 0:
+        #     logging.info(f"🔗 RELATIONSHIP: Chunk #{position-1} (ID={previous_chunk_id[:8] if previous_chunk_id else 'None'}...) -> Chunk #{position} (ID={current_chunk_id[:8]}...)")
+        # else:
+        #     logging.info(f"🏁 FIRST_CHUNK: Chunk #{position} (ID={current_chunk_id[:8]}...)")
         
         # Extract'daki gibi metadata yapısı
         metadata = {"position": position, "length": len(chunk.page_content), "content_offset": offset}
@@ -804,26 +805,25 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         # Chunk relationship'leri hazırla (extract'daki gibi)
         if firstChunk:
             relationships.append({"type": "FIRST_CHUNK", "chunk_id": current_chunk_id})
-            logging.info(f"📝 RELATIONSHIP ADDED: FIRST_CHUNK -> {current_chunk_id[:8]}...")
+            # logging.info(f"📝 RELATIONSHIP ADDED: FIRST_CHUNK -> {current_chunk_id[:8]}...")
         else:
             relationships.append({
                 "type": "NEXT_CHUNK",
                 "previous_chunk_id": previous_chunk_id,
                 "current_chunk_id": current_chunk_id
             })
-            logging.info(f"📝 RELATIONSHIP ADDED: NEXT_CHUNK {previous_chunk_id[:8] if previous_chunk_id else 'None'}... -> {current_chunk_id[:8]}...")
+            # logging.info(f"📝 RELATIONSHIP ADDED: NEXT_CHUNK {previous_chunk_id[:8] if previous_chunk_id else 'None'}... -> {current_chunk_id[:8]}...")
         
         previous_chunk_id = current_chunk_id
     
     # Chunk node'ları ve PART_OF ilişkilerini oluştur (extract'daki gibi)
-    logging.info(f"🔄 Creating chunk nodes and PART_OF relationships for {len(batch_data)} chunks")
-    logging.info(f"📊 BATCH_DATA SUMMARY: Total chunks to create: {len(batch_data)}")
-    
-    for i, chunk_data in enumerate(batch_data[:5]):  # İlk 5 chunk'ı logla
-        logging.info(f"   CHUNK {i+1}: ID={chunk_data['id'][:8]}..., Position={chunk_data['position']}, FileName={chunk_data['f_name']}")
-    
-    if len(batch_data) > 5:
-        logging.info(f"   ... ve {len(batch_data) - 5} chunk daha")
+    logging.info(f"🔄 Creating {len(batch_data)} chunk nodes for {file_name}")
+    # Verbose batch logging disabled
+    # logging.info(f"📊 BATCH_DATA SUMMARY: Total chunks to create: {len(batch_data)}")
+    # for i, chunk_data in enumerate(batch_data[:5]):  # İlk 5 chunk'ı logla
+    #     logging.info(f"   CHUNK {i+1}: ID={chunk_data['id'][:8]}..., Position={chunk_data['position']}, FileName={chunk_data['f_name']}")
+    # if len(batch_data) > 5:
+    #     logging.info(f"   ... ve {len(batch_data) - 5} chunk daha")
     
     query_to_create_chunk_and_PART_OF_relation = """
         UNWIND $batch_data AS data
@@ -850,7 +850,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     # Default 20 - daha küçük batch'ler timeout riskini azaltır
     chunk_batch_size = int(os.environ.get("CHUNK_CREATION_BATCH_SIZE", "20"))
     total_chunks = len(batch_data)
-    logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} for file: {file_name}")
+    # Verbose batch processing logging disabled
+    # logging.info(f"📦 Processing {total_chunks} chunks in batches of {chunk_batch_size} for file: {file_name}")
     
     # Prepare all batch tasks for parallel execution
     batch_tasks = []
@@ -859,7 +860,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     # Create async task function (defined outside loop to avoid closure issues)
     async def process_batch(batch_subset_data, batch_number, batch_start_idx, batch_end_idx, file_name_param, total_chunks_param):
         try:
-            logging.info(f"   🚀 Starting batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
+            # Verbose batch logging disabled
+            # logging.info(f"   🚀 Starting batch {batch_number}: chunks {batch_start_idx+1}-{batch_end_idx} of {total_chunks_param} for file: {file_name_param}")
             result = await asyncio.to_thread(
                 execute_graph_query, 
                 graph, 
@@ -881,7 +883,7 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         batch_tasks.append(process_batch(batch_subset, batch_num, batch_start, batch_end, file_name, total_chunks))
     
     # Execute all batches in parallel
-    logging.info(f"🔄 Starting {batch_count} batches in parallel for file: {file_name}")
+    # logging.info(f"🔄 Starting {batch_count} batches in parallel for file: {file_name}")
     results = await asyncio.gather(*batch_tasks, return_exceptions=True)
     
     # Check for errors in batch processing
@@ -903,23 +905,25 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
     try:
         # FIRST_CHUNK ilişkilerini oluştur (extract'daki gibi)
         first_relationships = [r for r in relationships if r["type"] == "FIRST_CHUNK"]
-        logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
-        query_to_create_FIRST_relation = """ 
-            UNWIND $relationships AS relationship
-            OPTIONAL MATCH (d:Document {fileName: $f_name})
-            MATCH (c:Chunk {id: relationship.chunk_id})
-            FOREACH (_ IN CASE WHEN relationship.type = 'FIRST_CHUNK' AND d IS NOT NULL THEN [1] ELSE [] END |
-                    MERGE (d)-[:FIRST_CHUNK]->(c))
-            """
-        await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": relationships})
+        # logging.info(f"🔄 Creating FIRST_CHUNK relationships for {len(first_relationships)} chunks")
+        
+        # Sadece FIRST_CHUNK olanları gönder (performans için!)
+        if first_relationships:
+            query_to_create_FIRST_relation = """ 
+                UNWIND $relationships AS relationship
+                MATCH (d:Document {fileName: $f_name})
+                MATCH (c:Chunk {id: relationship.chunk_id})
+                MERGE (d)-[:FIRST_CHUNK]->(c)
+                """
+            await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": first_relationships})
         
         # Debug: FIRST_CHUNK ilişkilerini kontrol et
         first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
         first_check_result = await asyncio.to_thread(execute_graph_query, graph, first_check_query, {"file_name": file_name})
-        logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
+        # logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
         
         # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
-        logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
+        # logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
         
         # Önce mevcut chunk'ların position'larını kontrol et
         position_check_query = """
@@ -929,12 +933,13 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         """
         existing_positions = await asyncio.to_thread(execute_graph_query, graph, position_check_query, {"file_name": file_name})
         
-        if existing_positions:
-            logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
-            for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
-                logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
-            if len(existing_positions) > 10:
-                logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
+        # Verbose position logging disabled
+        # if existing_positions:
+        #     logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
+        #     for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
+        #         logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
+        #     if len(existing_positions) > 10:
+        #         logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
         
         # Optimized query with CALL IN TRANSACTIONS: 
         # - Her 50 satırda auto-commit yapılır
@@ -953,7 +958,7 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
             RETURN count(*) as created_count
         """
         next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
-        logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using CALL IN TRANSACTIONS")
+        # logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using CALL IN TRANSACTIONS")
         
     except Exception as relationship_error:
         # İlişki oluşturma hatası - rollback yap

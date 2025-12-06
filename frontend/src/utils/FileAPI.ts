@@ -192,11 +192,26 @@ export const uploadFileToQueueAPI = async (
   return response;
 };
 
-// Get list of files in queue (no pagination - returns all files)
-export const getQueuedFilesAPI = async (): Promise<any> => {
-  const urlList = `${url()}/api/v2/files/list`;
+// Get list of files in queue with optimized hybrid pagination
+// Returns all file IDs/statuses but only full details for specified range
+export const getQueuedFilesAPI = async (
+  detailLimit: number = 100,
+  detailOffset: number = 0
+): Promise<any> => {
+  const urlList = `${url()}/api/v2/files/list?detail_limit=${detailLimit}&detail_offset=${detailOffset}`;
   const method: Method = 'get';
   const response = await apiCall(urlList, method, {});
+  return response;
+};
+
+// Get details for specific file IDs (for filtered views)
+export const getFileDetailsByIdsAPI = async (fileIds: number[]): Promise<any> => {
+  if (fileIds.length === 0) {
+    return { status: 'Success', data: { files: [] } };
+  }
+  const urlDetails = `${url()}/api/v2/files/details-by-ids`;
+  const method: Method = 'post';
+  const response = await apiCall(urlDetails, method, { ids: fileIds.join(',') });
   return response;
 };
 

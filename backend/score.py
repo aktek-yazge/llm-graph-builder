@@ -40,6 +40,7 @@ from src.main import (
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
+from src.workflow.deep_agent_integration import stream_deep_agent_response, DEEP_AGENT_AVAILABLE
 from src.qa_based_entity_extractor import (
     QABasedEntityExtractor,
     create_domain_specific_questions,
@@ -50,7 +51,7 @@ from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 import uvicorn
 import asyncio
 import base64
-from langserve import add_routes
+# from langserve import add_routes
 from langchain_google_vertexai import ChatVertexAI
 from src.api_response import create_api_response
 from src.graphDB_dataAccess import graphDBdataAccess
@@ -150,7 +151,8 @@ class HTTPLoggingMiddleware:
         # Log HTTP request with structured data
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
-        client_ip = scope.get("client", ["unknown", 0])[0]
+        client_info = scope.get("client") or ["unknown", 0]
+        client_ip = client_info[0] if client_info else "unknown"
 
         # Skip logging for V2 list and status endpoints (too frequent)
         skip_paths = [
@@ -937,8 +939,8 @@ is_gemini_enabled = os.environ.get("GEMINI_ENABLED", "False").lower() in (
     "1",
     "yes",
 )
-if is_gemini_enabled:
-    add_routes(app, ChatVertexAI(), path="/vertexai")
+# if is_gemini_enabled:
+#     add_routes(app, ChatVertexAI(), path="/vertexai")
 
 app.add_api_route("/health", health([healthy_condition, healthy]))
 
@@ -1097,13 +1099,18 @@ async def serve_document_file(file_name: str, inline: bool = False):
         # Content-Disposition header'ını ayarla
         content_disposition = "inline" if inline else f'attachment; filename="{normalized_file_name}"'
 
-        # Dosyayı stream olarak döndür
-        return StreamingResponse(
-            s3_response["Body"].iter_chunks(),
+        # Dosyayı tamamen oku (streaming yerine) - PDF viewer için daha güvenilir
+        file_content = s3_response["Body"].read()
+        content_length = len(file_content)
+        
+        from fastapi.responses import Response
+        return Response(
+            content=file_content,
             media_type="application/pdf",
             headers={
                 "Content-Disposition": content_disposition,
-                "Content-Length": str(s3_response.get("ContentLength", "")),
+                "Content-Length": str(content_length),
+                "Accept-Ranges": "bytes",  # PDF viewer için gerekli
             },
         )
 
@@ -2497,7 +2504,7 @@ async def chat_bot_stream(
     mode: str = Form(None),
     email: str = Form(None),
     files: Optional[str] = Form(None),
-    agent_type: str = Form("standard"),  # "standard" veya "fast_agent"
+    agent_type: str = Form("deep_agent"),  # "deep_agent", "fast_agent" veya "standard"
 ):
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile
@@ -2566,14 +2573,37 @@ async def chat_bot_stream(
             final_result = None
             total_tokens = 0
 
-            if agent_type != "fast_agent":
-                # FastAgent kullanarak streaming
+            if agent_type == "deep_agent" and DEEP_AGENT_AVAILABLE:
+                # 🧠 LangGraph Deep Agent kullanarak streaming (YENİ - varsayılan)
+                yield f"data: {json.dumps({'type': 'status', 'message': '🧠 LangGraph Deep Agent ile işleniyor...', 'status': 'deep_agent_processing'}, ensure_ascii=False)}\n\n"
+
+                async for chunk in stream_deep_agent_response(
+                    question=question,
+                    graph=graph,
+                    session_id=session_id,
+                ):
+                    # Client disconnect kontrolü
+                    if await request.is_disconnected():
+                        logging.info(
+                            "SSE Client disconnected during Deep Agent streaming"
+                        )
+                        break
+
+                    # Chunk'ı client'a gönder
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+                    # Final result'ı sakla
+                    if chunk.get("type") == "complete":
+                        final_result = chunk
+                        total_tokens = chunk.get("info", {}).get("total_tokens", 0)
+
+            elif agent_type == "fast_agent" or (agent_type == "deep_agent" and not DEEP_AGENT_AVAILABLE):
+                # FastAgent kullanarak streaming (fallback veya explicit)
                 yield f"data: {json.dumps({'type': 'status', 'message': 'FastAgent ile işleniyor...', 'status': 'fast_agent_processing'}, ensure_ascii=False)}\n\n"
 
                 async for chunk in stream_fast_agent_response(
                     question=question,
                     graph=graph,
-                    # model=model,
                     session_id=session_id,
                 ):
                     # Client disconnect kontrolü
@@ -2592,7 +2622,7 @@ async def chat_bot_stream(
                         total_tokens = chunk.get("info", {}).get("total_tokens", 0)
 
             else:
-                # Standart QA_RAG streaming
+                # Standart QA_RAG streaming (agent_type == "standard")
                 # Instantiate IntelligentAgent for streaming path and pass it through (fallback to None)
                 intelligent_agent = None
                 try:
@@ -2716,6 +2746,50 @@ async def test_fast_agent(
     except Exception as e:
         logging.error(f"FastAgent test error: {e}")
         return create_api_response("Failed", message=f"FastAgent test failed: {str(e)}")
+
+
+@app.post("/test_deep_agent")
+async def test_deep_agent(
+    question: str = Form("Amasyalı soy adı olan sigortalımız var mı?"),
+    model: str = Form("claude-sonnet-4-5-20250929"),
+    session_id: str = Form("test_session"),
+):
+    """LangGraph Deep Agent'i test etmek için basit endpoint"""
+    try:
+        from src.workflow.deep_agent_integration import (
+            stream_deep_agent_response,
+            DEEP_AGENT_AVAILABLE,
+        )
+
+        if not DEEP_AGENT_AVAILABLE:
+            return create_api_response(
+                "Failed",
+                message="Deep Agent kurulu değil. 'pip install deepagents' ile kurun.",
+            )
+
+        # Test response'u topla
+        response_parts = []
+        async for chunk in stream_deep_agent_response(
+            question=question,
+            session_id=session_id,
+        ):
+            response_parts.append(chunk)
+
+        return create_api_response(
+            "Success",
+            data={
+                "chunks": response_parts,
+                "total_chunks": len(response_parts),
+                "question": question,
+                "model": model,
+                "session_id": session_id,
+            },
+            message="Deep Agent test completed successfully",
+        )
+
+    except Exception as e:
+        logging.error(f"Deep Agent test error: {e}")
+        return create_api_response("Failed", message=f"Deep Agent test failed: {str(e)}")
 
 
 @app.get("/agent_cache_sessions")
@@ -5155,75 +5229,62 @@ async def upload_file_to_queue(
 
 
 @app.get("/api/v2/files/list")
-async def list_queued_files():
-    """Get list of all files in queue with their status (no pagination - returns all files)"""
+async def list_queued_files(detail_limit: int = 100, detail_offset: int = 0):
+    """Get list of all files with optimized two-stage query:
+    - Stage 1: Get summary (id + status) for ALL files (fast SQL query)
+    - Stage 2: Get full details only for visible page (detail_offset to detail_offset+detail_limit)
+    """
     try:
         db = get_file_queue_db()
-        # Tüm kayıtları çek (limit ve offset yok)
-        files = db.get_all_files(limit=None, offset=0)
-
+        
+        # Stage 1: Özet sorgusu - sadece id ve status'ler (ÇOK HIZLI!)
+        summary_files = db.get_files_summary()
+        total_count = len(summary_files)
+        
+        # Stage 2: Detay sorgusu - sadece görünen sayfa (pagination)
+        detail_files = db.get_files_with_details(limit=detail_limit, offset=detail_offset)
+        
+        # Detaylı dosyaları dict'e çevir (id -> data)
+        # NOT: Sadece frontend'te kullanılan alanlar dahil edildi
+        detail_dict = {}
+        for f in detail_files:
+            detail_dict[f.id] = {
+                "id": f.id,
+                "original_name": f.original_name,
+                "upload_date": f.upload_date.isoformat(),
+                "file_size": f.file_size,
+                "status": f.status,
+                "upload_status": f.upload_status,
+                "chunking_status": f.chunking_status,
+                "graph_status": f.graph_status,
+                "embedding_status": f.embedding_status,
+                "processing_error": f.processing_error,
+                # Status completion timestamps
+                "chunking_completed_at": f.chunking_completed_at.isoformat() if f.chunking_completed_at else None,
+                "graph_completed_at": f.graph_completed_at.isoformat() if f.graph_completed_at else None,
+                "embedding_completed_at": f.embedding_completed_at.isoformat() if f.embedding_completed_at else None,
+                "_detail": True,
+            }
+        
+        # Özet listeyi detaylarla birleştir
         files_data = []
-        for f in files:
-            files_data.append(
-                {
-                    "id": f.id,
-                    "filename": f.filename,
-                    "original_name": f.original_name,
-                    "file_path": f.file_path,
-                    "upload_date": f.upload_date.isoformat(),
-                    "file_size": f.file_size,
-                    "file_hash": f.file_hash,
-                    "status": f.status,
-                    "upload_status": f.upload_status,
-                    "chunking_status": f.chunking_status,
-                    "graph_status": f.graph_status,
-                    "embedding_status": f.embedding_status,
-                    "created_at": f.created_at.isoformat(),
-                    "updated_at": f.updated_at.isoformat(),
-                    "chunking_started_at": (
-                        f.chunking_started_at.isoformat()
-                        if f.chunking_started_at
-                        else None
-                    ),
-                    "chunking_completed_at": (
-                        f.chunking_completed_at.isoformat()
-                        if f.chunking_completed_at
-                        else None
-                    ),
-                    "graph_started_at": (
-                        f.graph_started_at.isoformat() if f.graph_started_at else None
-                    ),
-                    "graph_completed_at": (
-                        f.graph_completed_at.isoformat()
-                        if f.graph_completed_at
-                        else None
-                    ),
-                    "embedding_started_at": (
-                        f.embedding_started_at.isoformat()
-                        if f.embedding_started_at
-                        else None
-                    ),
-                    "embedding_completed_at": (
-                        f.embedding_completed_at.isoformat()
-                        if f.embedding_completed_at
-                        else None
-                    ),
-                    "processing_started_at": (
-                        f.processing_started_at.isoformat()
-                        if f.processing_started_at
-                        else None
-                    ),
-                    "processing_completed_at": (
-                        f.processing_completed_at.isoformat()
-                        if f.processing_completed_at
-                        else None
-                    ),
-                    "processing_error": f.processing_error,
-                }
-            )
-
+        for summary in summary_files:
+            file_id = summary["id"]
+            if file_id in detail_dict:
+                # Bu dosya için detay var
+                files_data.append(detail_dict[file_id])
+            else:
+                # Sadece özet
+                files_data.append(summary)
+        
         return create_api_response(
-            "Success", data={"files": files_data, "count": len(files_data)}
+            "Success", data={
+                "files": files_data, 
+                "total_count": total_count,
+                "detail_count": len(detail_files),
+                "detail_offset": detail_offset,
+                "detail_limit": detail_limit,
+            }
         )
 
     except Exception as e:
@@ -5231,6 +5292,55 @@ async def list_queued_files():
         logging.error(f"❌ Failed to list files: {error_message}")
         return create_api_response(
             "Failed", message="Failed to retrieve file list", error=error_message
+        )
+
+
+@app.post("/api/v2/files/details-by-ids")
+async def get_files_details_by_ids(request: Request):
+    """Get full details for specific file IDs (for filtered views)"""
+    try:
+        form_data = await request.form()
+        ids_str = form_data.get("ids", "")
+        
+        if not ids_str:
+            return create_api_response("Success", data={"files": []})
+        
+        # Parse comma-separated IDs
+        file_ids = [int(id.strip()) for id in ids_str.split(",") if id.strip().isdigit()]
+        
+        if not file_ids:
+            return create_api_response("Success", data={"files": []})
+        
+        db = get_file_queue_db()
+        files = db.get_files_by_ids(file_ids)
+        
+        files_data = []
+        for f in files:
+            files_data.append({
+                "id": f.id,
+                "original_name": f.original_name,
+                "upload_date": f.upload_date.isoformat(),
+                "file_size": f.file_size,
+                "status": f.status,
+                "upload_status": f.upload_status,
+                "chunking_status": f.chunking_status,
+                "graph_status": f.graph_status,
+                "embedding_status": f.embedding_status,
+                "processing_error": f.processing_error,
+                # Status completion timestamps
+                "chunking_completed_at": f.chunking_completed_at.isoformat() if f.chunking_completed_at else None,
+                "graph_completed_at": f.graph_completed_at.isoformat() if f.graph_completed_at else None,
+                "embedding_completed_at": f.embedding_completed_at.isoformat() if f.embedding_completed_at else None,
+                "_detail": True,
+            })
+        
+        return create_api_response("Success", data={"files": files_data})
+    
+    except Exception as e:
+        error_message = str(e)
+        logging.error(f"❌ Failed to get file details: {error_message}")
+        return create_api_response(
+            "Failed", message="Failed to get file details", error=error_message
         )
 
 
@@ -5673,9 +5783,11 @@ async def start_graph_creation(
     model: str = Form("openai_gpt_4o_mini"),
     generate_embedding: bool = Form(False),
 ):
-    """Start graph creation process for a file or all files
+    """Start graph creation process for a file, multiple files, or all files
 
-    If file_id is "all", processes all files with chunking_status="chunked" and graph_status="pending"
+    - If file_id is "all", processes all files with chunking_status="chunked" and graph_status="pending"
+    - If file_id is comma-separated IDs (e.g., "1,2,3"), processes those specific files
+    - Otherwise, processes single file
     """
     db_session = None  # Initialize outside try block
     try:
@@ -5692,6 +5804,59 @@ async def start_graph_creation(
 
         db = get_file_queue_db()
         db_session = db.get_db_session()
+
+        # Handle comma-separated IDs (e.g., "1,2,3")
+        if "," in file_id:
+            file_ids = [int(id.strip()) for id in file_id.split(",") if id.strip().isdigit()]
+            
+            if not file_ids:
+                if db_session:
+                    db_session.close()
+                return create_api_response("Failed", message="Invalid file IDs")
+            
+            logging.info(f"🚀 Graph creation request for {len(file_ids)} files: {file_ids}")
+            
+            # Get files by IDs
+            files_to_process = (
+                db_session.query(UploadedFile)
+                .filter(UploadedFile.id.in_(file_ids))
+                .filter(UploadedFile.chunking_status == "chunked")
+                .all()
+            )
+            
+            if not files_to_process:
+                db_session.close()
+                return create_api_response("Failed", message="No valid files found for graph creation")
+            
+            processed_count = 0
+            for file_record in files_to_process:
+                # Update status to processing
+                file_record.status = "processing"
+                file_record.graph_status = "processing"
+                file_record.graph_started_at = datetime.now(timezone.utc)
+                file_record.model_used = model
+                file_record.generate_embedding = str(generate_embedding)
+                file_record.neo4j_uri = uri
+                file_record.neo4j_database = database
+                db_session.commit()
+                
+                # Send to Celery
+                task_result = celery_app.send_task("src.tasks.create_graph_task", args=[file_record.id])
+                try:
+                    file_record.celery_task_id = task_result.id
+                    db_session.commit()
+                except Exception:
+                    pass
+                
+                processed_count += 1
+                logging.info(f"✨ Started graph creation for file {file_record.id}: {file_record.original_name}")
+            
+            db_session.close()
+            return create_api_response(
+                "Success",
+                message=f"Graph creation started for {processed_count} file(s)",
+                data={"processed_count": processed_count, "file_ids": file_ids},
+            )
 
         # Handle "all" parameter
         if file_id.lower() == "all":
@@ -5862,10 +6027,21 @@ async def start_graph_creation(
                 message=f"File must be chunked first (current status: {file_record.chunking_status})",
             )
 
-        # Check if markdown file exists
-        if not file_record.markdown_path or not os.path.exists(
-            file_record.markdown_path
-        ):
+        # Check if markdown file exists (check both backend and celery_worker directories)
+        markdown_exists = False
+        markdown_path = file_record.markdown_path
+        if markdown_path:
+            if os.path.exists(markdown_path):
+                markdown_exists = True
+            else:
+                # Try celery_worker directory
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                celery_worker_path = os.path.join(project_root, "celery_worker", markdown_path)
+                if os.path.exists(celery_worker_path):
+                    markdown_exists = True
+                    logging.info(f"📂 Found markdown in celery_worker: {celery_worker_path}")
+        
+        if not markdown_exists:
             db_session.close()
             return create_api_response(
                 "Failed", message="Markdown file not found. Please run chunking first."
@@ -6086,7 +6262,7 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
 
     If file_id is "all", resets all files based on the stage parameter.
     If stage is "invalidate", intelligently resets a SINGLE file based on its stuck/failed status.
-    If delete_markdown is True, markdown files will be deleted during chunking reset.
+    If delete_markdown is True, markdown files will be deleted AND images will be re-extracted from PDF.
     """
     try:
         if stage not in ["upload", "chunking", "graph", "invalidate"]:
@@ -6418,6 +6594,78 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
                                 file_record.markdown_path = None  # Clear invalid path
                         else:
                             logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
+                        
+                        # 🔄 Re-extract images from PDF and upload to S3
+                        # Mevcut yapıyı kullanarak (upload_v2 ile aynı fonksiyonlar)
+                        try:
+                            from src.utf8_utils import normalize_file_name
+                            from src.document_sources.local_file import generate_page_images_with_pymupdf
+                            from pathlib import Path
+                            import json
+                            
+                            normalized_filename = normalize_file_name(file_record.original_name)
+                            doc_name = Path(normalized_filename).stem
+                            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            
+                            # PDF'i bul (local)
+                            pdf_path = None
+                            for base_dir in ["celery_worker", "backend"]:
+                                potential_path = os.path.join(project_root, base_dir, "output", doc_name, "pdf", normalized_filename)
+                                if os.path.exists(potential_path):
+                                    pdf_path = potential_path
+                                    break
+                            
+                            # S3'ten indir (local'de yoksa)
+                            if not pdf_path:
+                                s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+                                if s3_bucket:
+                                    import boto3
+                                    s3_key = f"documents/{doc_name}/pdf/{normalized_filename}"
+                                    local_pdf_dir = os.path.join(project_root, "backend", "output", doc_name, "pdf")
+                                    os.makedirs(local_pdf_dir, exist_ok=True)
+                                    pdf_path = os.path.join(local_pdf_dir, normalized_filename)
+                                    
+                                    s3_client = boto3.client("s3")
+                                    s3_client.download_file(s3_bucket, s3_key, pdf_path)
+                                    logging.info(f"📥 Downloaded PDF from S3: {s3_key}")
+                            
+                            if pdf_path and os.path.exists(pdf_path):
+                                # Resim extraction (mevcut fonksiyon)
+                                images_dir = os.path.join(project_root, "backend", "output", doc_name, "images")
+                                os.makedirs(images_dir, exist_ok=True)
+                                
+                                extracted_images = generate_page_images_with_pymupdf(pdf_path, images_dir)
+                                logging.info(f"✅ Extracted {len(extracted_images)} images from PDF")
+                                
+                                # S3 upload (mevcut fonksiyon)
+                                s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+                                page_image_filenames = []
+                                
+                                if s3_bucket and extracted_images:
+                                    from src.document_sources.s3_upload_utils import upload_files_to_s3
+                                    
+                                    s3_prefix = f"documents/{doc_name}/images"
+                                    uploaded_urls, _ = upload_files_to_s3(
+                                        file_paths=extracted_images,
+                                        bucket_name=s3_bucket,
+                                        s3_prefix=s3_prefix,
+                                        delete_local_after_upload=False,
+                                    )
+                                    
+                                    for url in uploaded_urls:
+                                        page_image_filenames.append(os.path.basename(url.replace('s3://', '').split('/')[-1]))
+                                    logging.info(f"✅ Uploaded {len(uploaded_urls)} images to S3")
+                                else:
+                                    page_image_filenames = [os.path.basename(img) for img in extracted_images]
+                                
+                                # PostgreSQL güncelle
+                                if page_image_filenames:
+                                    file_record.page_images = json.dumps(page_image_filenames)
+                                    logging.info(f"✅ Updated page_images: {len(page_image_filenames)} images")
+                            else:
+                                logging.warning(f"⚠️ PDF not found for re-extraction: {normalized_filename}")
+                        except Exception as re_extract_error:
+                            logging.warning(f"⚠️ Image re-extraction failed: {re_extract_error}")
                     else:
                         logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
                     
@@ -6613,6 +6861,84 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
                         file_record.markdown_path = None  # Clear invalid path
                 else:
                     logging.info(f"ℹ️ No markdown_path set for {file_record.original_name}")
+                
+                # 🔄 Re-extract images from PDF and upload to S3 (single file)
+                try:
+                    logging.info(f"🖼️ Re-extracting images for {file_record.original_name}...")
+                    from src.utf8_utils import normalize_file_name
+                    from src.document_sources.local_file import generate_page_images_with_pymupdf
+                    from pathlib import Path
+                    import json
+                    
+                    normalized_filename = normalize_file_name(file_record.original_name)
+                    doc_name = Path(normalized_filename).stem
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    
+                    # PDF'i bul (local)
+                    pdf_path = None
+                    for base_dir in ["celery_worker", "backend"]:
+                        potential_path = os.path.join(project_root, base_dir, "output", doc_name, "pdf", normalized_filename)
+                        if os.path.exists(potential_path):
+                            pdf_path = potential_path
+                            logging.info(f"📁 Found local PDF: {pdf_path}")
+                            break
+                    
+                    # S3'ten indir (local'de yoksa)
+                    if not pdf_path:
+                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+                        if s3_bucket:
+                            logging.info(f"📥 Downloading PDF from S3...")
+                            import boto3
+                            s3_key = f"documents/{doc_name}/pdf/{normalized_filename}"
+                            local_pdf_dir = os.path.join(project_root, "backend", "output", doc_name, "pdf")
+                            os.makedirs(local_pdf_dir, exist_ok=True)
+                            pdf_path = os.path.join(local_pdf_dir, normalized_filename)
+                            
+                            s3_client = boto3.client("s3")
+                            s3_client.download_file(s3_bucket, s3_key, pdf_path)
+                            logging.info(f"✅ Downloaded PDF from S3: {s3_key}")
+                    
+                    if pdf_path and os.path.exists(pdf_path):
+                        # Resim extraction
+                        images_dir = os.path.join(project_root, "backend", "output", doc_name, "images")
+                        os.makedirs(images_dir, exist_ok=True)
+                        
+                        extracted_images = generate_page_images_with_pymupdf(pdf_path, images_dir)
+                        logging.info(f"✅ Extracted {len(extracted_images)} images from PDF")
+                        
+                        # S3 upload
+                        s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
+                        page_image_filenames = []
+                        
+                        if s3_bucket and extracted_images:
+                            from src.document_sources.s3_upload_utils import upload_files_to_s3
+                            
+                            s3_prefix = f"documents/{doc_name}/images"
+                            uploaded_urls, failed_uploads = upload_files_to_s3(
+                                file_paths=extracted_images,
+                                bucket_name=s3_bucket,
+                                s3_prefix=s3_prefix,
+                                delete_local_after_upload=False,
+                            )
+                            
+                            for url in uploaded_urls:
+                                page_image_filenames.append(os.path.basename(url.replace('s3://', '').split('/')[-1]))
+                            logging.info(f"✅ Uploaded {len(uploaded_urls)} images to S3")
+                            if failed_uploads:
+                                logging.warning(f"⚠️ Failed to upload {len(failed_uploads)} images")
+                        else:
+                            page_image_filenames = [os.path.basename(img) for img in extracted_images]
+                        
+                        # PostgreSQL güncelle
+                        if page_image_filenames:
+                            file_record.page_images = json.dumps(page_image_filenames)
+                            logging.info(f"✅ Updated page_images: {len(page_image_filenames)} images")
+                    else:
+                        logging.warning(f"⚠️ PDF not found for re-extraction: {normalized_filename}")
+                except Exception as re_extract_error:
+                    logging.warning(f"⚠️ Image re-extraction failed: {re_extract_error}")
+                    import traceback
+                    traceback.print_exc()
             else:
                 logging.info(f"ℹ️ Markdown file preserved for {file_record.original_name} (delete_markdown=False)")
             
@@ -9228,30 +9554,37 @@ from src.relationship_normalizer import (
 
 @app.post("/relationship_normalization/preview")
 async def relationship_normalization_preview(
-    uri: str = Form(...),
-    userName: str = Form(...),
-    password: str = Form(...),
-    database: str = Form(...),
+    uri: str = Form(None),
+    userName: str = Form(None),
+    password: str = Form(None),
+    database: str = Form(None),
 ):
     """
     Relationship type'larını analiz et ve normalizasyon önizlemesi oluştur.
     LLM ile benzer relationship'leri gruplar.
     """
     try:
-        from langchain_community.graphs import Neo4jGraph
-        from langchain_openai import ChatOpenAI
+        from src.shared.common_fn import create_graph_database_connection
         
-        logging.info(f"🔍 Relationship normalization preview başlatılıyor: {uri}")
+        # Env'den al (diğer çalışan endpoint'ler gibi)
+        # "undefined" string'i None olarak değerlendir (frontend bazen bunu gönderir)
+        neo4j_uri = (uri if uri and uri != "undefined" else None) or os.environ.get("NEO4J_URI")
+        neo4j_username = os.environ.get("NEO4J_USERNAME")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        neo4j_database = (database if database and database != "undefined" else None) or os.environ.get("NEO4J_DATABASE", "neo4j")
+        
+        logging.info(f"🔍 Relationship normalization preview başlatılıyor: {neo4j_uri}, db: {neo4j_database}")
         
         # Neo4j bağlantısı
-        graph = Neo4jGraph(
-            url=uri,
-            username=userName,
-            password=password,
-            database=database
+        graph = create_graph_database_connection(
+            neo4j_uri,
+            neo4j_username,
+            neo4j_password,
+            neo4j_database,
         )
         
         # LLM - gpt-4o-mini kullan (hızlı ve ucuz)
+        from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0
@@ -9278,10 +9611,10 @@ async def relationship_normalization_preview(
 
 @app.post("/relationship_normalization/apply")
 async def relationship_normalization_apply(
-    uri: str = Form(...),
-    userName: str = Form(...),
-    password: str = Form(...),
-    database: str = Form(...),
+    uri: str = Form(None),
+    userName: str = Form(None),
+    password: str = Form(None),
+    database: str = Form(None),
     groups: str = Form(...),  # JSON string
 ):
     """
@@ -9290,19 +9623,26 @@ async def relationship_normalization_apply(
     """
     try:
         import json
-        from langchain_community.graphs import Neo4jGraph
+        from src.shared.common_fn import create_graph_database_connection
         
-        logging.info(f"🔄 Relationship normalization apply başlatılıyor: {uri}")
+        # Env'den al (diğer çalışan endpoint'ler gibi)
+        # "undefined" string'i None olarak değerlendir (frontend bazen bunu gönderir)
+        neo4j_uri = (uri if uri and uri != "undefined" else None) or os.environ.get("NEO4J_URI")
+        neo4j_username = os.environ.get("NEO4J_USERNAME")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        neo4j_database = (database if database and database != "undefined" else None) or os.environ.get("NEO4J_DATABASE", "neo4j")
+        
+        logging.info(f"🔄 Relationship normalization apply başlatılıyor: {neo4j_uri}, db: {neo4j_database}")
         
         # Groups JSON parse
         groups_data = json.loads(groups)
         
         # Neo4j bağlantısı
-        graph = Neo4jGraph(
-            url=uri,
-            username=userName,
-            password=password,
-            database=database
+        graph = create_graph_database_connection(
+            neo4j_uri,
+            neo4j_username,
+            neo4j_password,
+            neo4j_database,
         )
         
         # Normalizasyonu uygula

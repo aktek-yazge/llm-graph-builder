@@ -15,7 +15,7 @@ import asyncio
 import concurrent.futures
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_classic.schema import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage
 from langchain_neo4j import Neo4jGraph
 import neo4j.time

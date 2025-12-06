@@ -2153,10 +2153,11 @@ class graphDBdataAccess:
         veritabanında bulunan mevcut ana poliçe Policy node'una HAS_ENDORSEMENT ilişkisiyle bağlar.
         """
         try:
-            policy_number = policy_info.get("policy_number", "").strip()
-            renewal_number = policy_info.get("renewal_number", "").strip()
-            customer_name = policy_info.get("customer_name", "").strip()
-            policy_type = policy_info.get("policy_type", "").strip()
+            # None değerlerini handle et (LLM bazen None dönebilir)
+            policy_number = (policy_info.get("policy_number") or "").strip()
+            renewal_number = (policy_info.get("renewal_number") or "").strip()
+            customer_name = (policy_info.get("customer_name") or "").strip()
+            policy_type = (policy_info.get("policy_type") or "").strip()
 
             logging.info(f"🔗 Zeyilname ana poliçe bağlantısı aranıyor: {file_name}")
             logging.info(f"   Policy Number: {policy_number}")
@@ -2609,6 +2610,19 @@ Kurallar:
 - Emin olmadığın bilgileri UYDURMA
 - Opsiyonel alanlar boş bırakılabilir
 - Listeler için [] kullan, tek öğe için de dizi içinde gönder
+- ⚠️ KRİTİK SAYI FORMATI: Sayıları JSON formatında yaz (İngilizce format):
+  * ❌ YANLIŞ: 422.240,00 (Türkçe format - bin ayracı nokta, ondalık virgül)
+  * ✅ DOĞRU: 422240.00 (JSON format - bin ayracı yok, ondalık nokta)
+  * Belgede "422.240,00 TL" görürsen → JSON'a 422240.00 yaz
+  * Belgede "1.089,21 TL" görürsen → JSON'a 1089.21 yaz
+- ⚠️ LİSTE LİMİTLERİ (JSON boyutunu küçük tut!):
+  * coverage_types: EN FAZLA 5 adet (en önemli teminatlar)
+  * guarantees: EN FAZLA 3 adet (en önemli garantiler)
+  * clauses: EN FAZLA 3 adet (ana klozlar, detaylı metinler YAZMA)
+  * endorsements: EN FAZLA 3 adet
+  * installments: EN FAZLA 12 adet (yıllık taksitler)
+  * insured_persons: EN FAZLA 5 adet
+  * Kloz/garanti metinlerini KISALT (max 100 karakter)
 
 Yanıt formatı (sadece JSON, başka açıklama ekleme):
 {{
@@ -2640,12 +2654,12 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         "type": "..."
     }},
     "insurance_amount": {{
-        "insuranceValue": null,
-        "policyPremium": null,
+        "insuranceValue": 422240.00,
+        "policyPremium": 1089.21,
         "endorsementInsuranceValue": null,
         "endorsementPremium": null,
         "tariffPrice": null,
-        "currency": "..."
+        "currency": "TRY"
     }},
     "dates": {{
         "start_date": "...",
@@ -2780,17 +2794,17 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         
                         # Gemini'ye prompt gönder - max output tokens ayarla
                         try:
-                            # generation_config = types.GenerationConfig(
-                            #     max_output_tokens=65000,  # JSON response için yeterli token limit
-                            #     temperature=0.1,  # Daha tutarlı JSON için düşük temperature
-                            # )
+                            generation_config = types.GenerateContentConfig(
+                                max_output_tokens=8192,  # JSON response için yeterli token limit
+                                temperature=0.1,  # Daha tutarlı JSON için düşük temperature
+                            )
                             
                             response = client.models.generate_content(
                                 model="models/gemini-2.0-flash",
                                 contents=[
                                     types.Part.from_text(text=prompt),
                                 ],
-                                # config=generation_config,
+                                config=generation_config,
                             )
                         except Exception as config_error:
                             # GenerationConfig hatası varsa, config olmadan dene
@@ -2905,9 +2919,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                                 # Exception fırlat ki retry mekanizması çalışsın
                                 raise ValueError(error_msg) from final_error
 
-                    # OCR hatalarını düzelt ve filename'den fallback kullan
+                    # OCR hatalarını düzelt, GPT-5 fallback ve filename'den fallback kullan
                     entities_data = self._validate_and_fix_customer_name(
-                        entities_data, file_name
+                        entities_data, file_name, document_content_for_llm
                     )
 
                     extraction_method = "Gemini 2.0 Flash" if use_gemini else model
@@ -2935,32 +2949,46 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             return {}
 
     def _validate_and_fix_customer_name(
-        self, entities_data: dict, file_name: str
+        self, entities_data: dict, file_name: str, document_content: str = ""
     ) -> dict:
         """
-        LLM extraction'ı öncelikli kullanır, hatalı/eksikse filename'den fallback yapar
+        LLM extraction'ı öncelikli kullanır, hatalı/eksikse GPT-5 ile retry yapar, son olarak filename'den fallback yapar
         """
         try:
             customer_data = entities_data.get("customer")
             # customer None olabilir, bu durumda boş dict kullan
             if customer_data is None:
                 customer_data = {}
-            extracted_name = customer_data.get("name", "").strip() if customer_data else ""
+            # None.strip() hatasını önle - get("name") None dönerse boş string kullan
+            extracted_name = (customer_data.get("name") or "").strip() if customer_data else ""
 
             # Filename'den müşteri adını çıkar (fallback için)
             filename_customer = self._extract_customer_name_from_filename(file_name)
 
-            # 1. LLM başarıyla çıkardıysa, LLM'i kullan (OCR kontrol kaldırıldı)
+            # 1. LLM başarıyla çıkardıysa, LLM'i kullan
             if extracted_name:
                 logging.info(f"✅ LLM'den müşteri ismi alındı: '{extracted_name}'")
                 customer_data["source"] = "llm_extraction"
                 entities_data["customer"] = customer_data
                 return entities_data
 
-            # 2. LLM ismi bulamadıysa filename'den al
-            elif not extracted_name and filename_customer:
+            # 2. Gemini müşteri ismi bulamadıysa, GPT-5 ile retry yap
+            if not extracted_name and document_content:
+                logging.info("🔄 Gemini müşteri ismi bulamadı, GPT-5 ile retry yapılıyor...")
+                gpt5_customer = self._retry_customer_extraction_with_gpt5(document_content, file_name)
+                if gpt5_customer:
+                    logging.info(f"✅ GPT-5'den müşteri ismi alındı: '{gpt5_customer}'")
+                    entities_data["customer"] = {
+                        "name": gpt5_customer,
+                        "type": customer_data.get("type", "Corporate" if any(kw in gpt5_customer.upper() for kw in ["A.Ş.", "AŞ", "ŞİRKET", "HOLDİNG", "LTD"]) else "Individual"),
+                        "source": "gpt5_fallback",
+                    }
+                    return entities_data
+
+            # 3. GPT-5 de bulamadıysa filename'den al
+            if not extracted_name and filename_customer:
                 logging.info(
-                    f"📝 LLM müşteri ismi çıkaramadı, filename kullanılıyor: '{filename_customer}'"
+                    f"📝 LLM'ler müşteri ismi çıkaramadı, filename kullanılıyor: '{filename_customer}'"
                 )
                 entities_data["customer"] = {
                     "name": filename_customer,
@@ -2968,10 +2996,10 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     "source": "filename_fallback_no_llm",
                 }
 
-            # 3. Hiç isim yoksa boş bırak
-            else:
+            # 4. Hiç isim yoksa boş bırak
+            elif not extracted_name:
                 logging.error(
-                    f"❌ Hem LLM hem filename'den müşteri ismi çıkarılamadı: {file_name}"
+                    f"❌ Hem LLM'ler hem filename'den müşteri ismi çıkarılamadı: {file_name}"
                 )
                 customer_data["source"] = "extraction_failed"
                 entities_data["customer"] = customer_data
@@ -2981,6 +3009,57 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception as e:
             logging.error(f"Customer name validation hatası: {e}")
             return entities_data
+    
+    def _retry_customer_extraction_with_gpt5(self, document_content: str, file_name: str) -> str:
+        """
+        GPT-5 ile müşteri adı çıkarmayı dene (Gemini başarısız olduğunda fallback)
+        """
+        try:
+            import openai
+            
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                logging.warning("❌ OPENAI_API_KEY bulunamadı, GPT-5 fallback atlanıyor")
+                return ""
+            
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Sadece müşteri adı için focused prompt
+            prompt = f"""Bu Türk sigorta poliçesi belgesinden SİGORTALI veya SİGORTA ETTİREN kısmındaki müşteri adını çıkar.
+
+KURALLAR:
+1. Sadece "Sigortalı:", "Sigorta Ettiren:", "Müşteri:" gibi başlıklardan sonra gelen ismi al
+2. Şirket ise tam unvanı al (örn: "AKENERJİ ELEKTRİK ÜRETİM ANONİM ŞİRKETİ")
+3. Bireysel müşteri ise ad-soyad al (örn: "MEHMET YILMAZ")
+4. Adres, telefon, TC kimlik numarası dahil ETME
+5. Bulamazsan boş string dön
+
+BELGE İÇERİĞİ (ilk 8000 karakter):
+{document_content[:8000]}
+
+DOSYA ADI: {file_name}
+
+Sadece müşteri adını yaz, başka bir şey yazma:"""
+
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {"role": "system", "content": "Sen bir sigorta belgesi analiz uzmanısın. Sadece istenen bilgiyi ver, açıklama yapma."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1
+            )
+            
+            customer_name = response.choices[0].message.content.strip()
+            
+            # Boş veya çok kısa cevapları reddet
+            if customer_name and len(customer_name) > 2 and customer_name.lower() not in ["yok", "bulunamadı", "none", ""]:
+                return customer_name
+            return ""
+            
+        except Exception as e:
+            logging.warning(f"⚠️ GPT-5 müşteri çıkarma hatası: {e}")
+            return ""
 
     def _extract_customer_name_from_filename(self, file_name: str) -> str:
         """
@@ -3752,6 +3831,28 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 deductible_info = {}
             policy_type = policy_data.get("type", "") if policy_data else ""
             if relationship_type:
+                # OCR hatalarından kaynaklanan relationship type'ları LLM ile normalize et
+                try:
+                    schema_data = self._get_existing_policy_relationship_types_from_schema()
+                    existing_types = [rt["type"] for rt in schema_data.get("relationship_types", [])]
+                    
+                    if existing_types:
+                        normalization_result = self._normalize_relationship_type_with_llm(
+                            new_relationship_type=relationship_type,
+                            existing_relationship_types=existing_types,
+                            policy_type=policy_type
+                        )
+                        normalized_relationship_type = normalization_result.get("normalized_type", relationship_type)
+                        
+                        if normalized_relationship_type != relationship_type:
+                            logging.info(
+                                f"🔄 LLM Relationship normalization: {relationship_type} → {normalized_relationship_type} "
+                                f"(Reason: {normalization_result.get('reason', 'N/A')})"
+                            )
+                        relationship_type = normalized_relationship_type
+                except Exception as norm_error:
+                    logging.warning(f"⚠️ Relationship normalization atlandı: {norm_error}")
+                
                 self._create_policy_type_relationship(
                     policy_id, relationship_type, policy_type, relationship_properties, deductible_info
                 )
@@ -4842,7 +4943,8 @@ KRİTİK:
     ):
         """Customer node'u oluşturur ve Policy ile ilişkilendirir (Document ilişkisi yok)"""
         try:
-            customer_name = customer_data.get("name", "").strip()
+            # None değerlerini handle et (LLM bazen None dönebilir)
+            customer_name = (customer_data.get("name") or "").strip() if customer_data else ""
             if not customer_name:
                 return
 
@@ -4917,7 +5019,8 @@ KRİTİK:
     def _create_insurance_company_node(self, company_data: dict, policy_id: str):
         """InsuranceCompany node'u oluşturur ve Policy ile ilişkilendirir - case insensitive normalization ile"""
         try:
-            company_name = company_data.get("name", "").strip()
+            # None değerlerini handle et (LLM bazen None dönebilir)
+            company_name = (company_data.get("name") or "").strip() if company_data else ""
             if not company_name:
                 return
 
@@ -5840,16 +5943,17 @@ KRİTİK:
             if policy_id:
                 entity_ids.append({"type": "Policy", "id": policy_id})
             
-            # Customer
+            # Customer - None kontrolü ile
             customer_data = entities_data.get("customer") or {}
-            if customer_data.get("name"):
-                customer_name = customer_data.get("name", "").strip()
+            customer_name = (customer_data.get("name") or "").strip() if customer_data else ""
+            if customer_name:
                 entity_ids.append({"type": "Customer", "name": customer_name})
             
-            # InsuranceCompany
+            # InsuranceCompany - None kontrolü ile
             company_data = entities_data.get("insurance_company") or {}
-            if company_data.get("name"):
-                entity_ids.append({"type": "InsuranceCompany", "name": company_data.get("name", "").strip()})
+            company_name = (company_data.get("name") or "").strip() if company_data else ""
+            if company_name:
+                entity_ids.append({"type": "InsuranceCompany", "name": company_name})
             
             # Coverage - policy_id ile bağlı
             coverage_data = entities_data.get("coverage") or {}
@@ -6123,17 +6227,17 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                 "RENEWAL": "yenileme belgesi"
             }.get(document_type, "belge")
             
-            # Customer
+            # Customer - None kontrolü ile
             customer_data = entities_data.get("customer") or {}
-            customer_name = customer_data.get("name", "").strip()
+            customer_name = (customer_data.get("name") or "").strip()
             
-            # Insurance Company
+            # Insurance Company - None kontrolü ile
             company_data = entities_data.get("insurance_company") or {}
-            company_name = company_data.get("name", "").strip()
+            company_name = (company_data.get("name") or "").strip()
             
-            # Policy
+            # Policy - None kontrolü ile
             policy_data = entities_data.get("policy") or {}
-            policy_type = policy_data.get("type", "").strip()
+            policy_type = (policy_data.get("type") or "").strip()
             
             # Build summary
             if customer_name and company_name:

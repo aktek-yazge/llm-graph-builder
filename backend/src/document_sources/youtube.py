@@ -1,4 +1,4 @@
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 # youtube_transcript_api is only needed for YouTube processing, which is done in celery_worker
 try:

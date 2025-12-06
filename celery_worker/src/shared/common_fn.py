@@ -161,12 +161,14 @@ def load_embedding_model(embedding_model_name: str):
         embeddings = HuggingFaceEmbeddings(
             model_name=hf_model_name,
             cache_folder=cache_folder,
+            show_progress=False,  # Progress bar'ı kapat
             # Model'i local'de tutmak için ek parametreler
             model_kwargs={
                 "cache_dir": cache_folder,
             },
             encode_kwargs={
                 "normalize_embeddings": True,  # Embedding'leri normalize et
+                "show_progress_bar": False,  # Encode progress bar'ı kapat
             }
         )
         dimension = 384
