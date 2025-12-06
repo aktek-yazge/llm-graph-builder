@@ -53,7 +53,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=llm_graph_builder
     # Increase max_connections for high concurrency workloads
-    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    command: postgres -c max_connections=200 -c shared_buffers=256MB -c idle_in_transaction_session_timeout=0 -c statement_timeout=0
     volumes:
       # Host'ta sakla - docker volume'dan daha garanti, docker system prune'dan etkilenmez
       - ~/postgres-data-preview:/var/lib/postgresql/data
