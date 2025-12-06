@@ -209,14 +209,24 @@ Sadece JSON döndür, açıklama yapma. Mümkün olduğunca çok birleştirme ya
         data = json.loads(content.strip())
         
         # NormalizationGroup'lara dönüştür
+        # SADECE gerçekte var olan type'ları dahil et (LLM örneklerden uydurmasın)
+        existing_types = set(type_names)
         groups = []
         for g in data.get("groups", []):
             original_types = g.get("original_types", [])
-            total_count = sum(type_counts.get(t, 0) for t in original_types)
+            # Sadece gerçekte var olan type'ları filtrele
+            filtered_types = [t for t in original_types if t in existing_types]
+            
+            if not filtered_types:
+                # Bu grupta hiç gerçek type yok, atla
+                logger.debug(f"⚠️ Grup atlandı (var olmayan type'lar): {original_types}")
+                continue
+                
+            total_count = sum(type_counts.get(t, 0) for t in filtered_types)
             
             groups.append(NormalizationGroup(
-                original_types=original_types,
-                suggested_name=g.get("suggested_name", original_types[0] if original_types else "UNKNOWN"),
+                original_types=filtered_types,
+                suggested_name=g.get("suggested_name", filtered_types[0] if filtered_types else "UNKNOWN"),
                 count=total_count
             ))
         
@@ -250,6 +260,13 @@ def preview_normalization(graph, llm) -> Dict:
     # 1. Tüm relationship type'larını al
     rel_types = get_all_relationship_types(graph)
     logger.info(f"📋 {len(rel_types)} relationship type bulundu")
+    
+    # 1.5. count=0 olanları filtrele (silinmiş ama meta cache'de kalan type'lar)
+    rel_types_filtered = [rt for rt in rel_types if rt.get("count", 0) > 0]
+    filtered_count = len(rel_types) - len(rel_types_filtered)
+    if filtered_count > 0:
+        logger.info(f"🗑️ {filtered_count} adet count=0 type filtrelendi")
+    rel_types = rel_types_filtered
     
     # 2. LLM ile analiz et
     groups = analyze_with_llm(rel_types, llm)

@@ -6182,7 +6182,8 @@ async def create_embeddings_for_file(file_id: str):
             queued_count = 0
             queued_ids = []
             for file_record in files_to_process:
-                if file_record.embedding_status in ["pending", "failed", "completed"]:
+                # Sadece pending veya failed olanları işle (completed olanları ATLA)
+                if file_record.embedding_status in ["pending", "failed"]:
                     file_record.embedding_status = "processing"
                     file_record.embedding_started_at = datetime.now(timezone.utc)
                     file_record.status = "processing"

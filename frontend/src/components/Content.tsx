@@ -702,10 +702,14 @@ const Content: React.FC<ContentProps> = ({
 
   const handleCreateEmbeddingsForV2 = async () => {
     const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
-    const chunkedFiles = v2Files.filter((f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status !== 'processing');
+    // Sadece embedding'i pending veya failed olan dosyaları filtrele (completed olanları DAHIL ETME!)
+    const chunkedFiles = v2Files.filter((f: CustomFile) => 
+      f.chunking_status === 'chunked' && 
+      (f.embedding_status === 'pending' || f.embedding_status === 'failed')
+    );
 
     if (!chunkedFiles || chunkedFiles.length === 0) {
-      showErrorToast('Embedding oluşturmak için chunked edilmiş dosya seçiniz');
+      showErrorToast('Embedding oluşturmak için uygun dosya bulunamadı (pending veya failed embedding)');
       return;
     }
 
@@ -1050,7 +1054,8 @@ const Content: React.FC<ContentProps> = ({
     ).length;
 
     const readyForEmbedding = v2Files.filter(
-      (f: CustomFile) => f.chunking_status === 'chunked' && f.embedding_status === 'pending'
+      (f: CustomFile) => f.chunking_status === 'chunked' && 
+      (f.embedding_status === 'pending' || f.embedding_status === 'failed')
     ).length;
 
     return { pendingChunking, readyForGraph, pendingEndorsement, readyForEmbedding, completed: 0 };
