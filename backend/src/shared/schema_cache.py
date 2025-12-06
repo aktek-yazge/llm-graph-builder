@@ -239,16 +239,23 @@ class SchemaVersionCache:
     
     def _fetch_from_neo4j(self, graph) -> str:
         """
-        Neo4j'den şema çek - ÖNCE hafif sorgu, sonra Langchain
+        Neo4j'den şema çek - ÖNCE APOC (24x hızlı), sonra lightweight fallback
         """
         try:
-            # 1. ÖNCE en hafif sorguyu dene (timeout riski düşük)
+            # 1. ÖNCE APOC dene (en hızlı - tek sorgu)
+            apoc_schema = self._fetch_schema_apoc(graph)
+            if apoc_schema and not apoc_schema.startswith("⚠️"):
+                logger.info("✅ APOC schema başarılı")
+                return apoc_schema
+            
+            # 2. APOC başarısız → Lightweight dene
+            logger.info("⚠️ APOC başarısız, lightweight deneniyor...")
             lightweight = self._fetch_schema_lightweight(graph)
             if lightweight and not lightweight.startswith("⚠️"):
                 logger.info("✅ Lightweight schema başarılı")
                 return lightweight
             
-            # 2. Hafif sorgu başarısız olursa, mevcut schema'yı kullan
+            # 3. Her ikisi de başarısız → mevcut schema'yı kullan
             if hasattr(graph, 'schema') and graph.schema:
                 logger.info("✅ Mevcut graph.schema kullanılıyor")
                 return graph.schema
@@ -258,6 +265,95 @@ class SchemaVersionCache:
         except Exception as e:
             logger.error(f"❌ Neo4j şema çekme hatası: {e}")
             return f"⚠️ Şema alınamadı: {str(e)}"
+    
+    def _fetch_schema_apoc(self, graph) -> str:
+        """
+        APOC ile şema çekme - TEK SORGU ile tüm bilgi (24x hızlı)
+        
+        Format:
+        # NODES
+        (NodeName:count){prop1:type,prop2:type,...}
+        
+        # RELATIONSHIPS
+        (FromNode)-[:REL_TYPE]->(ToNode)
+        """
+        try:
+            import time
+            logger.info("🔍 APOC meta.schema() ile şema çekiliyor...")
+            start_time = time.time()
+            
+            # APOC meta.schema() - TEK SORGU
+            result = graph.query("CALL apoc.meta.schema() YIELD value RETURN value")
+            if not result:
+                logger.warning("⚠️ APOC sonuç döndürmedi")
+                return "⚠️ APOC sonuç döndürmedi"
+            
+            schema_data = result[0]["value"]
+            elapsed = time.time() - start_time
+            logger.info(f"⏱️ APOC sorgusu: {elapsed:.2f} saniye")
+            
+            # Tip dönüşümü
+            type_map = {
+                "STRING": "str", "INTEGER": "int", "FLOAT": "float",
+                "BOOLEAN": "bool", "DATE_TIME": "dt", "DATE": "dt",
+                "LOCAL_DATE_TIME": "dt", "LIST": "list"
+            }
+            
+            # Node'ları ve Relationship'leri ayır
+            nodes = {}
+            relationships = []
+            
+            for name, info in schema_data.items():
+                if info.get("type") == "node":
+                    # Node bilgisi
+                    count = info.get("count", 0)
+                    props = []
+                    for prop_name, prop_info in info.get("properties", {}).items():
+                        if prop_name not in ["embedding", "id", "uuid", "elementId"]:
+                            prop_type = type_map.get(prop_info.get("type", "STRING"), "str")
+                            props.append(f"{prop_name}:{prop_type}")
+                    nodes[name] = {"count": count, "props": props}
+                    
+                    # Bu node'un relationship'leri
+                    for rel_name, rel_info in info.get("relationships", {}).items():
+                        direction = rel_info.get("direction", "out")
+                        target_labels = rel_info.get("labels", [])
+                        for target in target_labels:
+                            if direction == "out":
+                                relationships.append((name, rel_name, target))
+                            else:
+                                relationships.append((target, rel_name, name))
+            
+            # Format oluştur
+            lines = ["# NODES"]
+            # Count'a göre sırala
+            sorted_nodes = sorted(nodes.items(), key=lambda x: x[1]["count"], reverse=True)
+            for label, info in sorted_nodes:
+                count = info["count"]
+                props = info["props"]
+                if props:
+                    lines.append(f"({label}:{count}){{{','.join(props)}}}")
+                else:
+                    lines.append(f"({label}:{count})")
+            
+            lines.append("")
+            lines.append("# RELATIONSHIPS")
+            
+            # Unique pattern'ler
+            seen = set()
+            for from_l, rel, to_l in relationships:
+                pattern = f"({from_l})-[:{rel}]->({to_l})"
+                if pattern not in seen:
+                    seen.add(pattern)
+                    lines.append(pattern)
+            
+            schema = "\n".join(lines)
+            logger.info(f"✅ APOC Schema: {len(schema)} karakter, {len(sorted_nodes)} node, {len(seen)} pattern ({elapsed:.2f}s)")
+            return schema
+            
+        except Exception as e:
+            logger.warning(f"⚠️ APOC schema hatası: {e}")
+            return f"⚠️ APOC hatası: {str(e)}"
     
     def _format_langchain_schema(self, structured: dict) -> str:
         """Langchain structured schema'yı formatla"""
