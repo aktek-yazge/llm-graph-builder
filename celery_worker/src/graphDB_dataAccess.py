@@ -12,7 +12,8 @@ from src.shared.common_fn import (
 from src.entities.source_node import sourceNode
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
-from src.entity_resolver import resolve_entity_before_creation
+# Entity resolution pre-processing KALDIRILDI - post-processing LLM ile yapılıyor
+# from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
 from functools import wraps
@@ -4953,47 +4954,25 @@ KRİTİK:
     def _create_customer_node_comprehensive(
         self, customer_data: dict, policy_id: str, file_name: str
     ):
-        """Customer node'u oluşturur ve Policy ile ilişkilendirir (Document ilişkisi yok)"""
+        """
+        Customer node'u oluşturur ve Policy ile ilişkilendirir.
+        
+        NOT: Pre-processing entity resolution KALDIRILDI.
+        - Her Customer kendi adıyla MERGE edilir (exact match)
+        - Semantic duplicate'ler post-processing ile merge edilir (LLM doğrulamalı)
+        - Bu yaklaşım daha güvenli: yanlış merge riski yok
+        """
         try:
             # None değerlerini handle et (LLM bazen None dönebilir)
             customer_name = (customer_data.get("name") or "").strip() if customer_data else ""
             if not customer_name:
                 return
 
-            # Entity resolution kontrolü
-            new_entity = {
-                "id": customer_name,
-                "name": customer_name,
-                "entity_type": "Customer",
-            }
-
-            existing_entity_id = resolve_entity_before_creation(
-                new_entity, self.graph, "Customer"
-            )
-            if existing_entity_id:
-                logging.info(
-                    f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}"
-                )
-                # Mevcut entity ile Policy'yi ilişkilendir
-                link_query = """
-                    MATCH (c) WHERE elementId(c) = $entity_id
-                    MATCH (p:Policy {id: $policy_id})
-                    MERGE (c)-[r:HAS_POLICY]->(p)
-                    SET r.created_at = datetime(),
-                        r.source = 'llm_extraction'
-                    SET c.updatedAt = datetime()
-                    RETURN c.name as customer_name
-                """
-                self.graph.query(
-                    link_query,
-                    {"entity_id": existing_entity_id, "policy_id": policy_id},
-                    session_params={"database": self.graph._database},
-                )
-                return
-
             # Customer ID oluştur (name-based unique ID)
             customer_id = f"customer_{customer_name.replace(' ', '_').upper()}"
             
+            # MERGE ile exact name match - aynı isim varsa update, yoksa create
+            # Semantic benzerlik (A.Ş. vs ANONİM ŞİRKETİ) post-processing'de LLM ile merge edilir
             query = """
                 MERGE (c:Customer {name: $customer_name})
                 ON CREATE SET 

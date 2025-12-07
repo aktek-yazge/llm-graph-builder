@@ -20,7 +20,8 @@ from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
-from src.entity_resolver import resolve_entity_before_creation
+# Entity resolution pre-processing KALDIRILDI - post-processing LLM ile yapılıyor
+# from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
 
@@ -1968,60 +1969,14 @@ class graphDBdataAccess:
             logging.error(f"Policy related node'ları oluşturma hatası: {e}")
 
     def _create_customer_node(self, customer_name: str, policy_id: str, file_name: str):
-        """Customer node oluşturur ve ilişkilendirir"""
+        """
+        Customer node oluşturur ve ilişkilendirir.
+        
+        NOT: Pre-processing entity resolution KALDIRILDI.
+        - Her Customer kendi adıyla MERGE edilir (exact match veya normalized match)
+        - Semantic duplicate'ler post-processing ile merge edilir (LLM doğrulamalı)
+        """
         try:
-            # Entity resolution kontrolü
-            new_entity = {
-                "id": customer_name,
-                "name": customer_name,
-                "entity_type": "Customer",
-            }
-
-            existing_entity_id = resolve_entity_before_creation(
-                new_entity, self.graph, "Customer"
-            )
-            if existing_entity_id:
-                logging.info(
-                    f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}"
-                )
-
-                # Mevcut entity ile ilişkileri oluştur
-                link_queries = [
-                    # Customer -> Document HAS_DOC ilişkisi
-                    """
-                        MATCH (c) WHERE elementId(c) = $entity_id
-                        MATCH (d:Document {fileName: $file_name})
-                        MERGE (c)-[r:HAS_DOC]->(d)
-                        SET r.created_at = datetime()
-                        SET c.updatedAt = datetime()
-                        RETURN count(r) as links_created
-                    """,
-                    # Customer -> Policy HAS_POLICY ilişkisi
-                    """
-                        MATCH (c) WHERE elementId(c) = $entity_id
-                        MATCH (p:Policy {id: $policy_id})
-                        MERGE (c)-[r:HAS_POLICY]->(p)
-                        SET r.created_at = datetime()
-                        RETURN count(r) as links_created
-                    """,
-                ]
-
-                for query in link_queries:
-                    self.graph.query(
-                        query,
-                        {
-                            "entity_id": existing_entity_id,
-                            "file_name": file_name,
-                            "policy_id": policy_id,
-                        },
-                        session_params={"database": self.graph._database},
-                    )
-
-                logging.info(
-                    f"Mevcut Customer ile ilişkiler oluşturuldu: {customer_name}"
-                )
-                return
-
             # Customer node oluştur veya güncelle - case insensitive normalization ile
             create_customer_query = """
                 // Önce normalize edilmiş isimle eşleşen customer ara
@@ -3723,7 +3678,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception:
             return 0.0
 
-    def merge_existing_duplicate_customers(self):
+    def merge_existing_duplicate_customers(self, use_llm_verification: bool = True):
         """
         Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate Customer node'larını birleştirir
 
@@ -3732,11 +3687,126 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         2. Text edit distance <= 1 (sadece minimal yazım farkları)
         3. Bir isim diğerinin substring'i (contains ilişkisi - minimum 6 karakter)
         4. Jaro-Winkler similarity >= 0.95 (çok yüksek benzerlik threshold'u)
+        
+        GÜVENLİK: Substring match ve kısa isimler için LLM doğrulaması yapılır.
+        
+        Args:
+            use_llm_verification: LLM ile doğrulama yap (default True)
         """
+        
+        def verify_merge_with_llm_text(name1: str, name2: str, match_type: str) -> tuple:
+            """
+            GPT-4o ile text-based birleştirme kararını doğrula.
+            Özellikle substring match ve kişi isimleri için önemli.
+            Returns: (should_merge: bool, reason: str)
+            """
+            try:
+                from openai import OpenAI
+                import os
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki müşteri isminin AYNI kişi/şirket olup olmadığını belirle.
+Eğer AYNI ise, OCR hatalarını düzelterek DOĞRU İSMİ belirle.
+
+İsim 1: "{name1}"
+İsim 2: "{name2}"
+Eşleşme Tipi: {match_type}
+
+KURALLAR:
+
+1. OCR/PDF EXTRACTION HATALARI - Bunlar AYNI:
+   - Kelime bölünmeleri: "TEKNOLO JİLERİ" → "TEKNOLOJİLERİ"
+   - Satır kesmeleri: "ŞİR KETİ" → "ŞİRKETİ"
+   - Kesik isimler: "LİMİTED Ş" → "LİMİTED ŞİRKETİ"
+
+2. KISALTMALAR - Tutarlı kullan:
+   - "A.Ş." veya "ANONİM ŞİRKETİ"
+
+3. KİŞİ İSİMLERİ - FARKLI kişiler:
+   - Ad/soyad farklıysa: "FİGEN TAŞ" ≠ "FİGEN TAŞKENT"
+
+4. ŞİRKET İSİMLERİ - FARKLI şirketler:
+   - Ana şirket adı farklıysa FARKLI
+
+SADECE JSON formatında yanıt ver:
+{{"same_entity": true/false, "reason": "açıklama", "corrected_name": "düzeltilmiş isim veya null"}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir veri kalitesi uzmanısın. OCR hatalarını düzeltip doğru isimleri belirle. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_completion_tokens=300
+                )
+                
+                import json
+                result_text = response.choices[0].message.content.strip()
+                # JSON parse
+                if result_text.startswith("```"):
+                    result_text = result_text.split("```")[1]
+                    if result_text.startswith("json"):
+                        result_text = result_text[4:]
+                result = json.loads(result_text)
+                
+                corrected = result.get("corrected_name") if result.get("same_entity") else None
+                return result.get("same_entity", False), result.get("reason", ""), corrected
+                
+            except Exception as e:
+                logging.warning(f"⚠️ LLM doğrulama hatası: {e}")
+                # Hata durumunda güvenli tarafta kal - merge etme
+                return False, f"LLM error: {str(e)}", None
+        
+        def is_likely_person_name(name: str) -> bool:
+            """Kısa ve basit isimleri (kişi isimleri) tespit et"""
+            words = name.strip().split()
+            # 1-3 kelime ve her kelime kısa (muhtemelen kişi adı)
+            if len(words) <= 3 and all(len(w) <= 15 for w in words):
+                # Şirket suffixleri yoksa kişi ismi olabilir
+                company_suffixes = ['a.ş.', 'a.ş', 'a.s.', 'ltd.', 'şti.', 'sti.', 
+                                   'anonim', 'limited', 'şirketi', 'sirketi', 'san.', 'tic.']
+                name_lower = name.lower()
+                if not any(suffix in name_lower for suffix in company_suffixes):
+                    return True
+            return False
+        
+        def needs_llm_verification(name1: str, name2: str, similarity_info: dict) -> tuple:
+            """
+            LLM doğrulaması gerekip gerekmediğini belirle
+            Returns: (needs_verification: bool, match_type: str)
+            """
+            # Case 1: Normalized equal ve uzunluklar aynı - LLM gerekmez
+            if similarity_info.get("normalized_equal") and abs(len(name1) - len(name2)) <= 2:
+                return False, "normalized_equal"
+            
+            # Case 2: Edit distance 0 - tamamen aynı - LLM gerekmez
+            if similarity_info.get("edit_distance", 99) == 0:
+                return False, "exact_match"
+            
+            # Case 3: Substring match - LLM gerekli!
+            if similarity_info.get("is_substring"):
+                return True, "substring_match"
+            
+            # Case 4: Kişi isimleri - LLM gerekli!
+            if is_likely_person_name(name1) or is_likely_person_name(name2):
+                return True, "person_name"
+            
+            # Case 5: Uzunluk farkı çok fazla - LLM gerekli!
+            len_diff = abs(len(name1) - len(name2))
+            if len_diff > 10:
+                return True, "length_diff"
+            
+            # Diğer durumlar - LLM gerekmez
+            return False, "text_match"
+        
         try:
             logging.info(
                 "🔍 Mevcut duplicate Customer node'ları text similarity ile kontrol ediliyor..."
             )
+            if use_llm_verification:
+                logging.info("🤖 LLM doğrulaması AKTİF (substring + kişi isimleri için)")
 
             # Text similarity parametreleri - customer için EN SIKICI kriterler
             import os
@@ -3823,7 +3893,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 return 0
 
             total_merged = 0
+            names_corrected = 0
             processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
+            llm_rejected_pairs = []  # LLM tarafından reddedilen çiftler
 
             logging.info(f"🎯 {len(duplicates_result)} duplicate customer çift bulundu")
 
@@ -3866,6 +3938,34 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     f"Substring={similarity_info['is_substring']}"
                 )
 
+                # LLM doğrulama gerekiyor mu kontrol et
+                corrected_name = None
+                if use_llm_verification:
+                    needs_verification, match_type = needs_llm_verification(
+                        master['name'], duplicate['name'], similarity_info
+                    )
+                    
+                    if needs_verification:
+                        should_merge, reason, corrected_name = verify_merge_with_llm_text(
+                            master['name'], duplicate['name'], match_type
+                        )
+                        
+                        if not should_merge:
+                            logging.info(f"  🤖 LLM REDDETTİ ({match_type}): '{master['name']}' vs '{duplicate['name']}'")
+                            logging.info(f"     Neden: {reason}")
+                            llm_rejected_pairs.append({
+                                "master": master['name'],
+                                "duplicate": duplicate['name'],
+                                "match_type": match_type,
+                                "reason": reason
+                            })
+                            continue
+                        else:
+                            logging.info(f"  🤖 LLM ONAYLADI ({match_type}): '{master['name']}' = '{duplicate['name']}'")
+                            logging.info(f"     Neden: {reason}")
+                            if corrected_name:
+                                logging.info(f"     📝 Düzeltilmiş isim: '{corrected_name}'")
+
                 # APOC ile merge et
                 merge_query = """
                     MATCH (master) WHERE elementId(master) = $master_id
@@ -3875,7 +3975,7 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         {properties:"discard", mergeRels:true, produceSelfRel:false, 
                          preserveExistingSelfRels:false, singleElementAsArray:true}) 
                     YIELD node
-                    RETURN node.name as merged_name
+                    RETURN node.name as merged_name, elementId(node) as node_id
                 """
 
                 result = self.execute_query(
@@ -3888,22 +3988,432 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
                 if result:
                     total_merged += 1
-                    logging.info(
-                        f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'"
-                    )
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # 📝 İSİM DÜZELTMESİ
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.fullName = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(
+                            update_query,
+                            {
+                                "node_id": merged_node_id,
+                                "corrected_name": corrected_name,
+                                "original_name": current_name
+                            }
+                        )
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + OCR Düzeltildi: '{duplicate['name']}' -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                    else:
+                        logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
                 else:
                     logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
 
             logging.info(
                 f"🎉 Toplam {total_merged} duplicate Customer node birleştirildi"
             )
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi OCR hatalarından düzeltildi")
+            
+            # LLM tarafından reddedilen çiftleri raporla
+            if llm_rejected_pairs:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected_pairs)} birleştirme REDDEDİLDİ (false-positive önlendi):")
+                for pair in llm_rejected_pairs:
+                    logging.info(f"   ❌ '{pair['master']}' vs '{pair['duplicate']}' ({pair['match_type']})")
+                    logging.info(f"      Neden: {pair['reason']}")
+            
             return total_merged
 
         except Exception as e:
             logging.error(f"❌ Duplicate customer merge hatası: {e}")
             return 0
 
-    def merge_existing_duplicate_insurance_companies(self):
+    def merge_customers_with_semantic_similarity(self, similarity_threshold: float = 0.96, use_llm_verification: bool = True) -> int:
+        """
+        OpenAI embedding kullanarak semantic similarity ile duplicate Customer node'larını birleştirir.
+        
+        Bu fonksiyon text-based matching'in yakalayamadığı duplicateları bulur:
+        - "AKSA AKRİLİK KİMYA SANAYİİ ANONİM ŞİRKETİ" vs "AKSA AKRİLİK KİMYA SANAYİİ A.Ş."
+        - "HDI SİGORTA ANONİM ŞİRKETİ" vs "HDI SİGORTA A.Ş."
+        
+        GÜVENLİK ÖNLEMLERİ:
+        - Yüksek threshold (0.96) - sadece çok benzer isimleri merge et
+        - Karakter benzerliği kontrolü - semantic yüksek ama metin çok farklıysa skip
+        - İlk kelime kontrolü - ana isim farklıysa skip
+        - 🤖 LLM doğrulaması - GPT-4o merge kararını onaylamalı
+        
+        Args:
+            similarity_threshold: Minimum semantic similarity (0-1, default 0.96)
+            use_llm_verification: LLM ile doğrulama yap (default True)
+            
+        Returns:
+            Merge edilen duplicate sayısı
+        """
+        
+        def verify_merge_with_llm(name1: str, name2: str) -> tuple:
+            """
+            GPT-5.1 ile birleştirme kararını doğrula ve doğru ismi belirle.
+            Returns: (should_merge: bool, reason: str, corrected_name: str or None)
+            """
+            try:
+                from openai import OpenAI
+                import os
+                import json
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki müşteri isminin AYNI kişi/şirket olup olmadığını belirle.
+Eğer AYNI ise, OCR hatalarını düzelterek DOĞRU İSMİ belirle.
+
+İsim 1: "{name1}"
+İsim 2: "{name2}"
+
+KURALLAR:
+1. OCR/PDF EXTRACTION HATALARI - Bunlar AYNI entity'dir:
+   - Kelime bölünmeleri: "TEKNOLO JİLERİ" → düzelt → "TEKNOLOJİLERİ"
+   - Satır kesmeleri: "ŞİR KETİ" → düzelt → "ŞİRKETİ"
+   - Kesik isimler: "LİMİTED Ş" → düzelt → "LİMİTED ŞİRKETİ"
+   - Tekrarlanan metin: Fazlalıkları kaldır
+
+2. KISALTMALAR - Tutarlı kullan:
+   - "A.Ş." veya "ANONİM ŞİRKETİ" (hangisi daha yaygınsa)
+   - "LTD. ŞTİ." veya "LİMİTED ŞİRKETİ"
+
+3. FARKLI KİŞİLER - İsim/soyad farklıysa FARKLI
+
+4. FARKLI ŞİRKETLER - Ana şirket adı farklıysa FARKLI
+
+SADECE JSON formatında cevap ver:
+{{"karar": "AYNI" veya "FARKLI", "neden": "açıklama", "dogru_isim": "düzeltilmiş tam isim veya null"}}
+
+Örnek AYNI için: {{"karar": "AYNI", "neden": "OCR kelime bölünmesi", "dogru_isim": "DOWAKSA İLERİ KOMPOZİT MALZEMELER SANAYİ LİMİTED ŞİRKETİ"}}
+Örnek FARKLI için: {{"karar": "FARKLI", "neden": "Farklı soyadlar", "dogru_isim": null}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir veri kalitesi uzmanısın. OCR hatalarını düzeltip doğru isimleri belirle. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_completion_tokens=300,
+                    temperature=0
+                )
+                
+                answer = response.choices[0].message.content.strip()
+                
+                # JSON parse
+                if answer.startswith("```"):
+                    answer = answer.split("```")[1]
+                    if answer.startswith("json"):
+                        answer = answer[4:]
+                
+                result = json.loads(answer)
+                
+                should_merge = result.get("karar", "").upper() == "AYNI"
+                reason = result.get("neden", "")
+                corrected_name = result.get("dogru_isim") if should_merge else None
+                
+                return should_merge, reason, corrected_name
+                
+            except Exception as e:
+                logging.error(f"LLM verification error: {e}")
+                return False, f"LLM error: {str(e)}", None
+        
+        def normalize_name(name: str) -> str:
+            """İsmi normalize et - sadece harf ve rakamlar"""
+            import unicodedata
+            # Türkçe karakterleri koru, diğer özel karakterleri kaldır
+            result = ''.join(c for c in name.upper() if c.isalnum() or c.isspace())
+            return ' '.join(result.split())  # Fazla boşlukları temizle
+        
+        def get_char_similarity(s1: str, s2: str) -> float:
+            """Karakter bazlı benzerlik (Levenshtein ratio)"""
+            if not s1 or not s2:
+                return 0.0
+            n1, n2 = normalize_name(s1), normalize_name(s2)
+            if not n1 or not n2:
+                return 0.0
+            # Basit karakter örtüşmesi
+            len1, len2 = len(n1), len(n2)
+            max_len = max(len1, len2)
+            if max_len == 0:
+                return 1.0
+            # Ortak karakter sayısı
+            common = sum(1 for c in set(n1) if c in n2)
+            total_unique = len(set(n1) | set(n2))
+            jaccard = common / total_unique if total_unique > 0 else 0
+            # Uzunluk benzerliği
+            len_sim = min(len1, len2) / max_len
+            return (jaccard + len_sim) / 2
+        
+        def get_first_words(name: str, count: int = 2) -> str:
+            """İlk N kelimeyi al (ana isim için)"""
+            words = normalize_name(name).split()
+            return ' '.join(words[:count]) if words else ''
+        
+        def is_safe_to_merge(name1: str, name2: str, semantic_sim: float) -> tuple:
+            """
+            Merge güvenli mi? Word list YOK - sadece karakter analizi
+            
+            Returns: (is_safe, reason)
+            """
+            n1, n2 = normalize_name(name1), normalize_name(name2)
+            
+            # 1. Karakter benzerliği kontrolü
+            char_sim = get_char_similarity(name1, name2)
+            
+            # Semantic çok yüksek (>0.98) ama karakter benzerliği düşük (<0.5) = tehlikeli
+            if semantic_sim > 0.98 and char_sim < 0.5:
+                return False, f"Semantic yüksek ({semantic_sim:.2f}) ama karakter benzerliği düşük ({char_sim:.2f})"
+            
+            # 2. İlk kelime kontrolü - ana isim farklıysa merge etme
+            first1 = get_first_words(name1, 1)
+            first2 = get_first_words(name2, 1)
+            
+            # İlk kelimeler tamamen farklıysa (örn: AKİŞ vs AKMERKEZ)
+            if first1 and first2 and first1 != first2:
+                # İlk kelime benzerliği kontrol et
+                first_sim = get_char_similarity(first1, first2)
+                if first_sim < 0.7:  # İlk kelimeler çok farklı
+                    return False, f"İlk kelimeler farklı: '{first1}' vs '{first2}'"
+            
+            # 3. Kısa isimler için ekstra dikkat (kişi isimleri genelde kısa)
+            words1, words2 = n1.split(), n2.split()
+            if len(words1) <= 3 and len(words2) <= 3:
+                # Kısa isimler - her kelime önemli
+                # Kelime sayısı aynı olmalı
+                if len(words1) == len(words2):
+                    # Her pozisyondaki kelime benzer olmalı
+                    for w1, w2 in zip(words1, words2):
+                        word_sim = get_char_similarity(w1, w2)
+                        if word_sim < 0.7:  # Kelimeler çok farklı
+                            return False, f"Kelime farklı: '{w1}' vs '{w2}'"
+            
+            # 4. Minimum karakter benzerliği gerekli
+            if char_sim < 0.4:
+                return False, f"Karakter benzerliği çok düşük: {char_sim:.2f}"
+            
+            return True, "OK"
+        
+        try:
+            from src.shared.common_fn import load_embedding_model
+            
+            # Merkezi embedding model (batch + cache + similarity)
+            embeddings, dimension = load_embedding_model("openai")
+            
+            if not hasattr(embeddings, 'embed_texts'):
+                logging.error("❌ OpenAI embedding not available")
+                return 0
+            
+            logging.info(f"🔍 Semantic duplicate Customer merge başlatılıyor (threshold: {similarity_threshold})")
+            logging.info(f"🛡️ Güvenlik kontrolleri AKTİF: karakter benzerliği + ilk kelime + kısa isim kontrolü")
+            
+            # Tüm Customer isimlerini al
+            get_customers_query = """
+                MATCH (c:Customer)
+                WITH c, count { (c)-[:HAS_POLICY]->() } as policy_count
+                RETURN elementId(c) as id, c.name as name, policy_count
+                ORDER BY policy_count DESC
+            """
+            customers = self.execute_query(get_customers_query)
+            
+            if not customers or len(customers) < 2:
+                logging.info("✅ Yeterli Customer node yok")
+                return 0
+            
+            logging.info(f"📊 {len(customers)} Customer node bulundu")
+            
+            # Embedding hesapla - load_embedding_model batch + cache kullanır
+            names = [c["name"] for c in customers]
+            logging.info(f"🚀 Batch embedding: {len(names)} isim")
+            all_embeddings = embeddings.embed_texts(names)
+            
+            # Cache stats
+            stats = embeddings.get_cache_stats()
+            logging.info(f"📊 Cache stats: {stats}")
+            
+            # Yüksek similarity olan çiftleri bul
+            duplicates = []
+            skipped = []
+            processed_ids = set()
+            
+            for i in range(len(customers)):
+                if customers[i]["id"] in processed_ids:
+                    continue
+                
+                # None kontrolü
+                if all_embeddings[i] is None:
+                    continue
+                    
+                for j in range(i + 1, len(customers)):
+                    if customers[j]["id"] in processed_ids:
+                        continue
+                    
+                    # None kontrolü
+                    if all_embeddings[j] is None:
+                        continue
+                    
+                    # Semantic similarity - load_embedding_model'den
+                    sim = embeddings.cosine_similarity(all_embeddings[i], all_embeddings[j])
+                    
+                    if sim >= similarity_threshold:
+                        name1, name2 = customers[i]["name"], customers[j]["name"]
+                        
+                        # 🛡️ GÜVENLİK KONTROLÜ
+                        is_safe, reason = is_safe_to_merge(name1, name2, sim)
+                        
+                        if not is_safe:
+                            skipped.append({
+                                "name1": name1,
+                                "name2": name2,
+                                "sim": sim,
+                                "reason": reason
+                            })
+                            continue
+                        
+                        # Master: daha çok policy olan veya daha uzun isim
+                        if customers[i]["policy_count"] >= customers[j]["policy_count"]:
+                            master, duplicate = customers[i], customers[j]
+                        else:
+                            master, duplicate = customers[j], customers[i]
+                        
+                        duplicates.append({
+                            "master": master,
+                            "duplicate": duplicate,
+                            "similarity": sim
+                        })
+                        processed_ids.add(duplicate["id"])
+            
+            # Atlanan (güvenlik nedeniyle) kayıtları logla
+            if skipped:
+                logging.info(f"🛡️ Güvenlik kontrolü ile {len(skipped)} potansiyel false-positive atlandı:")
+                for s in skipped[:10]:  # İlk 10'u göster
+                    logging.info(f"   ❌ '{s['name1']}' vs '{s['name2']}' (sim={s['sim']:.3f}) - {s['reason']}")
+            
+            if not duplicates:
+                logging.info("✅ Semantic similarity ile duplicate bulunamadı")
+                return 0
+            
+            logging.info(f"🎯 {len(duplicates)} semantic duplicate çift bulundu")
+            
+            if use_llm_verification:
+                logging.info(f"🤖 LLM doğrulaması AKTİF - GPT-5.1 her birleştirmeyi onaylayacak + OCR düzeltme")
+            
+            # Merge işlemi
+            total_merged = 0
+            names_corrected = 0
+            llm_rejected = []
+            
+            for dup_pair in duplicates:
+                master = dup_pair["master"]
+                duplicate = dup_pair["duplicate"]
+                sim = dup_pair["similarity"]
+                corrected_name = None
+                
+                # 🤖 LLM DOĞRULAMASI + İSİM DÜZELTMESİ
+                if use_llm_verification:
+                    should_merge, llm_reason, corrected_name = verify_merge_with_llm(master["name"], duplicate["name"])
+                    
+                    if not should_merge:
+                        llm_rejected.append({
+                            "master": master["name"],
+                            "duplicate": duplicate["name"],
+                            "sim": sim,
+                            "reason": llm_reason
+                        })
+                        logging.info(f"🤖 LLM REDDETTİ (sim={sim:.3f}):")
+                        logging.info(f"   '{master['name']}' vs '{duplicate['name']}'")
+                        logging.info(f"   Neden: {llm_reason}")
+                        continue
+                    else:
+                        logging.info(f"🤖 LLM ONAYLADI: '{master['name']}' = '{duplicate['name']}' ({llm_reason})")
+                        if corrected_name:
+                            logging.info(f"   📝 Düzeltilmiş isim: '{corrected_name}'")
+                
+                logging.info(f"🔧 Semantic Merge (sim={sim:.3f}):")
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
+                
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name, elementId(node) as node_id
+                """
+                
+                result = self.execute_query(
+                    merge_query,
+                    {"master_id": master["id"], "duplicate_id": duplicate["id"]}
+                )
+                
+                if result:
+                    total_merged += 1
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # 📝 İSİM DÜZELTMESİ - LLM'in önerdiği doğru ismi uygula
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.fullName = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(
+                            update_query,
+                            {
+                                "node_id": merged_node_id,
+                                "corrected_name": corrected_name,
+                                "original_name": current_name
+                            }
+                        )
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + OCR Düzeltildi: '{duplicate['name']}' -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                    else:
+                        logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                else:
+                    logging.warning(f"  ⚠️ Merge başarısız: {duplicate['name']}")
+            
+            # Özet
+            logging.info(f"🎉 Semantic similarity ile {total_merged} Customer merge edildi")
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi OCR hatalarından düzeltildi")
+            
+            if use_llm_verification and llm_rejected:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected)} birleştirme REDDEDİLDİ (false-positive önlendi):")
+                for r in llm_rejected[:5]:  # İlk 5'i göster
+                    logging.info(f"   ❌ '{r['master']}' vs '{r['duplicate']}' - {r['reason']}")
+            
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Semantic merge hatası: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return 0
+
+    def merge_existing_duplicate_insurance_companies(self, use_llm_verification: bool = True):
         """
         Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate InsuranceCompany node'larını birleştirir
 
@@ -3912,11 +4422,95 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         2. Text edit distance <= 2 (küçük yazım farkları, insurance company için daha sıkı)
         3. Bir isim diğerinin substring'i (contains ilişkisi)
         4. Jaro-Winkler similarity >= 0.90 (insurance company için daha yüksek threshold)
+        
+        GÜVENLİK: Substring match için LLM doğrulaması yapılır.
         """
+        
+        def verify_merge_with_llm_text(name1: str, name2: str, match_type: str) -> tuple:
+            """GPT-5.1 ile birleştirme kararını doğrula ve OCR hatalarını düzelt."""
+            try:
+                from openai import OpenAI
+                import os
+                import json
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki sigorta şirketi isminin AYNI şirket olup olmadığını belirle.
+Eğer AYNI ise, en doğru ve tutarlı ismi belirle.
+
+İsim 1: "{name1}"
+İsim 2: "{name2}"
+Eşleşme Tipi: {match_type}
+
+KURALLAR:
+
+1. AYNI ŞİRKET - Bunları birleştir:
+   - "HDI SİGORTA" = "HDI SİGORTA A.Ş." (kısaltma farkı)
+   - "NEOVA SİGORTA" = "NEOVA SİGORTA ANONİM ŞİRKETİ" (tam isim)
+   - OCR/kesik isimler: eksik karakterler düzelt
+
+2. FARKLI ŞİRKETLER - Bunları birleştirme:
+   - "HDI SİGORTA" ≠ "ALLIANZ SİGORTA" (farklı şirketler)
+   - "AXA SİGORTA" ≠ "AXA HAYAT SİGORTA" (farklı iş kolu)
+
+3. İSİM STANDARTLAŞTIRMA:
+   - Tercih: "XXX SİGORTA A.Ş." formatı
+   - "ANONİM ŞİRKETİ" yerine "A.Ş." kullan
+   - Büyük harf tercih et
+
+SADECE JSON formatında cevap ver:
+{{"same_entity": true/false, "reason": "açıklama", "corrected_name": "standart isim veya null"}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir veri kalitesi uzmanısın. Sigorta şirketi isimlerini standartlaştır. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_completion_tokens=300
+                )
+                
+                result_text = response.choices[0].message.content.strip()
+                if result_text.startswith("```"):
+                    result_text = result_text.split("```")[1]
+                    if result_text.startswith("json"):
+                        result_text = result_text[4:]
+                result = json.loads(result_text)
+                
+                corrected = result.get("corrected_name") if result.get("same_entity") else None
+                return result.get("same_entity", False), result.get("reason", ""), corrected
+                
+            except Exception as e:
+                logging.warning(f"⚠️ LLM doğrulama hatası: {e}")
+                return False, f"LLM error: {str(e)}", None
+        
+        def needs_llm_verification(name1: str, name2: str, similarity_info: dict) -> tuple:
+            """LLM doğrulaması gerekip gerekmediğini belirle"""
+            # Normalized equal ve uzunluklar benzer - LLM gerekmez
+            if similarity_info.get("normalized_equal") and abs(len(name1) - len(name2)) <= 3:
+                return False, "normalized_equal"
+            
+            # Edit distance 0 - tamamen aynı
+            if similarity_info.get("edit_distance", 99) == 0:
+                return False, "exact_match"
+            
+            # Substring match - LLM gerekli!
+            if similarity_info.get("is_substring"):
+                return True, "substring_match"
+            
+            # Uzunluk farkı fazla - LLM gerekli!
+            if abs(len(name1) - len(name2)) > 10:
+                return True, "length_diff"
+            
+            return False, "text_match"
+        
         try:
             logging.info(
                 "🔍 Mevcut duplicate InsuranceCompany node'ları text similarity ile kontrol ediliyor..."
             )
+            if use_llm_verification:
+                logging.info("🤖 LLM doğrulaması AKTİF (substring match için)")
 
             # Text similarity parametreleri - insurance company için daha sıkı kriterler
             import os
@@ -4003,7 +4597,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 return 0
 
             total_merged = 0
-            processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
+            names_corrected = 0
+            processed_pairs = set()
+            llm_rejected_pairs = []
 
             logging.info(f"🎯 {len(duplicates_result)} duplicate company çift bulundu")
 
@@ -4013,38 +4609,57 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 ic2 = duplicate_pair["ic2"]
                 similarity_info = duplicate_pair["similarity_info"]
 
-                # Bu çift daha önce işlendi mi kontrol et
                 pair_key = tuple(sorted([ic1["element_id"], ic2["element_id"]]))
                 if pair_key in processed_pairs:
                     continue
 
                 processed_pairs.add(pair_key)
 
-                # Master'ı seç (daha çok policy ile bağlantısı olan, eşitse daha uzun isimli)
                 if ic1["policy_count"] > ic2["policy_count"]:
                     master, duplicate = ic1, ic2
                 elif ic2["policy_count"] > ic1["policy_count"]:
                     master, duplicate = ic2, ic1
                 else:
-                    # Policy sayısı eşitse, daha uzun ve detaylı ismi olan master olsun
                     if len(ic1["name"]) >= len(ic2["name"]):
                         master, duplicate = ic1, ic2
                     else:
                         master, duplicate = ic2, ic1
 
                 logging.info(f"🔧 Merge işlemi:")
-                logging.info(
-                    f"   Master: '{master['name']}' (Policy: {master['policy_count']})"
-                )
-                logging.info(
-                    f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})"
-                )
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
                 logging.info(
                     f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
                     f"Edit_dist={similarity_info['edit_distance']}, "
                     f"Jaro={similarity_info['jaro_similarity']:.3f}, "
                     f"Substring={similarity_info['is_substring']}"
                 )
+
+                # LLM doğrulama gerekiyor mu kontrol et
+                corrected_name = None
+                if use_llm_verification:
+                    needs_verification, match_type = needs_llm_verification(
+                        master['name'], duplicate['name'], similarity_info
+                    )
+                    
+                    if needs_verification:
+                        should_merge, reason, corrected_name = verify_merge_with_llm_text(
+                            master['name'], duplicate['name'], match_type
+                        )
+                        
+                        if not should_merge:
+                            logging.info(f"  🤖 LLM REDDETTİ ({match_type}): '{master['name']}' vs '{duplicate['name']}'")
+                            logging.info(f"     Neden: {reason}")
+                            llm_rejected_pairs.append({
+                                "master": master['name'],
+                                "duplicate": duplicate['name'],
+                                "reason": reason
+                            })
+                            continue
+                        else:
+                            logging.info(f"  🤖 LLM ONAYLADI ({match_type}): '{master['name']}' = '{duplicate['name']}'")
+                            if corrected_name:
+                                logging.info(f"     📝 Standart isim: '{corrected_name}'")
 
                 # APOC ile merge et
                 merge_query = """
@@ -4055,35 +4670,294 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         {properties:"discard", mergeRels:true, produceSelfRel:false, 
                          preserveExistingSelfRels:false, singleElementAsArray:true}) 
                     YIELD node
-                    RETURN node.name as merged_name
+                    RETURN node.name as merged_name, elementId(node) as node_id
                 """
 
                 result = self.execute_query(
                     merge_query,
-                    {
-                        "master_id": master["element_id"],
-                        "duplicate_id": duplicate["element_id"],
-                    },
+                    {"master_id": master["element_id"], "duplicate_id": duplicate["element_id"]},
                 )
 
                 if result:
                     total_merged += 1
-                    logging.info(
-                        f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'"
-                    )
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # İsim düzeltmesi
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(update_query, {
+                            "node_id": merged_node_id,
+                            "corrected_name": corrected_name,
+                            "original_name": current_name
+                        })
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + Standartlaştırıldı: '{duplicate['name']}' -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                    else:
+                        logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
                 else:
                     logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
 
-            logging.info(
-                f"🎉 Toplam {total_merged} duplicate InsuranceCompany node birleştirildi"
-            )
+            logging.info(f"🎉 Toplam {total_merged} duplicate InsuranceCompany node birleştirildi")
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi standartlaştırıldı")
+            if llm_rejected_pairs:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected_pairs)} birleştirme REDDEDİLDİ")
+                for pair in llm_rejected_pairs[:5]:
+                    logging.info(f"   ❌ '{pair['master']}' vs '{pair['duplicate']}' - {pair['reason']}")
+            
             return total_merged
 
         except Exception as e:
             logging.error(f"❌ Duplicate insurance company merge hatası: {e}")
             return 0
 
-    def merge_existing_duplicate_coverage_types(self):
+    def merge_insurance_companies_with_semantic_similarity(self, similarity_threshold: float = 0.96, use_llm_verification: bool = True) -> int:
+        """
+        OpenAI embedding + LLM doğrulama ile duplicate InsuranceCompany node'larını birleştirir.
+        
+        GÜVENLİK ÖNLEMLERİ:
+        - Yüksek threshold (0.96)
+        - Karakter benzerliği kontrolü
+        - 🤖 LLM doğrulaması - GPT-4o her birleştirmeyi onaylamalı
+        """
+        
+        def verify_merge_with_llm(name1: str, name2: str) -> tuple:
+            """GPT-5.1 ile birleştirme kararını doğrula ve OCR hatalarını düzelt."""
+            try:
+                from openai import OpenAI
+                import os
+                import json
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki sigorta şirketi isminin AYNI şirket olup olmadığını belirle.
+Eğer AYNI ise, OCR hatalarını düzelterek DOĞRU İSMİ belirle.
+
+İsim 1: "{name1}"
+İsim 2: "{name2}"
+
+KURALLAR:
+
+1. OCR/PDF EXTRACTION HATALARI - Bunlar AYNI:
+   - Kelime bölünmeleri: "SİGOR TA" → "SİGORTA"
+   - Kesik isimler: "A.Ş" → "A.Ş." veya "ANONİM ŞİRKETİ"
+   - Tekrarlanan metin: Fazlalıkları kaldır
+
+2. KISALTMALAR - Tutarlı kullan:
+   - "A.Ş." veya "ANONİM ŞİRKETİ"
+   - "SİG." = "SİGORTA"
+
+3. FARKLI ŞİRKETLER:
+   - Ana şirket adı farklıysa: "HDI" ≠ "ALLIANZ"
+
+SADECE JSON formatında cevap ver:
+{{"karar": "AYNI" veya "FARKLI", "neden": "açıklama", "dogru_isim": "düzeltilmiş isim veya null"}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir veri kalitesi uzmanısın. OCR hatalarını düzeltip doğru isimleri belirle. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_completion_tokens=300,
+                    temperature=0
+                )
+                
+                answer = response.choices[0].message.content.strip()
+                
+                # JSON parse
+                if answer.startswith("```"):
+                    answer = answer.split("```")[1]
+                    if answer.startswith("json"):
+                        answer = answer[4:]
+                
+                result = json.loads(answer)
+                
+                should_merge = result.get("karar", "").upper() == "AYNI"
+                reason = result.get("neden", "")
+                corrected_name = result.get("dogru_isim") if should_merge else None
+                
+                return should_merge, reason, corrected_name
+                
+            except Exception as e:
+                logging.error(f"LLM verification error: {e}")
+                return False, f"LLM error: {str(e)}", None
+        
+        def get_char_similarity(s1: str, s2: str) -> float:
+            """Karakter bazlı benzerlik"""
+            if not s1 or not s2:
+                return 0.0
+            n1 = ''.join(c for c in s1.upper() if c.isalnum() or c.isspace())
+            n2 = ''.join(c for c in s2.upper() if c.isalnum() or c.isspace())
+            if not n1 or not n2:
+                return 0.0
+            common = sum(1 for c in set(n1) if c in n2)
+            total_unique = len(set(n1) | set(n2))
+            return common / total_unique if total_unique > 0 else 0
+        
+        try:
+            from src.shared.common_fn import load_embedding_model
+            
+            embeddings, dimension = load_embedding_model("openai")
+            
+            if not hasattr(embeddings, 'embed_texts'):
+                logging.error("❌ OpenAI embedding not available")
+                return 0
+            
+            logging.info(f"🔍 Semantic duplicate InsuranceCompany merge başlatılıyor (threshold: {similarity_threshold})")
+            if use_llm_verification:
+                logging.info(f"🤖 LLM doğrulaması AKTİF")
+            
+            # Tüm InsuranceCompany isimlerini al
+            get_companies_query = """
+                MATCH (ic:InsuranceCompany)
+                WITH ic, count { ()-[:ISSUED_BY]->(ic) } as policy_count
+                RETURN elementId(ic) as id, ic.name as name, policy_count
+                ORDER BY policy_count DESC
+            """
+            companies = self.execute_query(get_companies_query)
+            
+            if not companies or len(companies) < 2:
+                logging.info("✅ Yeterli InsuranceCompany node yok")
+                return 0
+            
+            logging.info(f"📊 {len(companies)} InsuranceCompany node bulundu")
+            
+            # Embedding hesapla
+            names = [c["name"] for c in companies]
+            all_embeddings = embeddings.embed_texts(names)
+            
+            # Duplicate bul
+            duplicates = []
+            processed_ids = set()
+            
+            for i in range(len(companies)):
+                if companies[i]["id"] in processed_ids or all_embeddings[i] is None:
+                    continue
+                    
+                for j in range(i + 1, len(companies)):
+                    if companies[j]["id"] in processed_ids or all_embeddings[j] is None:
+                        continue
+                    
+                    sim = embeddings.cosine_similarity(all_embeddings[i], all_embeddings[j])
+                    
+                    if sim >= similarity_threshold:
+                        name1, name2 = companies[i]["name"], companies[j]["name"]
+                        
+                        # Karakter benzerliği kontrolü
+                        char_sim = get_char_similarity(name1, name2)
+                        if char_sim < 0.4:
+                            continue
+                        
+                        if companies[i]["policy_count"] >= companies[j]["policy_count"]:
+                            master, duplicate = companies[i], companies[j]
+                        else:
+                            master, duplicate = companies[j], companies[i]
+                        
+                        duplicates.append({
+                            "master": master,
+                            "duplicate": duplicate,
+                            "similarity": sim
+                        })
+                        processed_ids.add(duplicate["id"])
+            
+            if not duplicates:
+                logging.info("✅ Semantic similarity ile duplicate bulunamadı")
+                return 0
+            
+            logging.info(f"🎯 {len(duplicates)} semantic duplicate çift bulundu")
+            
+            # Merge işlemi
+            total_merged = 0
+            names_corrected = 0
+            llm_rejected = []
+            
+            for dup_pair in duplicates:
+                master = dup_pair["master"]
+                duplicate = dup_pair["duplicate"]
+                sim = dup_pair["similarity"]
+                corrected_name = None
+                
+                # LLM DOĞRULAMASI + OCR DÜZELTME
+                if use_llm_verification:
+                    should_merge, llm_reason, corrected_name = verify_merge_with_llm(master["name"], duplicate["name"])
+                    
+                    if not should_merge:
+                        llm_rejected.append({"master": master["name"], "duplicate": duplicate["name"], "reason": llm_reason})
+                        logging.info(f"🤖 LLM REDDETTİ: '{master['name']}' vs '{duplicate['name']}' - {llm_reason}")
+                        continue
+                    else:
+                        logging.info(f"🤖 LLM ONAYLADI: '{master['name']}' = '{duplicate['name']}'")
+                        if corrected_name:
+                            logging.info(f"   📝 Düzeltilmiş isim: '{corrected_name}'")
+                
+                logging.info(f"🔧 Semantic Merge (sim={sim:.3f}): '{duplicate['name']}' -> '{master['name']}'")
+                
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name, elementId(node) as node_id
+                """
+                
+                result = self.execute_query(merge_query, {"master_id": master["id"], "duplicate_id": duplicate["id"]})
+                
+                if result:
+                    total_merged += 1
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # 📝 İSİM DÜZELTMESİ
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(update_query, {
+                            "node_id": merged_node_id,
+                            "corrected_name": corrected_name,
+                            "original_name": current_name
+                        })
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + OCR Düzeltildi -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged")
+                    else:
+                        logging.info(f"  ✅ Merged")
+            
+            logging.info(f"🎉 Semantic similarity ile {total_merged} InsuranceCompany merge edildi")
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi OCR hatalarından düzeltildi")
+            if llm_rejected:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected)} birleştirme REDDEDİLDİ")
+            
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Semantic insurance company merge hatası: {e}")
+            return 0
+
+    def merge_existing_duplicate_coverage_types(self, use_llm_verification: bool = True):
         """
         Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate CoverageType node'larını birleştirir
 
@@ -4092,11 +4966,101 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         2. Text edit distance <= 3 (küçük yazım farkları)
         3. Bir isim diğerinin substring'i (contains ilişkisi)
         4. Jaro-Winkler similarity >= 0.85 (yakın benzerlik)
+        
+        GÜVENLİK: Substring match ve yüksek uzunluk farkları için LLM doğrulaması yapılır.
         """
+        
+        def verify_merge_with_llm_text(name1: str, name2: str, match_type: str) -> tuple:
+            """GPT-5.1 ile birleştirme kararını doğrula ve OCR hatalarını düzelt."""
+            try:
+                from openai import OpenAI
+                import os
+                import json
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki teminat tipi isminin AYNI teminat olup olmadığını belirle.
+Eğer AYNI ise, en doğru ve tutarlı ismi belirle.
+
+İsim 1: "{name1}"
+İsim 2: "{name2}"
+Eşleşme Tipi: {match_type}
+
+KURALLAR:
+
+1. AYNI TEMİNAT - Bunları birleştir:
+   - OCR hataları: "FERDİ KAZA" = "FERDI KAZA" (karakter farkı)
+   - Kısaltma farkları: "MALİ SORUMLULUK" = "MALİ SOR." 
+   - Kesik isimler: Bir isim diğerinin başlangıç kısmı olabilir
+
+2. FARKLI TEMİNATLAR - Bunları birleştirme:
+   - "KASKO" ≠ "KASKO ÖZEL" (farklı teminat tipi)
+   - "YANGIN" ≠ "YANGIN VE DOĞAL AFET" (farklı kapsam)
+
+3. İSİM STANDARTLAŞTIRMA:
+   - Büyük harf tercih et
+   - Kısaltmaları aç (varsa)
+   - Türkçe karakterleri koru
+
+SADECE JSON formatında cevap ver:
+{{"same_entity": true/false, "reason": "açıklama", "corrected_name": "standart isim veya null"}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir sigorta teminat uzmanısın. Teminat tiplerini standartlaştır. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_completion_tokens=300
+                )
+                
+                result_text = response.choices[0].message.content.strip()
+                if result_text.startswith("```"):
+                    result_text = result_text.split("```")[1]
+                    if result_text.startswith("json"):
+                        result_text = result_text[4:]
+                result = json.loads(result_text)
+                
+                corrected = result.get("corrected_name") if result.get("same_entity") else None
+                return result.get("same_entity", False), result.get("reason", ""), corrected
+                
+            except Exception as e:
+                logging.warning(f"⚠️ LLM doğrulama hatası: {e}")
+                return False, f"LLM error: {str(e)}", None
+        
+        def needs_llm_verification(name1: str, name2: str, similarity_info: dict) -> tuple:
+            """LLM doğrulaması gerekip gerekmediğini belirle"""
+            # Normalized equal ve uzunluklar benzer - LLM gerekmez
+            if similarity_info.get("normalized_equal") and abs(len(name1) - len(name2)) <= 3:
+                return False, "normalized_equal"
+            
+            # Edit distance 0 - tamamen aynı
+            if similarity_info.get("edit_distance", 99) == 0:
+                return False, "exact_match"
+            
+            # Substring match - LLM gerekli!
+            if similarity_info.get("is_substring"):
+                return True, "substring_match"
+            
+            # Uzunluk farkı fazla - LLM gerekli!
+            if abs(len(name1) - len(name2)) > 8:
+                return True, "length_diff"
+            
+            # Kelime sayısı farkı - LLM gerekli
+            words1 = len(name1.split())
+            words2 = len(name2.split())
+            if abs(words1 - words2) > 2:
+                return True, "word_count_diff"
+            
+            return False, "text_match"
+        
         try:
             logging.info(
                 "🔍 Mevcut duplicate CoverageType node'ları text similarity ile kontrol ediliyor..."
             )
+            if use_llm_verification:
+                logging.info("🤖 LLM doğrulaması AKTİF (substring/uzunluk farkı için)")
 
             # Text similarity parametreleri - coverage type için SIKI kriterler
             import os
@@ -4207,7 +5171,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 return 0
 
             total_merged = 0
-            processed_pairs = set()  # Aynı çiftin tekrar işlenmesini engellemek için
+            names_corrected = 0
+            processed_pairs = set()
+            llm_rejected_pairs = []
 
             logging.info(f"🎯 {len(duplicates_result)} duplicate çift bulundu")
 
@@ -4217,26 +5183,23 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 ct2 = duplicate_pair["ct2"]
                 similarity_info = duplicate_pair["similarity_info"]
 
-                # Bu çift daha önce işlendi mi kontrol et
                 pair_key = tuple(sorted([ct1["element_id"], ct2["element_id"]]))
                 if pair_key in processed_pairs:
                     continue
 
                 processed_pairs.add(pair_key)
 
-                # Master'ı seç (daha çok policy ile bağlantısı olan, eşitse daha uzun isimli)
                 if ct1["policy_count"] > ct2["policy_count"]:
                     master, duplicate = ct1, ct2
                 elif ct2["policy_count"] > ct1["policy_count"]:
                     master, duplicate = ct2, ct1
                 else:
-                    # Policy sayısı eşitse, daha uzun ve detaylı ismi olan master olsun
                     if len(ct1["name"]) >= len(ct2["name"]):
                         master, duplicate = ct1, ct2
                     else:
                         master, duplicate = ct2, ct1
 
-                # Merge işlemi öncesi ek validasyon - şüpheli merge'leri engelle
+                # Şüpheli merge kontrolü
                 if (
                     similarity_info["jaro_similarity"] < 0.8
                     and not similarity_info["normalized_equal"]
@@ -4246,18 +5209,11 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     logging.warning(
                         f"  ⚠️ Şüpheli CoverageType merge - atlaniyor: '{duplicate['name']}' -> '{master['name']}'"
                     )
-                    logging.warning(
-                        f"     Jaro={similarity_info['jaro_similarity']:.3f}, Edit={similarity_info['edit_distance']}, Common={similarity_info['common_words']}"
-                    )
                     continue
 
-                logging.info(f"🔧 SIKI Kriterlerle CoverageType Merge:")
-                logging.info(
-                    f"   Master: '{master['name']}' (Policy: {master['policy_count']})"
-                )
-                logging.info(
-                    f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})"
-                )
+                logging.info(f"🔧 CoverageType Merge:")
+                logging.info(f"   Master: '{master['name']}' (Policy: {master['policy_count']})")
+                logging.info(f"   Duplicate: '{duplicate['name']}' (Policy: {duplicate['policy_count']})")
                 logging.info(
                     f"   Similarity: Normalized={similarity_info['normalized_equal']}, "
                     f"Edit_dist={similarity_info['edit_distance']}, "
@@ -4265,6 +5221,32 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     f"Substring={similarity_info['is_substring']}, "
                     f"Common_words={similarity_info['common_words']}"
                 )
+
+                # LLM doğrulama gerekiyor mu kontrol et
+                corrected_name = None
+                if use_llm_verification:
+                    needs_verification, match_type = needs_llm_verification(
+                        master['name'], duplicate['name'], similarity_info
+                    )
+                    
+                    if needs_verification:
+                        should_merge, reason, corrected_name = verify_merge_with_llm_text(
+                            master['name'], duplicate['name'], match_type
+                        )
+                        
+                        if not should_merge:
+                            logging.info(f"  🤖 LLM REDDETTİ ({match_type}): '{master['name']}' vs '{duplicate['name']}'")
+                            logging.info(f"     Neden: {reason}")
+                            llm_rejected_pairs.append({
+                                "master": master['name'],
+                                "duplicate": duplicate['name'],
+                                "reason": reason
+                            })
+                            continue
+                        else:
+                            logging.info(f"  🤖 LLM ONAYLADI ({match_type}): '{master['name']}' = '{duplicate['name']}'")
+                            if corrected_name:
+                                logging.info(f"     📝 Standart isim: '{corrected_name}'")
 
                 # APOC ile merge et
                 merge_query = """
@@ -4275,33 +5257,290 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                         {properties:"discard", mergeRels:true, produceSelfRel:false, 
                          preserveExistingSelfRels:false, singleElementAsArray:true}) 
                     YIELD node
-                    RETURN node.name as merged_name
+                    RETURN node.name as merged_name, elementId(node) as node_id
                 """
 
                 result = self.execute_query(
                     merge_query,
-                    {
-                        "master_id": master["element_id"],
-                        "duplicate_id": duplicate["element_id"],
-                    },
+                    {"master_id": master["element_id"], "duplicate_id": duplicate["element_id"]},
                 )
 
                 if result:
                     total_merged += 1
-                    logging.info(
-                        f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'"
-                    )
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # İsim düzeltmesi
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(update_query, {
+                            "node_id": merged_node_id,
+                            "corrected_name": corrected_name,
+                            "original_name": current_name
+                        })
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + Standartlaştırıldı: '{duplicate['name']}' -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
+                    else:
+                        logging.info(f"  ✅ Merged: '{duplicate['name']}' -> '{master['name']}'")
                 else:
                     logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
 
-            logging.info(
-                f"🎉 SIKI kriterlerle toplam {total_merged} duplicate CoverageType node birleştirildi"
-            )
-            logging.info(f"   (Şüpheli merge'ler engellendi - daha güvenli sonuç)")
+            logging.info(f"🎉 Toplam {total_merged} duplicate CoverageType node birleştirildi")
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi standartlaştırıldı")
+            if llm_rejected_pairs:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected_pairs)} birleştirme REDDEDİLDİ")
+                for pair in llm_rejected_pairs[:5]:
+                    logging.info(f"   ❌ '{pair['master']}' vs '{pair['duplicate']}' - {pair['reason']}")
+            
             return total_merged
 
         except Exception as e:
             logging.error(f"❌ Duplicate coverage type merge hatası: {e}")
+            return 0
+
+    def merge_coverage_types_with_semantic_similarity(self, similarity_threshold: float = 0.96, use_llm_verification: bool = True) -> int:
+        """
+        OpenAI embedding + LLM doğrulama ile duplicate CoverageType node'larını birleştirir.
+        
+        GÜVENLİK ÖNLEMLERİ:
+        - Yüksek threshold (0.96)
+        - Karakter benzerliği kontrolü
+        - 🤖 LLM doğrulaması - GPT-4o her birleştirmeyi onaylamalı
+        """
+        
+        def verify_merge_with_llm(name1: str, name2: str) -> tuple:
+            """GPT-5.1 ile birleştirme kararını doğrula ve OCR hatalarını düzelt."""
+            try:
+                from openai import OpenAI
+                import os
+                import json
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                prompt = f"""İki sigorta teminat türünün AYNI teminat olup olmadığını belirle.
+Eğer AYNI ise, OCR hatalarını düzelterek DOĞRU İSMİ belirle.
+
+Teminat 1: "{name1}"
+Teminat 2: "{name2}"
+
+KURALLAR:
+
+1. OCR/PDF EXTRACTION HATALARI - Bunlar AYNI:
+   - Kelime bölünmeleri: "SİGOR TASI" → "SİGORTASI"
+   - Kesik isimler: Tamamla
+
+2. YAZIM FARKLARI - Bunlar AYNI:
+   - Büyük/küçük harf: "Yangın" = "YANGIN"
+   - "Sigortası" eki: Tutarlı kullan
+
+3. FARKLI TEMİNATLAR:
+   - Farklı türler: "Yangın" ≠ "Deprem"
+
+SADECE JSON formatında cevap ver:
+{{"karar": "AYNI" veya "FARKLI", "neden": "açıklama", "dogru_isim": "düzeltilmiş isim veya null"}}"""
+
+                response = client.chat.completions.create(
+                    model="gpt-5.1",
+                    messages=[
+                        {"role": "system", "content": "Sen bir veri kalitesi uzmanısın. OCR hatalarını düzeltip doğru isimleri belirle. SADECE JSON formatında yanıt ver."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_completion_tokens=300,
+                    temperature=0
+                )
+                
+                answer = response.choices[0].message.content.strip()
+                
+                # JSON parse
+                if answer.startswith("```"):
+                    answer = answer.split("```")[1]
+                    if answer.startswith("json"):
+                        answer = answer[4:]
+                
+                result = json.loads(answer)
+                
+                should_merge = result.get("karar", "").upper() == "AYNI"
+                reason = result.get("neden", "")
+                corrected_name = result.get("dogru_isim") if should_merge else None
+                
+                return should_merge, reason, corrected_name
+                
+            except Exception as e:
+                logging.error(f"LLM verification error: {e}")
+                return False, f"LLM error: {str(e)}", None
+        
+        def get_char_similarity(s1: str, s2: str) -> float:
+            """Karakter bazlı benzerlik"""
+            if not s1 or not s2:
+                return 0.0
+            n1 = ''.join(c for c in s1.upper() if c.isalnum() or c.isspace())
+            n2 = ''.join(c for c in s2.upper() if c.isalnum() or c.isspace())
+            if not n1 or not n2:
+                return 0.0
+            common = sum(1 for c in set(n1) if c in n2)
+            total_unique = len(set(n1) | set(n2))
+            return common / total_unique if total_unique > 0 else 0
+        
+        try:
+            from src.shared.common_fn import load_embedding_model
+            
+            embeddings, dimension = load_embedding_model("openai")
+            
+            if not hasattr(embeddings, 'embed_texts'):
+                logging.error("❌ OpenAI embedding not available")
+                return 0
+            
+            logging.info(f"🔍 Semantic duplicate CoverageType merge başlatılıyor (threshold: {similarity_threshold})")
+            if use_llm_verification:
+                logging.info(f"🤖 LLM doğrulaması AKTİF")
+            
+            # Tüm CoverageType isimlerini al
+            get_coverage_query = """
+                MATCH (ct:CoverageType)
+                WITH ct, count { (ct)-[:APPLIED_TO]->() } as policy_count
+                RETURN elementId(ct) as id, ct.name as name, policy_count
+                ORDER BY policy_count DESC
+            """
+            coverages = self.execute_query(get_coverage_query)
+            
+            if not coverages or len(coverages) < 2:
+                logging.info("✅ Yeterli CoverageType node yok")
+                return 0
+            
+            logging.info(f"📊 {len(coverages)} CoverageType node bulundu")
+            
+            # Embedding hesapla
+            names = [c["name"] for c in coverages]
+            all_embeddings = embeddings.embed_texts(names)
+            
+            # Duplicate bul
+            duplicates = []
+            processed_ids = set()
+            
+            for i in range(len(coverages)):
+                if coverages[i]["id"] in processed_ids or all_embeddings[i] is None:
+                    continue
+                    
+                for j in range(i + 1, len(coverages)):
+                    if coverages[j]["id"] in processed_ids or all_embeddings[j] is None:
+                        continue
+                    
+                    sim = embeddings.cosine_similarity(all_embeddings[i], all_embeddings[j])
+                    
+                    if sim >= similarity_threshold:
+                        name1, name2 = coverages[i]["name"], coverages[j]["name"]
+                        
+                        # Karakter benzerliği kontrolü
+                        char_sim = get_char_similarity(name1, name2)
+                        if char_sim < 0.4:
+                            continue
+                        
+                        if coverages[i]["policy_count"] >= coverages[j]["policy_count"]:
+                            master, duplicate = coverages[i], coverages[j]
+                        else:
+                            master, duplicate = coverages[j], coverages[i]
+                        
+                        duplicates.append({
+                            "master": master,
+                            "duplicate": duplicate,
+                            "similarity": sim
+                        })
+                        processed_ids.add(duplicate["id"])
+            
+            if not duplicates:
+                logging.info("✅ Semantic similarity ile duplicate bulunamadı")
+                return 0
+            
+            logging.info(f"🎯 {len(duplicates)} semantic duplicate çift bulundu")
+            
+            # Merge işlemi
+            total_merged = 0
+            names_corrected = 0
+            llm_rejected = []
+            
+            for dup_pair in duplicates:
+                master = dup_pair["master"]
+                duplicate = dup_pair["duplicate"]
+                sim = dup_pair["similarity"]
+                corrected_name = None
+                
+                # LLM DOĞRULAMASI + OCR DÜZELTME
+                if use_llm_verification:
+                    should_merge, llm_reason, corrected_name = verify_merge_with_llm(master["name"], duplicate["name"])
+                    
+                    if not should_merge:
+                        llm_rejected.append({"master": master["name"], "duplicate": duplicate["name"], "reason": llm_reason})
+                        logging.info(f"🤖 LLM REDDETTİ: '{master['name']}' vs '{duplicate['name']}' - {llm_reason}")
+                        continue
+                    else:
+                        logging.info(f"🤖 LLM ONAYLADI: '{master['name']}' = '{duplicate['name']}'")
+                        if corrected_name:
+                            logging.info(f"   📝 Düzeltilmiş isim: '{corrected_name}'")
+                
+                logging.info(f"🔧 Semantic Merge (sim={sim:.3f}): '{duplicate['name']}' -> '{master['name']}'")
+                
+                merge_query = """
+                    MATCH (master) WHERE elementId(master) = $master_id
+                    MATCH (duplicate) WHERE elementId(duplicate) = $duplicate_id
+                    WITH [master, duplicate] as nodes
+                    CALL apoc.refactor.mergeNodes(nodes, 
+                        {properties:"discard", mergeRels:true, produceSelfRel:false, 
+                         preserveExistingSelfRels:false, singleElementAsArray:true}) 
+                    YIELD node
+                    RETURN node.name as merged_name, elementId(node) as node_id
+                """
+                
+                result = self.execute_query(merge_query, {"master_id": master["id"], "duplicate_id": duplicate["id"]})
+                
+                if result:
+                    total_merged += 1
+                    merged_node_id = result[0]["node_id"]
+                    current_name = result[0]["merged_name"]
+                    
+                    # 📝 İSİM DÜZELTMESİ
+                    if corrected_name and corrected_name != current_name:
+                        update_query = """
+                            MATCH (n) WHERE elementId(n) = $node_id
+                            SET n.name = $corrected_name,
+                                n.ocr_corrected = true,
+                                n.original_name = $original_name,
+                                n.corrected_at = datetime()
+                            RETURN n.name as new_name
+                        """
+                        update_result = self.execute_query(update_query, {
+                            "node_id": merged_node_id,
+                            "corrected_name": corrected_name,
+                            "original_name": current_name
+                        })
+                        if update_result:
+                            names_corrected += 1
+                            logging.info(f"  ✅ Merged + OCR Düzeltildi -> '{corrected_name}'")
+                        else:
+                            logging.info(f"  ✅ Merged")
+                    else:
+                        logging.info(f"  ✅ Merged")
+            
+            logging.info(f"🎉 Semantic similarity ile {total_merged} CoverageType merge edildi")
+            if names_corrected > 0:
+                logging.info(f"📝 {names_corrected} node ismi OCR hatalarından düzeltildi")
+            if llm_rejected:
+                logging.info(f"🤖 LLM tarafından {len(llm_rejected)} birleştirme REDDEDİLDİ")
+            
+            return total_merged
+            
+        except Exception as e:
+            logging.error(f"❌ Semantic coverage type merge hatası: {e}")
             return 0
 
     def merge_duplicate_entities_selective(self, node_types: list = None):
@@ -4327,25 +5566,55 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             logging.info(f"🔄 Selective duplicate merge başlatılıyor: {node_types}")
 
             if "customers" in node_types:
-                logging.info("🔍 Customer duplicate merge işlemi...")
+                logging.info("🔍 Customer duplicate merge işlemi (text-based)...")
                 customers_merged = self.merge_existing_duplicate_customers()
-                results["customers"] = customers_merged
+                results["customers_text"] = customers_merged
                 total_merged += customers_merged
-                logging.info(f"✅ {customers_merged} customer merge edildi")
+                logging.info(f"✅ {customers_merged} customer (text) merge edildi")
+                
+                # Semantic similarity ile ek merge (kısaltma farklarını yakalar)
+                logging.info("🔍 Customer semantic duplicate merge işlemi (OpenAI embedding)...")
+                customers_semantic = self.merge_customers_with_semantic_similarity(
+                    similarity_threshold=0.96,
+                    use_llm_verification=True  # GPT-4o her birleştirmeyi doğrular
+                )
+                results["customers_semantic"] = customers_semantic
+                total_merged += customers_semantic
+                logging.info(f"✅ {customers_semantic} customer (semantic) merge edildi")
 
             if "insurance_companies" in node_types:
-                logging.info("🔍 Insurance Company duplicate merge işlemi...")
+                logging.info("🔍 Insurance Company duplicate merge işlemi (text-based)...")
                 companies_merged = self.merge_existing_duplicate_insurance_companies()
-                results["insurance_companies"] = companies_merged
+                results["insurance_companies_text"] = companies_merged
                 total_merged += companies_merged
-                logging.info(f"✅ {companies_merged} insurance company merge edildi")
+                logging.info(f"✅ {companies_merged} insurance company (text) merge edildi")
+                
+                # Semantic similarity ile ek merge
+                logging.info("🔍 Insurance Company semantic duplicate merge işlemi (OpenAI embedding)...")
+                companies_semantic = self.merge_insurance_companies_with_semantic_similarity(
+                    similarity_threshold=0.96,
+                    use_llm_verification=True  # GPT-4o her birleştirmeyi doğrular
+                )
+                results["insurance_companies_semantic"] = companies_semantic
+                total_merged += companies_semantic
+                logging.info(f"✅ {companies_semantic} insurance company (semantic) merge edildi")
 
             if "coverage_types" in node_types:
-                logging.info("🔍 Coverage Type duplicate merge işlemi...")
+                logging.info("🔍 Coverage Type duplicate merge işlemi (text-based)...")
                 coverage_merged = self.merge_existing_duplicate_coverage_types()
-                results["coverage_types"] = coverage_merged
+                results["coverage_types_text"] = coverage_merged
                 total_merged += coverage_merged
-                logging.info(f"✅ {coverage_merged} coverage type merge edildi")
+                logging.info(f"✅ {coverage_merged} coverage type (text) merge edildi")
+                
+                # Semantic similarity ile ek merge
+                logging.info("🔍 Coverage Type semantic duplicate merge işlemi (OpenAI embedding)...")
+                coverage_semantic = self.merge_coverage_types_with_semantic_similarity(
+                    similarity_threshold=0.96,
+                    use_llm_verification=True  # GPT-4o her birleştirmeyi doğrular
+                )
+                results["coverage_types_semantic"] = coverage_semantic
+                total_merged += coverage_semantic
+                logging.info(f"✅ {coverage_semantic} coverage type (semantic) merge edildi")
 
             results["total_merged"] = total_merged
             logging.info(
@@ -5495,43 +6764,19 @@ KRİTİK:
     def _create_customer_node_comprehensive(
         self, customer_data: dict, policy_id: str, file_name: str
     ):
-        """Customer node'u oluşturur ve Policy ile ilişkilendirir (Document ilişkisi yok)"""
+        """
+        Customer node'u oluşturur ve Policy ile ilişkilendirir.
+        
+        NOT: Pre-processing entity resolution KALDIRILDI.
+        - Her Customer kendi adıyla MERGE edilir (exact match)
+        - Semantic duplicate'ler post-processing ile merge edilir (LLM doğrulamalı)
+        """
         try:
             customer_name = customer_data.get("name", "").strip()
             if not customer_name:
                 return
 
-            # Entity resolution kontrolü
-            new_entity = {
-                "id": customer_name,
-                "name": customer_name,
-                "entity_type": "Customer",
-            }
-
-            existing_entity_id = resolve_entity_before_creation(
-                new_entity, self.graph, "Customer"
-            )
-            if existing_entity_id:
-                logging.info(
-                    f"🔗 Mevcut Customer node kullanılacak: {customer_name} -> {existing_entity_id}"
-                )
-                # Mevcut entity ile Policy'yi ilişkilendir
-                link_query = """
-                    MATCH (c) WHERE elementId(c) = $entity_id
-                    MATCH (p:Policy {id: $policy_id})
-                    MERGE (c)-[r:HAS_POLICY]->(p)
-                    SET r.created_at = datetime(),
-                        r.source = 'llm_extraction'
-                    SET c.updatedAt = datetime()
-                    RETURN c.name as customer_name
-                """
-                self.graph.query(
-                    link_query,
-                    {"entity_id": existing_entity_id, "policy_id": policy_id},
-                    session_params={"database": self.graph._database},
-                )
-                return
-
+            # MERGE ile exact name match - aynı isim varsa update, yoksa create
             query = """
                 MERGE (c:Customer {name: $customer_name})
                 ON CREATE SET 

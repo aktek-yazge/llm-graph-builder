@@ -1,80 +1,52 @@
 """
 Entity Resolution ve Deduplication modülü
 Benzer entity'leri tespit eder ve birleştirir
+
+load_embedding_model üzerinden OpenAI Embeddings kullanır
 """
 
 import logging
 import numpy as np
-import os
-from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-# sentence_transformers is only needed for embeddings, which is done in celery_worker
-try:
-    from sentence_transformers import SentenceTransformer
-except (ImportError, ModuleNotFoundError):
-    SentenceTransformer = None  # Embeddings are in celery_worker
-# sklearn is only needed for similarity calculations, which is done in celery_worker
-try:
-    from sklearn.metrics.pairwise import cosine_similarity
-except (ImportError, ModuleNotFoundError):
-    cosine_similarity = None  # Similarity calculations are in celery_worker
 import difflib
 import re
+
+from src.shared.common_fn import load_embedding_model
+
 
 class EntityResolver:
     """
     Entity Resolution ve deduplication için kullanılan sınıf
+    
+    load_embedding_model("openai") kullanır - batch, cache, similarity destekli
     """
     
     def __init__(self, 
                  similarity_threshold: float = 0.6,
-                 name_similarity_threshold: float = 0.6,
-                 embedding_model: str = "BAAI/bge-m3"):
+                 name_similarity_threshold: float = 0.6):
         """
         Args:
             similarity_threshold: Embedding benzerlik eşiği (0-1 arası)
             name_similarity_threshold: İsim benzerlik eşiği (0-1 arası)
-            embedding_model: Kullanılacak embedding modeli
         """
         self.similarity_threshold = similarity_threshold
         self.name_similarity_threshold = name_similarity_threshold
         
-        # Cache klasörü ayarları
-        # SentenceTransformer default olarak ~/.cache/torch/sentence_transformers kullanır
-        # Ama özel cache klasörü de belirtebiliriz
-        cache_folder = os.getenv(
-            "HUGGINGFACE_CACHE_FOLDER",
-            None  # None ise SentenceTransformer default cache kullanır
-        )
-        
-        if cache_folder:
-            Path(cache_folder).mkdir(parents=True, exist_ok=True)
-            logging.info(f"📦 EntityResolver - Özel cache klasörü: {cache_folder}")
-        else:
-            # SentenceTransformer'ın default cache klasörü
-            default_cache = os.path.join(os.path.expanduser("~"), ".cache", "torch", "sentence_transformers")
-            logging.info(f"📦 EntityResolver - Default cache klasörü: {default_cache}")
-        
-        logging.info(f"🤖 EntityResolver - Embedding model: {embedding_model}")
-        
-        # SentenceTransformer is only available in celery_worker
-        if SentenceTransformer is None:
-            raise NotImplementedError("EntityResolver requires sentence_transformers, which is only available in celery_worker")
-        
-        # SentenceTransformer otomatik olarak cache kullanır:
-        # - Model cache'te varsa oradan yüklenir (hızlı)
-        # - Yoksa internet'ten indirilir ve cache'lenir (ilk kullanım)
-        # - Sonraki kullanımlarda otomatik olarak cache'ten yüklenir
-        if cache_folder:
-            self.embedding_model = SentenceTransformer(
-                embedding_model,
-                cache_folder=cache_folder,
-            )
-        else:
-            # Default cache kullan (SentenceTransformer otomatik yönetir)
-            self.embedding_model = SentenceTransformer(embedding_model)
-        
-        logging.info(f"✅ EntityResolver - Model başarıyla yüklendi (cache'ten veya indirildi)")
+        # Merkezi embedding model (OpenAI with batch+cache)
+        self._embeddings, self._dimension = load_embedding_model("openai")
+        logging.info(f"✅ EntityResolver - load_embedding_model('openai') yüklendi")
+    
+    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """İki vektör arasında cosine similarity hesaplar"""
+        return self._embeddings.cosine_similarity(vec1, vec2)
+    
+    def get_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Tek bir metin için embedding hesaplar"""
+        return self._embeddings.embed_text(text)
+    
+    def batch_get_embeddings(self, texts: List[str]) -> List[Optional[np.ndarray]]:
+        """Birden fazla metin için batch embedding hesaplar (cached)"""
+        return self._embeddings.embed_texts(texts)
         
     def normalize_name(self, name: str) -> str:
         """
@@ -259,7 +231,7 @@ class EntityResolver:
             
             # Embedding benzerliği kontrolü
             existing_embedding = self.get_entity_embedding(existing_id, existing_type, existing_name)
-            embedding_similarity = cosine_similarity([new_embedding], [existing_embedding])[0][0]
+            embedding_similarity = self.cosine_similarity(new_embedding, existing_embedding)
             
             # Customer'lar için daha sıkı kombinasyon skoru
             if new_type.lower() == 'customer':
@@ -430,14 +402,12 @@ class EntityResolver:
             logging.error(f"❌ Relationship recreation hatası: {e}")
 
 
-# Global entity resolver instance - only create if sentence_transformers is available
-# This is only needed in celery_worker, not in backend
+# Global entity resolver instance - uses OpenAI embeddings
 entity_resolver = None
 try:
-    if SentenceTransformer is not None:
-        entity_resolver = EntityResolver()
-except (NotImplementedError, Exception):
-    # EntityResolver requires sentence_transformers, which is only available in celery_worker
+    entity_resolver = EntityResolver()
+except Exception as e:
+    logging.warning(f"EntityResolver initialization failed: {e}")
     entity_resolver = None
 
 def resolve_entity_before_creation(new_entity: Dict, graph, entity_type: str = "Person") -> Optional[str]:

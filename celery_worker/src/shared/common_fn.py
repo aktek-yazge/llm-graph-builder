@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import numpy as np
 from src.document_sources.youtube import create_youtube_url
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_vertexai import VertexAIEmbeddings
@@ -7,7 +8,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_neo4j import Neo4jGraph
 from neo4j.exceptions import TransientError, ClientError
 from langchain_community.graphs.graph_document import GraphDocument
-from typing import List
+from typing import List, Dict, Optional
 import re
 import os
 import time
@@ -15,6 +16,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 import boto3
 from langchain_community.embeddings import BedrockEmbeddings
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Embedding Cache - Global
+_embedding_cache: Dict[str, np.ndarray] = {}
+_cache_hits = 0
+_cache_misses = 0
 
 def check_url_source(source_type, yt_url:str=None, wiki_query:str=None):
     language=''
@@ -122,57 +132,138 @@ def create_graph_database_connection(uri, userName, password, database):
   return graph
 
 
-def load_embedding_model(embedding_model_name: str):
+def load_embedding_model(embedding_model_name: str = "openai"):
+    """
+    Embedding modeli yükler.
+    
+    OpenAI için gelişmiş özellikler:
+    - Batch embedding (embed_texts)
+    - In-memory caching
+    - Cosine similarity hesaplama
+    
+    Args:
+        embedding_model_name: "openai", "vertexai", "titan" veya HuggingFace model
+        
+    Returns:
+        (embeddings, dimension) tuple
+    """
+    global _embedding_cache, _cache_hits, _cache_misses
+    
     if embedding_model_name == "openai":
-        embeddings = OpenAIEmbeddings()
+        api_key = os.getenv("OPENAI_API_KEY")
+        model_name = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+        
         dimension = 1536
-        logging.info(f"Embedding: Using OpenAI Embeddings , Dimension:{dimension}")
+        
+        # Wrapper class - Pydantic'e attribute ekleyemeyiz
+        class OpenAIEmbeddingWrapper:
+            """OpenAI embedding wrapper with batch, cache and similarity support"""
+            
+            def __init__(self):
+                self.api_key = api_key
+                self.model_name = model_name
+                self.dimension = dimension
+                self._langchain_embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name) if api_key else OpenAIEmbeddings()
+                self.openai_client = OpenAI(api_key=api_key) if api_key else None
+            
+            def embed_query(self, text: str) -> List[float]:
+                """LangChain uyumluluğu için"""
+                return self._langchain_embeddings.embed_query(text)
+            
+            def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                """LangChain uyumluluğu için"""
+                return self._langchain_embeddings.embed_documents(texts)
+            
+            def embed_text(self, text: str, use_cache: bool = True) -> Optional[np.ndarray]:
+                """Tek metin için embedding (cached)"""
+                global _embedding_cache, _cache_hits, _cache_misses
+                if not self.openai_client or not text:
+                    return None
+                cache_key = text.strip()
+                if use_cache and cache_key in _embedding_cache:
+                    _cache_hits += 1
+                    return _embedding_cache[cache_key]
+                _cache_misses += 1
+                try:
+                    response = self.openai_client.embeddings.create(model=self.model_name, input=cache_key)
+                    result = np.array(response.data[0].embedding)
+                    if use_cache:
+                        _embedding_cache[cache_key] = result
+                    return result
+                except Exception as e:
+                    logging.error(f"OpenAI embedding error: {e}")
+                    return None
+            
+            def embed_texts(self, texts: List[str], use_cache: bool = True) -> List[Optional[np.ndarray]]:
+                """Batch embedding (cached, 2000/batch)"""
+                global _embedding_cache, _cache_hits, _cache_misses
+                if not self.openai_client or not texts:
+                    return [None] * len(texts)
+                results = [None] * len(texts)
+                to_embed, to_embed_idx = [], []
+                for i, text in enumerate(texts):
+                    if not text:
+                        results[i] = np.zeros(self.dimension)
+                        continue
+                    key = text.strip()
+                    if use_cache and key in _embedding_cache:
+                        _cache_hits += 1
+                        results[i] = _embedding_cache[key]
+                    else:
+                        _cache_misses += 1
+                        to_embed.append(key)
+                        to_embed_idx.append(i)
+                if to_embed:
+                    try:
+                        all_emb = []
+                        for start in range(0, len(to_embed), 2000):
+                            batch = to_embed[start:start + 2000]
+                            resp = self.openai_client.embeddings.create(model=self.model_name, input=batch)
+                            all_emb.extend([np.array(d.embedding) for d in resp.data])
+                        for j, idx in enumerate(to_embed_idx):
+                            results[idx] = all_emb[j]
+                            if use_cache:
+                                _embedding_cache[to_embed[j]] = all_emb[j]
+                    except Exception as e:
+                        logging.error(f"OpenAI batch embedding error: {e}")
+                return results
+            
+            def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+                if vec1 is None or vec2 is None:
+                    return 0.0
+                dot = np.dot(vec1, vec2)
+                n1, n2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
+                return float(dot / (n1 * n2)) if n1 > 0 and n2 > 0 else 0.0
+            
+            def get_cache_stats(self) -> Dict:
+                return {"size": len(_embedding_cache), "hits": _cache_hits, "misses": _cache_misses,
+                        "hit_rate": _cache_hits / (_cache_hits + _cache_misses) if (_cache_hits + _cache_misses) > 0 else 0}
+            
+            def clear_cache(self):
+                global _embedding_cache, _cache_hits, _cache_misses
+                size = len(_embedding_cache)
+                _embedding_cache.clear()
+                _cache_hits = _cache_misses = 0
+                logging.info(f"🧹 Embedding cache cleared: {size} entries")
+        
+        embeddings = OpenAIEmbeddingWrapper()
+        logging.info(f"✅ Embedding: OpenAI {model_name}, Dimension:{dimension}, Batch+Cache enabled")
+        
     elif embedding_model_name == "vertexai":        
-        embeddings = VertexAIEmbeddings(
-            model="textembedding-gecko@003"
-        )
+        embeddings = VertexAIEmbeddings(model="textembedding-gecko@003")
         dimension = 768
-        logging.info(f"Embedding: Using Vertex AI Embeddings , Dimension:{dimension}")
+        logging.info(f"Embedding: Using Vertex AI Embeddings, Dimension:{dimension}")
+        
     elif embedding_model_name == "titan":
         embeddings = get_bedrock_embeddings()
         dimension = 1536
-        logging.info(f"Embedding: Using bedrock titan Embeddings , Dimension:{dimension}")
+        logging.info(f"Embedding: Using Bedrock Titan Embeddings, Dimension:{dimension}")
+        
     else:
-        # HuggingFace model için local cache klasörü ayarla
-        # Environment variable'dan al veya default kullan
-        cache_folder = os.getenv(
-            "HUGGINGFACE_CACHE_FOLDER",
-            os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "models")
-        )
-        
-        # Cache klasörünü oluştur (yoksa)
-        Path(cache_folder).mkdir(parents=True, exist_ok=True)
-        
-        # Model adını environment variable'dan al veya default kullan
-        hf_model_name = os.getenv("HUGGINGFACE_MODEL_NAME", "BAAI/bge-m3")
-        
-        logging.info(f"📦 HuggingFace model cache klasörü: {cache_folder}")
-        logging.info(f"🤖 HuggingFace model adı: {hf_model_name}")
-        
-        # HuggingFaceEmbeddings otomatik olarak cache kullanır:
-        # - Model cache'te varsa oradan yüklenir (hızlı)
-        # - Yoksa internet'ten indirilir ve cache'lenir (ilk kullanım)
-        # - Sonraki kullanımlarda otomatik olarak cache'ten yüklenir
-        embeddings = HuggingFaceEmbeddings(
-            model_name=hf_model_name,
-            cache_folder=cache_folder,
-            show_progress=False,  # Progress bar'ı kapat
-            # Model'i local'de tutmak için ek parametreler
-            model_kwargs={
-                "cache_dir": cache_folder,
-            },
-            encode_kwargs={
-                "normalize_embeddings": True,  # Embedding'leri normalize et
-                "show_progress_bar": False,  # Encode progress bar'ı kapat
-            }
-        )
-        dimension = 384
-        logging.info(f"✅ Embedding: Using Langchain HuggingFaceEmbeddings (cached locally), Dimension:{dimension}")
+        # HuggingFace DEVRE DIŞI - OpenAI kullan
+        logging.warning(f"⚠️ HuggingFace embedding devre dışı, OpenAI kullanılıyor")
+        return load_embedding_model("openai")
+    
     return embeddings, dimension
 
 def save_graphDocuments_in_neo4j(graph: Neo4jGraph, graph_document_list: List[GraphDocument], max_retries=3, delay=1):
