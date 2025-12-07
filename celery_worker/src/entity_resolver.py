@@ -1,89 +1,98 @@
 """
 Entity Resolution ve Deduplication modülü
 Benzer entity'leri tespit eder ve birleştirir
+
+load_embedding_model üzerinden OpenAI Embeddings kullanır
 """
 
 import logging
 import numpy as np
-import os
-from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+import time
 import difflib
 import re
+
+from src.shared.common_fn import load_embedding_model
+
 
 class EntityResolver:
     """
     Entity Resolution ve deduplication için kullanılan sınıf
+    
+    load_embedding_model("openai") kullanır - batch, cache, similarity destekli
     """
     
     def __init__(self, 
                  similarity_threshold: float = 0.6,
-                 name_similarity_threshold: float = 0.6,
-                 embedding_model: str = "BAAI/bge-m3"):
+                 name_similarity_threshold: float = 0.6):
         """
         Args:
             similarity_threshold: Embedding benzerlik eşiği (0-1 arası)
             name_similarity_threshold: İsim benzerlik eşiği (0-1 arası)
-            embedding_model: Kullanılacak embedding modeli
         """
         self.similarity_threshold = similarity_threshold
         self.name_similarity_threshold = name_similarity_threshold
         
-        # Cache klasörü ayarları
-        # SentenceTransformer default olarak ~/.cache/torch/sentence_transformers kullanır
-        # Ama özel cache klasörü de belirtebiliriz
-        cache_folder = os.getenv(
-            "HUGGINGFACE_CACHE_FOLDER",
-            None  # None ise SentenceTransformer default cache kullanır
-        )
-        
-        if cache_folder:
-            Path(cache_folder).mkdir(parents=True, exist_ok=True)
-            logging.info(f"📦 EntityResolver - Özel cache klasörü: {cache_folder}")
-        else:
-            # SentenceTransformer'ın default cache klasörü
-            default_cache = os.path.join(os.path.expanduser("~"), ".cache", "torch", "sentence_transformers")
-            logging.info(f"📦 EntityResolver - Default cache klasörü: {default_cache}")
-        
-        logging.info(f"🤖 EntityResolver - Embedding model: {embedding_model}")
-        
-        # SentenceTransformer otomatik olarak cache kullanır:
-        # - Model cache'te varsa oradan yüklenir (hızlı)
-        # - Yoksa internet'ten indirilir ve cache'lenir (ilk kullanım)
-        # - Sonraki kullanımlarda otomatik olarak cache'ten yüklenir
-        if cache_folder:
-            self.embedding_model = SentenceTransformer(
-                embedding_model,
-                cache_folder=cache_folder,
-            )
-        else:
-            # Default cache kullan (SentenceTransformer otomatik yönetir)
-            self.embedding_model = SentenceTransformer(embedding_model)
-        
-        logging.info(f"✅ EntityResolver - Model başarıyla yüklendi (cache'ten veya indirildi)")
+        # Merkezi embedding model (OpenAI with batch+cache)
+        self._embeddings, self._dimension = load_embedding_model("openai")
+        logging.info(f"✅ EntityResolver - load_embedding_model('openai') yüklendi")
+    
+    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """İki vektör arasında cosine similarity hesaplar"""
+        return self._embeddings.cosine_similarity(vec1, vec2)
+    
+    def clear_embedding_cache(self):
+        """Embedding cache'ini temizle"""
+        self._embeddings.clear_cache()
+    
+    def get_cache_stats(self) -> Dict:
+        """Cache istatistiklerini döndür"""
+        return self._embeddings.get_cache_stats()
         
     def normalize_name(self, name: str) -> str:
         """
         İsmi normalize eder (büyük/küçük harf, boşluk, Türkçe karakter)
+        
+        Türkçe karakter dönüşümleri:
+        - İ -> i (büyük noktalı i)
+        - I -> i (büyük noktasız ı, Türkçe'de ı'nın büyüğü)
+        - ı -> i (küçük noktasız ı)
+        - i -> i (küçük noktalı i, değişmez)
         """
         if not name:
             return ""
-            
-        # Türkçe karakterleri normalize et
-        replacements = {
-            'ç': 'c', 'Ç': 'C',
-            'ğ': 'g', 'Ğ': 'G', 
-            'ı': 'i', 'I': 'I',
-            'ö': 'o', 'Ö': 'O',
-            'ş': 's', 'Ş': 'S',
-            'ü': 'u', 'Ü': 'U'
+        
+        # ÖNCE Türkçe büyük harfleri küçüğe çevir (lower()'dan önce!)
+        # Çünkü Python'ın lower() fonksiyonu İ'yi i'ye, I'yı ı'ya çevirir
+        turkish_upper_to_lower = {
+            'İ': 'i',  # Büyük noktalı İ -> küçük i
+            'I': 'i',  # Büyük noktasız I -> küçük i (Türkçe'de I, ı'nın büyüğü ama biz hepsini i yapıyoruz)
+            'Ç': 'c',
+            'Ğ': 'g',
+            'Ö': 'o',
+            'Ş': 's',
+            'Ü': 'u',
         }
         
+        # Önce Türkçe büyük harfleri dönüştür
+        for tr_upper, tr_lower in turkish_upper_to_lower.items():
+            name = name.replace(tr_upper, tr_lower)
+        
+        # Şimdi lower() güvenli
         normalized = name.lower().strip()
-        for tr_char, en_char in replacements.items():
-            normalized = normalized.replace(tr_char, en_char)
+        
+        # Küçük Türkçe karakterleri de ASCII'ye çevir
+        turkish_to_ascii = {
+            'ç': 'c',
+            'ğ': 'g',
+            'ı': 'i',  # Küçük noktasız ı -> i
+            'ö': 'o',
+            'ş': 's',
+            'ü': 'u',
+        }
+        
+        for tr_char, ascii_char in turkish_to_ascii.items():
+            normalized = normalized.replace(tr_char, ascii_char)
             
         # Ekstra boşlukları temizle
         normalized = re.sub(r'\s+', ' ', normalized)
@@ -185,30 +194,110 @@ class EntityResolver:
         
     def get_entity_embedding(self, entity_id: str, entity_type: str, entity_name: str = None) -> np.ndarray:
         """
-        Entity için embedding oluşturur
+        Entity için embedding oluşturur (load_embedding_model üzerinden, cached)
         """
-        # Entity bilgilerini birleştir
         text_parts = []
-        
         if entity_name:
             text_parts.append(f"name: {entity_name}")
         if entity_id:
             text_parts.append(f"id: {entity_id}")
         if entity_type:
             text_parts.append(f"type: {entity_type}")
-            
+        
         combined_text = " | ".join(text_parts)
+        result = self._embeddings.embed_text(combined_text)
         
-        # Embedding oluştur
-        embedding = self.embedding_model.encode([combined_text], show_progress_bar=False)
-        return embedding[0]
+        if result is None:
+            return np.zeros(self._dimension)
+        return result
+    
+    def batch_get_entity_embeddings(self, entities: List[Dict]) -> Dict[str, np.ndarray]:
+        """
+        Birden fazla entity için batch embedding hesaplar (load_embedding_model üzerinden, cached)
         
+        Args:
+            entities: Entity dict listesi (id, name, entity_type)
+            
+        Returns:
+            {cache_key_str: embedding} dict'i
+        """
+        texts = []
+        cache_keys = []
+        
+        for entity in entities:
+            entity_id = entity.get('id', '')
+            entity_type = entity.get('entity_type', entity.get('type', ''))
+            entity_name = entity.get('name', entity.get('id', ''))
+            
+            text_parts = []
+            if entity_name:
+                text_parts.append(f"name: {entity_name}")
+            if entity_id:
+                text_parts.append(f"id: {entity_id}")
+            if entity_type:
+                text_parts.append(f"type: {entity_type}")
+            
+            texts.append(" | ".join(text_parts))
+            cache_keys.append(f"{entity_id or ''}|{entity_type or ''}|{entity_name or ''}")
+        
+        # Batch embedding (load_embedding_model handles caching)
+        if texts:
+            logging.info(f"🚀 Batch embedding: {len(texts)} entities")
+            embeddings = self._embeddings.embed_texts(texts)
+            
+            results = {}
+            for i, key in enumerate(cache_keys):
+                results[key] = embeddings[i] if embeddings[i] is not None else np.zeros(self._dimension)
+            return results
+        
+        return {}
+        
+    def _is_complex_name(self, name: str) -> bool:
+        """
+        İsmin "karmaşık" olup olmadığını tespit et (şirket ismi olma ihtimali yüksek)
+        
+        Karmaşık isim özellikleri:
+        - Uzun (4+ kelime)
+        - Noktalama içerir (., /, &, -)
+        - Sayı içerir
+        - Tamamen büyük harf
+        """
+        if not name:
+            return False
+        
+        words = name.split()
+        
+        # 4+ kelime = muhtemelen şirket
+        if len(words) >= 4:
+            return True
+        
+        # Noktalama karakterleri = muhtemelen şirket
+        if any(c in name for c in './-&'):
+            return True
+        
+        # Sayı içerir = muhtemelen şirket
+        if any(c.isdigit() for c in name):
+            return True
+        
+        # 20+ karakter ve tamamen büyük harf = muhtemelen şirket
+        if len(name) > 20 and name.isupper():
+            return True
+        
+        return False
+
     def find_similar_entities(self, 
                             new_entity: Dict, 
                             existing_entities: List[Dict],
                             entity_type_filter: str = None) -> List[Tuple[Dict, float]]:
         """
         Yeni entity'ye benzer mevcut entity'leri bulur
+        
+        🚀 Performance & Accuracy Optimizations:
+        1. Akıllı pre-filtering: Şirket/kişi ayrımına göre dinamik eşik
+        2. Embedding-first for companies: Şirket isimleri için embedding'e güven
+        3. High similarity shortcut: %95+ isim benzerliğinde embedding atla
+        4. Batch embedding: Potansiyel eşleşmeler için tek seferde embedding
+        5. Embedding cache: Daha önce hesaplanan embedding'ler tekrar hesaplanmaz
         
         Args:
             new_entity: Yeni entity bilgileri
@@ -222,12 +311,16 @@ class EntityResolver:
         new_name = new_entity.get('name', new_entity.get('id', ''))
         new_type = new_entity.get('entity_type', new_entity.get('type', ''))
         
-        logging.info(f"🔍 Benzer entity aranıyor: '{new_id}' (name: '{new_name}', type: '{new_type}')")
+        logging.debug(f"🔍 Benzer entity aranıyor: '{new_id}' (name: '{new_name}', type: '{new_type}')")
         
         similar_entities = []
+        high_similarity_matches = []  # %95+ isim benzerliği - embedding gereksiz
         
-        # Yeni entity için embedding oluştur
-        new_embedding = self.get_entity_embedding(new_id, new_type, new_name)
+        # 🎯 Yeni isim karmaşık mı? (şirket olma ihtimali)
+        new_is_complex = self._is_complex_name(new_name)
+        
+        # 🚀 PHASE 1: İsim benzerliği ile ön filtreleme
+        candidates = []
         
         for existing_entity in existing_entities:
             existing_id = existing_entity.get('id', '')
@@ -238,52 +331,122 @@ class EntityResolver:
             if entity_type_filter and existing_type.lower() != entity_type_filter.lower():
                 continue
                 
-            # Aynı entity type kontrolü (Person vs Person)
+            # Aynı entity type kontrolü
             if new_type.lower() != existing_type.lower():
                 continue
-                
-            # İsim benzerliği kontrolü - entity_type'ı geç
+            
+            # İsim benzerliği hesapla
             name_similarity = self.calculate_name_similarity(new_name, existing_name, new_type)
             
-            # Embedding benzerliği kontrolü
-            existing_embedding = self.get_entity_embedding(existing_id, existing_type, existing_name)
-            embedding_similarity = cosine_similarity([new_embedding], [existing_embedding])[0][0]
+            # 🎯 %95+ isim benzerliği = Kesin eşleşme, embedding gereksiz
+            if name_similarity >= 0.95:
+                high_similarity_matches.append({
+                    'entity': existing_entity,
+                    'name_similarity': name_similarity,
+                    'existing_id': existing_id,
+                    'existing_name': existing_name,
+                    'combined_score': name_similarity  # Embedding'siz skor
+                })
+                continue
             
-            # Customer'lar için daha sıkı kombinasyon skoru
-            if new_type.lower() == 'customer':
-                # Customer'larda isim benzerliği daha önemli (%80 isim, %20 embedding)
-                combined_score = (name_similarity * 0.8) + (embedding_similarity * 0.2)
+            # 🎯 Dinamik pre-filter eşiği
+            existing_is_complex = self._is_complex_name(existing_name)
+            
+            if new_is_complex or existing_is_complex:
+                # Şirket ismi olabilir - DÜŞÜK eşik (%25), embedding'e güven
+                pre_threshold = 0.25
+            elif new_type.lower() == 'customer':
+                # Kişi ismi - orta eşik (%50)
+                pre_threshold = 0.50
             else:
-                # Diğer entity'lerde mevcut oran (%60 isim, %40 embedding)
-                combined_score = (name_similarity * 0.6) + (embedding_similarity * 0.4)
+                # Diğer entity'ler - düşük eşik (%30)
+                pre_threshold = 0.30
             
-            logging.debug(f"  - Karşılaştırma: '{existing_id}' (name: '{existing_name}')")
-            logging.debug(f"    İsim benzerliği: {name_similarity:.3f}")
-            logging.debug(f"    Embedding benzerliği: {embedding_similarity:.3f}")
-            logging.debug(f"    Kombinasyon skoru: {combined_score:.3f}")
+            if name_similarity < pre_threshold:
+                continue
             
-            # Eşik kontrolü - Customer'lar için çok daha sıkı kurallar
-            if new_type.lower() == 'customer':
-                # Customer'lar için çok sıkı eşikler
-                customer_name_threshold = 0.90   # İsim benzerliği en az %90
-                customer_combined_threshold = 0.88  # Kombinasyon skoru en az %88
-                
-                if (name_similarity >= customer_name_threshold and 
-                    combined_score >= customer_combined_threshold):
-                    similar_entities.append((existing_entity, combined_score))
-                    logging.info(f"  ✅ Benzer Customer bulundu: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
-                else:
-                    logging.debug(f"  ❌ Customer eşik altı: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
+            # Potansiyel eşleşme - embedding hesaplanacak
+            candidates.append({
+                'entity': existing_entity,
+                'name_similarity': name_similarity,
+                'existing_id': existing_id,
+                'existing_name': existing_name,
+                'existing_type': existing_type,
+                'is_complex': existing_is_complex
+            })
+        
+        logging.debug(f"  📊 Pre-filter: {len(existing_entities)} -> {len(candidates)} candidates, {len(high_similarity_matches)} high-similarity")
+        
+        # 🚀 PHASE 2: Yüksek benzerlikli eşleşmeleri ekle (embedding'siz)
+        for match in high_similarity_matches:
+            similar_entities.append((match['entity'], match['combined_score']))
+            logging.info(f"  ✅ Yüksek benzerlik (embedding'siz): '{match['existing_id']}' -> name_sim: {match['name_similarity']:.3f}")
+        
+        if not candidates:
+            similar_entities.sort(key=lambda x: x[1], reverse=True)
+            return similar_entities
+        
+        # 🚀 PHASE 3: Batch embedding hesaplama (sadece candidates için)
+        new_embedding = self.get_entity_embedding(new_id, new_type, new_name)
+        
+        entities_for_batch = [c['entity'] for c in candidates]
+        batch_embeddings = self.batch_get_entity_embeddings(entities_for_batch)
+        
+        # 🚀 PHASE 4: Final skor hesaplama
+        for candidate in candidates:
+            existing_entity = candidate['entity']
+            existing_id = candidate['existing_id']
+            existing_name = candidate['existing_name']
+            existing_type = candidate['existing_type']
+            name_similarity = candidate['name_similarity']
+            is_complex = candidate['is_complex']
+            
+            # Batch'ten embedding al
+            cache_key_str = f"{existing_id or ''}|{existing_type or ''}|{existing_name or ''}"
+            existing_embedding = batch_embeddings.get(cache_key_str)
+            
+            if existing_embedding is None:
+                existing_embedding = self.get_entity_embedding(existing_id, existing_type, existing_name)
+            
+            embedding_similarity = self.cosine_similarity(new_embedding, existing_embedding)
+            
+            # 🎯 Şirket/Kişi'ye göre farklı ağırlıklar
+            if new_is_complex or is_complex:
+                # Şirket isimleri: Embedding daha önemli (%40 isim, %60 embedding)
+                # Çünkü "A.Ş." vs "Anonim Şirketi" gibi farklılıklar var
+                combined_score = (name_similarity * 0.40) + (embedding_similarity * 0.60)
+            elif new_type.lower() == 'customer':
+                # Kişi isimleri: İsim daha önemli (%70 isim, %30 embedding)
+                combined_score = (name_similarity * 0.70) + (embedding_similarity * 0.30)
             else:
-                # Diğer entity'ler için mevcut eşikler
-                if (name_similarity >= self.name_similarity_threshold or 
-                    embedding_similarity >= self.similarity_threshold or
-                    combined_score >= self.similarity_threshold):
-                    
+                # Diğer: Dengeli (%50 isim, %50 embedding)
+                combined_score = (name_similarity * 0.50) + (embedding_similarity * 0.50)
+            
+            logging.debug(f"  - '{existing_id}': name={name_similarity:.3f}, emb={embedding_similarity:.3f}, combined={combined_score:.3f}, complex={is_complex}")
+            
+            # 🎯 Eşik kontrolü
+            if new_is_complex or is_complex:
+                # Şirket isimleri: Embedding benzerliği yüksekse eşleş
+                # %75 embedding benzerliği VEYA %70 combined score
+                if embedding_similarity >= 0.75 or combined_score >= 0.70:
                     similar_entities.append((existing_entity, combined_score))
-                    logging.info(f"  ✅ Benzer entity bulundu: '{existing_id}' -> skor: {combined_score:.3f}")
-                else:
-                    logging.debug(f"  ❌ Entity eşik altı: '{existing_id}' -> name_sim: {name_similarity:.3f}, combined: {combined_score:.3f}")
+                    logging.info(f"  ✅ Benzer şirket: '{existing_id}' -> emb: {embedding_similarity:.3f}, combined: {combined_score:.3f}")
+            elif new_type.lower() == 'customer':
+                # Kişi isimleri: İsim benzerliği yüksek olmalı
+                # %85 isim benzerliği VE %75 combined score
+                if name_similarity >= 0.85 and combined_score >= 0.75:
+                    similar_entities.append((existing_entity, combined_score))
+                    logging.info(f"  ✅ Benzer kişi: '{existing_id}' -> name: {name_similarity:.3f}, combined: {combined_score:.3f}")
+            else:
+                # Diğer entity'ler
+                if combined_score >= self.similarity_threshold:
+                    similar_entities.append((existing_entity, combined_score))
+                    logging.info(f"  ✅ Benzer entity: '{existing_id}' -> combined: {combined_score:.3f}")
+        
+        # Cache stats log (her 100 aramada bir)
+        if (self._cache_hits + self._cache_misses) % 100 == 0:
+            stats = self.get_cache_stats()
+            logging.info(f"📊 Embedding Cache: size={stats['cache_size']}, hit_rate={stats['hit_rate']:.1%}")
         
         # Skora göre sırala
         similar_entities.sort(key=lambda x: x[1], reverse=True)

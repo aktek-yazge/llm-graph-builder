@@ -7706,34 +7706,31 @@ async def start_background_processing():
         reset_count = 0
 
         try:
-            # Reset kriterleri: Sadece gerçekten takılmış kayıtları resetle
+            # Reset kriterleri: Takılmış kayıtları resetle
+            # 1. status='processing' olan tüm kayıtlar (stuck)
+            # 2. status='failed' olan kayıtlar
+            # 3. chunking/graph/embedding_status='processing' veya 'failed' olanlar
             files_to_reset = (
                 db_session.query(UploadedFile)
                 .filter(
                     or_(
-                        UploadedFile.status == "uploaded",
+                        # status='processing' olanlar (takılmış)
                         UploadedFile.status == "processing",
-                    )
-                )
-                .filter(
-                    or_(
-                        or_(
-                            UploadedFile.chunking_status == "processing",
-                            UploadedFile.chunking_status == "chunking",
-                            UploadedFile.chunking_status == "failed",
-                        ),
+                        # status='failed' olanlar
+                        UploadedFile.status == "failed",
+                        # Normal reset kriterleri
                         and_(
-                            UploadedFile.chunking_status == "chunked",
+                            UploadedFile.status == "uploaded",
                             or_(
-                                UploadedFile.embedding_status == "processing",
-                                UploadedFile.embedding_status == "failed",
-                            ),
-                        ),
-                        and_(
-                            UploadedFile.chunking_status == "chunked",
-                            or_(
-                                UploadedFile.graph_status == "processing",
-                                UploadedFile.graph_status == "failed",
+                                UploadedFile.chunking_status.in_(["processing", "chunking", "failed"]),
+                                and_(
+                                    UploadedFile.chunking_status == "chunked",
+                                    UploadedFile.embedding_status.in_(["processing", "failed"]),
+                                ),
+                                and_(
+                                    UploadedFile.chunking_status == "chunked",
+                                    UploadedFile.graph_status.in_(["processing", "failed"]),
+                                ),
                             ),
                         ),
                     )
@@ -7742,15 +7739,22 @@ async def start_background_processing():
             )
 
             for file in files_to_reset:
+                original_status = file.status
                 original_chunking = file.chunking_status
                 original_graph = file.graph_status
                 original_embedding = file.embedding_status
                 
+                # status='processing' veya 'failed' ise düzelt
+                if original_status in ["processing", "failed"]:
+                    file.status = "uploaded"
+                
+                # chunking durumunu düzelt
                 if original_chunking in ["processing", "chunking", "failed"]:
                     file.chunking_status = "ready"
-                    file.status = "uploaded"
+                # embedding durumunu düzelt
                 elif original_chunking == "chunked" and original_embedding in ["processing", "failed"]:
                     file.embedding_status = "pending"
+                # graph durumunu düzelt
                 elif original_chunking == "chunked" and original_graph in ["processing", "failed"]:
                     file.graph_status = "pending"
                 
