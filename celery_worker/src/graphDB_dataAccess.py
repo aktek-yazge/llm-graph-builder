@@ -4086,10 +4086,22 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
         """
         try:
             # Mevcut relationship type'ları formatla
-            existing_list = "\n".join([
-                f"- {rt['type']} (kullanım: {rt['count']} kez)"
-                for rt in existing_relationship_types
-            ]) if existing_relationship_types else "Henüz hiç relationship type yok (ilk oluşturma)"
+            # existing_relationship_types hem string listesi hem dict listesi olabilir
+            if existing_relationship_types:
+                if isinstance(existing_relationship_types[0], dict):
+                    # Dict listesi: [{"type": "...", "count": N}, ...]
+                    existing_list = "\n".join([
+                        f"- {rt['type']} (kullanım: {rt.get('count', 'N/A')} kez)"
+                        for rt in existing_relationship_types
+                    ])
+                else:
+                    # String listesi: ["IS_KASKO_POLICY", ...]
+                    existing_list = "\n".join([
+                        f"- {rt}"
+                        for rt in existing_relationship_types
+                    ])
+            else:
+                existing_list = "Henüz hiç relationship type yok (ilk oluşturma)"
             
             prompt = f"""
 Sen bir veritabanı uzmanısın. Yeni bir relationship type normalize edeceksin.
@@ -4979,14 +4991,19 @@ KRİTİK:
                 )
                 return
 
+            # Customer ID oluştur (name-based unique ID)
+            customer_id = f"customer_{customer_name.replace(' ', '_').upper()}"
+            
             query = """
                 MERGE (c:Customer {name: $customer_name})
                 ON CREATE SET 
+                    c.id = $customer_id,
                     c.type = $customer_type,
                     c.responsible_person = $responsible_person,
                     c.createdAt = datetime()
                 ON MATCH SET 
                     c.updatedAt = datetime(),
+                    c.id = COALESCE(c.id, $customer_id),
                     c.type = $customer_type,
                     c.responsible_person = $responsible_person
                 WITH c
@@ -4994,13 +5011,14 @@ KRİTİK:
                 MERGE (c)-[r:HAS_POLICY]->(p)
                 SET r.created_at = datetime(),
                     r.source = 'llm_extraction'
-                RETURN c.name as customer_name
+                RETURN c.name as customer_name, c.id as customer_id
             """
 
             self.graph.query(
                 query,
                 {
                     "customer_name": customer_name,
+                    "customer_id": customer_id,
                     "customer_type": customer_data.get("type", "Individual"),
                     "responsible_person": customer_data.get("responsible_person", ""),
                     "policy_id": policy_id,
