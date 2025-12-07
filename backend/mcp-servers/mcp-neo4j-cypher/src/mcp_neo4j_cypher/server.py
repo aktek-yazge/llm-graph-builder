@@ -2,9 +2,10 @@ import json
 import logging
 import os
 import re
-import sys
+import unicodedata
 from typing import Any, Literal, Optional
 
+from dotenv import load_dotenv
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
 from fastmcp.tools.tool import TextContent, ToolResult
@@ -18,38 +19,133 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .utils import _truncate_string_to_tokens, _value_sanitize
 
-logger = logging.getLogger("mcp_neo4j_cypher")
+# Load environment variables from backend/.env file
+# server.py -> mcp_neo4j_cypher -> src -> mcp-neo4j-cypher -> mcp-servers -> backend
+_backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+_env_path = os.path.join(_backend_dir, ".env")
+# Önce backend/.env dosyasını yükle, sonra mevcut dizindeki .env dosyasını yükle
+load_dotenv(_env_path)
+load_dotenv()  # Mevcut dizindeki .env dosyasını da yükle (override etmez, sadece eksik değişkenleri ekler)
 
-# Backend modüllerini import etmek için path'i ayarla
-_backend_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-    "src"
+# Configure logging to stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [MCP] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
-if _backend_path not in sys.path:
-    sys.path.insert(0, _backend_path)
+logger = logging.getLogger("mcp_neo4j_cypher")
+logger.setLevel(logging.INFO)
 
-# Embedding ve normalization fonksiyonlarını import et
-try:
-    from shared.common_fn import load_embedding_model
-    from utf8_utils import normalize_unicode_text
-except ImportError:
-    # Fallback: Eğer backend modülleri bulunamazsa, basit bir fallback kullan
-    logger.warning("Backend modülleri bulunamadı, embedding fonksiyonları kullanılamayabilir")
+
+def normalize_unicode_text(text: str) -> str:
+    """
+    Unicode text normalization for consistent UTF-8 storage
     
-    def load_embedding_model(model_name: str):
-        """Fallback embedding model loader"""
+    Args:
+        text (str): Input text to normalize
+        
+    Returns:
+        str: Normalized UTF-8 text
+    """
+    if not text or not isinstance(text, str):
+        return text
+    
+    try:
+        # NFC normalization - Canonical Decomposition followed by Canonical Composition
+        normalized = unicodedata.normalize('NFC', text)
+        
+        # UTF-8 encoding'i güvence altına al
+        normalized = normalized.encode('utf-8', errors='replace').decode('utf-8')
+        
+        # Additional cleaning
+        normalized = normalized.strip()
+        
+        return normalized
+    except Exception as e:
+        logger.warning(f"Text normalization hatası: {e}")
+        return text
+
+
+def load_embedding_model(embedding_model_name: str):
+    """
+    Embedding model yükleme fonksiyonu
+    OpenAI, VertexAI, Titan ve HuggingFace modellerini destekler
+    """
+    if embedding_model_name == "openai":
         try:
             from langchain_openai import OpenAIEmbeddings
             api_key = os.getenv("OPENAI_API_KEY")
             if api_key:
-                return OpenAIEmbeddings(api_key=api_key), 1536
-            return OpenAIEmbeddings(), 1536
+                embeddings = OpenAIEmbeddings(api_key=api_key)
+            else:
+                embeddings = OpenAIEmbeddings()
+            dimension = 1536
+            logger.info(f"Embedding: Using OpenAI Embeddings, Dimension:{dimension}")
+            return embeddings, dimension
         except ImportError:
-            raise ImportError("OpenAI embeddings not available")
+            raise ImportError("OpenAI embeddings not available. Install langchain-openai")
     
-    def normalize_unicode_text(text: str) -> str:
-        """Fallback normalize function"""
-        return text.strip() if text else ""
+    elif embedding_model_name == "vertexai":
+        try:
+            from langchain_google_vertexai import VertexAIEmbeddings
+            embeddings = VertexAIEmbeddings(model="textembedding-gecko@003")
+            dimension = 768
+            logger.info(f"Embedding: Using Vertex AI Embeddings, Dimension:{dimension}")
+            return embeddings, dimension
+        except ImportError:
+            raise ImportError("VertexAI embeddings not available. Install langchain-google-vertexai")
+    
+    elif embedding_model_name == "titan":
+        try:
+            from langchain_community.embeddings import BedrockEmbeddings
+            env_value = os.getenv("BEDROCK_EMBEDDING_MODEL")
+            if not env_value:
+                raise ValueError("Environment variable 'BEDROCK_EMBEDDING_MODEL' is not set.")
+            try:
+                model_name, aws_access_key, aws_secret_key, region_name = env_value.split(",")
+            except ValueError:
+                raise ValueError("BEDROCK_EMBEDDING_MODEL format: model_name,aws_access_key,aws_secret_key,region_name")
+            
+            embeddings = BedrockEmbeddings(
+                model_id=model_name.strip(),
+                credentials_profile_name=None,
+                region_name=region_name.strip(),
+                aws_access_key_id=aws_access_key.strip(),
+                aws_secret_access_key=aws_secret_key.strip(),
+            )
+            dimension = 1536
+            logger.info(f"Embedding: Using bedrock titan Embeddings, Dimension:{dimension}")
+            return embeddings, dimension
+        except ImportError:
+            raise ImportError("Bedrock embeddings not available. Install langchain-community and boto3")
+    
+    else:
+        # HuggingFace model için
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+            from pathlib import Path
+            
+            cache_folder = os.getenv(
+                "HUGGINGFACE_CACHE_FOLDER",
+                os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "models")
+            )
+            Path(cache_folder).mkdir(parents=True, exist_ok=True)
+            hf_model_name = os.getenv("HUGGINGFACE_MODEL_NAME", "BAAI/bge-m3")
+            
+            logger.info(f"📦 HuggingFace model cache klasörü: {cache_folder}")
+            logger.info(f"🤖 HuggingFace model adı: {hf_model_name}")
+            
+            embeddings = HuggingFaceEmbeddings(
+                model_name=hf_model_name,
+                cache_folder=cache_folder,
+                model_kwargs={"cache_dir": cache_folder},
+                encode_kwargs={"normalize_embeddings": True},
+            )
+            dimension = 384
+            logger.info(f"✅ Embedding: Using Langchain HuggingFaceEmbeddings (cached locally), Dimension:{dimension}")
+            return embeddings, dimension
+        except ImportError:
+            raise ImportError("HuggingFace embeddings not available. Install langchain-huggingface")
 
 
 def _create_direct_schema_format(nodes_result, rels_result):
@@ -339,7 +435,7 @@ def create_mcp_server(
     read_only: bool = False,
 ) -> FastMCP:
     mcp: FastMCP = FastMCP(
-        "mcp-neo4j-cypher", dependencies=["neo4j", "pydantic"], stateless_http=True
+        "mcp-neo4j-cypher", dependencies=["neo4j", "pydantic"]
     )
 
     namespace_prefix = _format_namespace(namespace)
@@ -382,7 +478,30 @@ def create_mcp_server(
             dict(), description="The parameters to pass to the Cypher query."
         ),
     ) -> list[ToolResult]:
-        """Execute a read Cypher query on the neo4j database."""
+        """
+        Execute a read Cypher query on the neo4j database.
+        
+        USE THIS TOOL FOR:
+        - METADATA queries: names, numbers, dates, counts, IDs
+        - Questions like: "Who?", "How many?", "Which date?", "What number?"
+        - Finding entities and their properties from graph nodes
+        
+        DO NOT USE FOR:
+        - Detail/content questions: "What does it say?", "What are the details?"
+        - List/table requests: "List all X", "What are the Y?" (plural)
+        - Document content search
+        
+        For content/detail queries, use read_neo4j_cypher_with_embedding instead.
+        """
+        
+        # 📊 Tool Call Logging
+        logger.info(f"")
+        logger.info(f"{'🔷'*20}")
+        logger.info(f"🔍 CYPHER READ QUERY")
+        logger.info(f"{'🔷'*20}")
+        logger.info(f"📝 {query}")
+        logger.info(f"📦 Params: {params}")
+        logger.info(f"{'🔷'*20}")
 
         if _is_write_query(query):
             raise ValueError("Only MATCH queries are allowed for read-query")
@@ -410,9 +529,10 @@ def create_mcp_server(
                     minimal_results, token_limit
                 )
 
-            logger.debug(
-                f"Read query returned {len(results)} rows, minimal format: {len(minimal_results)} chars"
-            )
+            # 📊 Result Logging
+            logger.info(f"✅ RESULT: {len(results)} rows returned")
+            logger.info(f"📊 Data: {minimal_results}")
+            logger.info(f"{'🔷'*20}")
 
             return ToolResult(content=[TextContent(type="text", text=minimal_results)])
 
@@ -460,26 +580,39 @@ def create_mcp_server(
         ),
     ) -> list[ToolResult]:
         """
-        Execute a read Cypher query with automatic embedding generation for semantic search.
+        Execute a semantic search in document content (Chunks) using embeddings.
         
-        This tool is designed for semantic search scenarios where you need to:
-        1. Generate an embedding from a text query
-        2. Use that embedding in a Cypher query for vector similarity search
+        ⚠️ USE THIS TOOL WHEN:
+        - Question asks for DETAILS, LISTS, TABLES, or EXPLANATIONS
+        - Question contains: "neler?", "listele", "detayları", "ne diyor?", "var mı?"
+        - Question asks about: installments, payments, coverage details, terms, conditions
+        - Graph query returned FEW results (≤3) but more detail is expected
+        - Information is NOT in graph nodes but IN DOCUMENT CONTENT
         
-        Workflow:
-        - You provide a text query (e.g., "payment plan details")
-        - You provide a Cypher query that uses $embedding_vector parameter
-        - This tool automatically:
-          * Generates embedding from the text query
-          * Binds the embedding to $embedding_vector parameter
-          * Executes the Cypher query
-          * Returns the results
+        WORKFLOW:
+        1. First use read_neo4j_cypher to find the relevant entity (Policy, Document, etc.)
+        2. Then use THIS tool to search within that entity's Chunks for detailed content
+        
+        PARAMETERS:
+        - query_text: The CONCEPT you're searching for (e.g., "payment installment plan")
+          DO NOT include metadata (names, dates, IDs) in query_text!
+        - cypher_query: Must filter to specific entity's Chunks and use $embedding_vector
         
         Example usage:
         - query_text: "taksit ödeme planı"
         - cypher_query: "MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC LIMIT 10"
         - params: {} (optional additional parameters)
         """
+        
+        # 📊 Tool Call Logging
+        logger.info(f"")
+        logger.info(f"{'🟣'*20}")
+        logger.info(f"🧠 SEMANTIC SEARCH (Embedding)")
+        logger.info(f"{'🟣'*20}")
+        logger.info(f"🔤 Text: {query_text}")
+        logger.info(f"📝 Cypher: {cypher_query}")
+        logger.info(f"📦 Params: {params}")
+        logger.info(f"{'🟣'*20}")
 
         # Validate that cypher_query contains $embedding_vector parameter
         if "$embedding_vector" not in cypher_query:
@@ -537,10 +670,10 @@ def create_mcp_server(
                     minimal_results, token_limit
                 )
 
-            logger.info(
-                f"✅ Semantic arama tamamlandı: {len(results)} sonuç bulundu, "
-                f"minimal format: {len(minimal_results)} karakter"
-            )
+            # 📊 Result Logging
+            logger.info(f"✅ RESULT: {len(results)} rows returned")
+            logger.info(f"📊 Data: {minimal_results}")
+            logger.info(f"{'🟣'*20}")
 
             return ToolResult(
                 content=[
@@ -590,6 +723,15 @@ def create_mcp_server(
         ),
     ) -> list[ToolResult]:
         """Execute a write Cypher query on the neo4j database."""
+        
+        # 📊 Tool Call Logging
+        logger.info(f"")
+        logger.info(f"{'🔴'*20}")
+        logger.info(f"✏️ CYPHER WRITE QUERY")
+        logger.info(f"{'🔴'*20}")
+        logger.info(f"📝 {query}")
+        logger.info(f"📦 Params: {params}")
+        logger.info(f"{'🔴'*20}")
 
         if not _is_write_query(query):
             raise ValueError("Only write queries are allowed for write-query")
@@ -604,7 +746,10 @@ def create_mcp_server(
 
             counters_json_str = json.dumps(summary.counters.__dict__, default=str)
 
-            logger.debug(f"Write query affected {counters_json_str}")
+            # 📊 Result Logging
+            logger.info(f"✅ RESULT: Write completed")
+            logger.info(f"📊 Counters: {counters_json_str}")
+            logger.info(f"{'🔴'*20}")
 
             return ToolResult(
                 content=[TextContent(type="text", text=counters_json_str)]
@@ -645,7 +790,12 @@ async def main(
             username,
             password,
         ),
+        # Connection pool ayarları - tek soru için bağlantıları yeniden kullan
+        max_connection_pool_size=50,  # Maksimum bağlantı sayısı
+        connection_acquisition_timeout=60,  # Bağlantı alma timeout (saniye)
+        max_connection_lifetime=3600,  # Bağlantı ömrü (saniye)
     )
+    logger.info("✅ Neo4j connection pool oluşturuldu (max: 50 bağlantı)")
     custom_middleware = [
         Middleware(
             CORSMiddleware,
@@ -667,7 +817,7 @@ async def main(
                 f"Running Neo4j Cypher MCP Server with HTTP transport on {host}:{port}..."
             )
             await mcp.run_http_async(
-                host=host, port=port, path=path, middleware=custom_middleware
+                host=host, port=port, path=path, middleware=custom_middleware, stateless_http=True
             )
         case "stdio":
             logger.info("Running Neo4j Cypher MCP Server with stdio transport...")
@@ -682,6 +832,7 @@ async def main(
                 path=path,
                 middleware=custom_middleware,
                 transport="sse",
+                stateless_http=True,
             )
         case _:
             logger.error(

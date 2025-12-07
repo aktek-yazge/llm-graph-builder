@@ -20,7 +20,7 @@ def main():
         "--server-path", default=None, help="HTTP path (default: /mcp/)"
     )
     parser.add_argument("--server-host", default=None, help="Server host")
-    parser.add_argument("--server-port", default=None, help="Server port")
+    parser.add_argument("--server-port", type=int, default=None, help="Server port")
     parser.add_argument(
         "--allow-origins",
         default=None,

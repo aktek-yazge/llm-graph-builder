@@ -218,7 +218,15 @@ logging.getLogger("langchain_neo4j").setLevel(logging.INFO)
 logging.getLogger("langchain.retrievers").setLevel(logging.INFO)
 
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
-EMBEDDING_FUNCTION , _ = load_embedding_model(EMBEDDING_MODEL) 
+# Lazy loading - embedding sadece ilk kullanımda yüklenir
+_EMBEDDING_FUNCTION_CACHE = None
+
+def get_embedding_function():
+    """Lazy loading ile embedding function al"""
+    global _EMBEDDING_FUNCTION_CACHE
+    if _EMBEDDING_FUNCTION_CACHE is None:
+        _EMBEDDING_FUNCTION_CACHE, _ = load_embedding_model(EMBEDDING_MODEL)
+    return _EMBEDDING_FUNCTION_CACHE 
 
 ## Neo4j SessionChatHistory class kaldırıldı - PostgreSQL kullanılıyor
 ## Bkz: src/shared/postgres_chat_history.py
@@ -887,7 +895,7 @@ def create_document_retriever_chain(llm, retriever):
 
         splitter = TokenTextSplitter(chunk_size=CHAT_DOC_SPLIT_SIZE, chunk_overlap=0)
         embeddings_filter = EmbeddingsFilter(
-            embeddings=EMBEDDING_FUNCTION,
+            embeddings=get_embedding_function(),
             similarity_threshold=CHAT_EMBEDDING_FILTER_SCORE_THRESHOLD
         )
 
@@ -942,7 +950,7 @@ def initialize_neo4j_vector(graph, chat_mode_settings, llm=None):
             print("========== USING CUSTOM NEO4J VECTOR WITH LLM ==========")
             if keyword_index:
                 neo_db = CustomNeo4jVector.from_existing_graph_with_llm(
-                    embedding=EMBEDDING_FUNCTION,
+                    embedding=get_embedding_function(),
                     index_name=index_name,
                     retrieval_query=retrieval_query,
                     graph=graph,
@@ -955,7 +963,7 @@ def initialize_neo4j_vector(graph, chat_mode_settings, llm=None):
                 )
             else:
                 neo_db = CustomNeo4jVector.from_existing_graph_with_llm(
-                    embedding=EMBEDDING_FUNCTION,
+                    embedding=get_embedding_function(),
                     index_name=index_name,
                     retrieval_query=retrieval_query,
                     graph=graph,
@@ -969,7 +977,7 @@ def initialize_neo4j_vector(graph, chat_mode_settings, llm=None):
             print("========== USING STANDARD NEO4J VECTOR ==========")
             if keyword_index:
                 neo_db = Neo4jVector.from_existing_graph(
-                    embedding=EMBEDDING_FUNCTION,
+                    embedding=get_embedding_function(),
                     index_name=index_name,
                     retrieval_query=retrieval_query,
                     graph=graph,
@@ -985,7 +993,7 @@ def initialize_neo4j_vector(graph, chat_mode_settings, llm=None):
                 logging.info(f"Successfully retrieved Neo4jVector Fulltext index '{index_name}' and keyword index '{keyword_index}'")
             else:
                 neo_db = Neo4jVector.from_existing_graph(
-                    embedding=EMBEDDING_FUNCTION,
+                    embedding=get_embedding_function(),
                     index_name=index_name,
                     retrieval_query=retrieval_query,
                     graph=graph,

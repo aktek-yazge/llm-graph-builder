@@ -37,6 +37,7 @@ services:
       - rabbitmq
       - neo4j
       - postgres
+      - redis
 
   # RabbitMQ - Message Broker
   rabbitmq:
@@ -82,6 +83,31 @@ services:
         max-size: "500m"
         max-file: "10"
         labels: "container_name=postgres-prod"
+    networks:
+      - llm-graph-builder_prod
+    restart: unless-stopped
+
+  # Redis Stack Server - Semantic Cache & Chat Memory (RediSearch + RedisJSON dahil)
+  redis:
+    image: redis/redis-stack-server:7.4.0-v2
+    container_name: redis-prod
+    hostname: redis-prod
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+        labels: "container_name=redis-prod"
     networks:
       - llm-graph-builder_prod
     restart: unless-stopped
@@ -239,4 +265,5 @@ volumes:
   neo4j_plugins_prod_2:
   neo4j_import_prod_2:
   llm-graph-output-prod:
+  redis_data_prod:
   # postgres_data_prod kaldırıldı - ~/postgres-data-prod host dizininde saklanıyor

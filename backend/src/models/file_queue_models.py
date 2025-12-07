@@ -187,13 +187,16 @@ class FileQueueDatabase:
         # pool_recycle: Recycle connections after N seconds (prevent stale connections)
         pool_config = {}
         if "sqlite" not in self.db_url:
+            # Backend chat server için pool ayarları
+            # Celery worker'lar ayrı process'lerde çalışıyor
             pool_config = {
-                "pool_size": 20,           # Base connections (increased for high concurrency)
-                "max_overflow": 40,        # Extra connections when needed (total max: 60)
-                "pool_timeout": 60,        # Wait up to 60s for connection
-                "pool_recycle": 300,       # Recycle connections every 5 min (faster cleanup)
+                "pool_size": 3,            # Base connections for backend
+                "max_overflow": 5,         # Extra when needed (total: 8)
+                "pool_timeout": 30,        # Wait up to 30s for connection
+                "pool_recycle": 300,       # Recycle connections every 5 min
                 "pool_pre_ping": True,     # Check connection health before use
             }
+            logging.info(f"✅ PostgreSQL pool: size=3, max_overflow=5, total_max=8")
         
         self.engine = create_engine(
             self.db_url,

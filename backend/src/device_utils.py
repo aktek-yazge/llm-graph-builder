@@ -119,6 +119,5 @@ def print_device_info():
     print(f"Selected Device: {device}")
     print("=" * 50)
 
-# Modül import edildiğinde otomatik optimizasyon
-if __name__ != "__main__":
-    optimize_for_apple_silicon()
+# Not: optimize_for_apple_silicon() artık lifespan'de çağrılıyor
+# Modül seviyesinde otomatik çağrı kaldırıldı - tekrar eden log mesajlarını önlemek için

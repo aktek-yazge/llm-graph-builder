@@ -48,8 +48,8 @@ def get_pg_pool() -> pool.ThreadedConnectionPool:
                     parsed = urlparse(db_url)
                     
                     _pg_pool = pool.ThreadedConnectionPool(
-                        minconn=2,
-                        maxconn=10,
+                        minconn=1,
+                        maxconn=5,  # Reduced to share with other pools
                         host=parsed.hostname or 'localhost',
                         port=parsed.port or 5432,
                         user=parsed.username or 'postgres',

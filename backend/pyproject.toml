@@ -79,4 +79,9 @@ dependencies = [
     # LangGraph Deep Agents
     "deepagents>=0.2.8",
     "langchain-mcp-adapters>=0.1.0",
+    
+    # Redis for Semantic Caching and Chat Memory
+    "redis>=5.0.0",
+    "langchain-redis>=0.1.0",
+    "redisvl>=0.3.0",
 ]

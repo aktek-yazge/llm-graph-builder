@@ -46,8 +46,16 @@ if nltk is not None:
 load_dotenv()
 
 EMBEDDING_MODEL = os.getenv("RAGAS_EMBEDDING_MODEL")
-logging.info(f"Loading embedding model '{EMBEDDING_MODEL}' for ragas evaluation")
-EMBEDDING_FUNCTION, _ = load_embedding_model(EMBEDDING_MODEL)
+# Lazy loading - embedding sadece ilk kullanımda yüklenir
+_RAGAS_EMBEDDING_CACHE = None
+
+def get_ragas_embedding():
+    """Lazy loading ile ragas embedding al"""
+    global _RAGAS_EMBEDDING_CACHE
+    if _RAGAS_EMBEDDING_CACHE is None:
+        logging.info(f"Loading embedding model '{EMBEDDING_MODEL}' for ragas evaluation")
+        _RAGAS_EMBEDDING_CACHE, _ = load_embedding_model(EMBEDDING_MODEL)
+    return _RAGAS_EMBEDDING_CACHE
 
 def get_ragas_metrics(question: str, context: list, answer: list, model: str):
     """Calculates RAGAS metrics."""
@@ -72,7 +80,7 @@ def get_ragas_metrics(question: str, context: list, answer: list, model: str):
             dataset=dataset,
             metrics=[faithfulness, answer_relevancy,context_entity_recall],
             llm=llm,
-            embeddings=EMBEDDING_FUNCTION,
+            embeddings=get_ragas_embedding(),
         )
         
         score_dict = (
@@ -101,7 +109,7 @@ async def get_additional_metrics(question: str, contexts: list, answers: list, r
        if ("diffbot" in model_name) or ("ollama" in model_name):
            raise ValueError(f"Unsupported model for evaluation: {model_name}")
        llm, model_name = get_llm(model=model_name)
-       embeddings = EMBEDDING_FUNCTION
+       embeddings = get_ragas_embedding()
        embedding_model = LangchainEmbeddingsWrapper(embeddings=embeddings)
        rouge_scorer = RougeScore()
        semantic_scorer = SemanticSimilarity()

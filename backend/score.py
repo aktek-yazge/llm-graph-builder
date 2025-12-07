@@ -871,9 +871,52 @@ async def lifespan(app: FastAPI):
             f"İlk soru geldiğinde yüklenecek."
         )
 
+    # 🚀 SERVER STARTUP: MCP Serverları önceden başlat
+    try:
+        from src.workflow.deep_agent_integration import (
+            MCP_ADAPTERS_AVAILABLE,
+            get_mcp_server_config,
+            set_global_mcp_tools,
+            MCP_HTTP_HOST,
+            MCP_HTTP_PORT,
+        )
+        
+        if MCP_ADAPTERS_AVAILABLE:
+            # MCP Server start-backend-yedek.sh tarafından başlatılıyor
+            # Burada sadece client olarak bağlanıyoruz
+            logging.info(f"📡 Server Startup: MCP Client bağlanıyor (http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/)...")
+            
+            from langchain_mcp_adapters.client import MultiServerMCPClient
+            
+            mcp_config = get_mcp_server_config()
+            mcp_client = MultiServerMCPClient(mcp_config)
+            
+            # MCP tools'ları al
+            tools = await mcp_client.get_tools()
+            
+            logging.info(f"✅ Server Startup: {len(tools)} MCP tool yüklendi")
+            for tool in tools:
+                logging.info(f"   - {tool.name}: {tool.description[:50]}...")
+            
+            # MCP client ve tools'ları global cache'e kaydet (DeepAgent kullanacak)
+            set_global_mcp_tools(mcp_client, tools)
+            
+            # MCP client'ı app.state'e de sakla
+            app.state.mcp_client = mcp_client
+        else:
+            logging.warning("⚠️ Server Startup: MCP Adapters mevcut değil, MCP serverları başlatılamadı")
+    except Exception as mcp_error:
+        logging.warning(f"⚠️ Server Startup: MCP serverları başlatılamadı: {mcp_error}", exc_info=True)
+        # MCP serverları başlatılamazsa devam et, ilk request'te tekrar denenecek
+
     yield
     # Shutdown - here you can add cleanup code if needed
     try:
+        # MCP client referansını temizle (MCP server shell script tarafından yönetiliyor)
+        if hasattr(app.state, 'mcp_client') and app.state.mcp_client:
+            app.state.mcp_client = None
+            logging.info("✅ Server Shutdown: MCP client referansı temizlendi")
+        
         # Celery worker runs independently - no need to stop
         logging.info("⏹️ Server shutdown - celery worker continues running independently")
     except asyncio.CancelledError:
@@ -3251,17 +3294,15 @@ async def clear_chat_bot(
         start = time.time()
 
         # 🧹 SESSION-BASED AGENT CACHE TEMİZLİK ÖNCE YAP
-        # Chat history temizlendiğinde ilgili agent'ı da cache'den kaldır
+        # Chat history temizlendiğinde ilgili agent'ı da cache'den kaldır (IntelligentAgent için)
+        # NOT: DeepAgent kendi global instance'ını yönetiyor, bu cache artık aktif kullanılmıyor
         agent_cache_result = "no_cache_entry"
         if session_id and session_id in _agent_cache:
             del _agent_cache[session_id]
             if session_id in _cache_access_times:
                 del _cache_access_times[session_id]
             agent_cache_result = "cache_cleared"
-            print(f"🧹 Agent cache temizlendi - Session: {session_id}")
-        elif session_id:
-            agent_cache_result = "cache_not_found"
-            print(f"🔍 Agent cache'de bulunamadı - Session: {session_id}")
+            logging.debug(f"🧹 Legacy agent cache temizlendi - Session: {session_id}")
 
         # ⚠️ NEO4J BAĞLANTI KONTROLÜ
         result = None
@@ -3271,38 +3312,42 @@ async def clear_chat_bot(
         try:
             # Neo4j bağlantısını dene
             graph = create_graph_database_connection(uri, userName, password, database)
-            result = await asyncio.to_thread(
-                clear_chat_history, graph=graph, session_id=session_id
-            )
-            db_clear_result = "db_cleared"
-            print(f"✅ PostgreSQL'den chat history temizlendi - Session: {session_id}")
+            
+            # NOT: Chat history artık silinmiyor - kullanıcı isteği üzerine
+            # Eski kod: clear_chat_history, graph=graph, session_id=session_id
+            # Chat history PostgreSQL'de saklanmaya devam ediyor
+            result = {"session_id": session_id, "message": "Session cleared (chat history preserved)", "user": "chatbot"}
+            db_clear_result = "session_cleared_history_preserved"
+            logging.info(f"✅ Session temizlendi (chat history korundu) - Session: {session_id}")
 
-            # 🆕 CLEAR CHAT'TEN SONRA YENİ SESSION ID İLE AGENT OLUŞTUR (eğer new_session_id gönderildiyse)
-            if model and new_session_id and db_clear_result == "db_cleared":
-                try:
-                    # Yeni session ID ile agent oluştur
-                    new_session_agent = get_cached_agent(new_session_id, graph, model)
-                    new_agent_result = (
-                        f"agent_created_for_new_session: {new_session_id}"
+            # DeepAgent session yönetimi
+            try:
+                from src.workflow.deep_agent_integration import (
+                    clear_session_agent,
+                    get_or_create_session_agent,
+                )
+                
+                # 1. Eski session agent'ı temizle
+                if session_id:
+                    cleared = clear_session_agent(session_id)
+                    if cleared:
+                        logging.info(f"🗑️ CLEAR_CHAT: Eski session agent temizlendi - {session_id[:8]}...")
+                
+                # 2. Yeni session için agent'ı hemen oluştur (pre-create)
+                if new_session_id:
+                    # Graph connection ile yeni agent oluştur
+                    new_agent = await get_or_create_session_agent(
+                        session_id=new_session_id,
+                        model=model or "gpt-5",
+                        graph=graph
                     )
-                    print(
-                        f"🆕 Clear chat sonrası yeni session için agent oluşturuldu - New Session: {new_session_id}, Model: {model}"
-                    )
-
-                    # 🆕 FastAgent için şema cache'ini doldur (yeni session için)
-                    # NOT: Schema artık clear_chat'te pre-fetch edilmiyor
-                    # GlobalSchemaCache ile ilk soru geldiğinde on-demand yüklenecek
+                    new_agent_result = f"deep_agent_created_for_session: {new_session_id}"
                     logging.info(
-                        f"📋 FastAgent CLEAR_CHAT: Schema pre-fetch atlandı - "
-                        f"Session {new_session_id} için schema ilk soruda yüklenecek"
+                        f"✅ CLEAR_CHAT: Yeni session agent oluşturuldu - {new_session_id[:8]}..."
                     )
-                except Exception as agent_error:
-                    new_agent_result = (
-                        f"new_session_agent_creation_failed: {str(agent_error)}"
-                    )
-                    print(
-                        f"❌ Yeni session için agent oluşturma hatası - New Session: {new_session_id}: {agent_error}"
-                    )
+                    
+            except Exception as agent_error:
+                logging.warning(f"⚠️ DeepAgent session yönetimi hatası: {agent_error}")
 
         except Exception as db_error:
             # Neo4j bağlantı hatası durumunda sadece cache temizle
