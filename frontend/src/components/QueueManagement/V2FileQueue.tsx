@@ -155,17 +155,34 @@ const V2FileQueue: React.FC = () => {
     try {
       setIsLoading(true);
       const fileIds = Array.from(selectedFileIds);
-      console.log(`✨ Starting graph creation for ${fileIds.length} files: ${fileIds.join(', ')}`);
+      
+      // Check if all files are selected
+      const allFiles = files.map((f) => f.id);
+      const isAllSelected = allFiles.length > 0 && fileIds.length === allFiles.length;
 
-      // Send selected file IDs - single ID or comma-separated for multiple
-      const fileIdParam = fileIds.length === 1 ? fileIds[0] : fileIds.join(',');
-      const response = await startGraphCreationAPI(fileIdParam, 'openai_gpt_4o_mini', false);
+      if (isAllSelected) {
+        // Tüm dosyalar seçilmişse "all" parametresi kullan
+        console.log(`✨ Starting graph creation for ALL ${fileIds.length} files`);
+        const response = await startGraphCreationAPI('all', 'openai_gpt_4o_mini', false);
 
-      if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
-        const processedCount = response.data?.processed_count || fileIds.length;
-        showSuccessToast(`Started graph creation for ${processedCount} file(s) (batch processing)`);
+        if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+          const processedCount = response.data?.processed_count || fileIds.length;
+          showSuccessToast(`Started graph creation for ${processedCount} file(s) (all files - batch)`);
+        } else {
+          showErrorToast(`Failed to start graph creation: ${response?.message || 'Unknown error'}`);
+        }
       } else {
-        showErrorToast(`Failed to start graph creation: ${response?.message || 'Unknown error'}`);
+        // Aradan seçim yapılmışsa virgüllü ID'ler gönder
+        console.log(`✨ Starting graph creation for ${fileIds.length} selected files: ${fileIds.join(', ')}`);
+        const fileIdParam = fileIds.length === 1 ? fileIds[0] : fileIds.join(',');
+        const response = await startGraphCreationAPI(fileIdParam, 'openai_gpt_4o_mini', false);
+
+        if (response?.status === 'Success' || response?.status === 'success' || response?.data?.status === 'success') {
+          const processedCount = response.data?.processed_count || fileIds.length;
+          showSuccessToast(`Started graph creation for ${processedCount} file(s) (batch processing)`);
+        } else {
+          showErrorToast(`Failed to start graph creation: ${response?.message || 'Unknown error'}`);
+        }
       }
 
       setSelectedFileIds(new Set());

@@ -1400,6 +1400,10 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
           .filter((f: CustomFile) => f.fileSource === 'V2 Queue') as CustomFile[];
         return result;
       },
+      getV2Files: () => {
+        // Tüm V2 dosyalarını döndür (seçili olsun olmasın)
+        return filesData.filter((f) => f.fileSource === 'V2 Queue') as CustomFile[];
+      },
       handleStartChunking: async () => {
         // React table selection'dan al
         const selected = table

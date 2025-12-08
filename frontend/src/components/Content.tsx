@@ -702,6 +702,8 @@ const Content: React.FC<ContentProps> = ({
 
   const handleCreateEmbeddingsForV2 = async () => {
     const v2Files = childRef.current?.getV2SelectedFiles?.() || [];
+    const allV2Files = childRef.current?.getV2Files?.() || [];
+    
     // Sadece embedding'i pending veya failed olan dosyaları filtrele (completed olanları DAHIL ETME!)
     const chunkedFiles = v2Files.filter((f: CustomFile) => 
       f.chunking_status === 'chunked' && 
@@ -715,21 +717,31 @@ const Content: React.FC<ContentProps> = ({
 
     try {
       setIsExtractLoading(true);
-      showNormalToast(`${chunkedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
+      
+      // Tüm dosyalar seçilmiş mi kontrol et
+      const isAllSelected = allV2Files.length > 0 && v2Files.length === allV2Files.length;
+      
+      let response;
+      if (isAllSelected) {
+        // Tüm dosyalar seçilmişse "all" parametresi kullan
+        showNormalToast(`Tüm uygun dosyalar için embedding oluşturma başlatılıyor...`);
+        response = await startEmbeddingAPI('all');
+      } else {
+        showNormalToast(`${chunkedFiles.length} dosya için embedding oluşturma başlatılıyor...`);
+        
+        // Seçili dosya ID'lerini virgülle ayırarak TEK bir API çağrısı yap
+        const fileIds = chunkedFiles
+          .filter((f: CustomFile) => f.v2FileId)
+          .map((f: CustomFile) => f.v2FileId)
+          .join(',');
 
-      // Tüm dosya ID'lerini virgülle ayırarak TEK bir API çağrısı yap
-      const fileIds = chunkedFiles
-        .filter((f: CustomFile) => f.v2FileId)
-        .map((f: CustomFile) => f.v2FileId)
-        .join(',');
+        if (!fileIds) {
+          showErrorToast('Geçerli dosya ID\'si bulunamadı');
+          return;
+        }
 
-      if (!fileIds) {
-        showErrorToast('Geçerli dosya ID\'si bulunamadı');
-        return;
+        response = await startEmbeddingAPI(fileIds as any);
       }
-
-      // Toplu embedding başlat (tek API çağrısı)
-      const response = await startEmbeddingAPI(fileIds as any);
       
       if (response.status === 'Success' || response.status === 'success') {
         const queuedCount = response.data?.queued_count || chunkedFiles.length;

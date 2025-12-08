@@ -417,7 +417,7 @@ Cevaplarını markdown formatında ver. Teknik detay verme, sadece sonucu göste
 class DeepAgentIntegration:
     """LangGraph Deep Agent'i chat_bot_stream'e entegre eden sınıf - MCP Tools ile"""
 
-    def __init__(self, model: str = "gpt-5", graph=None):
+    def __init__(self, model: str = "gpt-5.1", graph=None):
         self.model = model
         self.graph = graph
         self.agent = None
@@ -649,9 +649,30 @@ class DeepAgentIntegration:
 
 {DEEP_AGENT_SYSTEM_PROMPT}"""
 
-        # Model oluştur
+        # Model oluştur - GPT-5 reasoning modellerinde düşünmeyi minimize et
         try:
-            model = init_chat_model(self.model)
+            model_name = self.model
+            
+            # GPT-5 / GPT-5.1 reasoning modelleri için özel handling
+            if "gpt-5" in model_name.lower():
+                from langchain_openai import ChatOpenAI
+                api_key = os.environ.get("OPENAI_API_KEY")
+                
+                # gpt-5.1 için reasoning tamamen kapatılabilir, gpt-5 için minimal
+                if "gpt-5.1" in model_name.lower():
+                    reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", "none")  # Düşünme KAPALI
+                else:
+                    reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", "minimal")  # Minimum düşünme
+                
+                logging.info(f"🧠 {model_name} reasoning: effort={reasoning_effort}")
+                
+                model = ChatOpenAI(
+                    api_key=api_key,
+                    model=model_name,
+                    reasoning={"effort": reasoning_effort}
+                )
+            else:
+                model = init_chat_model(model_name)
         except Exception as e:
             logging.warning(f"⚠️ Model {self.model} yüklenemedi, fallback: {e}")
             model = init_chat_model("openai:gpt-4o")
@@ -774,6 +795,7 @@ class DeepAgentIntegration:
             
             # 🧠 Agent düşünme süreci için sayaç
             thinking_step = 0
+            logged_message_ids = set()  # Daha önce loglanan mesajları takip et
             
             async for chunk in agent.astream(
                 {"messages": messages},
@@ -781,6 +803,15 @@ class DeepAgentIntegration:
             ):
                 if "messages" in chunk and chunk["messages"]:
                     last_message = chunk["messages"][-1]
+                    
+                    # Mesajın benzersiz ID'sini al (id veya content hash)
+                    msg_id = getattr(last_message, "id", None) or hash(str(last_message.content)[:100] if hasattr(last_message, "content") else "")
+                    
+                    # Daha önce loglandıysa atla
+                    if msg_id in logged_message_ids:
+                        continue
+                    logged_message_ids.add(msg_id)
+                    
                     thinking_step += 1
                     
                     # 🧠 AGENT DÜŞÜNME SÜRECİ LOGLAMA
@@ -1035,7 +1066,7 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5", graph=None
+    session_id: str, model: str = "gpt-5.1", graph=None
 ) -> DeepAgentIntegration:
     """Session bazlı DeepAgent al veya oluştur"""
     global _session_agents, _session_access_times
@@ -1083,7 +1114,7 @@ def get_session_agent_stats() -> Dict[str, Any]:
 
 async def stream_deep_agent_response(
     question: str,
-    model: str = "gpt-5",
+    model: str = "gpt-5.1",
     session_id: str = None,
     graph=None,
     **kwargs,
@@ -1095,7 +1126,7 @@ async def stream_deep_agent_response(
 
     Args:
         question: Kullanıcının sorusu
-        model: Kullanılacak LLM modeli (default: gpt-5)
+        model: Kullanılacak LLM modeli (default: gpt-5.1)
         session_id: Oturum ID'si (conversation history için) - ZORUNLU
         graph: Neo4j graph connection
         **kwargs: Ek parametreler
