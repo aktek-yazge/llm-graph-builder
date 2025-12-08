@@ -3,13 +3,13 @@ import logging
 import os
 import re
 import unicodedata
-from typing import Any, Literal, Optional
+from typing import Any, Literal, LiteralString, Optional, cast
 
 from dotenv import load_dotenv
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import TextContent, ToolResult
-from mcp.types import ToolAnnotations
+from fastmcp.tools.tool import ToolResult
+from mcp.types import ToolAnnotations, TextContent
 from neo4j import AsyncDriver, AsyncGraphDatabase, Query, RoutingControl
 from neo4j.exceptions import ClientError, Neo4jError
 from pydantic import Field
@@ -74,50 +74,13 @@ def load_embedding_model(embedding_model_name: str):
     if embedding_model_name == "openai":
         try:
             from langchain_openai import OpenAIEmbeddings
-            api_key = os.getenv("OPENAI_API_KEY")
-            if api_key:
-                embeddings = OpenAIEmbeddings(api_key=api_key)
-            else:
-                embeddings = OpenAIEmbeddings()
+            # OpenAIEmbeddings will automatically use OPENAI_API_KEY from environment
+            embeddings = OpenAIEmbeddings()
             dimension = 1536
             logger.info(f"Embedding: Using OpenAI Embeddings, Dimension:{dimension}")
             return embeddings, dimension
         except ImportError:
             raise ImportError("OpenAI embeddings not available. Install langchain-openai")
-    
-    elif embedding_model_name == "vertexai":
-        try:
-            from langchain_google_vertexai import VertexAIEmbeddings
-            embeddings = VertexAIEmbeddings(model="textembedding-gecko@003")
-            dimension = 768
-            logger.info(f"Embedding: Using Vertex AI Embeddings, Dimension:{dimension}")
-            return embeddings, dimension
-        except ImportError:
-            raise ImportError("VertexAI embeddings not available. Install langchain-google-vertexai")
-    
-    elif embedding_model_name == "titan":
-        try:
-            from langchain_community.embeddings import BedrockEmbeddings
-            env_value = os.getenv("BEDROCK_EMBEDDING_MODEL")
-            if not env_value:
-                raise ValueError("Environment variable 'BEDROCK_EMBEDDING_MODEL' is not set.")
-            try:
-                model_name, aws_access_key, aws_secret_key, region_name = env_value.split(",")
-            except ValueError:
-                raise ValueError("BEDROCK_EMBEDDING_MODEL format: model_name,aws_access_key,aws_secret_key,region_name")
-            
-            embeddings = BedrockEmbeddings(
-                model_id=model_name.strip(),
-                credentials_profile_name=None,
-                region_name=region_name.strip(),
-                aws_access_key_id=aws_access_key.strip(),
-                aws_secret_access_key=aws_secret_key.strip(),
-            )
-            dimension = 1536
-            logger.info(f"Embedding: Using bedrock titan Embeddings, Dimension:{dimension}")
-            return embeddings, dimension
-        except ImportError:
-            raise ImportError("Bedrock embeddings not available. Install langchain-community and boto3")
     
     else:
         # HuggingFace model için
@@ -507,7 +470,7 @@ def create_mcp_server(
             raise ValueError("Only MATCH queries are allowed for read-query")
 
         try:
-            query_obj = Query(query, timeout=float(read_timeout))
+            query_obj = Query(cast(LiteralString, query), timeout=float(read_timeout))
             results = await neo4j_driver.execute_query(
                 query_obj,
                 parameters_=params,
@@ -534,7 +497,7 @@ def create_mcp_server(
             logger.info(f"📊 Data: {minimal_results}")
             logger.info(f"{'🔷'*20}")
 
-            return ToolResult(content=[TextContent(type="text", text=minimal_results)])
+            return [ToolResult(content=[TextContent(type="text", text=minimal_results)])]
 
         except Neo4jError as e:
             logger.error(f"Neo4j Error executing read query: {e}\n{query}\n{params}")
@@ -647,7 +610,7 @@ def create_mcp_server(
 
             # Step 5: Execute Cypher query
             logger.info(f"🔍 Cypher sorgusu çalıştırılıyor...")
-            query_obj = Query(cypher_query, timeout=float(read_timeout))
+            query_obj = Query(cast(LiteralString, cypher_query), timeout=float(read_timeout))
             results = await neo4j_driver.execute_query(
                 query_obj,
                 parameters_=params_with_embedding,
@@ -675,14 +638,14 @@ def create_mcp_server(
             logger.info(f"📊 Data: {minimal_results}")
             logger.info(f"{'🟣'*20}")
 
-            return ToolResult(
+            return [ToolResult(
                 content=[
                     TextContent(
                         type="text",
                         text=f"Semantic search completed. Found {len(results)} results.\n\n{minimal_results}",
                     )
                 ]
-            )
+            )]
 
         except ImportError as e:
             error_msg = f"Embedding model import hatası: {e}. Lütfen backend modüllerinin doğru yüklendiğinden emin olun."
@@ -705,63 +668,63 @@ def create_mcp_server(
             )
             raise ToolError(f"{error_msg}\nQuery text: {query_text}\nCypher query: {cypher_query}")
 
-    @mcp.tool(
-        name=namespace_prefix + "write_neo4j_cypher",
-        annotations=ToolAnnotations(
-            title="Write Neo4j Cypher",
-            readOnlyHint=False,
-            destructiveHint=True,
-            idempotentHint=False,
-            openWorldHint=True,
-        ),
-        enabled=allow_writes,
-    )
-    async def write_neo4j_cypher(
-        query: str = Field(..., description="The Cypher query to execute."),
-        params: dict[str, Any] = Field(
-            dict(), description="The parameters to pass to the Cypher query."
-        ),
-    ) -> list[ToolResult]:
-        """Execute a write Cypher query on the neo4j database."""
+    # @mcp.tool(
+    #     name=namespace_prefix + "write_neo4j_cypher",
+    #     annotations=ToolAnnotations(
+    #         title="Write Neo4j Cypher",
+    #         readOnlyHint=False,
+    #         destructiveHint=True,
+    #         idempotentHint=False,
+    #         openWorldHint=True,
+    #     ),
+    #     enabled=allow_writes,
+    # )
+    # async def write_neo4j_cypher(
+    #     query: str = Field(..., description="The Cypher query to execute."),
+    #     params: dict[str, Any] = Field(
+    #         dict(), description="The parameters to pass to the Cypher query."
+    #     ),
+    # ) -> list[ToolResult]:
+    #     """Execute a write Cypher query on the neo4j database."""
         
-        # 📊 Tool Call Logging
-        logger.info(f"")
-        logger.info(f"{'🔴'*20}")
-        logger.info(f"✏️ CYPHER WRITE QUERY")
-        logger.info(f"{'🔴'*20}")
-        logger.info(f"📝 {query}")
-        logger.info(f"📦 Params: {params}")
-        logger.info(f"{'🔴'*20}")
+    #     # 📊 Tool Call Logging
+    #     logger.info(f"")
+    #     logger.info(f"{'🔴'*20}")
+    #     logger.info(f"✏️ CYPHER WRITE QUERY")
+    #     logger.info(f"{'🔴'*20}")
+    #     logger.info(f"📝 {query}")
+    #     logger.info(f"📦 Params: {params}")
+    #     logger.info(f"{'🔴'*20}")
 
-        if not _is_write_query(query):
-            raise ValueError("Only write queries are allowed for write-query")
+    #     if not _is_write_query(query):
+    #         raise ValueError("Only write queries are allowed for write-query")
 
-        try:
-            _, summary, _ = await neo4j_driver.execute_query(
-                query,
-                parameters_=params,
-                routing_control=RoutingControl.WRITE,
-                database_=database,
-            )
+    #     try:
+    #         _, summary, _ = await neo4j_driver.execute_query(
+    #             query,
+    #             parameters_=params,
+    #             routing_control=RoutingControl.WRITE,
+    #             database_=database,
+    #         )
 
-            counters_json_str = json.dumps(summary.counters.__dict__, default=str)
+    #         counters_json_str = json.dumps(summary.counters.__dict__, default=str)
 
-            # 📊 Result Logging
-            logger.info(f"✅ RESULT: Write completed")
-            logger.info(f"📊 Counters: {counters_json_str}")
-            logger.info(f"{'🔴'*20}")
+    #         # 📊 Result Logging
+    #         logger.info(f"✅ RESULT: Write completed")
+    #         logger.info(f"📊 Counters: {counters_json_str}")
+    #         logger.info(f"{'🔴'*20}")
 
-            return ToolResult(
-                content=[TextContent(type="text", text=counters_json_str)]
-            )
+    #         return ToolResult(
+    #             content=[TextContent(type="text", text=counters_json_str)]
+    #         )
 
-        except Neo4jError as e:
-            logger.error(f"Neo4j Error executing write query: {e}\n{query}\n{params}")
-            raise ToolError(f"Neo4j Error: {e}\n{query}\n{params}")
+    #     except Neo4jError as e:
+    #         logger.error(f"Neo4j Error executing write query: {e}\n{query}\n{params}")
+    #         raise ToolError(f"Neo4j Error: {e}\n{query}\n{params}")
 
-        except Exception as e:
-            logger.error(f"Error executing write query: {e}\n{query}\n{params}")
-            raise ToolError(f"Error: {e}\n{query}\n{params}")
+    #     except Exception as e:
+    #         logger.error(f"Error executing write query: {e}\n{query}\n{params}")
+    #         raise ToolError(f"Error: {e}\n{query}\n{params}")
 
     return mcp
 
@@ -844,4 +807,23 @@ async def main(
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    
+    # Environment variables'dan al
+    db_url = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    username = os.getenv("NEO4J_USERNAME", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "password")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    host = os.getenv("MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("MCP_PORT", "8000"))
+    
+    asyncio.run(main(
+        db_url=db_url,
+        username=username,
+        password=password,
+        database=database,
+        transport=transport,  # type: ignore
+        host=host,
+        port=port,
+    ))

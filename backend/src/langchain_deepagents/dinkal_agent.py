@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import urllib.parse
-from typing import AsyncGenerator, Dict, Any, Optional, List, Set
+from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING
 from datetime import datetime
 
 # Global Schema Cache import
@@ -30,17 +30,27 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Redis Semantic Cache import
-try:
+if TYPE_CHECKING:
     from src.shared.redis_cache import setup_semantic_cache, is_cache_available, get_cache_stats
+
+try:
+    from src.shared.redis_cache import setup_semantic_cache, is_cache_available, get_cache_stats  # type: ignore
     REDIS_CACHE_IMPORTED = True
 except ImportError as e:
     logging.warning(f"⚠️ Redis cache module not available: {e}")
     REDIS_CACHE_IMPORTED = False
+    setup_semantic_cache = None  # type: ignore
+    is_cache_available = None  # type: ignore
+    get_cache_stats = None  # type: ignore
 
 # Deep Agent imports
-try:
+if TYPE_CHECKING:
     from deepagents import create_deep_agent
     from langchain.chat_models import init_chat_model
+
+try:
+    from deepagents import create_deep_agent  # type: ignore
+    from langchain.chat_models import init_chat_model  # type: ignore
     from langchain_core.messages import HumanMessage, AIMessage
     from langchain_community.callbacks import get_openai_callback
     
@@ -49,15 +59,21 @@ try:
 except ImportError as e:
     logging.warning(f"⚠️ LangGraph Deep Agent not available: {e}")
     DEEP_AGENT_AVAILABLE = False
+    create_deep_agent = None  # type: ignore
+    init_chat_model = None  # type: ignore
 
 # MCP Adapters import
-try:
+if TYPE_CHECKING:
     from langchain_mcp_adapters.client import MultiServerMCPClient
+
+try:
+    from langchain_mcp_adapters.client import MultiServerMCPClient  # type: ignore
     MCP_ADAPTERS_AVAILABLE = True
     logging.info("✅ LangChain MCP Adapters successfully imported")
 except ImportError as e:
     logging.warning(f"⚠️ LangChain MCP Adapters not available: {e}")
     MCP_ADAPTERS_AVAILABLE = False
+    MultiServerMCPClient = None  # type: ignore
 
 
 # ============================================================================
@@ -597,6 +613,9 @@ class DeepAgentIntegration:
             return global_tools
         
         # Global cache yoksa veya reset edildiyse yeni oluştur
+        if not MCP_ADAPTERS_AVAILABLE or MultiServerMCPClient is None:
+            raise ImportError("LangChain MCP Adapters not available. Install langchain-mcp-adapters")
+        
         try:
             logging.info("🔄 DeepAgent: MCP client oluşturuluyor (reconnect)...")
             mcp_config = get_mcp_server_config()
@@ -656,6 +675,8 @@ class DeepAgentIntegration:
             # GPT-5 / GPT-5.1 reasoning modelleri için özel handling
             if "gpt-5" in model_name.lower():
                 from langchain_openai import ChatOpenAI
+                from pydantic import SecretStr
+                
                 api_key = os.environ.get("OPENAI_API_KEY")
                 
                 # gpt-5.1 için reasoning tamamen kapatılabilir, gpt-5 için minimal
@@ -666,15 +687,23 @@ class DeepAgentIntegration:
                 
                 logging.info(f"🧠 {model_name} reasoning: effort={reasoning_effort}")
                 
-                model = ChatOpenAI(
-                    api_key=api_key,
-                    model=model_name,
-                    reasoning={"effort": reasoning_effort}
-                )
+                # ChatOpenAI will read from environment if api_key is None
+                model_kwargs = {
+                    "model": model_name,
+                    "reasoning": {"effort": reasoning_effort}
+                }
+                if api_key:
+                    model_kwargs["api_key"] = SecretStr(api_key)
+                
+                model = ChatOpenAI(**model_kwargs)
             else:
+                if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
+                    raise ImportError("LangGraph Deep Agent not available. Install deepagents")
                 model = init_chat_model(model_name)
         except Exception as e:
             logging.warning(f"⚠️ Model {self.model} yüklenemedi, fallback: {e}")
+            if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
+                raise ImportError("LangGraph Deep Agent not available. Install deepagents")
             model = init_chat_model("openai:gpt-4o")
 
         # 📋 System Prompt Logging
@@ -684,6 +713,9 @@ class DeepAgentIntegration:
         logging.info(f"{'='*60}")
         
         # Deep Agent oluştur
+        if not DEEP_AGENT_AVAILABLE or create_deep_agent is None:
+            raise ImportError("LangGraph Deep Agent not available. Install deepagents")
+        
         agent = create_deep_agent(
             tools=tools,
             model=model,
@@ -693,11 +725,11 @@ class DeepAgentIntegration:
         return agent
 
     async def stream_query_response(
-        self, question: str, session_id: str = None, **kwargs
+        self, question: str, session_id: str = "", **kwargs
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Deep Agent kullanarak streaming cevap üret - MCP tools ile"""
         import time
-        
+
         # Session bazlı page_links - her request için ayrı set (concurrent safety)
         session_page_links: Set[str] = set()
         
@@ -942,8 +974,11 @@ class DeepAgentIntegration:
             logging.info(f"   🔧 Tool Calls:      {tool_calls}")
             
             # 🔴 Redis Cache Stats
-            if REDIS_CACHE_IMPORTED and is_cache_available():
-                cache_stats = get_cache_stats()
+            if REDIS_CACHE_IMPORTED and is_cache_available is not None and is_cache_available():
+                if get_cache_stats is not None:
+                    cache_stats = get_cache_stats()
+                else:
+                    cache_stats = {}
                 logging.info(f"")
                 logging.info(f"🔴 REDIS CACHE:")
                 logging.info(f"   📦 Cached Queries:  {cache_stats.get('cached_queries', 0)}")
@@ -1115,7 +1150,7 @@ def get_session_agent_stats() -> Dict[str, Any]:
 async def stream_deep_agent_response(
     question: str,
     model: str = "gpt-5.1",
-    session_id: str = None,
+    session_id: str = "",
     graph=None,
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:

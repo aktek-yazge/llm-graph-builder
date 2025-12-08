@@ -1,0 +1,25 @@
+{
+  "folders": [
+    {
+      "name": "Root",
+      "path": "."
+    },
+    {
+      "name": "Backend",
+      "path": "backend"
+    },
+    {
+      "name": "MCP Neo4j Cypher",
+      "path": "backend/mcp-servers/mcp-neo4j-cypher"
+    }
+  ],
+  "settings": {
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.useLibraryCodeForTypes": true,
+    "cursorpyright.analysis.autoImportCompletions": true,
+    "cursorpyright.analysis.typeCheckingMode": "basic",
+    "cursorpyright.analysis.useLibraryCodeForTypes": true
+  }
+}

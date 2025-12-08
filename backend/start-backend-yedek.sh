@@ -26,56 +26,46 @@ fi
 cd "$SCRIPT_DIR"
 
 # ==============================
-# MCP Server (Neo4j Cypher)
+# MCP Server (Docker Container)
 # ==============================
 MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
 MCP_PORT="${MCP_HTTP_PORT:-8002}"
+MCP_CONTAINER_NAME="mcp-neo4j-cypher"
 
-# Neo4j connection (from .env or defaults)
-NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
-NEO4J_USERNAME="${NEO4J_USERNAME:-neo4j}"
-NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
-NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
-
-echo "🔌 Starting MCP Server (Neo4j Cypher)..."
+echo "🐳 Checking MCP Server (Docker)..."
 echo "   📡 MCP Server: http://${MCP_HOST}:${MCP_PORT}/mcp/"
 
-# Start MCP server in background (logs to same terminal as backend)
-cd "$SCRIPT_DIR/mcp-servers/mcp-neo4j-cypher/src"
-uv run python -m mcp_neo4j_cypher \
-    --transport http \
-    --server-host "$MCP_HOST" \
-    --server-port "$MCP_PORT" \
-    --db-url "$NEO4J_URI" \
-    --username "$NEO4J_USERNAME" \
-    --password "$NEO4J_PASSWORD" \
-    --database "$NEO4J_DATABASE" 2>&1 &
-
-MCP_PID=$!
-echo "   ✅ MCP Server started (PID: $MCP_PID)"
-
-# Wait for MCP server to be ready
-echo "   ⏳ Waiting for MCP server to be ready..."
-sleep 3
-
-# Back to backend directory
-cd "$SCRIPT_DIR"
-
-# Cleanup function - kill MCP server when script exits
-cleanup() {
-    echo ""
-    echo "🛑 Shutting down..."
-    if [ -n "$MCP_PID" ] && kill -0 "$MCP_PID" 2>/dev/null; then
-        echo "   Stopping MCP Server (PID: $MCP_PID)..."
-        kill "$MCP_PID" 2>/dev/null
-        wait "$MCP_PID" 2>/dev/null
-        echo "   ✅ MCP Server stopped"
+# Check if Docker container is running
+if docker ps --format '{{.Names}}' | grep -q "^${MCP_CONTAINER_NAME}$"; then
+    echo "   ✅ MCP Server container is already running"
+else
+    echo "   ⚠️  MCP Server container is not running"
+    echo "   🚀 Starting MCP Server container..."
+    
+    # Export Neo4j variables for docker-compose
+    export NEO4J_URI="${NEO4J_URI:-bolt://host.docker.internal:7687}"
+    export NEO4J_USERNAME="${NEO4J_USERNAME:-neo4j}"
+    export NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
+    export NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
+    
+    # Start the Docker container
+    cd "$SCRIPT_DIR/mcp-servers/mcp-neo4j-cypher"
+    docker compose up -d --build
+    
+    # Wait for container to be ready
+    echo "   ⏳ Waiting for MCP server to be ready..."
+    sleep 5
+    
+    # Verify container started
+    if docker ps --format '{{.Names}}' | grep -q "^${MCP_CONTAINER_NAME}$"; then
+        echo "   ✅ MCP Server container started successfully"
+    else
+        echo "   ❌ Failed to start MCP Server container"
+        echo "   💡 Check logs with: docker logs ${MCP_CONTAINER_NAME}"
     fi
-    exit 0
-}
-
-# Trap SIGINT (Ctrl+C) and SIGTERM
-trap cleanup SIGINT SIGTERM
+    
+    cd "$SCRIPT_DIR"
+fi
 
 echo ""
 echo "🚀 Starting Backend API Server..."
@@ -95,14 +85,5 @@ echo ""
 # For development with hot-reload, comment out --workers line and uncomment --reload line
 uv run uvicorn score:app --host 0.0.0.0 --port 8000 --workers ${WORKERS} --log-level info
 
-# Wait for cleanup
-cleanup
-
 # Development mode with hot-reload (single worker):
 # uv run uvicorn score:app --host 0.0.0.0 --port 8000 --reload --log-level debug
-
-
-
-
-
-

@@ -27,7 +27,8 @@
   },
   "python.analysis.extraPaths": [
     "${workspaceFolder}/backend/src",
-    "${workspaceFolder}/celery_worker/src"
+    "${workspaceFolder}/celery_worker/src",
+    "${workspaceFolder}/backend/mcp-servers/mcp-neo4j-cypher/src"
   ],
   "python.analysis.autoImportCompletions": true,
   "python.analysis.typeCheckingMode": "basic",
@@ -47,5 +48,15 @@
       "username": "postgres",
       "database": "llm_graph_builder"
     }
-  ]
+  ],
+  "cursorpyright.analysis.autoImportCompletions": true,
+  "cursorpyright.analysis.diagnosticMode": "workspace",
+  "cursorpyright.analysis.extraPaths": [
+    "${workspaceFolder}/backend/src",
+    "${workspaceFolder}/celery_worker/src",
+    "${workspaceFolder}/backend/mcp-servers/mcp-neo4j-cypher/src"
+  ],
+  "cursorpyright.analysis.stubPath": "${workspaceFolder}/typings",
+  "cursorpyright.analysis.typeCheckingMode": "basic",
+  "cursorpyright.analysis.useLibraryCodeForTypes": true
 }

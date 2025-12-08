@@ -40,7 +40,7 @@ from src.main import (
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
-from src.workflow.deep_agent_integration import stream_deep_agent_response, DEEP_AGENT_AVAILABLE
+from src.langchain_deepagents import stream_deep_agent_response, DEEP_AGENT_AVAILABLE
 from src.qa_based_entity_extractor import (
     QABasedEntityExtractor,
     create_domain_specific_questions,
@@ -873,7 +873,7 @@ async def lifespan(app: FastAPI):
 
     # 🚀 SERVER STARTUP: MCP Serverları önceden başlat
     try:
-        from src.workflow.deep_agent_integration import (
+        from src.langchain_deepagents.dinkal_agent import (
             MCP_ADAPTERS_AVAILABLE,
             get_mcp_server_config,
             set_global_mcp_tools,
@@ -2799,7 +2799,7 @@ async def test_deep_agent(
 ):
     """LangGraph Deep Agent'i test etmek için basit endpoint"""
     try:
-        from src.workflow.deep_agent_integration import (
+        from src.langchain_deepagents import (
             stream_deep_agent_response,
             DEEP_AGENT_AVAILABLE,
         )
@@ -3322,7 +3322,7 @@ async def clear_chat_bot(
 
             # DeepAgent session yönetimi
             try:
-                from src.workflow.deep_agent_integration import (
+                from src.langchain_deepagents import (
                     clear_session_agent,
                     get_or_create_session_agent,
                 )

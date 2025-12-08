@@ -8,5 +8,11 @@
   "python.analysis.autoImportCompletions": true,
   "python.analysis.typeCheckingMode": "basic",
   "python.analysis.useLibraryCodeForTypes": true,
-  "python.terminal.activateEnvironment": true
+  "python.terminal.activateEnvironment": true,
+  "cursorpyright.analysis.autoImportCompletions": true,
+  "cursorpyright.analysis.extraPaths": [
+    "${workspaceFolder}/backend/src"
+  ],
+  "cursorpyright.analysis.typeCheckingMode": "basic",
+  "cursorpyright.analysis.useLibraryCodeForTypes": true
 }
