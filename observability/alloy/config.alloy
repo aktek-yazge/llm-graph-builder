@@ -1,0 +1,305 @@
+// =============================================================================
+// Grafana Alloy Configuration
+// =============================================================================
+// Birleşik telemetry collector: Logs + Traces + Metrics
+// Based on: https://github.com/grafana/alloy
+//
+// Flow-based configuration (River syntax)
+// Docs: https://grafana.com/docs/alloy/latest/
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// LOGGING CONFIGURATION
+// -----------------------------------------------------------------------------
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// =============================================================================
+// OTLP PIPELINE - Application Telemetry
+// =============================================================================
+// Resmi örnek: https://github.com/grafana/alloy/blob/main/example-config.alloy
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [
+      otelcol.connector.servicegraph.default.input,
+      otelcol.connector.spanmetrics.default.input,
+      otelcol.processor.batch.default.input,
+    ]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// TRACE CONNECTORS - Generate metrics from traces
+// -----------------------------------------------------------------------------
+
+// Service Graph: Generates service dependency metrics
+otelcol.connector.servicegraph "default" {
+  dimensions = ["http.method", "http.status_code", "http.route"]
+  
+  latency_histogram_buckets = ["100ms", "250ms", "500ms", "1s", "2s", "5s", "10s"]
+  
+  store {
+    ttl       = "2s"
+    max_items = 1000
+  }
+  
+  output {
+    metrics = [otelcol.exporter.prometheus.default.input]
+  }
+}
+
+// Span Metrics: Generates RED metrics (Rate, Error, Duration)
+otelcol.connector.spanmetrics "default" {
+  histogram {
+    explicit {
+      buckets = ["5ms", "10ms", "25ms", "50ms", "100ms", "250ms", "500ms", "1s", "2s", "5s", "10s"]
+    }
+  }
+  
+  dimension {
+    name = "http.method"
+  }
+  dimension {
+    name = "http.status_code"
+  }
+  dimension {
+    name = "http.route"
+  }
+  dimension {
+    name = "service.name"
+  }
+  
+  namespace = "traces"
+  
+  output {
+    metrics = [otelcol.exporter.prometheus.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.prometheus.default.input]
+    logs    = [otelcol.exporter.loki.default.input]
+    traces  = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// EXPORTERS
+// -----------------------------------------------------------------------------
+
+// Traces -> Tempo (OTLP)
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Logs -> Loki
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+// Metrics -> Prometheus (internal scrape endpoint)
+otelcol.exporter.prometheus "default" {
+  forward_to = [prometheus.relabel.default.receiver]
+}
+
+// Relabel before exposing (no external Prometheus needed)
+prometheus.relabel "default" {
+  forward_to = []  // Metrics exposed at /metrics endpoint
+  
+  rule {
+    target_label = "service"
+    replacement  = "llm-graph-builder"
+  }
+}
+
+// Scrape Tempo metrics (includes metrics-generator output)
+prometheus.scrape "tempo" {
+  targets = [
+    { "__address__" = "tempo:3200" },
+  ]
+  metrics_path = "/metrics"
+  forward_to   = [prometheus.relabel.default.receiver]
+  scrape_interval = "15s"
+}
+
+// =============================================================================
+// LOKI PIPELINE - Log Storage
+// =============================================================================
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// =============================================================================
+// FILE LOG COLLECTION - Backend Logs
+// =============================================================================
+
+local.file_match "backend_logs" {
+  path_targets = [
+    {
+      __path__     = "/var/log/backend/*.jsonl",
+      job          = "backend",
+      service_name = "llm-graph-builder",
+    },
+    {
+      __path__     = "/var/log/backend/*.log",
+      job          = "backend-plain",
+      service_name = "llm-graph-builder",
+    },
+    {
+      __path__     = "/var/log/backend/**/*.jsonl",
+      job          = "backend-nested",
+      service_name = "llm-graph-builder",
+    },
+  ]
+}
+
+loki.source.file "backend_logs" {
+  targets    = local.file_match.backend_logs.targets
+  forward_to = [loki.process.json_logs.receiver]
+}
+
+// JSON log processing pipeline
+loki.process "json_logs" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = {
+      level       = "level",
+      message     = "message",
+      component   = "component",
+      operation   = "operation",
+      timestamp   = "timestamp",
+      logger_name = "logger_name",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level     = "",
+      component = "",
+      operation = "",
+    }
+  }
+
+  stage.timestamp {
+    source = "timestamp"
+    format = "RFC3339Nano"
+  }
+
+  stage.output {
+    source = "message"
+  }
+
+  stage.static_labels {
+    values = {
+      source = "file",
+    }
+  }
+}
+
+// =============================================================================
+// DOCKER CONTAINER LOG COLLECTION
+// =============================================================================
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  
+  filter {
+    name   = "label"
+    values = ["logging=alloy"]
+  }
+}
+
+discovery.relabel "docker" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_image"]
+    target_label  = "image"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker.output
+  forward_to = [loki.process.docker_logs.receiver]
+  
+  relabel_rules = discovery.relabel.docker.rules
+}
+
+loki.process "docker_logs" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = {
+      log    = "log",
+      stream = "stream",
+      time   = "time",
+    }
+  }
+
+  stage.labels {
+    values = {
+      stream = "",
+    }
+  }
+
+  stage.output {
+    source = "log"
+  }
+
+  stage.static_labels {
+    values = {
+      source = "docker",
+    }
+  }
+}
+
+// =============================================================================
+// SELF MONITORING
+// =============================================================================
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.scrape "alloy_self" {
+  targets         = prometheus.exporter.self.alloy.targets
+  forward_to      = [prometheus.relabel.default.receiver]
+  scrape_interval = "15s"
+}

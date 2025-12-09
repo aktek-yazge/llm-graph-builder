@@ -57,6 +57,9 @@ dependencies = [
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-requests",  # Outgoing HTTP calls tracing
+    "opentelemetry-instrumentation-httpx",     # Async HTTP calls tracing (LangChain)
+    "opentelemetry-exporter-otlp-proto-grpc",  # OTLP gRPC exporter for Tempo
     
     # LangChain Ecosystem (minimal - only for API endpoints, not processing)
     # NOT: deepagents için langchain-core 1.x gerekiyor

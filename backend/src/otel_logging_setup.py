@@ -107,7 +107,7 @@ class JSONRotatingFileHandler(RotatingFileHandler):
                 operation = 'http_request'
             
             log_record = {
-                "timestamp": current_time.isoformat() + "Z",
+                "timestamp": current_time.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
                 "level": record.levelname,
                 "message": message,
                 "component": component,
@@ -199,7 +199,7 @@ class JSONFileHandler(logging.Handler):
                 operation = 'http_request'
             
             log_record = {
-                "timestamp": current_time.isoformat() + "Z",
+                "timestamp": current_time.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
                 "level": record.levelname,
                 "message": message,
                 "component": component,
@@ -258,6 +258,7 @@ class PrintCapture:
     def __init__(self, original_stdout):
         self.original_stdout = original_stdout
         self.logger = logging.getLogger('print_capture')
+        self._otel_captured: bool = False  # Flag to prevent double capture
         
     def write(self, text):
         # Boş satırları filtrele
@@ -380,11 +381,16 @@ def setup_print_capture():
         print("✅ Print capture başarıyla yapılandırıldı")
 
 
+# Global flag to prevent double initialization
+_otel_logging_initialized = False
+
+
 def initialize_otel_logging():
     """Ana başlatma fonksiyonu - bu fonksiyon main.py'de çağrılacak"""
+    global _otel_logging_initialized
     
     # Tekrar başlatmayı önle
-    if hasattr(initialize_otel_logging, '_initialized'):
+    if _otel_logging_initialized:
         print("⚠️ JSON logging zaten başlatılmış, tekrar başlatma atlanıyor")
         return
     
@@ -399,7 +405,7 @@ def initialize_otel_logging():
         setup_uvicorn_logging()
         
         # Başlatma bayrağını işaretle
-        initialize_otel_logging._initialized = True
+        _otel_logging_initialized = True
         
         # Test log'u gönder
         logger = logging.getLogger(__name__)

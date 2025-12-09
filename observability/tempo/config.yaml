@@ -1,0 +1,94 @@
+# =============================================================================
+# Tempo Configuration
+# =============================================================================
+# Distributed tracing backend.
+# OTLP, Jaeger, Zipkin protokollerini destekler.
+#
+# Endpoints:
+#   - OTLP gRPC: localhost:4317 (OTel Collector üzerinden)
+#   - HTTP API: localhost:3200
+# =============================================================================
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+        grpc:
+          endpoint: 0.0.0.0:14250
+    zipkin:
+      endpoint: 0.0.0.0:9411
+
+ingester:
+  trace_idle_period: 10s
+  max_block_bytes: 1_000_000
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 48h
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+    pool:
+      max_workers: 100
+      queue_depth: 10000
+
+querier:
+  frontend_worker:
+    frontend_address: ""
+
+query_frontend:
+  search:
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09
+  trace_by_id:
+    duration_slo: 5s
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      environment: development
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write: []
+  processor:
+    service_graphs:
+      dimensions:
+        - http.method
+        - http.status_code
+    span_metrics:
+      dimensions:
+        - http.method
+        - http.status_code
+        - http.route
+      enable_target_info: true
+
+overrides:
+  per_tenant_override_config: ""
+  metrics_generator_processors:
+    - service-graphs
+    - span-metrics
+    - local-blocks
+
+usage_report:
+  reporting_enabled: false
+

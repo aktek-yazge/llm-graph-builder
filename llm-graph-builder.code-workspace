@@ -15,6 +15,10 @@
     {
       "name": "MCP Neo4j Cypher",
       "path": "mcp-servers/mcp-neo4j-cypher"
+    },
+    {
+      "name": "Observability",
+      "path": "observability"
     }
   ],
   "settings": {

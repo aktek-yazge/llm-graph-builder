@@ -4,10 +4,9 @@ import sys
 import logging
 import importlib.util
 
-# OpenTelemetry configuration - Jaeger collector için
-# Jaeger OTLP endpoint: localhost:4318 (HTTP) veya localhost:4317 (gRPC)
-os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")  # Jaeger OTLP HTTP endpoint
-os.environ.setdefault("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")  # HTTP protobuf protocol
+# OpenTelemetry configuration - Alloy/Tempo için
+# Local: localhost:4317 (gRPC), Docker: alloy:4317 (gRPC)
+os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")  # gRPC endpoint
 os.environ.setdefault("OTEL_SERVICE_NAME", "llm-graph-builder")  # Service name for traces
 
 # Ensure UTF-8 encoding for Turkish characters
@@ -81,6 +80,8 @@ from src.utf8_utils import normalize_file_name
 from src.logger import CustomLogger
 from src.celery_client import celery_app, revoke_celery_task, revoke_celery_tasks, purge_all_queues, get_queue_stats
 from src.models.file_queue_models import get_file_queue_db
+from src.otel_tracing_setup import initialize_tracing, instrument_fastapi, get_tracer, add_span_attribute
+from src.otel_logging_setup import initialize_otel_logging
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -819,6 +820,20 @@ async def lifespan(app: FastAPI):
     # Startup
     optimize_for_apple_silicon()
     print_device_info()
+    
+    # 📝 JSON Logging başlat (Loki'ye log gönderir - Alloy okur)
+    try:
+        initialize_otel_logging()
+        logging.info("✅ Server Startup: JSON Logging aktif - logs/simple-logs.jsonl")
+    except Exception as log_error:
+        logging.warning(f"⚠️ Server Startup: JSON Logging başlatılamadı: {log_error}")
+    
+    # 🔍 OpenTelemetry Tracing başlat (Tempo'ya trace gönderir)
+    try:
+        initialize_tracing()
+        logging.info("✅ Server Startup: OpenTelemetry Tracing aktif")
+    except Exception as otel_error:
+        logging.warning(f"⚠️ Server Startup: OpenTelemetry Tracing başlatılamadı: {otel_error}")
 
     # V2 background processor manuel başlatmaya ayarlı (otomatik başlatma devre dışı)
     # Background processor'ı başlatmak için /api/v2/processing/start endpoint'ini kullanın
@@ -930,6 +945,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# 🔍 FastAPI Instrumentation - tüm HTTP endpoint'lerini otomatik trace et
+instrument_fastapi(app)
 
 # Uvicorn access logger'ını kapat (HTTP request logları - çok gürültülü)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
