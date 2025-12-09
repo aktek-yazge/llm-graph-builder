@@ -72,7 +72,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=llm_graph_builder
     # Increase max_connections for high concurrency workloads
-    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    command: postgres -c max_connections=500 -c shared_buffers=512MB -c idle_in_transaction_session_timeout=0 -c statement_timeout=0
     volumes:
       # Host'ta sakla - docker volume'dan daha garanti, docker system prune'dan etkilenmez
       - ~/postgres-data-prod:/var/lib/postgresql/data
@@ -201,6 +201,9 @@ services:
       - NEO4J_dbms_transaction_timeout=5m
       # Lock acquisition timeout
       - NEO4J_dbms_lock_acquisition_timeout=2m
+      # Connection pool - Bolt connector ayarları
+      - NEO4J_server_bolt_thread__pool__min__size=50
+      - NEO4J_server_bolt_thread__pool__max__size=500
       - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
       - NEO4J_apoc_export_file_enabled=true

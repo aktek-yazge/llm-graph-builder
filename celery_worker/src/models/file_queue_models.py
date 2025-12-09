@@ -206,8 +206,15 @@ class FileQueueDatabase:
             autocommit=False, autoflush=False, bind=self.engine
         )
 
-        # Create tables if they don't exist
-        Base.metadata.create_all(bind=self.engine)
+        # Create tables if they don't exist (with race condition handling)
+        try:
+            Base.metadata.create_all(bind=self.engine)
+        except Exception as e:
+            # Ignore "already exists" errors from concurrent workers
+            if "already exists" in str(e) or "UniqueViolation" in str(e):
+                logging.warning(f"⚠️ Table creation skipped (already exists): {str(e)[:100]}")
+            else:
+                raise
 
         # Migrate: Add auto_process column if it doesn't exist
         self._migrate_add_auto_process_column()
