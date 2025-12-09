@@ -67,7 +67,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
   const { connectionStatus, setConnectionStatus, onInspect, onRetry, onChunkView, setIsQueueProcessingStopped, nameFilter, setNameFilter } = props;
   const { filesData, setFilesData, model, rowSelection, setRowSelection, setSelectedRows, setProcessedCount, queue } =
     useFileContext();
-  const { userCredentials, isReadOnlyUser } = useCredentials();
+  const { userCredentials, isReadOnlyUser, watchProcessingMode } = useCredentials();
   const columnHelper = createColumnHelper<CustomFile>();
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -1113,8 +1113,13 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     reloadV2Files();
   }, [reloadV2Files]);
 
-  // V2 dosyaları için periyodik polling (her 5 saniyede bir)
+  // V2 dosyaları için periyodik polling (her 5 saniyede bir) - watchProcessingMode aktifse
   useEffect(() => {
+    // Watch mode kapalıysa polling yapma
+    if (!watchProcessingMode) {
+      return;
+    }
+
     // V2 dosyaları var mı kontrol et
     const hasV2Files = filesData.some((f) => f.fileSource === 'V2 Queue');
     if (!hasV2Files) {
@@ -1127,7 +1132,7 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [filesData, reloadV2Files]);
+  }, [filesData, reloadV2Files, watchProcessingMode]);
 
   // Filtre veya sayfa değiştiğinde, görünen dosyaların detaylarını yükle
   const loadMissingDetails = useCallback(async () => {

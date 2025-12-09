@@ -9,6 +9,8 @@ import {
   TrashIconOutline,
   ArrowLeftIconOutline,
   ArrowDownTrayIconOutline,
+  EyeIconOutline,
+  EyeSlashIconOutline,
 } from '@neo4j-ndl/react/icons';
 import { Button, SpotlightTarget, TextLink, Typography, useSpotlightContext } from '@neo4j-ndl/react';
 import { memo, useCallback, useContext, useEffect, useRef, useState, useMemo } from 'react';
@@ -35,7 +37,7 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
   const downloadLinkRef = useRef<HTMLAnchorElement>(null);
   const { loginWithRedirect } = useAuth0();
   const firstTourTarget = useRef<HTMLDivElement>(null);
-  const { connectionStatus } = useCredentials();
+  const { connectionStatus, watchProcessingMode, setWatchProcessingMode } = useCredentials();
   const chatAnchor = useRef<HTMLDivElement>(null);
   const { pathname } = useLocation();
   const [showChatModeOption, setShowChatModeOption] = useState<boolean>(false);
@@ -116,6 +118,24 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
                   >
                     <CodeBracketSquareIconOutline />
                   </IconButtonWithToolTip> */}
+                  <IconButtonWithToolTip
+                    label={watchProcessingMode ? 'Watch Mode: ON' : 'Watch Mode: OFF'}
+                    text={watchProcessingMode ? 'Auto-refresh aktif (5sn)' : 'Auto-refresh kapalı'}
+                    clean
+                    size='large'
+                    onClick={() => setWatchProcessingMode(!watchProcessingMode)}
+                    placement='left'
+                  >
+                    {watchProcessingMode ? (
+                      <span role='img' aria-label='watching' style={{ color: 'var(--theme-palette-success-bg-strong)' }}>
+                        <EyeIconOutline className='n-size-token-7' />
+                      </span>
+                    ) : (
+                      <span role='img' aria-label='not-watching'>
+                        <EyeSlashIconOutline className='n-size-token-7' />
+                      </span>
+                    )}
+                  </IconButtonWithToolTip>
                   <IconButtonWithToolTip
                     label={tooltips.theme}
                     text={tooltips.theme}

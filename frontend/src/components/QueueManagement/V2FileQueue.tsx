@@ -32,7 +32,7 @@ const V2FileQueue: React.FC = () => {
   const [selectedFileIds, setSelectedFileIds] = useState<Set<number>>(new Set());
   const [currentPage, setCurrentPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
-  const { userCredentials } = useCredentials();
+  const { userCredentials, watchProcessingMode } = useCredentials();
 
   // Fetch V2 files with pagination
   const fetchV2Files = useCallback(async () => {
@@ -56,10 +56,16 @@ const V2FileQueue: React.FC = () => {
   useEffect(() => {
     console.log(`🔄 Page changed to ${currentPage}, fetching new data...`);
     fetchV2Files();
+    
+    // Watch mode kapalıysa polling yapma
+    if (!watchProcessingMode) {
+      return;
+    }
+    
     // Poll every 5 seconds for status updates
     const interval = setInterval(fetchV2Files, 5000);
     return () => clearInterval(interval);
-  }, [fetchV2Files]);
+  }, [fetchV2Files, watchProcessingMode]);
 
   // Calculate pagination - files from detail range have full data
   const totalPages = Math.ceil(totalCount / PAGE_SIZE);
