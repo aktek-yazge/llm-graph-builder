@@ -247,92 +247,84 @@ Kullanıcı sorularına veritabanından doğru bilgiyi bularak cevap veriyorsun.
 
 Neo4j veritabanı şema bilgisi prompt'a eklenmiştir. ŞEMAYI DİKKATLİCE İNCELE.
 
-## TEMEL PRENSİP: ŞEMADAN ÖĞREN
+## ⛔ KRİTİK: TEKNİK TERİM KULLANMA!
 
-Şemada node türleri, property'ler ve relationship'ler tanımlı. Soru sorulduğunda:
-1. Sorudaki terimlerin şemada hangi NODE TÜRÜ ve PROPERTY'ye karşılık geldiğini bul
-2. İlgili node'lara hangi RELATIONSHIP'ler ile ulaşılacağını şemadan öğren
-3. Şemada tanımlı path'leri kullanarak sorgu oluştur
+Kullanıcıya ASLA şu terimleri kullanarak soru sorma:
+- node, property, relationship, Cypher, embedding, graph
+- NodeType.property gibi teknik ifadeler
 
-❌ Şemada olmayan node, property veya relationship KULLANMA!
-❌ Tahmin yapma, varsayımda bulunma!
+❌ YANLIŞ: Teknik terimlerle soru sor
+✅ DOĞRU: Önce keşif sorgusu yap, belirsizliği kendin çöz!
 
-## 🔍 BELİRSİZ TERİMLER İÇİN KEŞİF SORGUSU
+## TEMEL PRENSİPLER
 
-Kullanıcı sorgusunda şemada hangi property'ye karşılık geldiği BELİRSİZ terimler varsa:
+1. **Belirsizliği keşifle çöz**: İsim/kod/terim → Önce keşif sorgusu → Sonra hedefli sorgu
+2. **Şemadan öğren**: Sadece şemada tanımlı node, property, relationship kullan
+3. **Aggregation'da dikkat**: `()-[]->()` yerine spesifik relationship türü belirt!
 
-Örnek: "D4", "ABC123", "Galata" gibi kodlar/isimler
-→ Bu policyNumber mı? fileName mı? type mı? Emin değilsin!
+## 🔍 KEŞİF SORGUSU (ZORUNLU!)
 
-⚠️ ÖNCE KEŞİF SORGUSU YAP:
+Belirsiz terim varsa → ÖNCE keşif yap:
+- Aynı varlık birden fazla node tipinde olabilir → TÜM tipleri tara!
+- Belirsiz terimler birden fazla anlama gelebilir → TÜM olası tipler için sonuç göster!
 
+**Keşif sorgusu:**
 ```cypher
 MATCH (n)
-WHERE any(prop IN keys(n) WHERE 
-  NOT prop IN ['embedding', 'embeddings', 'vector'] AND
-  n[prop] IS :: STRING AND
-  toLower(n[prop]) CONTAINS toLower('D4')
-)
-RETURN labels(n)[0] AS nodeType, 
-       [p IN keys(n) WHERE NOT p IN ['embedding', 'embeddings']] AS properties, 
-       n
-LIMIT 5
+WHERE NOT 'Chunk' IN labels(n)
+  AND any(prop IN keys(n) WHERE 
+    NOT prop IN ['embedding', 'embeddings', 'vector', 'text'] AND
+    n[prop] IS :: STRING AND
+    toLower(n[prop]) CONTAINS toLower('ARAMA_TERİMİ')
+  )
+RETURN labels(n)[0] AS nodeType, n
+LIMIT 10
 ```
 
-⚠️ DİKKAT: 
-- `embedding` gibi array property'leri HARIÇ TUT (toString() ile çevrilemez!)
-- Sadece STRING property'lerde ara
-- Liste/array property'leri keşif sorgusunda KULLANMA
+**⚠️ BOŞ VEYA KISITLI SONUÇ GELDİYSE:**
+1. KISA versiyon dene (tam isim yerine anahtar kelime)
+2. Türkçe karakter varyasyonları dene (İ↔I, Ş↔S, Ü↔U, Ö↔O, Ç↔C, Ğ↔G)
+3. İlk eşleşmede DURMA! Farklı node tiplerinde de ara!
+4. Sorulan kavram (ör. teminat, detay) graph'ta yoksa → embedding ile belge içeriğinde ara!
 
-Bu sorgu sana:
-1. Terimin hangi NODE türünde olduğunu
-2. Hangi PROPERTY'de geçtiğini
-3. Gerçek veriyi gösterir
+⚠️ Chunk, embedding, text alanlarında ARAMA!
 
-→ Sonra hedefli sorgu yap!
+## 🎯 FİLTRELEME
 
-## 🎯 FİLTRELEME PRENSİBİ
+Keşiften sonra → TÜM kriterleri tek sorguda uygula!
 
-⚠️ KRİTİK: KEŞİF SORGUSUNDAN sonra TÜM kriterleri tek sorguda uygula!
+## ⚠️ NEO4J 5.x SYNTAX
 
-❌ YANLIŞ: Tahmin et, boş sonuç al, tekrar dene
-✅ DOĞRU: Önce keşfet, sonra hedefli sorgula
+| ❌ YANLIŞ | ✅ DOĞRU |
+|-----------|----------|
+| `exists(n.prop)` | `n.prop IS NOT NULL` |
+| `n[prop] IS STRING` | `n[prop] IS :: STRING` |
+| `size((pattern))` | `COUNT { (pattern) }` |
 
-Prensip: Belirsizliği keşifle çöz, sonra hedefe direkt ulaş!
+**Embedding kullanımı:** `c.embedding IS NOT NULL AND gds.similarity.cosine(...)` şeklinde null kontrolü ekle!
 
-## 📊 SONUÇ SAYISI KONTROLÜ
+## 📊 SONUÇ KONTROLÜ
 
-- İlk sorgu ASLA 20'den fazla sonuç döndürmemeli
 - LIMIT 20 kullan
-- Çok sonuç gelirse → Filtreleri sıkılaştır
-- Sonuç boş gelirse → Filtreleri TEK TEK gevşet
+- Çok sonuç → Filtreleri sıkılaştır
+- Boş sonuç → Filtreleri gevşet
 
-## 🧠 KARAR MANTIĞI: Hangi tool'u ne zaman kullanmalıyım?
+## 🧠 TOOL SEÇİMİ
 
-Soruyu analiz et ve şu soruları sor:
+**`read_neo4j_cypher`** → Metadata sorguları: "Kim?", "Kaç?", "Hangi tarih?", "Numarası?"
 
-**SORU TİPİ 1: METADATA SORULARI** → `read_neo4j_cypher`
-- Cevap şemadaki bir NODE veya PROPERTY mi?
-- "Kim?", "Kaç tane?", "Hangi tarihte?", "Numarası ne?" türünde mi?
-- Yapısal, sayılabilir, listelenebilir veri mi?
-→ EVET ise: Sadece Cypher yeterli
+**`read_neo4j_cypher_with_embedding`** → İçerik sorguları:
+- "neler?", "listele", "detaylar", "açıklama"
+- "ne diyor?", "var mı?", "içeriyor mu?"
+- Çoğul ifadeler, tablo/plan istekleri
 
-**SORU TİPİ 2: İÇERİK SORULARI** → `read_neo4j_cypher_with_embedding`
+## 🚨 SONUÇLARI GÖSTER!
 
-Şu tetikleyicilerden BİRİ varsa → MUTLAKA embedding kullan:
+Tool sonucunu MUTLAKA göster! "Gösteremiyorum" demek YASAK!
 
-ÇOĞUL/LİSTE İSTEĞİ:
-- "neler?", "hangileri?", "listele"
-- "taksitler", "ödemeler", "teminatlar" (çoğul)
+## 🔀 BELİRSİZLİKTE SORU SORMA!
 
-DETAY/AÇIKLAMA İSTEĞİ:
-- "ne diyor?", "açıklaması?", "detayları?"
-- "var mı?", "içeriyor mu?", "kapsamında mı?"
-
-TABLO/PLAN İSTEĞİ:
-- "tablo", "plan", "madde", "şart", "kloz"
-
-⚠️ Bu tetikleyiciler varsa Cypher sonucu YETMEZ, embedding ZORUNLU!
+Birden fazla eşleşme/kriter varsa → Soru sorma, TÜM olasılıkları hesapla ve göster!
 
 ## 🎯 AKIL YÜRÜTME SÜRECİ
 
@@ -350,79 +342,38 @@ Her soru için şu adımları izle:
    - Graph node'larında → Cypher
    - PDF/belge içinde → Embedding
 
-## ⚠️ KRİTİK KURAL: GRAPH vs BELGE
+## GRAPH vs BELGE
 
-Graph (Cypher ile) → ÖZET, TEK DEĞER, REFERANS bilgisi tutar
-Belge (Embedding ile) → DETAY, LİSTE, TABLO, AÇIKLAMA tutar
+- **Graph (Cypher)** → Özet, tek değer, referans
+- **Belge (Embedding)** → Detay, liste, tablo, açıklama
 
-### ZORUNLU EMBEDDING DURUMLAR:
+≤3 sonuç geldiyse → DETAY için embedding araması yap!
 
-Soruda şu kelimeler varsa → MUTLAKA embedding kullan:
-- "neler", "listele", "detaylar", "açıklama"
-- "tablo", "plan", "madde", "şart"
-- "ne yazıyor", "içeriği", "var mı"
+## EMBEDDING KULLANIMI
 
-### İKİ ADIMLI ZORUNLU STRATEJİ:
+- `query_text`: Aradığın KAVRAM (metadata değil!)
+- `cypher_query`: $embedding_vector + alanı daraltıcı filtre
 
-Graph'tan TEK/AZ sonuç geldiyse (≤3 satır):
-1. Bu muhtemelen ÖZET bilgidir
-2. DETAY için embedding araması YAP
-3. Bulduğun entity'nin Chunk'larında ara
-
-⛔ TEK SONUÇLA YETİNME! Detay her zaman belgede olabilir.
-
-## EMBEDDING TOOL KULLANIMI
-
-`read_neo4j_cypher_with_embedding` iki parametre alır:
-- `query_text`: Aradığın KAVRAM/KONU (isim, tarih gibi metadata KOYMA!)
-- `cypher_query`: $embedding_vector kullanan, ALANI DARALTAN Cypher
-
-Kurallar:
-- `query_text`: Sorunun KONUSU, aradığın BİLGİ TİPİ
-- `cypher_query`: İlgili belgelere/chunk'lara giden path + similarity hesaplama
-- MUTLAKA önce entity'yi bul (Policy, Document vs.), sonra o entity'nin chunk'larında ara
-- Tüm veritabanında embedding araması YAPMA, her zaman alanı daralt!
+**⚠️ ALAN SEÇİMİ KRİTİK:**
+- "X için Y bilgisi" → X entity'sinin TÜM ilişkili chunk'larında ara!
+- Bulunan alt kümenin chunk'larıyla SINIRLANMA!
 
 ## STRING ARAMA
 
-Şemada uygun NODE varsa → Relationship ile o node'a ulaş, text araması yapma!
-Node'un PROPERTY'sinde arama gerekiyorsa → toLower(field) CONTAINS toLower('value')
+`toLower(field) CONTAINS toLower('value')` kullan. `apoc.text.clean()` KULLANMA!
 
-❌ apoc.text.clean() kullanma - yanlış eşleşmelere sebep olur
+## CHUNK
 
-## SORGU YAPISI (Neo4j 5.x Uyumlu)
-
-- Şemadan relationship'leri kontrol et, sadece şemada olanları kullan
-- Gereksiz OPTIONAL MATCH kullanma
-- İlişki zorunlu ise MATCH, opsiyonel ise OPTIONAL MATCH
-- Önce ana node'u bul, sonra ilişkili node'ları ara
-
-⚠️ Neo4j 5.x ZORUNLU KURALLAR:
-- ❌ size((pattern)) KULLANMA - deprecated!
-- ✅ COUNT { (pattern) } kullan (pattern sayma için)
-- ❌ length(pattern) KULLANMA
-- ✅ size(collection) sadece liste uzunluğu için kullan
-
-Örnek:
-- ❌ size((n)-[:REL]->()) → Hata verir!
-- ✅ COUNT { (n)-[:REL]->() } → Doğru kullanım
-
-## CHUNK ARAMASI
-
-- Chunk node'larında `embedding` alanı semantic arama için kullanılır
-- Chunk node'larında `text` alanı içerik bilgisini tutar
-- Chunk node'larında `page_link` alanı varsa, sonuçlarla birlikte döndür
-- Eksik bilgi varsa, komşu chunk'lara (bir önceki/sonraki) bakarak tamamla
-
-## PAGE_LINK
-
-Chunk sorgularında `page_link` alanı varsa:
-- Bu değerleri cevabının sonunda listele
-- Her page_link'i ayrı göster
+- `embedding` → semantic arama
+- `text` → içerik
+- `page_link` varsa → sonuçla birlikte göster
 
 ## CEVAP FORMATI
 
-Cevaplarını markdown formatında ver. Teknik detay verme, sadece sonucu göster.
+- Markdown kullan, teknik detay verme
+- Cypher sorgusu gösterme
+- Teknik terimler (node, property vb.) KULLANMA
+- Belirsizlik varsa sessizce keşif yap, sonra basit dille sor
 """
 
 
@@ -433,9 +384,10 @@ Cevaplarını markdown formatında ver. Teknik detay verme, sadece sonucu göste
 class DeepAgentIntegration:
     """LangGraph Deep Agent'i chat_bot_stream'e entegre eden sınıf - MCP Tools ile"""
 
-    def __init__(self, model: str = "gpt-5.1", graph=None):
+    def __init__(self, model: str = "gpt-5-mini", graph=None, reasoning_effort: str = "high"):
         self.model = model
         self.graph = graph
+        self.reasoning_effort = reasoning_effort  # none, low, medium, high
         self.agent = None
         self.mcp_client = None
         self.mcp_tools = None
@@ -524,6 +476,77 @@ class DeepAgentIntegration:
 
         except Exception as e:
             logging.error(f"❌ DeepAgent: Mesaj kaydedilemedi: {e}", exc_info=True)
+
+    def _extract_text_from_reasoning_content(self, content) -> str:
+        """
+        Reasoning modellerinin content formatını parse eder.
+        GPT-5 modelleri content'i liste olarak döndürür:
+        [{'type': 'reasoning', ...}, {'type': 'text', 'text': '...'}]
+        """
+        if content is None:
+            return ""
+        
+        # Zaten string ise direkt döndür
+        if isinstance(content, str):
+            return content
+        
+        # Liste ise text bloklarını birleştir
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    # type: text olan blokların text alanını al
+                    if block.get("type") == "text" and "text" in block:
+                        text_parts.append(block["text"])
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            
+            if text_parts:
+                return "\n".join(text_parts)
+            
+            # Hiç text bloğu yoksa, tüm listeyi string'e çevir (fallback)
+            return str(content)
+        
+        # Başka bir tip ise string'e çevir
+        return str(content)
+
+    def _extract_token_usage(self, message) -> dict:
+        """
+        Reasoning modellerinden token usage bilgisini extract eder.
+        GPT-5 modelleri usage_metadata kullanır, GPT-4 modelleri response_metadata kullanır.
+        """
+        usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+        
+        # 1. usage_metadata kontrol et (GPT-5 / reasoning modeller)
+        if hasattr(message, "usage_metadata") and message.usage_metadata:
+            meta = message.usage_metadata
+            usage["input_tokens"] = meta.get("input_tokens", 0)
+            usage["output_tokens"] = meta.get("output_tokens", 0)
+            usage["total_tokens"] = meta.get("total_tokens", 0)
+            
+            # Output token details içinde reasoning token bilgisi olabilir
+            if "output_token_details" in meta:
+                details = meta["output_token_details"]
+                usage["reasoning_tokens"] = details.get("reasoning_tokens", 0)
+            
+            return usage
+        
+        # 2. response_metadata kontrol et (GPT-4 / standart modeller)
+        if hasattr(message, "response_metadata") and message.response_metadata:
+            meta = message.response_metadata
+            if "token_usage" in meta:
+                token_usage = meta["token_usage"]
+                usage["input_tokens"] = token_usage.get("prompt_tokens", 0)
+                usage["output_tokens"] = token_usage.get("completion_tokens", 0)
+                usage["total_tokens"] = token_usage.get("total_tokens", 0)
+                return usage
+        
+        return usage
 
     def _extract_page_links_from_response(self, response_text: str) -> Set[str]:
         """Response text'inden page_link'leri extract eder"""
@@ -668,26 +691,21 @@ class DeepAgentIntegration:
 
 {DEEP_AGENT_SYSTEM_PROMPT}"""
 
-        # Model oluştur - GPT-5 reasoning modellerinde düşünmeyi minimize et
+        # Model oluştur - GPT-5-mini default, reasoning_effort parametresi ile
         try:
             model_name = self.model
             
-            # GPT-5 / GPT-5.1 reasoning modelleri için özel handling
+            # GPT-5 modelleri için özel handling (reasoning özellikleri ile)
             if "gpt-5" in model_name.lower():
                 from langchain_openai import ChatOpenAI
                 from pydantic import SecretStr
                 
                 api_key = os.environ.get("OPENAI_API_KEY")
                 
-                # gpt-5.1 için reasoning tamamen kapatılabilir, gpt-5 için minimal
-                if "gpt-5.1" in model_name.lower():
-                    reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", "none")  # Düşünme KAPALI
-                else:
-                    reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", "minimal")  # Minimum düşünme
+                # Environment variable varsa onu kullan, yoksa instance'ın reasoning_effort değerini
+                reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", self.reasoning_effort)
+                logging.info(f"🧠 {model_name}: reasoning_effort={reasoning_effort}")
                 
-                logging.info(f"🧠 {model_name} reasoning: effort={reasoning_effort}")
-                
-                # ChatOpenAI will read from environment if api_key is None
                 model_kwargs = {
                     "model": model_name,
                     "reasoning": {"effort": reasoning_effort}
@@ -697,11 +715,19 @@ class DeepAgentIntegration:
                 
                 model = ChatOpenAI(**model_kwargs)
             else:
+                # Standart modeller (gpt-4o, gpt-4o-mini, vb.) - token kullanımı tam destekli
                 if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
                     raise ImportError("LangGraph Deep Agent not available. Install deepagents")
+                
+                # init_chat_model OpenAI modelleri için "openai:" prefix'i bekler
+                if not model_name.startswith("openai:") and "gpt" in model_name.lower():
+                    model_name = f"openai:{model_name}"
+                
+                logging.info(f"🤖 Model oluşturuluyor: {model_name}")
                 model = init_chat_model(model_name)
+            
         except Exception as e:
-            logging.warning(f"⚠️ Model {self.model} yüklenemedi, fallback: {e}")
+            logging.warning(f"⚠️ Model {self.model} yüklenemedi, fallback gpt-4o: {e}")
             if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
                 raise ImportError("LangGraph Deep Agent not available. Install deepagents")
             model = init_chat_model("openai:gpt-4o")
@@ -819,11 +845,17 @@ class DeepAgentIntegration:
             total_tokens = 0
             prompt_tokens = 0
             completion_tokens = 0
+            reasoning_tokens_total = 0
             llm_calls = 0
             tool_calls = 0
+            tool_call_count = 0  # Toplam tool call sayısı
             
-            # LLM streaming timing
+            # Detaylı timing metrikleri
             llm_start = time.time()
+            step_timings = []  # Her step için timing
+            llm_thinking_time = 0.0  # Toplam LLM düşünme süresi
+            tool_execution_time = 0.0  # Toplam tool çalışma süresi
+            last_step_time = time.time()  # Son step zamanı
             
             # 🧠 Agent düşünme süreci için sayaç
             thinking_step = 0
@@ -844,23 +876,47 @@ class DeepAgentIntegration:
                         continue
                     logged_message_ids.add(msg_id)
                     
+                    # Step süresini hesapla
+                    current_time = time.time()
+                    step_duration = current_time - last_step_time
+                    last_step_time = current_time
+                    
                     thinking_step += 1
                     
                     # 🧠 AGENT DÜŞÜNME SÜRECİ LOGLAMA
                     msg_type = type(last_message).__name__
                     logging.info(f"")
                     logging.info(f"{'🧠'*20}")
-                    logging.info(f"🧠 AGENT STEP {thinking_step} - {msg_type}")
+                    logging.info(f"🧠 AGENT STEP {thinking_step} - {msg_type} (⏱️ {step_duration:.2f}s)")
                     logging.info(f"{'🧠'*20}")
+                    
+                    # Step timing kaydet
+                    step_info = {
+                        "step": thinking_step,
+                        "type": msg_type,
+                        "duration": step_duration,
+                    }
+                    
+                    # Mesaj tipine göre süreyi kategorize et
+                    if msg_type == "AIMessage":
+                        llm_thinking_time += step_duration
+                        step_info["category"] = "llm"
+                    elif msg_type == "ToolMessage":
+                        tool_execution_time += step_duration
+                        step_info["category"] = "tool"
+                    else:
+                        step_info["category"] = "other"
                     
                     # Tool calls varsa logla
                     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
                         tool_calls += len(last_message.tool_calls)
-                        for tc in last_message.tool_calls:
+                        for i, tc in enumerate(last_message.tool_calls, 1):
+                            tool_call_count += 1
                             tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
                             tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                            logging.info(f"🔧 Tool Call: {tool_name}")
+                            logging.info(f"🔧 Tool Call #{tool_call_count} (Step {thinking_step}): {tool_name}")
                             logging.info(f"   Args: {str(tool_args)[:500]}...")
+                            step_info["tool_name"] = tool_name
                     
                     # AI'ın düşüncesi/reasoning varsa logla
                     if hasattr(last_message, "content") and last_message.content:
@@ -876,20 +932,26 @@ class DeepAgentIntegration:
                         if "thinking" in kwargs:
                             logging.info(f"💡 Thinking: {str(kwargs['thinking'])[:300]}...")
                     
+                    # Token usage bilgisini al (reasoning ve standart modeller için)
+                    usage = self._extract_token_usage(last_message)
+                    if usage["total_tokens"] > 0:
+                        total_tokens += usage["total_tokens"]
+                        prompt_tokens += usage["input_tokens"]
+                        completion_tokens += usage["output_tokens"]
+                        reasoning_tokens_total += usage["reasoning_tokens"]
+                        llm_calls += 1
+                        logging.info(f"🔢 Token Usage - Input: {usage['input_tokens']}, Output: {usage['output_tokens']}, Reasoning: {usage['reasoning_tokens']}")
+                        step_info["tokens"] = usage
+                    
+                    logging.info(f"⏱️ Step {thinking_step} tamamlandı: {step_duration:.2f}s ({step_info['category'].upper()})")
                     logging.info(f"{'🧠'*20}")
                     
-                    # Token usage bilgisini al (eğer varsa)
-                    if hasattr(last_message, "response_metadata"):
-                        metadata = last_message.response_metadata
-                        if "token_usage" in metadata:
-                            usage = metadata["token_usage"]
-                            total_tokens += usage.get("total_tokens", 0)
-                            prompt_tokens += usage.get("prompt_tokens", 0)
-                            completion_tokens += usage.get("completion_tokens", 0)
-                            llm_calls += 1
+                    step_timings.append(step_info)
                     
+                    # Content parsing - reasoning modeller için özel handling
                     if hasattr(last_message, "content") and last_message.content:
-                        new_content = str(last_message.content)
+                        # Reasoning modellerinin list formatını parse et
+                        new_content = self._extract_text_from_reasoning_content(last_message.content)
                         if new_content != response_text:
                             # Yeni içerik varsa stream et
                             delta = new_content[len(response_text):]
@@ -906,6 +968,8 @@ class DeepAgentIntegration:
 
             # LLM streaming tamamlandı
             timings["llm_streaming"] = time.time() - llm_start
+            timings["llm_thinking"] = llm_thinking_time
+            timings["tool_execution"] = tool_execution_time
             
             # Page link'leri extract et (session bazlı - concurrent safe)
             extracted_links = self._extract_page_links_from_response(response_text)
@@ -962,16 +1026,40 @@ class DeepAgentIntegration:
             logging.info(f"   🤖 Agent Create:    {timings.get('agent_create', 0):.2f}s")
             logging.info(f"   🔄 LLM Streaming:   {timings.get('llm_streaming', 0):.2f}s")
             logging.info(f"   ─────────────────────────")
+            logging.info(f"   🧠 LLM Düşünme:     {timings.get('llm_thinking', 0):.2f}s")
+            logging.info(f"   🔧 Tool Çalışma:    {timings.get('tool_execution', 0):.2f}s")
+            logging.info(f"   ─────────────────────────")
             logging.info(f"   ⏱️ TOTAL TIME:      {total_time:.2f}s")
             logging.info(f"")
+            
+            # Step detayları
+            logging.info(f"📋 STEP DETAYLARI:")
+            for step in step_timings:
+                step_num = step["step"]
+                step_type = step["type"]
+                step_dur = step["duration"]
+                step_cat = step["category"].upper()
+                tool_name = step.get("tool_name", "")
+                tokens = step.get("tokens", {})
+                
+                if tool_name:
+                    logging.info(f"   Step {step_num}: {step_type} ({step_cat}) - {step_dur:.2f}s - Tool: {tool_name}")
+                elif tokens:
+                    logging.info(f"   Step {step_num}: {step_type} ({step_cat}) - {step_dur:.2f}s - Tokens: {tokens.get('total_tokens', 0)}")
+                else:
+                    logging.info(f"   Step {step_num}: {step_type} ({step_cat}) - {step_dur:.2f}s")
+            logging.info(f"")
+            
             logging.info(f"💰 TOKENS:")
             logging.info(f"   📥 Prompt:          {prompt_tokens}")
             logging.info(f"   📤 Completion:      {completion_tokens}")
+            logging.info(f"   🧠 Reasoning:       {reasoning_tokens_total}")
             logging.info(f"   🔢 Total:           {total_tokens}")
             logging.info(f"")
             logging.info(f"🔧 CALLS:")
             logging.info(f"   🤖 LLM Calls:       {llm_calls}")
-            logging.info(f"   🔧 Tool Calls:      {tool_calls}")
+            logging.info(f"   🔧 Tool Calls:      {tool_call_count}")
+            logging.info(f"   📊 Total Steps:     {thinking_step}")
             
             # 🔴 Redis Cache Stats
             if REDIS_CACHE_IMPORTED and is_cache_available is not None and is_cache_available():
@@ -994,21 +1082,29 @@ class DeepAgentIntegration:
                 "info": {
                     "agent_type": "langgraph_deep_agent",
                     "model": self.model,
+                    "reasoning_effort": self.reasoning_effort,
                     "page_links_count": len(session_page_links),
                     "mcp_tools_used": True,
                     "token_usage": {
                         "total_tokens": total_tokens,
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
+                        "reasoning_tokens": reasoning_tokens_total,
                         "llm_calls": llm_calls,
-                        "tool_calls": tool_calls,
+                        "tool_calls": tool_call_count,
                     },
                     "timings": {
                         "schema_fetch_sec": round(timings.get("schema_fetch", 0), 2),
                         "history_fetch_sec": round(timings.get("history_fetch", 0), 2),
                         "agent_create_sec": round(timings.get("agent_create", 0), 2),
                         "llm_streaming_sec": round(timings.get("llm_streaming", 0), 2),
+                        "llm_thinking_sec": round(timings.get("llm_thinking", 0), 2),
+                        "tool_execution_sec": round(timings.get("tool_execution", 0), 2),
                         "total_sec": round(total_time, 2),
+                    },
+                    "steps": {
+                        "total_steps": thinking_step,
+                        "step_details": step_timings,
                     },
                 },
                 "timestamp": datetime.now().isoformat(),
@@ -1101,7 +1197,7 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5.1", graph=None
+    session_id: str, model: str = "gpt-5-mini", graph=None, reasoning_effort: str = "high"
 ) -> DeepAgentIntegration:
     """Session bazlı DeepAgent al veya oluştur"""
     global _session_agents, _session_access_times
@@ -1114,10 +1210,11 @@ async def get_or_create_session_agent(
         agent = _session_agents[session_id]
         _session_access_times[session_id] = datetime.now()
         
-        # Model veya graph değiştiyse güncelle
-        if agent.model != model:
-            logging.info(f"🔄 Session {session_id[:8]}: Model güncelleniyor ({agent.model} -> {model})")
+        # Model veya reasoning_effort değiştiyse güncelle
+        if agent.model != model or agent.reasoning_effort != reasoning_effort:
+            logging.info(f"🔄 Session {session_id[:8]}: Model/reasoning güncelleniyor ({agent.model}/{agent.reasoning_effort} -> {model}/{reasoning_effort})")
             agent.model = model
+            agent.reasoning_effort = reasoning_effort
             agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
         
         if graph and agent.graph != graph:
@@ -1128,11 +1225,11 @@ async def get_or_create_session_agent(
         return agent
     
     # Yeni agent oluştur
-    agent = DeepAgentIntegration(model=model, graph=graph)
+    agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
     _session_agents[session_id] = agent
     _session_access_times[session_id] = datetime.now()
     
-    logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model} (cache: {len(_session_agents)} session)")
+    logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
     
     return agent
 
@@ -1149,9 +1246,10 @@ def get_session_agent_stats() -> Dict[str, Any]:
 
 async def stream_deep_agent_response(
     question: str,
-    model: str = "gpt-5.1",
+    model: str = "gpt-5-mini",
     session_id: str = "",
     graph=None,
+    reasoning_effort: str = "high",
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -1161,9 +1259,10 @@ async def stream_deep_agent_response(
 
     Args:
         question: Kullanıcının sorusu
-        model: Kullanılacak LLM modeli (default: gpt-5.1)
+        model: Kullanılacak LLM modeli (default: gpt-5-mini)
         session_id: Oturum ID'si (conversation history için) - ZORUNLU
         graph: Neo4j graph connection
+        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (none, low, medium, high) - default: high
         **kwargs: Ek parametreler
 
     Yields:
@@ -1191,7 +1290,7 @@ async def stream_deep_agent_response(
 
     try:
         # Session bazlı agent al veya oluştur
-        agent = await get_or_create_session_agent(session_id, model, graph)
+        agent = await get_or_create_session_agent(session_id, model, graph, reasoning_effort)
         
         async for chunk in agent.stream_query_response(
             question=question, session_id=session_id, **kwargs

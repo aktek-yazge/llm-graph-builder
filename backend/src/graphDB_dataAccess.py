@@ -3789,11 +3789,21 @@ SADECE JSON formatında yanıt ver:
             if similarity_info.get("is_substring"):
                 return True, "substring_match"
             
-            # Case 4: Kişi isimleri - LLM gerekli!
+            # Case 4: İlk 2 kelime eşleşmesi (first_two_words_match) - LLM gerekli!
+            # Örn: "AKENERJİ ELEKTRİK Üretim A.Ş." vs "AKENERJİ ELEKTRİK Üretim ANONİM ŞİRKETİ"
+            if similarity_info.get("first_two_words_match"):
+                return True, "first_two_words_match"
+            
+            # Case 4b: İlk kelime eşleşmesi (first_word_match) - LLM gerekli!
+            # Örn: "AKENERJİ Elektrik Üretim" vs "AKENERJİ Elektrik Enerjisi"
+            if similarity_info.get("first_word_match"):
+                return True, "first_word_match"
+            
+            # Case 5: Kişi isimleri - LLM gerekli!
             if is_likely_person_name(name1) or is_likely_person_name(name2):
                 return True, "person_name"
             
-            # Case 5: Uzunluk farkı çok fazla - LLM gerekli!
+            # Case 6: Uzunluk farkı çok fazla - LLM gerekli!
             len_diff = abs(len(name1) - len(name2))
             if len_diff > 10:
                 return True, "length_diff"
@@ -3827,10 +3837,26 @@ SADECE JSON formatında yanıt ver:
             logging.info(f"   - Min substring length: {min_substring_length} (EN UZUN)")
 
             # Duplicate customer'ları text similarity ile bul
+            # NOT: Şirket isimleri için özel normalizasyon eklendi (Türkçe karakter normalize dahil)
             find_duplicates_query = """
                 MATCH (c1:Customer), (c2:Customer)
                 WHERE elementId(c1) < elementId(c2)
-                  AND (
+                WITH c1, c2,
+                     // Türkçe karakterleri ASCII'ye normalize et
+                     replace(replace(replace(replace(replace(replace(
+                       toUpper(trim(c1.name)),
+                       'İ', 'I'), 'Ş', 'S'), 'Ğ', 'G'), 'Ü', 'U'), 'Ö', 'O'), 'Ç', 'C') as norm_name_1,
+                     replace(replace(replace(replace(replace(replace(
+                       toUpper(trim(c2.name)),
+                       'İ', 'I'), 'Ş', 'S'), 'Ğ', 'G'), 'Ü', 'U'), 'Ö', 'O'), 'Ç', 'C') as norm_name_2
+                WITH c1, c2, norm_name_1, norm_name_2,
+                     // İlk kelimeyi al (normalize edilmiş)
+                     split(norm_name_1, ' ')[0] as first_word_1,
+                     split(norm_name_2, ' ')[0] as first_word_2,
+                     // İlk 2 kelimeyi al (şirket adının özü - normalize edilmiş)
+                     reduce(s = '', w IN split(norm_name_1, ' ')[0..2] | s + w) as first_two_words_1,
+                     reduce(s = '', w IN split(norm_name_2, ' ')[0..2] | s + w) as first_two_words_2
+                WHERE (
                     // 1. Normalize edilmiş isimler tamamen eşit
                     apoc.text.clean(c1.name) = apoc.text.clean(c2.name)
                     OR
@@ -3847,14 +3873,31 @@ SADECE JSON formatında yanıt ver:
                       )
                     )
                     OR
-                    // 4. Jaro-Winkler similarity kontrolü (çok yüksek threshold)
+                    // 4. Jaro-Winkler similarity kontrolü (orta threshold)
                     apoc.text.jaroWinklerDistance(toLower(c1.name), toLower(c2.name)) >= $min_jaro_similarity
+                    OR
+                    // 5. İlk kelime eşleşmesi + İlk 2 kelime benzerliği
+                    // Örn: "AKENERJİ ELEKTRİK Üretim" vs "AKENERJİ ELEKTRİK Enerjisi"
+                    (
+                      first_word_1 = first_word_2 AND
+                      size(first_word_1) >= 4 AND
+                      apoc.text.jaroWinklerDistance(first_two_words_1, first_two_words_2) >= 0.85
+                    )
+                    OR
+                    // 6. YENİ: Şirket adı özü eşleşmesi (ilk 2 kelime aynı)
+                    // Örn: "AKENERJİ ELEKTRİK ÜRETİM A.Ş." vs "AKENERJİ ELEKTRİK ÜRETİM ANONİM ŞİRKETİ"
+                    (
+                      first_two_words_1 = first_two_words_2 AND
+                      size(first_two_words_1) >= 10
+                    )
                   )
-                WITH c1, c2,
+                WITH c1, c2, first_word_1, first_word_2, first_two_words_1, first_two_words_2,
                      apoc.text.clean(c1.name) = apoc.text.clean(c2.name) as normalized_equal,
                      apoc.text.distance(toLower(c1.name), toLower(c2.name)) as edit_distance,
                      apoc.text.jaroWinklerDistance(toLower(c1.name), toLower(c2.name)) as jaro_similarity,
-                     (toLower(c2.name) CONTAINS toLower(c1.name) OR toLower(c1.name) CONTAINS toLower(c2.name)) as is_substring
+                     (toLower(c2.name) CONTAINS toLower(c1.name) OR toLower(c1.name) CONTAINS toLower(c2.name)) as is_substring,
+                     first_word_1 = first_word_2 as first_word_match,
+                     first_two_words_1 = first_two_words_2 as first_two_words_match
                 RETURN {
                     c1: {
                         name: c1.name,
@@ -3870,10 +3913,14 @@ SADECE JSON formatında yanıt ver:
                         normalized_equal: normalized_equal,
                         edit_distance: edit_distance,
                         jaro_similarity: jaro_similarity,
-                        is_substring: is_substring
+                        is_substring: is_substring,
+                        first_word_match: first_word_match,
+                        first_two_words_match: first_two_words_match
                     }
                 } as duplicate_pair
-                ORDER BY duplicate_pair.similarity_info.normalized_equal DESC, 
+                ORDER BY duplicate_pair.similarity_info.first_two_words_match DESC,
+                         duplicate_pair.similarity_info.first_word_match DESC,
+                         duplicate_pair.similarity_info.normalized_equal DESC, 
                          duplicate_pair.similarity_info.jaro_similarity DESC
             """
 

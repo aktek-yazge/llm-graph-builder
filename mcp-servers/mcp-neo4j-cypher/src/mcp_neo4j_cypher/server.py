@@ -27,7 +27,7 @@ _env_path = os.path.join(_backend_dir, ".env")
 load_dotenv(_env_path)
 load_dotenv()  # Mevcut dizindeki .env dosyasını da yükle (override etmez, sadece eksik değişkenleri ekler)
 
-# Configure logging to stdout
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [MCP] %(message)s',
@@ -440,7 +440,7 @@ def create_mcp_server(
         params: dict[str, Any] = Field(
             dict(), description="The parameters to pass to the Cypher query."
         ),
-    ) -> list[ToolResult]:
+    ) -> str:
         """
         Execute a read Cypher query on the neo4j database.
         
@@ -497,7 +497,9 @@ def create_mcp_server(
             logger.info(f"📊 Data: {minimal_results}")
             logger.info(f"{'🔷'*20}")
 
-            return [ToolResult(content=[TextContent(type="text", text=minimal_results)])]
+            # Düz string döndür - FastMCP otomatik olarak ToolResult'a sarar
+            # [ToolResult(...)] formatı langchain_mcp_adapters ile uyumsuzluk yaratıyordu
+            return minimal_results
 
         except Neo4jError as e:
             logger.error(f"Neo4j Error executing read query: {e}\n{query}\n{params}")
@@ -529,8 +531,8 @@ def create_mcp_server(
         cypher_query: str = Field(
             ...,
             description=(
-                "The Cypher query to execute. MUST include $embedding_vector parameter in the query. "
-                "Example: 'MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 "
+                "The Cypher query to execute. MUST include $embedding_vector parameter AND 'c.embedding IS NOT NULL' check. "
+                "Example: 'MATCH (c:Chunk) WHERE c.embedding IS NOT NULL AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 "
                 "RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC'"
             ),
         ),
@@ -541,7 +543,7 @@ def create_mcp_server(
                 "Note: $embedding_vector will be automatically added to params."
             ),
         ),
-    ) -> list[ToolResult]:
+    ) -> str:
         """
         Execute a semantic search in document content (Chunks) using embeddings.
         
@@ -563,8 +565,10 @@ def create_mcp_server(
         
         Example usage:
         - query_text: "taksit ödeme planı"
-        - cypher_query: "MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC LIMIT 10"
+        - cypher_query: "MATCH (c:Chunk) WHERE c.embedding IS NOT NULL AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC LIMIT 10"
         - params: {} (optional additional parameters)
+        
+        ⚠️ CRITICAL: Always include 'c.embedding IS NOT NULL' check to avoid NullPointerException!
         """
         
         # 📊 Tool Call Logging
@@ -638,14 +642,8 @@ def create_mcp_server(
             logger.info(f"📊 Data: {minimal_results}")
             logger.info(f"{'🟣'*20}")
 
-            return [ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=f"Semantic search completed. Found {len(results)} results.\n\n{minimal_results}",
-                    )
-                ]
-            )]
+            # Düz string döndür - FastMCP otomatik olarak ToolResult'a sarar
+            return f"Semantic search completed. Found {len(results)} results.\n\n{minimal_results}"
 
         except ImportError as e:
             error_msg = f"Embedding model import hatası: {e}. Lütfen backend modüllerinin doğru yüklendiğinden emin olun."
@@ -817,6 +815,14 @@ if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio")
     host = os.getenv("MCP_HOST", "127.0.0.1")
     port = int(os.getenv("MCP_PORT", "8000"))
+    path = os.getenv("MCP_PATH", "/mcp/")
+    
+    # Allowed hosts ve origins
+    allowed_hosts_str = os.getenv("NEO4J_MCP_SERVER_ALLOWED_HOSTS", "localhost,127.0.0.1,host.docker.internal")
+    allowed_hosts = [h.strip() for h in allowed_hosts_str.split(",") if h.strip()]
+    
+    allow_origins_str = os.getenv("NEO4J_MCP_SERVER_ALLOW_ORIGINS", "*")
+    allow_origins = allow_origins_str.split(",") if allow_origins_str != "*" else ["*"]
     
     asyncio.run(main(
         db_url=db_url,
@@ -826,4 +832,7 @@ if __name__ == "__main__":
         transport=transport,  # type: ignore
         host=host,
         port=port,
+        path=path,
+        allowed_hosts=allowed_hosts,
+        allow_origins=allow_origins,
     ))

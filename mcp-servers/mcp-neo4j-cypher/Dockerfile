@@ -47,5 +47,5 @@ ENV NEO4J_READ_TIMEOUT="30"
 
 EXPOSE 8002
 
-# Command to run the server using the package entry point
-CMD ["mcp-neo4j-cypher"]
+# Command to run the server directly via Python module
+CMD ["python", "-m", "mcp_neo4j_cypher.server"]

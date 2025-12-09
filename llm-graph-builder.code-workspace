@@ -9,8 +9,12 @@
       "path": "backend"
     },
     {
+      "name": "Frontend",
+      "path": "frontend"
+    },
+    {
       "name": "MCP Neo4j Cypher",
-      "path": "backend/mcp-servers/mcp-neo4j-cypher"
+      "path": "mcp-servers/mcp-neo4j-cypher"
     }
   ],
   "settings": {

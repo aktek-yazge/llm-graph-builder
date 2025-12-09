@@ -45,7 +45,8 @@ echo ""
 case "${1:-up}" in
     up|start)
         echo "🚀 Container başlatılıyor..."
-        docker compose up -d --build
+        # Image yoksa otomatik build yapacak
+        docker compose up -d
         echo ""
         echo "✅ MCP Server başlatıldı!"
         echo "📡 Endpoint: http://localhost:${MCP_HTTP_PORT}/mcp/"
@@ -63,9 +64,23 @@ case "${1:-up}" in
         echo "   📂 ./src değişirse -> sync + restart"
         echo "   📦 pyproject.toml değişirse -> rebuild"
         echo ""
+        echo "   📋 Logları görmek için başka bir terminalde:"
+        echo "      cd $SCRIPT_DIR && docker compose logs -f mcp-neo4j-cypher"
+        echo ""
         echo "   Çıkmak için: Ctrl+C"
         echo ""
-        docker compose up --build --watch
+        # Container zaten çalışıyorsa sadece watch başlat, rebuild yapma
+        if docker compose ps | grep -q "mcp-neo4j-cypher.*Up"; then
+            echo "   ✅ Container zaten çalışıyor, rebuild yapılmayacak"
+        else
+            echo "   🚀 Container başlatılıyor (ilk kez ise build yapılacak)..."
+            docker compose up -d
+        fi
+        
+        # Sonra watch modunu ayrı çalıştır (logları karıştırmamak için)
+        # Dokümantasyona göre: docker compose watch ayrı komut olarak kullanılabilir
+        echo "   🔍 Watch modu başlatılıyor..."
+        docker compose watch
         ;;
     
     down|stop)

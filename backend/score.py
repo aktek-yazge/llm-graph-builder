@@ -2623,7 +2623,9 @@ async def chat_bot_stream(
                 async for chunk in stream_deep_agent_response(
                     question=question,
                     graph=graph,
+                    model="gpt-5",
                     session_id=session_id,
+                    reasoning_effort="medium",  # none, low, medium, high
                 ):
                     # Client disconnect kontrolü
                     if await request.is_disconnected():
@@ -2815,6 +2817,7 @@ async def test_deep_agent(
         async for chunk in stream_deep_agent_response(
             question=question,
             session_id=session_id,
+            reasoning_effort="medium",  # none, low, medium, high
         ):
             response_parts.append(chunk)
 
