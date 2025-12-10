@@ -61,12 +61,18 @@ const QueueManagement: React.FC = () => {
   });
   const [selectedFiles, setSelectedFiles] = useState<number[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const { userCredentials } = useCredentials();
+  const { userCredentials, watchProcessingMode } = useCredentials();
 
-  // Polling interval
+  // Polling interval - watchProcessingMode aktifse
   useEffect(() => {
+    // İlk yüklemede bir kez çağır
     fetchQueueData();
     fetchProcessingStatus();
+
+    // Watch mode kapalıysa polling yapma
+    if (!watchProcessingMode) {
+      return;
+    }
 
     const interval = setInterval(() => {
       fetchQueueData();
@@ -74,7 +80,7 @@ const QueueManagement: React.FC = () => {
     }, 5000); // Poll every 5 seconds
 
     return () => clearInterval(interval);
-  }, []);
+  }, [watchProcessingMode]);
 
   const fetchQueueData = useCallback(async () => {
     try {

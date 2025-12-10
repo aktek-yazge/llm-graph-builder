@@ -1,24 +1,4 @@
 services:
-  # Jaeger - OpenTelemetry tracing
-  jaeger:
-    image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
-    container_name: jaeger-preview
-    ports:
-      - "16686:16686" # Web UI
-      - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP
-      - "5778:5778" # Configuration server
-      - "9411:9411" # Zipkin compatible endpoint
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-        labels: "container_name=jaeger-preview"
-    networks:
-      - preview
-    restart: always
-
   # RabbitMQ - Message Broker
   rabbitmq:
     image: rabbitmq:3-management
@@ -29,17 +9,17 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
-      # Disable consumer timeout for long-running tasks (default is 30min = 1800000ms)
-      # Use 'infinity' to completely disable, or high value like 7200000 (2 hours)
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
-        labels: "container_name=rabbitmq-preview"
     networks:
       - preview
+      - observability
     restart: always
 
   # PostgreSQL - Database
@@ -52,31 +32,31 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=f456Re?lm1!
       - POSTGRES_DB=llm_graph_builder
-    # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
-      # Host'ta sakla - docker volume'dan daha garanti, docker system prune'dan etkilenmez
       - ~/postgres-data-preview:/var/lib/postgresql/data
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
-        labels: "container_name=postgres-preview"
     networks:
       - preview
+      - observability
     restart: always
 
   # Backend - preview servisi
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile # Production Dockerfile
+      context: .
+      dockerfile: Dockerfile
     env_file:
-      - ./backend/.preview.env
+      - .preview.env
     container_name: backend-preview
     ports:
-      - "8000:8000" # preview port - production test
+      - "8000:8000"
     environment:
       - PYTHONPATH=/code
       - ENV=preview
@@ -89,31 +69,29 @@ services:
       - NEO4J_READ_TIMEOUT=300
       - NEO4J_WRITE_TIMEOUT=300
       - NEO4J_CONNECTION_ACQUISITION_TIMEOUT=120
-      # MCP Server bağlantısı (ayrı container olarak çalışıyor)
-      - MCP_HTTP_HOST=mcp-neo4j-cypher
-      - MCP_HTTP_PORT=8002
-      - MCP_TRANSPORT_MODE=http
+      # OpenTelemetry - Observability entegrasyonu
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=llm-graph-builder-backend
+      - OTEL_ENVIRONMENT=preview
     volumes:
-      # TÜM BACKEND KLASÖRÜ MOUNT - restart ile değişiklikler uygulanır
-      - ./backend:/code/backend
-      # .venv container'da kalsın (host'a yazılmasın)
+      # TÜM BACKEND KLASÖRÜ MOUNT
+      - .:/code/backend
       - /code/backend/.venv
-      # Persist queue.db - ayrı dizine mount (backend dışında)
       - ~/sqlite-db:/code/sqlite-data
-      # Persist output folder (documents, PDFs, images, markdown) - survives container/image deletion
-      # Backend creates output/document_name/ structure with PDF, images, and markdown files
       - ~/llm-graph-output:/code/output
-      # Docker socket for system monitoring (docker stats)
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Logs klasörü - Alloy tarafından okunacak
+      - ./logs:/code/backend/logs
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
-        labels: "container_name=backend-preview"
     networks:
       - preview
-      - mcp-network
+      - observability
     restart: always
     depends_on:
       - rabbitmq
@@ -122,32 +100,31 @@ services:
   # Frontend - preview servisi
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile # Production Dockerfile
+      context: ../frontend
+      dockerfile: Dockerfile
       args:
         - DEPLOYMENT_ENV=preview
     env_file:
-      - ./frontend/.preview.env
+      - ../frontend/.preview.env
     container_name: frontend-preview
     ports:
-      - "5173:5173" # preview port - production test
+      - "5173:5173"
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
-        labels: "container_name=frontend-preview"
     networks:
       - preview
+      - observability
     restart: always
-
-  # Neo4j ve Qdrant servisleri harici olarak çalıştırılmalı
-  # Bu servisler kaldırıldı - mevcut servisler kullanılır
 
 networks:
   preview:
     driver: bridge
-  mcp-network:
+  observability:
     external: true
+    name: observability
 
-# Named volumes kaldırıldı - veriler host dizinlerinde saklanıyor

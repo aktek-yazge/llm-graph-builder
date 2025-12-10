@@ -104,7 +104,7 @@ const Content: React.FC<ContentProps> = ({
   const [showConfirmationModal, setShowConfirmationModal] = useState<boolean>(false);
   const [showExpirationModal, setShowExpirationModal] = useState<boolean>(false);
   const [extractLoading, setIsExtractLoading] = useState<boolean>(false);
-  const { setUserCredentials, userCredentials, setConnectionStatus, isGdsActive, isReadOnlyUser, isGCSActive } =
+  const { setUserCredentials, userCredentials, setConnectionStatus, isGdsActive, isReadOnlyUser, isGCSActive, watchProcessingMode } =
     useCredentials();
   const [retryFile, setRetryFile] = useState<string>('');
   const [retryLoading, setRetryLoading] = useState<boolean>(false);
@@ -1213,10 +1213,17 @@ const Content: React.FC<ContentProps> = ({
       }
     };
 
+    // İlk yüklemede bir kez kontrol et
     checkBackgroundProcessorStatus();
+
+    // Watch mode aktifse periyodik polling yap
+    if (!watchProcessingMode) {
+      return;
+    }
+    
     const interval = setInterval(checkBackgroundProcessorStatus, 5000); // Her 5 saniyede bir kontrol et
     return () => clearInterval(interval);
-  }, []);
+  }, [watchProcessingMode]);
 
   // V2 Chunking reset handler'ı
   const handleResetChunkingForV2 = async () => {

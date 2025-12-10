@@ -1,0 +1,148 @@
+version: '3.8'
+
+# =============================================================================
+# OBSERVABILITY STACK (Modern - Grafana Alloy)
+# =============================================================================
+# Grafana Alloy: Promtail + OTel Collector + Grafana Agent birleşimi
+# Tek araç ile logs, traces, metrics toplama
+#
+# Kullanım:
+#   1. Bağımsız: cd observability && docker-compose up -d
+#   2. Ana compose ile: docker-compose -f docker-compose.preview.yml -f observability/docker-compose.yml up -d
+#
+# Portlar:
+#   - Grafana:     http://localhost:3000
+#   - Loki:        http://localhost:3100
+#   - Tempo:       http://localhost:3200
+#   - Alloy OTLP:  grpc://localhost:4317, http://localhost:4318
+#   - Alloy UI:    http://localhost:12345
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Grafana Alloy - Birleşik Telemetry Collector
+  # ---------------------------------------------------------------------------
+  # Replaces: Promtail + OTel Collector + Grafana Agent
+  # Features:
+  #   - OTLP receiver (traces, metrics, logs)
+  #   - File-based log collection
+  #   - Docker container log discovery
+  #   - Flow-based configuration
+  # ---------------------------------------------------------------------------
+  alloy:
+    image: grafana/alloy:v1.12.0
+    container_name: alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Backend JSON logs (backend/logs klasöründen)
+      - ../backend/logs:/var/log/backend:ro
+      # Docker container logs
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Alloy data persistence
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "12345:12345" # Alloy UI
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    restart: unless-stopped
+    networks:
+      - observability
+    depends_on:
+      - loki
+      - tempo
+
+  # ---------------------------------------------------------------------------
+  # Loki - Log Aggregation ve Storage
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/config.yaml
+    restart: unless-stopped
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Tempo - Distributed Tracing Backend
+  # ---------------------------------------------------------------------------
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: tempo
+    volumes:
+      - ./tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"   # Tempo HTTP API
+      - "9095:9095"   # Tempo gRPC
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    restart: unless-stopped
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Grafana - Visualization ve Dashboards
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      # Tempo features: traceQL editor, search, service graph, APM table
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,tempoSearch,tempoBackendSearch,tempoServiceGraph,tempoApmTable,traceQLStreaming
+      # Türkçe timezone
+      - TZ=Europe/Istanbul
+    restart: unless-stopped
+    networks:
+      - observability
+    depends_on:
+      - loki
+      - tempo
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  observability:
+    driver: bridge
+    name: observability
+
+volumes:
+  loki-data:
+    name: observability-loki-data
+  tempo-data:
+    name: observability-tempo-data
+  grafana-data:
+    name: observability-grafana-data
+  alloy-data:
+    name: observability-alloy-data

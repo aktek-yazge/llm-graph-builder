@@ -23,6 +23,8 @@ export const UserConnection = createContext<ContextProps>({
   setShowDisconnectButton: () => null,
   isGCSActive: false,
   setIsGCSActive: () => null,
+  watchProcessingMode: false,
+  setWatchProcessingMode: () => null,
   //  chunksToBeProces: 50,
   // setChunksToBeProces: () => null,
 });
@@ -39,7 +41,16 @@ const UserCredentialsWrapper: FunctionComponent<Props> = (props) => {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [showDisconnectButton, setShowDisconnectButton] = useState<boolean>(false);
   const [isGCSActive, setIsGCSActive] = useState<boolean>(false);
+  const [watchProcessingMode, setWatchProcessingMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem('watchProcessingMode');
+    return saved === 'true';
+  });
   // const [chunksToBeProces, setChunksToBeProces] = useState<number>(50);
+  // Watch mode değiştiğinde localStorage'a kaydet
+  useEffect(() => {
+    localStorage.setItem('watchProcessingMode', String(watchProcessingMode));
+  }, [watchProcessingMode]);
+
   const value = {
     userCredentials,
     setUserCredentials,
@@ -57,6 +68,8 @@ const UserCredentialsWrapper: FunctionComponent<Props> = (props) => {
     setShowDisconnectButton,
     isGCSActive,
     setIsGCSActive,
+    watchProcessingMode,
+    setWatchProcessingMode,
     // chunksToBeProces,
     // setChunksToBeProces,
   };

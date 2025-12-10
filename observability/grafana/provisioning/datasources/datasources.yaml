@@ -1,0 +1,86 @@
+# =============================================================================
+# Grafana Datasources Provisioning
+# =============================================================================
+# Grafana başlatıldığında otomatik olarak bu datasource'lar eklenir.
+# =============================================================================
+
+apiVersion: 1
+
+deleteDatasources:
+  - name: Loki
+    orgId: 1
+  - name: Tempo
+    orgId: 1
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  # ---------------------------------------------------------------------------
+  # Loki - Log Aggregation
+  # ---------------------------------------------------------------------------
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: true
+    jsonData:
+      maxLines: 1000
+      timeout: 60
+      derivedFields:
+        # Trace ID'yi Tempo'ya bağla
+        - name: TraceID
+          matcherRegex: '"trace_id":"([a-f0-9]+)"'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+          urlDisplayLabel: View Trace
+
+  # ---------------------------------------------------------------------------
+  # Tempo - Distributed Tracing
+  # ---------------------------------------------------------------------------
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      httpMethod: GET
+      tracesToLogs:
+        datasourceUid: loki
+        filterByTraceID: true
+        filterBySpanID: false
+        mapTagNamesEnabled: true
+        mappedTags:
+          - key: service.name
+            value: service_name
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+
+  # ---------------------------------------------------------------------------
+  # Prometheus - Metrics (Alloy'dan)
+  # ---------------------------------------------------------------------------
+  # Alloy kendi Prometheus-compatible metrics endpoint'ini expose eder
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://alloy:12345
+    isDefault: false
+    editable: true
+    jsonData:
+      httpMethod: GET
+      manageAlerts: false
+      prometheusType: Prometheus
+

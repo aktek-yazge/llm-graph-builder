@@ -841,6 +841,8 @@ export interface ContextProps {
   setShowDisconnectButton: Dispatch<SetStateAction<boolean>>;
   isGCSActive: boolean;
   setIsGCSActive: Dispatch<SetStateAction<boolean>>;
+  watchProcessingMode: boolean;
+  setWatchProcessingMode: Dispatch<SetStateAction<boolean>>;
   // chunksToBeProces: number;
   // setChunksToBeProces: Dispatch<SetStateAction<number>>;
 }
