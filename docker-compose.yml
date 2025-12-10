@@ -13,9 +13,9 @@ services:
       - PYTHONPATH=/code
       - ENV=production
       - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:f456Re?lm1!@postgres:5432/llm_graph_builder
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:f456Re?lm1!@postgres:5432/llm_graph_builder
     volumes:
       # Persist queue.db in user's home directory - survives container/image deletion
       # Mount directory so Docker can auto-create the file
@@ -70,7 +70,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=f456Re?lm1!
       - POSTGRES_DB=llm_graph_builder
     # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=200 -c shared_buffers=256MB

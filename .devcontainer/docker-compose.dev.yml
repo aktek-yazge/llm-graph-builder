@@ -128,7 +128,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=f456Re?lm1!
       - POSTGRES_DB=llm_graph_builder
     # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=2000 -c shared_buffers=256MB

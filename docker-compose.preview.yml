@@ -50,7 +50,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=f456Re?lm1!
       - POSTGRES_DB=llm_graph_builder
     # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=200 -c shared_buffers=256MB
@@ -81,14 +81,18 @@ services:
       - PYTHONPATH=/code
       - ENV=preview
       - QUEUE_DB_PATH=/code/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:f456Re?lm1!@postgres:5432/llm_graph_builder
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:f456Re?lm1!@postgres:5432/llm_graph_builder
       # Neo4j Timeout ayarları - yoğun işlemler için artırıldı
       - NEO4J_CONNECTION_TIMEOUT=60
       - NEO4J_READ_TIMEOUT=300
       - NEO4J_WRITE_TIMEOUT=300
       - NEO4J_CONNECTION_ACQUISITION_TIMEOUT=120
+      # MCP Server bağlantısı (ayrı container olarak çalışıyor)
+      - MCP_HTTP_HOST=mcp-neo4j-cypher
+      - MCP_HTTP_PORT=8002
+      - MCP_TRANSPORT_MODE=http
     volumes:
       # TÜM BACKEND KLASÖRÜ MOUNT - restart ile değişiklikler uygulanır
       - ./backend:/code/backend
@@ -109,6 +113,7 @@ services:
         labels: "container_name=backend-preview"
     networks:
       - preview
+      - mcp-network
     restart: always
     depends_on:
       - rabbitmq
@@ -142,5 +147,7 @@ services:
 networks:
   preview:
     driver: bridge
+  mcp-network:
+    external: true
 
 # Named volumes kaldırıldı - veriler host dizinlerinde saklanıyor
