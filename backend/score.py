@@ -193,7 +193,8 @@ except ImportError:
 
 # docling_core is only needed for document processing, which is done in celery_worker
 try:
-    from docling_core.types.doc import ImageRefMode, DocItemLabel
+    from docling_core.types.doc.base import ImageRefMode
+    from docling_core.types.doc.labels import DocItemLabel
 except (ImportError, ModuleNotFoundError):
     ImageRefMode = None
     DocItemLabel = None  # Document processing is in celery_worker
