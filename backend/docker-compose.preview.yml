@@ -30,7 +30,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=Ekdmjweu483i
       - POSTGRES_DB=llm_graph_builder
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
@@ -61,9 +61,9 @@ services:
       - PYTHONPATH=/code
       - ENV=preview
       - QUEUE_DB_PATH=/code/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
       # Neo4j Timeout ayarları
       - NEO4J_CONNECTION_TIMEOUT=60
       - NEO4J_READ_TIMEOUT=300
@@ -127,4 +127,5 @@ networks:
   observability:
     external: true
     name: observability
+
 

@@ -9,9 +9,9 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 export PYTHONPATH="$SCRIPT_DIR:$PROJECT_ROOT"
 export ENV=development
 # Use the same postgres database as celery_worker
-export QUEUE_DB_URL="postgresql://postgres:postgres@3.76.55.209:5432/llm_graph_builder"
+export QUEUE_DB_URL="postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder"
 export CELERY_BROKER_URL="amqp://guest:guest@3.76.55.209:5672//"
-export CELERY_RESULT_BACKEND="db+postgresql://postgres:postgres@3.76.55.209:5432/llm_graph_builder"
+export CELERY_RESULT_BACKEND="db+postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder"
 
 # Load specific variables from .env file (safer than export all)
 if [ -f "$SCRIPT_DIR/.env" ]; then

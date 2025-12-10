@@ -44,8 +44,11 @@ def get_pg_pool() -> pool.ThreadedConnectionPool:
                 # Parse connection string
                 # Format: postgresql://user:password@host:port/database
                 try:
-                    from urllib.parse import urlparse
+                    from urllib.parse import urlparse, unquote
                     parsed = urlparse(db_url)
+                    
+                    # URL decode password (handles special characters like ? ! @ etc.)
+                    decoded_password = unquote(parsed.password) if parsed.password else 'postgres'
                     
                     _pg_pool = pool.ThreadedConnectionPool(
                         minconn=1,
@@ -53,7 +56,7 @@ def get_pg_pool() -> pool.ThreadedConnectionPool:
                         host=parsed.hostname or 'localhost',
                         port=parsed.port or 5432,
                         user=parsed.username or 'postgres',
-                        password=parsed.password or 'postgres',
+                        password=decoded_password,
                         database=parsed.path.lstrip('/') or 'llm_graph_builder'
                     )
                     logger.info(f"✅ PostgreSQL chat history pool oluşturuldu: {parsed.hostname}:{parsed.port}")

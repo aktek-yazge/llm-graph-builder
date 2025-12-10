@@ -503,11 +503,26 @@ def create_mcp_server(
 
         except Neo4jError as e:
             logger.error(f"Neo4j Error executing read query: {e}\n{query}\n{params}")
-            raise ToolError(f"Neo4j Error: {e}\n{query}\n{params}")
+            error_msg = str(e)
+            
+            # Syntax hatası için özel düzeltme önerisi
+            if "SyntaxError" in error_msg:
+                correction_hint = """
+
+⚠️ CYPHER SYNTAX HATASI!
+Cypher clause sırası: MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
+
+❌ YANLIŞ: MATCH ... RETURN ... WHERE ...
+✅ DOĞRU:  MATCH ... WHERE ... RETURN ...
+
+Sorguyu düzeltip TEKRAR DENE!"""
+                return f"❌ HATA: {error_msg}{correction_hint}"
+            
+            return f"❌ Neo4j Hatası: {error_msg}\nSorgu: {query}\nParametreler: {params}"
 
         except Exception as e:
             logger.error(f"Error executing read query: {e}\n{query}\n{params}")
-            raise ToolError(f"Error: {e}\n{query}\n{params}")
+            return f"❌ Hata: {str(e)}\nSorgu: {query}\nParametreler: {params}"
 
     @mcp.tool(
         name=namespace_prefix + "read_neo4j_cypher_with_embedding",
@@ -648,23 +663,36 @@ def create_mcp_server(
         except ImportError as e:
             error_msg = f"Embedding model import hatası: {e}. Lütfen backend modüllerinin doğru yüklendiğinden emin olun."
             logger.error(error_msg)
-            raise ToolError(error_msg)
+            return f"❌ {error_msg}"
 
         except Neo4jError as e:
             logger.error(
                 f"Neo4j Error executing semantic search query: {e}\n"
                 f"Query text: {query_text}\nCypher query: {cypher_query}\nParams: {params}"
             )
-            raise ToolError(
-                f"Neo4j Error: {e}\nQuery text: {query_text}\nCypher query: {cypher_query}"
-            )
+            error_msg = str(e)
+            
+            # Syntax hatası için özel düzeltme önerisi
+            if "SyntaxError" in error_msg:
+                correction_hint = """
+
+⚠️ CYPHER SYNTAX HATASI!
+Cypher clause sırası: MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
+
+❌ YANLIŞ: MATCH ... RETURN ... WHERE ...
+✅ DOĞRU:  MATCH ... WHERE ... RETURN ...
+
+Sorguyu düzeltip TEKRAR DENE!"""
+                return f"❌ HATA: {error_msg}{correction_hint}"
+            
+            return f"❌ Neo4j Hatası: {error_msg}\nSorgu: {cypher_query}"
 
         except Exception as e:
             error_msg = f"Embedding oluşturma veya sorgu çalıştırma hatası: {e}"
             logger.error(
                 f"{error_msg}\nQuery text: {query_text}\nCypher query: {cypher_query}\nParams: {params}"
             )
-            raise ToolError(f"{error_msg}\nQuery text: {query_text}\nCypher query: {cypher_query}")
+            return f"❌ {error_msg}\nSorgu: {cypher_query}"
 
     # @mcp.tool(
     #     name=namespace_prefix + "write_neo4j_cypher",

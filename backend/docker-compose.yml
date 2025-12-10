@@ -13,9 +13,9 @@ services:
       - PYTHONPATH=/code
       - ENV=production
       - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@postgres:5432/llm_graph_builder
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
       # OpenTelemetry - Observability entegrasyonu
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
       - OTEL_SERVICE_NAME=llm-graph-builder-backend
@@ -73,7 +73,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=Ekdmjweu483i
       - POSTGRES_DB=llm_graph_builder
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
@@ -271,4 +271,5 @@ volumes:
   neo4j_import_prod_2:
   llm-graph-output-prod:
   redis_data_prod:
+
 
