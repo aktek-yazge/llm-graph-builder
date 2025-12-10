@@ -35,6 +35,7 @@ from src.main import (
     manually_cancelled_job,
     populate_graph_schema_from_text,
     set_status_retry,
+    upload_file,
 )
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
@@ -944,7 +945,12 @@ async def lifespan(app: FastAPI):
         logging.warning(f"⚠️ Failed to stop background processor: {bg_error}")
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=None,      # Swagger UI devre dışı
+    redoc_url=None,     # ReDoc devre dışı
+    openapi_url=None,   # OpenAPI schema devre dışı
+)
 
 # 🔍 FastAPI Instrumentation - tüm HTTP endpoint'lerini otomatik trace et
 instrument_fastapi(app)

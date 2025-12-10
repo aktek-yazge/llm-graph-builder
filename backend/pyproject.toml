@@ -12,22 +12,19 @@ dependencies = [
     "python-multipart==0.0.20",
     "pydantic==2.11.7",
     "pydantic-settings==2.10.1",
-           "starlette==0.46.2",
-           "sse-starlette==2.3.6",
-           "fastapi-health==0.4.0",
-           "itsdangerous==2.2.0",
-    
+    "starlette==0.46.2",
+    "sse-starlette==2.3.6",
+    "fastapi-health==0.4.0",
+    "itsdangerous==2.2.0",
     # Database
     "sqlalchemy==2.0.41",
     "psycopg2-binary==2.9.10",
     "asyncpg==0.30.0",
     "asyncio==3.4.3",
     "async-timeout==5.0.1",
-    
     # Celery Client
     "celery==5.4.0",
     "flower==2.0.1",
-    
     # Utilities
     "python-dotenv==1.1.0",
     "requests==2.32.5",
@@ -39,20 +36,16 @@ dependencies = [
     "email-validator==2.3.0",
     "python-dateutil==2.9.0.post0",
     "pytz==2025.2",
-    
     # PDF Processing (for image extraction in upload)
     "PyMuPDF>=1.26.1",
-    
     # AI & ML (for image processing)
     "torch==2.8.0",
     "torchvision==0.23.0",
     "pillow==11.3.0",
     "opencv-python==4.11.0.86",
     "youtube-transcript-api==1.2.3",
-    
     # System Monitoring
     "psutil>=5.9.0",
-    
     # Telemetry (Optional, keep if used in API)
     "opentelemetry-api",
     "opentelemetry-sdk",
@@ -60,7 +53,6 @@ dependencies = [
     "opentelemetry-instrumentation-requests",  # Outgoing HTTP calls tracing
     "opentelemetry-instrumentation-httpx",     # Async HTTP calls tracing (LangChain)
     "opentelemetry-exporter-otlp-proto-grpc",  # OTLP gRPC exporter for Tempo
-    
     # LangChain Ecosystem (minimal - only for API endpoints, not processing)
     # NOT: deepagents için langchain-core 1.x gerekiyor
     "langchain==1.1.2",
@@ -78,13 +70,15 @@ dependencies = [
     "langchain-mcp-adapters==0.1.14",
     # FastAgent MCP
     "fast-agent-mcp",
-    
     # LangGraph Deep Agents
     "deepagents>=0.2.8",
     "langchain-mcp-adapters>=0.1.0",
-    
     # Redis for Semantic Caching and Chat Memory
     "redis>=5.0.0",
     "langchain-redis>=0.1.0",
     "redisvl>=0.3.0",
+    "docling>=2.64.1",
+    "secweb>=1.25.2",
+    "pypdf2>=3.0.1",
+    "pdf2image>=1.17.0",
 ]
