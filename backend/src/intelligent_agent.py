@@ -65,7 +65,7 @@ mem0_config = {
 }
 
 
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 # Mem0 instance - güvenli initialization (DEVRE DIŞI)

@@ -17,7 +17,7 @@ from src.QA_integration import is_casual_conversation
 from src.llm import get_llm
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def test_casual_conversation_detection():

@@ -6,7 +6,7 @@ from src.shared.common_fn import execute_graph_query
 from langchain_neo4j import Neo4jGraph
 import os
 
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 
 def cleanup_old_relationships(graph: Neo4jGraph) -> int:
     """

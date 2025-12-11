@@ -18,7 +18,7 @@ from src.domain_agnostic_schema import DomainAgnosticSchemaDiscovery
 from langchain_neo4j import Neo4jGraph
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def setup_neo4j_connection():

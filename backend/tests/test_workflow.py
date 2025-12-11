@@ -16,7 +16,7 @@ from src.llm import get_llm, is_reasoning_model
 from src.intelligent_agent import IntelligentAgent
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def test_reasoning_model_detection():

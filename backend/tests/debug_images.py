@@ -17,7 +17,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
 def debug_image_generation():
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Test PDF dosyası
     test_pdf_path = "/Users/mehmeterdogan/python-projects/llm-graph-builder/backend/merged_files/Asude Sitesi Yönetimi Ortak Alan Poliçesi 2020.pdf"

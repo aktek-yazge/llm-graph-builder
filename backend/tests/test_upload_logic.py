@@ -18,7 +18,7 @@ sys.path.append("src")
 def test_upload_logic():
     """Test upload logic with S3 image existence check"""
     
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Mock document info
     normalized_filename = "test_document.pdf"

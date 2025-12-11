@@ -18,7 +18,7 @@ from datetime import datetime
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
 
 # Logging ayarları
-logging.basicConfig(level=logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 # FastAgent import'u yapalım

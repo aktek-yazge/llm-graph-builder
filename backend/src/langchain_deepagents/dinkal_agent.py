@@ -26,7 +26,7 @@ from datetime import datetime
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
 
 # Logging ayarları
-logging.basicConfig(level=logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 # Redis Semantic Cache import
@@ -417,6 +417,105 @@ Toplam kayıt sayısı: **8.144**
 
 İsterseniz yılına, durumuna veya türüne göre döküm paylaşabilirim.
 ```
+
+## 🗂️ TODO LIST MEKANİZMASI (PLANLAMA)
+
+### GÖREV BAŞLANGIÇINDA:
+Karmaşık sorular için `write_todos` tool'u ile görev planı oluştur:
+
+```
+write_todos([
+  {"id": "1", "content": "Şirket/kişi adını veritabanında bul", "status": "in_progress"},
+  {"id": "2", "content": "İlişkili kayıtları ve filtreleri belirle", "status": "pending"},
+  {"id": "3", "content": "İstenilen detay bilgilerini ara", "status": "pending"},
+  {"id": "4", "content": "Sonuçları formatla ve kullanıcıya sun", "status": "pending"}
+])
+```
+
+### SUBAGENT'A TODO LİSTİ VER:
+Her subagent görevinde TODO listesi dahil et:
+
+```
+task(
+  name="graph-explorer",
+  task=\"\"\"
+  ## 📋 GÖREV PLANI:
+  1. [ ] Şirket adını veritabanında bul
+  2. [ ] Yıllara göre kayıt dağılımını çıkar
+  3. [ ] İlişkili entity'leri belirle
+  
+  ## 📁 RAPORLAMA:
+  - Her maddeyi tamamladığında bana bildir
+  - Bulgularını /research/madde_N.md dosyasına yaz
+  - Sorun yaşarsan ESCALATE et
+  
+  ## ⏳ ONAY MEKANİZMASI:
+  Her madde sonunda kısa özet ver, onay bekle, sonra devam et.
+  \"\"\"
+)
+```
+
+## 📁 DOSYA SİSTEMİ KULLANIMI
+
+### SUBAGENT BULGULARI:
+Subagent'lar bulgularını `/research/` klasörüne yazar:
+- `/research/madde_1.md` - İlk görev bulguları
+- `/research/madde_2.md` - İkinci görev bulguları
+- `/research/summary.md` - Final özet
+
+### BULGULARI OKUMA:
+Subagent tamamlandığında veya escalation geldiğinde:
+```
+read_file("/research/summary.md")
+```
+
+## 🔄 ESCALATION YÖNETİMİ
+
+### SUBAGENT "ESCALATE" DEDİĞİNDE:
+1. **Başarısız denemeleri oku** - Subagent ne denemiş?
+2. **Şemaya bak** - Alternatif yollar var mı?
+3. **Yeni strateji belirle** - Farklı entity/relationship öner
+4. **Yeni talimatla tekrar çağır**
+
+### ESCALATION YANITI FORMATI:
+```
+task(
+  name="graph-explorer",
+  task=\"\"\"
+  ## ÖNCEKİ DENEMELER (TEKRARLAMA!):
+  - [Subagent'ın denediği sorgular]
+  
+  ## YENİ STRATEJİ:
+  Şemaya göre [EntityX] yerine [EntityY]'den başla.
+  Çünkü şemada [EntityY]-[:REL]->[EntityX] ilişkisi var.
+  
+  ## YENİ TODO:
+  1. [ ] [EntityY]'yi bul
+  2. [ ] Oradan [EntityX]'e ulaş
+  \"\"\"
+)
+```
+
+## ✅ ONAY MEKANİZMASI
+
+### SUBAGENT MADDE TAMAMLADIĞINDA:
+Subagent her madde sonunda sana bildirim yapar:
+```
+MADDE 1 TAMAMLANDI ✅
+BULGU: [Kısa özet]
+DOSYA: /research/madde_1.md
+```
+
+### SENİN ONAYIN:
+Kısa ve net onay ver:
+- ✅ "Tamam, devam et" - Sonraki maddeye geç
+- 🔄 "Eksik, şunu da ekle: [...]" - Aynı maddeyi tamamla
+- 📍 "Strateji değişikliği: [...]" - Yeni yön ver
+
+### ONAY ÖRNEKLERİ:
+✅ KISA ONAY: "Tamam, 44 şirket bulundu. Madde 2'ye geç."
+🔄 EKSİK: "Doğa Sigorta detaylarını da ekle, sonra devam."
+📍 YÖN DEĞİŞİKLİĞİ: "Policy yerine InsuranceCoverage'dan başla."
 """
 
 # -----------------------------------------------------------------------------
@@ -601,6 +700,79 @@ Bu strateji şu durumlarda kritik:
 9. **İLK ARAMADA `toLower()` KULLAN! `WHERE toLower(n.name) CONTAINS toLower('terim')` pattern'ini uygula!**
 10. **Bir entity bulduğunda durmadan TÜM ilişkili kayıtları tek sorguda çek!**
 11. **Sadece exact match kullanma! `n.name = 'X'` yerine `toLower(n.name) CONTAINS toLower('X')` kullan!**
+
+## 📋 TODO LIST TAKİBİ
+
+### GÖREV ALDIĞINDA:
+1. Orchestrator'dan gelen TODO listesini oku
+2. İlk bekleyen maddeyle başla
+3. Her madde için:
+   - Sorguyu çalıştır
+   - Sonucu `/research/madde_N.md` dosyasına yaz
+   - Orchestrator'a kısa bildirim yap
+
+### DOSYAYA YAZMA:
+```
+write_file("/research/madde_1.md", \"\"\"
+# Madde 1: [Görev Açıklaması]
+
+## Yapılan Sorgular:
+1. `MATCH (n:EntityType)...` → [N] kayıt bulundu
+
+## Bulgular:
+- [Özet bilgi 1]
+- [Özet bilgi 2]
+
+## Sonraki Adım İçin:
+- [Kullanılacak filtre veya relationship]
+\"\"\")
+```
+
+### MADDE TAMAMLAMA BİLDİRİMİ:
+Her madde bittiğinde şu formatta bildir:
+
+```
+MADDE 1 TAMAMLANDI ✅
+
+BULGU: [Kısa özet - max 2 cümle]
+DOSYA: /research/madde_1.md
+
+ONAY BEKLİYORUM...
+```
+
+Orchestrator onay verene kadar sonraki maddeye GEÇME!
+
+## 🚨 ESCALATION MEKANİZMASI
+
+### NE ZAMAN ESCALATE ET:
+Kendi kararınla belirle, genellikle:
+- Aynı arama için 3-5 farklı sorgu başarısız olursa
+- Şemada beklenen entity/relationship bulunamazsa
+- Cypher hatası tekrar tekrar alınırsa
+
+### ESCALATION FORMATI:
+```
+🚨 ESCALATE: Madde [N] tamamlanamadı.
+
+DENEDİĞİM SORGULAR:
+1. MATCH (x:TypeA)... → Sonuç: 0 kayıt
+2. MATCH (y:TypeB)... → Sonuç: Hata - property yok
+3. MATCH (z:TypeC)... → Sonuç: 0 kayıt
+
+SORUN:
+[Ne aradım ama bulamadım]
+
+ÖNERİM:
+- [Alternatif entity/relationship önerisi varsa]
+
+ORCHESTRATOR TALİMATI BEKLİYORUM...
+```
+
+### ESCALATION SONRASI:
+Orchestrator yeni strateji verdiğinde:
+1. Önceki denemeleri TEKRARLAMA
+2. Yeni stratejiyi uygula
+3. Sonucu yine `/research/madde_N.md`'ye yaz
 """
 
 # -----------------------------------------------------------------------------
@@ -730,6 +902,79 @@ RETURN detail.name, main
 7. Boş sonuç alırsan alternatif yolları dene!
 8. **Chunk aramasından ÖNCE ilişkili metadata node'larında basit arama yap!**
 9. **Detay bilgileri genellikle Chunk'ta değil, alt node'ların name/text property'sinde!**
+
+## 📋 TODO LIST TAKİBİ
+
+### GÖREV ALDIĞINDA:
+1. Orchestrator'dan gelen TODO listesini oku
+2. İlk bekleyen maddeyle başla
+3. Her madde için:
+   - Sorguyu çalıştır
+   - Sonucu `/research/madde_N.md` dosyasına yaz
+   - Orchestrator'a kısa bildirim yap
+
+### DOSYAYA YAZMA:
+```
+write_file("/research/madde_1.md", \"\"\"
+# Madde 1: [Görev Açıklaması]
+
+## Yapılan Sorgular:
+1. `MATCH ... WHERE gds.similarity.cosine...` → [N] sonuç
+
+## Bulunan İçerikler:
+- [Kaynak 1]: [Özet]
+- [Kaynak 2]: [Özet]
+
+## Sonraki Adım İçin:
+- [Ek arama gerekli mi?]
+\"\"\")
+```
+
+### MADDE TAMAMLAMA BİLDİRİMİ:
+Her madde bittiğinde şu formatta bildir:
+
+```
+MADDE 1 TAMAMLANDI ✅
+
+BULGU: [Kısa özet - max 2 cümle]
+DOSYA: /research/madde_1.md
+
+ONAY BEKLİYORUM...
+```
+
+Orchestrator onay verene kadar sonraki maddeye GEÇME!
+
+## 🚨 ESCALATION MEKANİZMASI
+
+### NE ZAMAN ESCALATE ET:
+Kendi kararınla belirle, genellikle:
+- Birkaç farklı embedding sorgusu başarısız olursa
+- Verilen filtreler sonuç döndürmezse
+- Relationship zinciri çalışmazsa
+
+### ESCALATION FORMATI:
+```
+🚨 ESCALATE: Madde [N] tamamlanamadı.
+
+DENEDİĞİM SORGULAR:
+1. Filtre: [...], Kavram: [...] → 0 sonuç
+2. Alternatif zincir: [...] → Hata
+3. Gevşetilmiş filtre: [...] → 0 sonuç
+
+SORUN:
+[Ne aradım ama bulamadım]
+
+ÖNERİM:
+- [Farklı relationship veya node tipi önerisi]
+
+ORCHESTRATOR TALİMATI BEKLİYORUM...
+```
+
+### ESCALATION SONRASI:
+Orchestrator yeni strateji verdiğinde:
+1. Önceki denemeleri TEKRARLAMA
+2. Yeni stratejiyi uygula
+3. Sonucu yine `/research/madde_N.md`'ye yaz
 """
 
 # -----------------------------------------------------------------------------
@@ -1236,33 +1481,39 @@ class DeepAgentIntegration:
             logging.warning("⚠️ DeepAgent: No tools available, agent may have limited functionality")
         
         # =====================================================================
-        # ORCHESTRATOR (ANA AGENT) PROMPT
+        # ORCHESTRATOR (ANA AGENT) PROMPT - TAM ŞEMA BİLGİSİ
         # =====================================================================
+        # Orchestrator plan yapan ana agent - TAM şema bilgisine sahip olmalı
+        # Böylece doğru strateji belirleyip subagent'lara yön verebilir
         orchestrator_prompt = ORCHESTRATOR_SYSTEM_PROMPT
         if schema_info:
-            # Orchestrator'a da şema özeti ekle (yüksek seviye bilgi için)
-            orchestrator_prompt = f"""## 📊 VERİTABANI ŞEMA ÖZETİ:
-{schema_info[:2000]}...
+            orchestrator_prompt = f"""## 📊 VERİTABANI ŞEMASI (TAM - PLANLAMA İÇİN):
+{schema_info}
 
 {ORCHESTRATOR_SYSTEM_PROMPT}"""
 
         # =====================================================================
-        # SUB AGENT PROMPTS - Şema bilgisi ile zenginleştirilmiş
+        # SUB AGENT PROMPTS - Kısaltılmış şema özeti
         # =====================================================================
+        # Subagent'lar orchestrator'dan yönlendirme alacak
+        # Kısa şema özeti yeterli - detaylı strateji orchestrator'dan gelir
         
         # Explorer sub agent prompt (keşif sorguları için)
         explorer_prompt_with_schema = EXPLORER_SUBAGENT_PROMPT
         if schema_info:
-            explorer_prompt_with_schema = f"""## 📊 NEO4J VERİTABANI ŞEMA BİLGİSİ:
-{schema_info}
+            # Şema özetinin ilk 4000 karakteri yeterli - relationship'ler ve node tipleri görünsün
+            schema_summary = schema_info[:4000] + "..." if len(schema_info) > 4000 else schema_info
+            explorer_prompt_with_schema = f"""## 📊 ŞEMA ÖZETİ (Orchestrator detaylı strateji verecek):
+{schema_summary}
 
 {EXPLORER_SUBAGENT_PROMPT}"""
 
         # Searcher sub agent prompt (embedding aramaları için)
         searcher_prompt_with_schema = SEARCHER_SUBAGENT_PROMPT
         if schema_info:
-            searcher_prompt_with_schema = f"""## 📊 NEO4J VERİTABANI ŞEMA BİLGİSİ:
-{schema_info}
+            schema_summary = schema_info[:4000] + "..." if len(schema_info) > 4000 else schema_info
+            searcher_prompt_with_schema = f"""## 📊 ŞEMA ÖZETİ (Orchestrator detaylı strateji verecek):
+{schema_summary}
 
 {SEARCHER_SUBAGENT_PROMPT}"""
 
@@ -1468,110 +1719,227 @@ class DeepAgentIntegration:
             thinking_step = 0
             logged_message_ids = set()  # Daha önce loglanan mesajları takip et
             
+            # 🆕 Subagent tracking
+            subagent_outputs = {}  # Her subagent için output'ları topla
+            current_subagent = None  # Şu an hangi subagent çalışıyor
+            subagent_prompts = {}  # Her subagent'a gönderilen prompt
+            subagent_final_outputs = {}  # Her subagent'ın final çıktısı
+            last_subagent = None  # Son aktif subagent (bitişi tespit için)
+            
             async for chunk in agent.astream(
                 {"messages": messages},
-                stream_mode="values"
+                stream_mode="values",
+                subgraphs=True  # 🆕 Subagent çıktılarını da stream et
             ):
-                if "messages" in chunk and chunk["messages"]:
-                    last_message = chunk["messages"][-1]
-                    
-                    # Mesajın benzersiz ID'sini al (id veya content hash)
-                    msg_id = getattr(last_message, "id", None) or hash(str(last_message.content)[:100] if hasattr(last_message, "content") else "")
-                    
-                    # Daha önce loglandıysa atla
-                    if msg_id in logged_message_ids:
-                        continue
-                    logged_message_ids.add(msg_id)
-                    
-                    # Step süresini hesapla
-                    current_time = time.time()
-                    step_duration = current_time - last_step_time
-                    last_step_time = current_time
-                    
-                    thinking_step += 1
-                    
-                    # 🧠 AGENT DÜŞÜNME SÜRECİ LOGLAMA
-                    msg_type = type(last_message).__name__
-                    logging.info(f"")
-                    logging.info(f"{'🧠'*20}")
-                    logging.info(f"🧠 AGENT STEP {thinking_step} - {msg_type} (⏱️ {step_duration:.2f}s)")
-                    logging.info(f"{'🧠'*20}")
-                    
-                    # Step timing kaydet
-                    step_info = {
-                        "step": thinking_step,
-                        "type": msg_type,
-                        "duration": step_duration,
-                    }
-                    
-                    # Mesaj tipine göre süreyi kategorize et
-                    if msg_type == "AIMessage":
-                        llm_thinking_time += step_duration
-                        step_info["category"] = "llm"
-                    elif msg_type == "ToolMessage":
-                        tool_execution_time += step_duration
-                        step_info["category"] = "tool"
-                    else:
-                        step_info["category"] = "other"
-                    
-                    # Tool calls varsa logla
-                    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                        tool_calls += len(last_message.tool_calls)
-                        for i, tc in enumerate(last_message.tool_calls, 1):
-                            tool_call_count += 1
-                            tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                            tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                            logging.info(f"🔧 Tool Call #{tool_call_count} (Step {thinking_step}): {tool_name}")
-                            logging.info(f"   Args: {str(tool_args)[:500]}...")
-                            step_info["tool_name"] = tool_name
-                    
-                    # AI'ın düşüncesi/reasoning varsa logla
-                    if hasattr(last_message, "content") and last_message.content:
-                        content_preview = str(last_message.content)[:300]
-                        if content_preview.strip():
-                            logging.info(f"💭 Content: {content_preview}...")
-                    
-                    # Additional info varsa logla
-                    if hasattr(last_message, "additional_kwargs") and last_message.additional_kwargs:
-                        kwargs = last_message.additional_kwargs
-                        if "reasoning" in kwargs:
-                            logging.info(f"🤔 Reasoning: {str(kwargs['reasoning'])[:300]}...")
-                        if "thinking" in kwargs:
-                            logging.info(f"💡 Thinking: {str(kwargs['thinking'])[:300]}...")
-                    
-                    # Token usage bilgisini al (reasoning ve standart modeller için)
-                    usage = self._extract_token_usage(last_message)
-                    if usage["total_tokens"] > 0:
-                        total_tokens += usage["total_tokens"]
-                        prompt_tokens += usage["input_tokens"]
-                        completion_tokens += usage["output_tokens"]
-                        reasoning_tokens_total += usage["reasoning_tokens"]
-                        llm_calls += 1
-                        logging.info(f"🔢 Token Usage - Input: {usage['input_tokens']}, Output: {usage['output_tokens']}, Reasoning: {usage['reasoning_tokens']}")
-                        step_info["tokens"] = usage
-                    
-                    logging.info(f"⏱️ Step {thinking_step} tamamlandı: {step_duration:.2f}s ({step_info['category'].upper()})")
-                    logging.info(f"{'🧠'*20}")
-                    
-                    step_timings.append(step_info)
-                    
-                    # Content parsing - reasoning modeller için özel handling
-                    if hasattr(last_message, "content") and last_message.content:
-                        # Reasoning modellerinin list formatını parse et
-                        new_content = self._extract_text_from_reasoning_content(last_message.content)
-                        if new_content != response_text:
-                            # Yeni içerik varsa stream et
-                            delta = new_content[len(response_text):]
-                            response_text = new_content
+                # 🆕 subgraphs=True ile chunk tuple olarak gelir: (namespace, data)
+                namespace = None
+                chunk_data = chunk
+                
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    namespace, chunk_data = chunk
+                    # Namespace örnek: ('graph-explorer:abc123',) veya ('content-searcher:xyz789',)
+                    if namespace and len(namespace) > 0:
+                        subagent_name = namespace[0].split(':')[0] if ':' in namespace[0] else namespace[0]
+                        if subagent_name != current_subagent:
+                            # 🆕 Önceki subagent bittiyse final output'u logla
+                            if last_subagent and last_subagent in subagent_outputs:
+                                last_content = None
+                                for output in reversed(subagent_outputs[last_subagent]):
+                                    if output.get("type") == "content":
+                                        last_content = output.get("full_content", output.get("preview", ""))
+                                        break
+                                if last_content:
+                                    subagent_final_outputs[last_subagent] = last_content
+                                    logging.info(f"")
+                                    logging.info(f"{'✅'*20}")
+                                    logging.info(f"✅ SUBAGENT [{last_subagent}] TAMAMLANDI")
+                                    logging.info(f"📤 FINAL OUTPUT ({len(last_content)} chars):")
+                                    logging.info(f"{'─'*60}")
+                                    # İlk 1000 karakteri logla
+                                    for line in last_content[:1000].split('\n'):
+                                        logging.info(f"   {line}")
+                                    if len(last_content) > 1000:
+                                        logging.info(f"   ... ({len(last_content) - 1000} more chars)")
+                                    logging.info(f"{'─'*60}")
+                                    logging.info(f"{'✅'*20}")
                             
-                            if delta.strip():
-                                yield {
-                                    "type": "message_chunk",
-                                    "content": delta,
-                                    "full_message": response_text,
-                                    "session_id": session_id,
-                                    "timestamp": datetime.now().isoformat(),
-                                }
+                            current_subagent = subagent_name
+                            last_subagent = subagent_name
+                            logging.info(f"")
+                            logging.info(f"{'🔀'*20}")
+                            logging.info(f"🔀 SUBAGENT BAŞLADI: {subagent_name}")
+                            logging.info(f"{'🔀'*20}")
+                            if subagent_name not in subagent_outputs:
+                                subagent_outputs[subagent_name] = []
+                else:
+                    # 🆕 Orchestrator'a dönüldüğünde son subagent'ın final output'unu logla
+                    if current_subagent and current_subagent in subagent_outputs and current_subagent not in subagent_final_outputs:
+                        last_content = None
+                        for output in reversed(subagent_outputs[current_subagent]):
+                            if output.get("type") == "content":
+                                last_content = output.get("full_content", output.get("preview", ""))
+                                break
+                        if last_content:
+                            subagent_final_outputs[current_subagent] = last_content
+                            logging.info(f"")
+                            logging.info(f"{'✅'*20}")
+                            logging.info(f"✅ SUBAGENT [{current_subagent}] TAMAMLANDI - Orchestrator'a dönülüyor")
+                            logging.info(f"📤 FINAL OUTPUT ({len(last_content)} chars):")
+                            logging.info(f"{'─'*60}")
+                            for line in last_content[:1000].split('\n'):
+                                logging.info(f"   {line}")
+                            if len(last_content) > 1000:
+                                logging.info(f"   ... ({len(last_content) - 1000} more chars)")
+                            logging.info(f"{'─'*60}")
+                            logging.info(f"{'✅'*20}")
+                        current_subagent = None
+                
+                if not isinstance(chunk_data, dict) or "messages" not in chunk_data or not chunk_data["messages"]:
+                    continue
+                    
+                last_message = chunk_data["messages"][-1]
+                    
+                # Mesajın benzersiz ID'sini al (id veya content hash)
+                msg_id = getattr(last_message, "id", None) or hash(str(last_message.content)[:100] if hasattr(last_message, "content") else "")
+                
+                # Daha önce loglandıysa atla
+                if msg_id in logged_message_ids:
+                    continue
+                logged_message_ids.add(msg_id)
+                
+                # Step süresini hesapla
+                current_time = time.time()
+                step_duration = current_time - last_step_time
+                last_step_time = current_time
+                
+                thinking_step += 1
+                
+                # 🧠 AGENT DÜŞÜNME SÜRECİ LOGLAMA
+                msg_type = type(last_message).__name__
+                
+                # 🆕 Subagent bilgisi ile loglama
+                agent_label = f"SUBAGENT [{current_subagent}]" if current_subagent else "ORCHESTRATOR"
+                
+                logging.info(f"")
+                logging.info(f"{'🧠'*20}")
+                logging.info(f"🧠 {agent_label} STEP {thinking_step} - {msg_type} (⏱️ {step_duration:.2f}s)")
+                logging.info(f"{'🧠'*20}")
+                
+                # Step timing kaydet
+                step_info = {
+                    "step": thinking_step,
+                    "type": msg_type,
+                    "duration": step_duration,
+                }
+                
+                # Mesaj tipine göre süreyi kategorize et
+                if msg_type == "AIMessage":
+                    llm_thinking_time += step_duration
+                    step_info["category"] = "llm"
+                elif msg_type == "ToolMessage":
+                    tool_execution_time += step_duration
+                    step_info["category"] = "tool"
+                else:
+                    step_info["category"] = "other"
+                
+                # Tool calls varsa logla
+                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                    tool_calls += len(last_message.tool_calls)
+                    for i, tc in enumerate(last_message.tool_calls, 1):
+                        tool_call_count += 1
+                        tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                        tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                        logging.info(f"🔧 Tool Call #{tool_call_count} (Step {thinking_step}): {tool_name}")
+                        logging.info(f"   Args: {str(tool_args)[:500]}...")
+                        step_info["tool_name"] = tool_name
+                        
+                        # 🆕 TASK TOOL - Subagent spawn ediliyorsa prompt'u detaylı logla
+                        if tool_name == "task":
+                            task_description = tool_args.get("description", "") if isinstance(tool_args, dict) else ""
+                            subagent_type = tool_args.get("subagent_type", "unknown") if isinstance(tool_args, dict) else "unknown"
+                            
+                            logging.info(f"")
+                            logging.info(f"{'📋'*20}")
+                            logging.info(f"📋 SUBAGENT PROMPT GÖNDERILIYOR")
+                            logging.info(f"📋 Subagent Type: {subagent_type}")
+                            logging.info(f"{'─'*60}")
+                            logging.info(f"📝 PROMPT (Orchestrator → Subagent):")
+                            # Prompt'u satır satır logla
+                            for line in task_description.split('\n'):
+                                logging.info(f"   {line}")
+                            logging.info(f"{'─'*60}")
+                            logging.info(f"{'📋'*20}")
+                            
+                            # Prompt'u kaydet
+                            subagent_prompts[subagent_type] = task_description
+                        
+                        # 🆕 Subagent tool call'ı kaydet
+                        if current_subagent and current_subagent in subagent_outputs:
+                            subagent_outputs[current_subagent].append({
+                                "type": "tool_call",
+                                "tool": tool_name,
+                                "args": str(tool_args)[:200],
+                                "step": thinking_step,
+                            })
+                
+                # AI'ın düşüncesi/reasoning varsa logla
+                if hasattr(last_message, "content") and last_message.content:
+                    full_content = str(last_message.content)
+                    content_preview = full_content[:300]
+                    if content_preview.strip():
+                        logging.info(f"💭 Content: {content_preview}...")
+                        
+                        # 🆕 Subagent content'i kaydet (full content ile)
+                        if current_subagent and current_subagent in subagent_outputs:
+                            subagent_outputs[current_subagent].append({
+                                "type": "content",
+                                "preview": content_preview,
+                                "full_content": full_content,  # Tam içerik (final output için)
+                                "full_length": len(full_content),
+                                "step": thinking_step,
+                            })
+                
+                # Additional info varsa logla
+                if hasattr(last_message, "additional_kwargs") and last_message.additional_kwargs:
+                    kwargs_msg = last_message.additional_kwargs
+                    if "reasoning" in kwargs_msg:
+                        logging.info(f"🤔 Reasoning: {str(kwargs_msg['reasoning'])[:300]}...")
+                    if "thinking" in kwargs_msg:
+                        logging.info(f"💡 Thinking: {str(kwargs_msg['thinking'])[:300]}...")
+                
+                # Token usage bilgisini al (reasoning ve standart modeller için)
+                usage = self._extract_token_usage(last_message)
+                if usage["total_tokens"] > 0:
+                    total_tokens += usage["total_tokens"]
+                    prompt_tokens += usage["input_tokens"]
+                    completion_tokens += usage["output_tokens"]
+                    reasoning_tokens_total += usage["reasoning_tokens"]
+                    llm_calls += 1
+                    logging.info(f"🔢 Token Usage - Input: {usage['input_tokens']}, Output: {usage['output_tokens']}, Reasoning: {usage['reasoning_tokens']}")
+                    step_info["tokens"] = usage
+                
+                logging.info(f"⏱️ Step {thinking_step} tamamlandı: {step_duration:.2f}s ({step_info['category'].upper()})")
+                logging.info(f"{'🧠'*20}")
+                
+                step_timings.append(step_info)
+                
+                # Content parsing - reasoning modeller için özel handling
+                if hasattr(last_message, "content") and last_message.content:
+                    # Reasoning modellerinin list formatını parse et
+                    new_content = self._extract_text_from_reasoning_content(last_message.content)
+                    if new_content != response_text:
+                        # Yeni içerik varsa stream et
+                        delta = new_content[len(response_text):]
+                        response_text = new_content
+                        
+                        if delta.strip():
+                            yield {
+                                "type": "message_chunk",
+                                "content": delta,
+                                "full_message": response_text,
+                                "session_id": session_id,
+                                "timestamp": datetime.now().isoformat(),
+                            }
 
             # LLM streaming tamamlandı
             timings["llm_streaming"] = time.time() - llm_start
@@ -1667,6 +2035,28 @@ class DeepAgentIntegration:
             logging.info(f"   🤖 LLM Calls:       {llm_calls}")
             logging.info(f"   🔧 Tool Calls:      {tool_call_count}")
             logging.info(f"   📊 Total Steps:     {thinking_step}")
+            
+            # 🆕 SUBAGENT OUTPUTS LOGLAMA
+            if subagent_outputs:
+                logging.info(f"")
+                logging.info(f"🔀 SUBAGENT ÇIKTILARI:")
+                for subagent_name, outputs in subagent_outputs.items():
+                    logging.info(f"   ─────────────────────────")
+                    logging.info(f"   📦 {subagent_name.upper()}:")
+                    tool_calls_count = sum(1 for o in outputs if o["type"] == "tool_call")
+                    content_count = sum(1 for o in outputs if o["type"] == "content")
+                    logging.info(f"      🔧 Tool Calls: {tool_calls_count}")
+                    logging.info(f"      💬 Responses:  {content_count}")
+                    
+                    # Detaylı çıktılar
+                    for output in outputs:
+                        if output["type"] == "tool_call":
+                            logging.info(f"      → Tool: {output['tool']} (Step {output['step']})")
+                            logging.info(f"        Args: {output['args'][:100]}...")
+                        elif output["type"] == "content":
+                            logging.info(f"      → Content (Step {output['step']}, {output['full_length']} chars):")
+                            logging.info(f"        {output['preview'][:150]}...")
+                logging.info(f"   ─────────────────────────")
             
             # 🔴 Redis Cache Stats
             if REDIS_CACHE_IMPORTED and is_cache_available is not None and is_cache_available():

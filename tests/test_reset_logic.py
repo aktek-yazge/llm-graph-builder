@@ -9,7 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../back
 from src.models.file_queue_models import UploadedFile, FileStatus, get_file_queue_db
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def setup_test_data(db_session):

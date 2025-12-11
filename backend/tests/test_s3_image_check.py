@@ -25,7 +25,7 @@ except ImportError as e:
 def test_s3_image_check():
     """S3'te image varlığını test et"""
     
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Environment variables
     s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")

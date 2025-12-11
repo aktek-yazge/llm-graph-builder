@@ -22,7 +22,7 @@ from langchain_neo4j import Neo4jGraph
 from src.utf8_utils import normalize_unicode_text
 from dotenv import load_dotenv
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 

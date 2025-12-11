@@ -35,7 +35,7 @@ def demo_page_image_generation():
     """
     Example function showing how to use the page image generation feature.
     """
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Example usage
     file_path = "path/to/your/document.pdf"

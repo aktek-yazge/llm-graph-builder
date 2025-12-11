@@ -17,7 +17,7 @@ from src.intelligent_agent import IntelligentAgent
 from langchain_neo4j import Neo4jGraph
 
 # Logging ayarla
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def test_job_posting_cv_matching():

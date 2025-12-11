@@ -10,7 +10,7 @@ import json
 import logging
 
 # Logging'i ayarla
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 
 def test_openai_token_response():
     print("🔍 OpenAI Token Response Format Test")

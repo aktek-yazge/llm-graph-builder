@@ -23,7 +23,7 @@ NEO4J_USER = os.getenv('NEO4J_USERNAME', 'neo4j')
 NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD', 'qwerty5555')
 NEO4J_DATABASE = os.getenv('NEO4J_DATABASE', 'neo4j')
 
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 
 def test_utf8_functions():
     """UTF-8 utility fonksiyonlarını test et"""

@@ -19,7 +19,7 @@ except ImportError as e:
 
 def test_pymupdf_image_generation():
     """Test PyMuPDF image generation specifically"""
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Test PDF dosyasının yolu - gerçek bir PDF dosyası kullanın
     test_pdf_path = "/Users/mehmeterdogan/python-projects/llm-graph-builder/backend/merged_files/Asude Sitesi Yönetimi Ortak Alan Poliçesi 2020.pdf"

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 def setup_neo4j_connection():

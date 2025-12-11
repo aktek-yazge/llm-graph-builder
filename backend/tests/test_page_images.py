@@ -24,7 +24,7 @@ except ImportError as e:
         sys.exit(1)
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
     
     # Test PDF dosyasının yolu - gerçek bir PDF dosyası kullanın
     test_pdf_path = "/Users/mehmeterdogan/python-projects/llm-graph-builder/backend/merged_files/Asude Sitesi Yönetimi Ortak Alan Poliçesi 2020.pdf"

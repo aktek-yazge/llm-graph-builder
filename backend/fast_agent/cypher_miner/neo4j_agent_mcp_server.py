@@ -12,7 +12,7 @@ from fast_agent.core.fastagent import FastAgent
 from fast_agent import RequestParams
 
 # Logging ayarları
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
 
 # Structured output modeli

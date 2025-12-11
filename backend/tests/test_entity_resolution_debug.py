@@ -15,7 +15,7 @@ from entity_resolver import resolve_entity_before_creation
 from neo4j import GraphDatabase
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)  # main.py'de yapılıyor
 
 # Neo4j connection setup from environment
 NEO4J_URI = os.getenv('NEO4J_URI')
