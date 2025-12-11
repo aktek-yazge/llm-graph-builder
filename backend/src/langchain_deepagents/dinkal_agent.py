@@ -88,9 +88,9 @@ _mcp_error_count = 0    # Hata sayısı
 _mcp_last_reset_time = None  # Son reset zamanı
 
 # Config
-MCP_MAX_REQUESTS_BEFORE_RESET = 1000  # Bu kadar istekten sonra reset
-MCP_MAX_ERRORS_BEFORE_RESET = 5       # Bu kadar hatadan sonra reset
-MCP_RESET_INTERVAL_HOURS = 24         # Bu kadar saat sonra reset
+MCP_MAX_REQUESTS_BEFORE_RESET = int(os.environ.get("MCP_MAX_REQUESTS_BEFORE_RESET", "1000"))  # Bu kadar istekten sonra reset
+MCP_MAX_ERRORS_BEFORE_RESET = int(os.environ.get("MCP_MAX_ERRORS_BEFORE_RESET", "5"))       # Bu kadar hatadan sonra reset
+MCP_RESET_INTERVAL_HOURS = int(os.environ.get("MCP_RESET_INTERVAL_HOURS", "24"))         # Bu kadar saat sonra reset
 
 
 def set_global_mcp_tools(mcp_client, tools):
@@ -2139,10 +2139,15 @@ class DeepAgentIntegration:
 # Session bazlı DeepAgent cache - her session için ayrı agent
 _session_agents: Dict[str, DeepAgentIntegration] = {}
 _session_access_times: Dict[str, datetime] = {}
+# Async lock for session cache to avoid race conditions in concurrent environments
+try:
+    _session_agent_lock = asyncio.Lock()
+except Exception:
+    _session_agent_lock = None
 
-# Config
-SESSION_AGENT_MAX_AGE_HOURS = 24  # Session agent'ı bu süreden sonra temizle
-SESSION_AGENT_MAX_COUNT = 100    # Maksimum cache'deki session sayısı
+# Config (env-overridable)
+SESSION_AGENT_MAX_AGE_HOURS = int(os.environ.get("SESSION_AGENT_MAX_AGE_HOURS", "24"))  # Session agent'ı bu süreden sonra temizle
+SESSION_AGENT_MAX_COUNT = int(os.environ.get("SESSION_AGENT_MAX_COUNT", "100"))    # Maksimum cache'deki session sayısı
 
 
 def cleanup_old_session_agents():
@@ -2199,13 +2204,41 @@ async def get_or_create_session_agent(
     """Session bazlı DeepAgent al veya oluştur"""
     global _session_agents, _session_access_times
     
-    # Önce eski session'ları temizle
-    cleanup_old_session_agents()
-    
-    # Session için agent var mı?
-    if session_id in _session_agents:
-        agent = _session_agents[session_id]
-        _session_access_times[session_id] = datetime.now()
+    # Güvenlik: session cache işlemlerini lock ile koru (concurrency safety)
+    if _session_agent_lock:
+        async with _session_agent_lock:
+            # Önce eski session'ları temizle
+            cleanup_old_session_agents()
+            # Session için agent var mı?
+            if session_id in _session_agents:
+                agent = _session_agents[session_id]
+                _session_access_times[session_id] = datetime.now()
+                # Model veya reasoning_effort değiştiyse güncelle
+                if agent.model != model or agent.reasoning_effort != reasoning_effort:
+                    logging.info(f"🔄 Session {session_id[:8]}: Model/reasoning güncelleniyor ({agent.model}/{agent.reasoning_effort} -> {model}/{reasoning_effort})")
+                    agent.model = model
+                    agent.reasoning_effort = reasoning_effort
+                    agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
+                if graph and agent.graph != graph:
+                    logging.debug(f"🔄 Session {session_id[:8]}: Graph güncelleniyor")
+                    agent.graph = graph
+                logging.debug(f"♻️ Session {session_id[:8]}: Mevcut agent kullanılıyor")
+                return agent
+            # Yeni agent oluştur
+            agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
+            _session_agents[session_id] = agent
+            _session_access_times[session_id] = datetime.now()
+            logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
+            return agent
+    else:
+        # Fallback without lock
+        # Önce eski session'ları temizle
+        cleanup_old_session_agents()
+        
+        # Session için agent var mı?
+        if session_id in _session_agents:
+            agent = _session_agents[session_id]
+            _session_access_times[session_id] = datetime.now()
         
         # Model veya reasoning_effort değiştiyse güncelle
         if agent.model != model or agent.reasoning_effort != reasoning_effort:
@@ -2221,14 +2254,14 @@ async def get_or_create_session_agent(
         logging.debug(f"♻️ Session {session_id[:8]}: Mevcut agent kullanılıyor")
         return agent
     
-    # Yeni agent oluştur
-    agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
-    _session_agents[session_id] = agent
-    _session_access_times[session_id] = datetime.now()
-    
-    logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
-    
-    return agent
+        # Yeni agent oluştur
+        agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
+        _session_agents[session_id] = agent
+        _session_access_times[session_id] = datetime.now()
+        
+        logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
+        
+        return agent
 
 
 def get_session_agent_stats() -> Dict[str, Any]:
