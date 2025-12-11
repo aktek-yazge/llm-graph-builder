@@ -945,7 +945,7 @@ Birden fazla eşleşme/kriter varsa → Soru sorma, TÜM olasılıkları hesapla
 class DeepAgentIntegration:
     """LangGraph Deep Agent'i chat_bot_stream'e entegre eden sınıf - MCP Tools ile"""
 
-    def __init__(self, model: str = "gpt-5-mini", graph=None, reasoning_effort: str = "high"):
+    def __init__(self, model: str = "gpt-5", graph=None, reasoning_effort: str = "medium"):
         self.model = model
         self.graph = graph
         self.reasoning_effort = reasoning_effort  # none, low, medium, high
@@ -1275,14 +1275,14 @@ class DeepAgentIntegration:
                 "description": "Veritabanında keşif sorguları yapar. İsim, kod veya terim arayarak ilgili kayıtları bulur. Bulunan entity tiplerini ve başarılı filtreleri raporlar. Metadata sorguları (kim, kaç, hangi tarih) için kullan.",
                 "system_prompt": explorer_prompt_with_schema,
                 "tools": tools,  # MCP tools (read_neo4j_cypher)
-                "model": "openai:gpt-4o-mini",  # Hızlı ve maliyet etkin
+                "model": "gpt-5-mini",  # Reasoning yetenekli, hızlı
             },
             {
                 "name": "content-searcher",
                 "description": "Belge içeriklerinde detaylı arama yapar. Verilen filtreler ile semantic arama yaparak içerik detaylarını bulur. Detay, liste, açıklama, tablo istekleri için kullan. KRİTİK: Mutlaka doğrulanmış filtrelerle birlikte kullan!",
                 "system_prompt": searcher_prompt_with_schema,
                 "tools": tools,  # MCP tools (read_neo4j_cypher_with_embedding)
-                "model": "openai:gpt-4o-mini",  # Hızlı ve maliyet etkin
+                "model": "gpt-5-mini",  # Reasoning yetenekli, hızlı
             },
         ]
         
@@ -1804,7 +1804,7 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5-mini", graph=None, reasoning_effort: str = "high"
+    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "medium"
 ) -> DeepAgentIntegration:
     """Session bazlı DeepAgent al veya oluştur"""
     global _session_agents, _session_access_times
