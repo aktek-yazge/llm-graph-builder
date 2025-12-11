@@ -69,6 +69,9 @@ services:
       - NEO4J_READ_TIMEOUT=300
       - NEO4J_WRITE_TIMEOUT=300
       - NEO4J_CONNECTION_ACQUISITION_TIMEOUT=120
+      # MCP Server bağlantısı
+      - MCP_HTTP_HOST=mcp-neo4j-cypher
+      - MCP_HTTP_PORT=8002
       # OpenTelemetry - Observability entegrasyonu
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
       - OTEL_SERVICE_NAME=llm-graph-builder-backend

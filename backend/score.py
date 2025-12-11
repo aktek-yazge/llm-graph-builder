@@ -2617,10 +2617,14 @@ async def chat_bot_stream(
             # İlk durum mesajı gönder
             yield f"data: {json.dumps({'type': 'status', 'message': 'Gerçek streaming başlatılıyor...', 'status': 'starting'}, ensure_ascii=False)}\n\n"
 
-            # Graph bağlantısını kur
+            # Graph bağlantısını kur - Environment variable varsa onu kullan
+            actual_uri = os.environ.get("NEO4J_URI", uri) if uri else uri
+            if actual_uri and actual_uri != uri:
+                logging.info(f"URI override: {uri} -> {actual_uri}")
+            
             if mode == "graph":
                 graph = Neo4jGraph(
-                    url=uri,
+                    url=actual_uri,
                     username=userName,
                     password=password,
                     database=database,
@@ -2629,7 +2633,7 @@ async def chat_bot_stream(
                 )
             else:
                 graph = create_graph_database_connection(
-                    uri, userName, password, database
+                    actual_uri, userName, password, database
                 )
 
             yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'}, ensure_ascii=False)}\n\n"

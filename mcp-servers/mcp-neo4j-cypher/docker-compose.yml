@@ -58,7 +58,13 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - default
+      - preview
 
 networks:
   default:
     name: mcp-network
+  preview:
+    external: true
+    name: backend_preview
