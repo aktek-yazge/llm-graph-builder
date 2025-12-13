@@ -5,12 +5,16 @@ export const chatBotAPI = async (
   session_id: string,
   model: string,
   mode: string,
-  document_names?: (string | undefined)[]
+  document_names?: (string | undefined)[],
+  question_id?: string  // Log correlation ID
 ) => {
   try {
     const formData = new FormData();
     formData.append('question', question);
     formData.append('session_id', session_id);
+    if (question_id) {
+      formData.append('question_id', question_id);  // Log correlation
+    }
     formData.append('model', model);
     formData.append('mode', mode);
     formData.append('document_names', JSON.stringify(document_names));

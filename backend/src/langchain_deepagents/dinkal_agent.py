@@ -18,8 +18,9 @@ import json
 import logging
 import os
 import re
+import threading
 import urllib.parse
-from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING
+from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING, Union, cast
 from datetime import datetime
 
 # Global Schema Cache import
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
 
 try:
     from deepagents import create_deep_agent  # type: ignore
+    from deepagents.backends import FilesystemBackend  # type: ignore
     from langchain.chat_models import init_chat_model  # type: ignore
     from langchain_core.messages import HumanMessage, AIMessage
     from langchain_community.callbacks import get_openai_callback
@@ -61,6 +63,7 @@ except ImportError as e:
     DEEP_AGENT_AVAILABLE = False
     create_deep_agent = None  # type: ignore
     init_chat_model = None  # type: ignore
+    FilesystemBackend = None  # type: ignore
 
 # MCP Adapters import
 if TYPE_CHECKING:
@@ -86,6 +89,7 @@ _global_mcp_tools = None
 _mcp_request_count = 0  # Toplam istek sayısı
 _mcp_error_count = 0    # Hata sayısı
 _mcp_last_reset_time = None  # Son reset zamanı
+_mcp_counter_lock = threading.Lock()  # Thread-safe counter operations
 
 # Config
 MCP_MAX_REQUESTS_BEFORE_RESET = int(os.environ.get("MCP_MAX_REQUESTS_BEFORE_RESET", "1000"))  # Bu kadar istekten sonra reset
@@ -115,23 +119,26 @@ def get_global_mcp_client():
 
 
 def increment_mcp_request():
-    """MCP istek sayacını artır"""
+    """MCP istek sayacını artır (thread-safe)"""
     global _mcp_request_count
-    _mcp_request_count += 1
-    return _mcp_request_count
+    with _mcp_counter_lock:
+        _mcp_request_count += 1
+        return _mcp_request_count
 
 
 def increment_mcp_error():
-    """MCP hata sayacını artır"""
+    """MCP hata sayacını artır (thread-safe)"""
     global _mcp_error_count
-    _mcp_error_count += 1
-    return _mcp_error_count
+    with _mcp_counter_lock:
+        _mcp_error_count += 1
+        return _mcp_error_count
 
 
 def reset_mcp_error_count():
-    """Başarılı istekte hata sayacını sıfırla"""
+    """Başarılı istekte hata sayacını sıfırla (thread-safe)"""
     global _mcp_error_count
-    _mcp_error_count = 0
+    with _mcp_counter_lock:
+        _mcp_error_count = 0
 
 
 def should_reset_mcp_client() -> tuple[bool, str]:
@@ -238,6 +245,37 @@ def get_mcp_server_config() -> Dict[str, Any]:
 
 
 # ============================================================================
+# THINK TOOL - Subagent Düşünme Aracı (LangChain DeepAgents Pattern)
+# ============================================================================
+# Referans: https://github.com/langchain-ai/deepagents-quickstarts/blob/main/deep_research/research_agent/tools.py
+# think_tool, subagent'ların her sorgu sonrası düşünme ve strateji belirleme yapmasını sağlar.
+
+from langchain_core.tools import tool
+
+@tool
+def think_tool(reflection: str) -> str:
+    """
+    Düşünme ve strateji belirleme aracı.
+    
+    Her sorgu sonrasında bu tool'u kullanarak:
+    - Ne buldum? (sonuç özeti)
+    - Eksik ne var? (henüz cevaplanamayan kısımlar)
+    - Yeterli bilgi var mı? (devam etmeli miyim?)
+    - Sonraki adım ne olmalı? (devam/dur/escalate)
+    
+    Args:
+        reflection: Düşünce ve strateji değerlendirmesi
+    
+    Returns:
+        Düşünce kaydedildi onayı
+    """
+    # Bu tool aslında bir "no-op" - model düşüncesini yapılandırması için kullanılır
+    # Trace'de görünmesi için log'lanır
+    logging.info(f"🧠 THINK: {reflection[:500]}...")
+    return f"Düşünce kaydedildi: {reflection[:100]}..."
+
+
+# ============================================================================
 # SYSTEM PROMPTS - ORCHESTRATOR & SUB AGENTS
 # ============================================================================
 
@@ -250,14 +288,15 @@ Sen kullanıcı sorularını analiz eden ve cevapları koordine eden bir ajansı
 ## 🎯 GÖREVLER
 
 1. **Kullanıcının sorusunu analiz et** ve ne tür bilgi gerektiğini belirle
-2. **Plan oluştur** ve kullanıcıya ne yaptığını açıkla (TEKNİK TERİM KULLANMADAN!)
+2. **Kısa ilerleme bilgisi ver** (TEKNİK TERİM KULLANMADAN!) ama kullanıcıya "plan/strateji metni" döndürme
 3. **Alt görevleri delege et** ve sonuçları topla
 4. **Final cevabı oluştur** ve kullanıcıya sun
 
 ## 🔄 ÇALIŞMA AKIŞI
 
-### ADIM 1: PLAN OLUŞTUR VE KULLANICIYA BİLDİR
-Kullanıcıya ne yapacağını TEKNİK TERİM KULLANMADAN açıkla:
+### ADIM 1: KISA İLERLEME BİLGİSİ VER (opsiyonel)
+Kullanıcıya ne yaptığını TEKNİK TERİM KULLANMADAN 1-2 cümle ile söyleyebilirsin.
+**Ama final mesajın "Planım / Ön bulgular / Devam etmek için seçenekler" şeklinde bir çalışma notu OLMAMALI.**
 
 ✅ DOĞRU mesajlar:
 - "🔍 Veritabanında [X] ile ilgili kayıtları arıyorum..."
@@ -283,19 +322,7 @@ task(
 )
 ```
 
-### ADIM 3: İÇERİK ARAMASI DELEGE ET (Gerekirse)
-İstenen detay bilgisi graph'ta yoksa `content-searcher` sub agent'ını kullan:
-
-```
-task(
-  name="content-searcher", 
-  task="[Doğrulanmış filtreler] ile [Aranan kavram] hakkında belge içeriğinde ara.
-  ⚠️ Eğer sonuç bulamazsan: farklı relationship zincirleri dene, filtreleri gevşet, 
-  alternatif node tiplerinden belgelere ulaşmayı dene. BOŞ SONUÇTA HEMEN VAZGEÇME!"
-)
-```
-
-### ADIM 4: SONUÇLARI BİRLEŞTİR VE CEVAPLA
+### ADIM 3: SONUÇLARI BİRLEŞTİR VE CEVAPLA
 Sub agent'lardan gelen sonuçları birleştir ve kullanıcıya sun.
 
 ## 📋 ÖNCEKİ BULGULARI YENİ GÖREVLERE AKTAR (KRİTİK!)
@@ -346,6 +373,13 @@ Metin alanlarında (açıklama, dosya adı vb.) da bu terim geçiyor olabilir."
 6. **BULGULARI SAKLA**: Her sub agent'tan gelen bulguları hafızanda tut ve yeni görevlere dahil et!
 7. **TUTARSIZLIK KONTROLÜ**: Bir sub agent önceki bulguyla çelişen sonuç verirse, önceki bulguları açıkça geçirerek tekrar sor!
 
+## ✅ FINAL MESAJ KURALI (ÇOK ÖNEMLİ)
+Kullanıcıya döndüğün **son mesaj** bir "çalışma planı" veya "seçenek" listesi olamaz.
+
+- Finalde **doğrudan cevap ver** (kısa ve net).
+- **Kullanıcıya soru sorma** (örn. "2023 mü 2025 mi?") — gerekiyorsa varsayımını yaz ve devam et.
+- Eğer %100 teyit edemiyorsan: bunu 1 cümle ile söyle, ardından **en güçlü kanıtı** ve **belge/poliçe/şirket** bilgisini ver.
+
 ## 🚫 HAM VERİ GÖSTERME!
 
 Kullanıcıya ASLA şunları gösterme:
@@ -375,18 +409,10 @@ Kullanıcıya ASLA şunları gösterme:
 Soru: "[Kişi/Kurum adı]'nın [Yıl] belgelerinde [detay bilgisi]"
 
 1. "🔍 Veritabanında '[Arama terimi]' ile ilgili kayıtları arıyorum..."
-   → graph-explorer'a delege et
+   → graph-explorer'a delege et (hem keşif hem içerik araması aynı agent'ta yapılır)
    → **SONUÇ KAYDET**: [EntityTipi]: [ID1], [Özellik]: [Değer1]; [EntityTipi]: [ID2], [Özellik]: [Değer2]
    
-2. "📋 [Yıl] yılına ait belgeleri filtreliyorum..."
-   → Keşif sonuçlarını kullan
-   
-3. "📄 [Detay bilgisi] için belge içeriklerini inceliyorum..."
-   → content-searcher'a delege et
-   → **ÖNCEKİ BULGULARI GÖREVİNE DAHİL ET!**:
-   "Aranan: [kavram]. Önceki bulgular: [ID1] ([Özellik1]), [ID2] ([Özellik2]). Bu kayıtların belgelerinde ara."
-   
-4. "✅ Bilgiler bulundu!"
+2. "✅ Bilgiler bulundu!"
    → Anlaşılır özet sun (HAM VERİ DEĞİL!)
 
 ## ⚠️ TUTARSIZLIK KONTROLÜ
@@ -432,41 +458,37 @@ write_todos([
 ])
 ```
 
-### SUBAGENT'A TODO LİSTİ VER:
-Her subagent görevinde TODO listesi dahil et:
+### SUBAGENT'A GÖREV VER (session_id ve question_id dahil):
+Her subagent görevinde dosya yolu bilgisi ve kurallar dahil et:
 
 ```
 task(
   name="graph-explorer",
   task=\"\"\"
-  ## 📋 GÖREV PLANI:
-  1. [ ] Şirket adını veritabanında bul
-  2. [ ] Yıllara göre kayıt dağılımını çıkar
-  3. [ ] İlişkili entity'leri belirle
+  ## 📋 GÖREV: [Arama terimi/entity] ile ilgili bilgileri bul
   
-  ## 📁 RAPORLAMA:
-  - Her maddeyi tamamladığında bana bildir
-  - Bulgularını /research/madde_N.md dosyasına yaz
-  - Sorun yaşarsan ESCALATE et
+  ## 📁 DOSYA YOLU (Sonuçları buraya yaz):
+  findings/{session_id}/{question_id}_result.md
   
-  ## ⏳ ONAY MEKANİZMASI:
-  Her madde sonunda kısa özet ver, onay bekle, sonra devam et.
+  ## 🎯 ARANAN ENTITY: [Tam isim]
+  ⚠️ Sadece bu entity ile EŞLEŞen sonuçları döndür!
+  ⚠️ Farklı isimli entity bulursan KULLANMA, ESCALATE et!
+  
+  ## 🚨 ESCALATION: 3 sorguda bulunamazsa ESCALATE et
   \"\"\"
 )
 ```
 
-## 📁 DOSYA SİSTEMİ KULLANIMI
+## 📁 SUBAGENT SONUÇLARI VE DOSYA YÖNETİMİ
 
-### SUBAGENT BULGULARI:
-Subagent'lar bulgularını `/research/` klasörüne yazar:
-- `/research/madde_1.md` - İlk görev bulguları
-- `/research/madde_2.md` - İkinci görev bulguları
-- `/research/summary.md` - Final özet
-
-### BULGULARI OKUMA:
-Subagent tamamlandığında veya escalation geldiğinde:
+### SONUÇ AKIŞI:
 ```
-read_file("/research/summary.md")
+1. Subagent araştırma yapar
+2. Büyük sonuçları dosyaya yazar: findings/{session_id}/{question_id}_result.md
+3. Kısa özeti mesaj olarak döndürür
+4. Sen (orchestrator) detaylı sonucu okumak için: read_file("findings/{session_id}/{question_id}_result.md")
+5. Gerekirse başka subagent çağırırsın
+4. Yeterliyse final cevabı oluşturursun
 ```
 
 ## 🔄 ESCALATION YÖNETİMİ
@@ -503,7 +525,7 @@ Subagent her madde sonunda sana bildirim yapar:
 ```
 MADDE 1 TAMAMLANDI ✅
 BULGU: [Kısa özet]
-DOSYA: /research/madde_1.md
+SONUÇ: [Bulunan entity'ler veya içerikler]
 ```
 
 ### SENİN ONAYIN:
@@ -516,47 +538,186 @@ Kısa ve net onay ver:
 ✅ KISA ONAY: "Tamam, 44 şirket bulundu. Madde 2'ye geç."
 🔄 EKSİK: "Doğa Sigorta detaylarını da ekle, sonra devam."
 📍 YÖN DEĞİŞİKLİĞİ: "Policy yerine InsuranceCoverage'dan başla."
+
+## 🔄 ARAŞTIRMA WORKFLOW (KRİTİK!)
+
+### 1. PLAN - Görevi analiz et
+- Kullanıcının sorusunu oku
+- Ne tür bilgi gerekli: metadata mı, içerik detayı mı?
+- TODO listesi oluştur
+
+### 2. KEŞİF VE ARAMA - graph-explorer çağır
+- graph-explorer hem metadata keşfi hem içerik araması yapabilir
+- Entity'leri, belgeleri, filtreleri bul
+- Gerekirse embedding search ile detay bilgisini de bul
+- **Subagent sonucu gelince DEVAM ET!**
+
+### 3. SENTEZle - Final cevap oluştur
+- **SEN (orchestrator) final cevabı oluşturmalısın!**
+- Subagent sonuçlarını al ve KULLANICIYA UYGUN formatta sun
+- Teknik terim kullanma, sade Türkçe
+
+### ⚠️ SUBAGENT SONUCU GELDİĞİNDE:
+1. Sonucu OKU ve DEĞERLENDIR
+2. **Subagent dosya yazdıysa** → read_file("findings/...") ile detayları OKU
+3. Yeterli mi? Değilse → Başka subagent çağır veya aynısını yeni talimatla çağır
+4. Yeterliyse → SEN final cevabı oluştur ve kullanıcıya sun
+
+**📁 DOSYA YÖNETİMİ (Context Yönetimi):**
+- Subagent'lar büyük sonuçları `findings/` altına yazar (**başında `/` OLMASIN**, yoksa OS root'a yazar ve "read-only filesystem" hatası alırsın)
+- Sen read_file ile bu dosyaları okuyabilirsin
+- Örnek: read_file("findings/explorer_results.md")
+- Örnek: read_file("findings/searcher_results.md")
+
+**❌ YAPMA:** Subagent'ın cevabını direkt kullanıcıya iletme!
+**✅ YAP:** Subagent sonucunu al, gerekirse dosyadan detay oku, sentezle, güzel formatla sun!
+
+## 🔗 ARAŞTIRMA AKIŞI
+
+### STANDART AKIŞ:
+```
+ADIM 1: graph-explorer → Entity ve belgeler bulunur + İçerik araması yapılır
+        ↓
+        Sonuç: "Akiş GYO'nun 4 poliçesi var, Kira Kaybı Klozu bulundu"
+        ↓
+ADIM 2: SEN (orchestrator) → Final cevabı oluştur
+```
+
+### graph-explorer TOOL'LARI:
+- **read_neo4j_cypher**: Metadata sorguları (kim, kaç, hangi tarih, ilişkiler)
+- **read_neo4j_cypher_with_embedding**: İçerik araması (detay, liste, açıklama)
+
+graph-explorer tek başına hem keşif hem içerik araması yapabilir!
+
+## 📝 KAYNAK VE CİTATION FORMATI
+
+Raporlarda kaynak gösterirken:
+```
+[1] [Belge adı veya kaynak] - Sayfa: [link]
+[2] [Başka kaynak] - Sayfa: [link]
+
+...rapor içeriği...
+
+Kaynaklar:
+[1] [Tam referans]
+[2] [Tam referans]
+```
 """
 
 # -----------------------------------------------------------------------------
-# SUB AGENT 1: GRAPH EXPLORER - Keşif ve Filtreleme
+# SUB AGENT 1: GRAPH EXPLORER - Keşif ve Filtreleme (Sadeleştirilmiş + Hard Limits)
 # -----------------------------------------------------------------------------
+# Referans: https://github.com/langchain-ai/deepagents-quickstarts/blob/main/deep_research/research_agent/prompts.py
 EXPLORER_SUBAGENT_PROMPT = """
-Sen Neo4j veritabanında keşif sorguları yapan bir uzman ajansın.
+Sen Neo4j veritabanında hem keşif hem içerik araması yapan bir uzman ajansın.
+Bugünün tarihi: {date}
 
-## 🎯 GÖREV
-Verilen arama terimleri için graph'ta keşif yap ve ilgili entity'leri bul.
+<Task>
+Verilen arama terimleri için graph'ta keşif yap, entity'leri bul, ve gerekirse belge içeriklerinde semantic arama yap.
+</Task>
 
-## 🔧 KULLANILACAK TOOL
-`read_neo4j_cypher` - Metadata sorguları için
+<Available_Tools>
+You have access to exactly **4 specific tools**:
+1. **read_neo4j_cypher** - Metadata sorguları (entity, ilişki, tarih, sayı bul)
+2. **read_neo4j_cypher_with_embedding** - Belge içeriklerinde semantic arama
+3. **think_tool** - Her sorgu sonrası düşünme ve değerlendirme
+4. **write_file** - Büyük sonuçları dosyaya kaydet (context yönetimi)
 
-## ⚠️ CYPHER SYNTAX KURALLARI (KRİTİK!)
+**TOOL SEÇİMİ:**
+- "Kim? Kaç? Hangi tarih?" → read_neo4j_cypher
+- "Neler? Detaylar? Liste?" → read_neo4j_cypher_with_embedding
+- Her sorgu sonrası → think_tool ile değerlendir
+- Sonuç 500+ karakter → write_file ile kaydet
 
-Cypher sorgusunda clause SIRASI ÇOK ÖNEMLİ:
+**⛔ YASAK (Bu tool'ları ASLA çağırma):** task, write_todos
+
+**📁 DOSYA YAZMA KURALI:**
+Dosya yolu formatı: `findings/{session_id}/{question_id}_result.md`
+- session_id ve question_id orchestrator'dan gelir (görev açıklamasında belirtilir)
+- Birden fazla sonuç varsa: `{question_id}_result_2.md`, `{question_id}_result_3.md`
+- Örnek: `findings/sess_abc123/q_001_result.md`
+- Orchestrator bu dosyayı read_file ile okuyabilir
+</Available_Tools>
+
+<Critical_Validation>
+**ARANAN vs BULUNAN ENTITY KONTROLÜ:**
+Orchestrator sana "[X]'ı bul" dedi. Sorgu sonucu "[Y]" döndü.
+- X = Y ise → ✅ Sonucu kullan
+- X ≠ Y ise → ❌ Bu sonucu KULLANMA, ESCALATE et!
+
+**ÖRNEK:**
+- Aranan: "Akiş GYO" 
+- Bulunan: "Sernur Çiftçi"
+- X ≠ Y → Bu sonuç İLGİSİZ! Döndürme, ESCALATE et!
+
+**KURAL:** Eğer aranan entity veritabanında BULUNAMAZSA:
+1. Alakasız sonuç döndürme
+2. "Entity bulunamadı" de ve ESCALATE et
+3. Orchestrator alternatif strateji belirleyecek
+</Critical_Validation>
+
+<Instructions>
+1. **Soruyu dikkatlice oku** - Ne bilgi gerekiyor?
+2. **Geniş aramadan başla** - Önce tüm entity tiplerinde ara
+3. **Her sorgu sonrası dur ve değerlendir** - think_tool kullan
+4. **Sonuç yeterliyse dur** - Mükemmellik arama, yeterli bilgi varsa bitir
+</Instructions>
+
+<Hard_Limits>
+**Tool Call Budget:**
+- Basit sorgular: 2-3 tool call maksimum
+- Karmaşık sorgular: 5 tool call maksimum
+- 5 tool call sonrası: HER DURUMDA DUR
+
+**Hemen Dur ve Sonuç Döndür:**
+- ✅ Aranan entity bulundu → DÖNDÜR
+- ✅ 2+ ilgili belge/kayıt bulundu → DÖNDÜR
+- ❌ 3 sorguda entity bulunamadı → ESCALATE et
+- ❌ Son 2 sorgu aynı sonucu döndürdü → DUR
+</Hard_Limits>
+
+<Escalate_Mechanism>
+**ESCALATE = Aranan entity bulunamadı, görevi bitir**
+
+**ESCALATE et (ve DURDUR) şu durumlarda:**
+- Aranan entity/kavram 3+ sorguda bulunamadı
+- Bulunan sonuçlar aranan ile EŞLEŞMİYOR (farklı isim/entity)
+- Cypher hatası tekrar tekrar alıyorsun
+
+**ESCALATE formatı:**
 ```
-MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
+🚨 ESCALATE - [Aranan Entity] bulunamadı
+
+Denenen: [ad varyasyonları listesi]
+Sonuç: Veritabanında bu entity yok veya farklı isimle kayıtlı
+
+Öneri: [alternatif strateji varsa]
 ```
 
-❌ YANLIŞ (WHERE, RETURN'den sonra olamaz!):
-```cypher
-MATCH (n:EntityType) RETURN n WHERE n.status = 'active'
-```
+**ESCALATE sonrası:** Görev BİTER. Daha fazla sorgu YAPMA!
+</Escalate_Mechanism>
 
-✅ DOĞRU (WHERE, RETURN'den önce):
-```cypher
-MATCH (n:EntityType) WHERE n.status = 'active' RETURN n
-```
+<Show_Your_Thinking>
+Her sorgu sonrası think_tool ile analiz yap:
+- Hangi bilgiyi buldum?
+- Kaç sorgu yaptım? (5'e yaklaşıyorsam sonlandırmalıyım)
+- Yeterli bilgi var mı sonuç döndürmek için?
+- Orchestrator'a ne aktarmalıyım?
+</Show_Your_Thinking>
 
-## 🔄 HATA ALIRSAN
+<Cypher_Syntax>
+Clause sırası: MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
 
-Cypher hatası alırsan:
-1. Hata mesajını oku ve SORUNU ANLA
-2. Syntax sırasını kontrol et: MATCH → WHERE → RETURN
-3. Sorguyu DÜZELT ve TEKRAR DENE
-4. Aynı hatayı TEKRARLAMA!
+❌ YANLIŞ: `MATCH (n) RETURN n WHERE n.x = 'a'`
+✅ DOĞRU: `MATCH (n) WHERE n.x = 'a' RETURN n`
 
-## 📋 KEŞİF SORGUSU ŞABLONU
+Neo4j 5.x:
+- `exists(n.prop)` → `n.prop IS NOT NULL`
+- `n[prop] IS STRING` → `n[prop] IS :: STRING`
+</Cypher_Syntax>
 
+<Search_Templates>
+**1. Metadata Keşfi (read_neo4j_cypher):**
 ```cypher
 MATCH (n)
 WHERE NOT 'Chunk' IN labels(n)
@@ -569,412 +730,236 @@ RETURN labels(n)[0] AS nodeType, n
 LIMIT 10
 ```
 
-## 📋 İLİŞKİLİ ENTITY SORGUSU
+**2. İçerik Araması (read_neo4j_cypher_with_embedding):**
 
-Şemadan relationship'leri öğren ve zinciri takip et:
-```cypher
-MATCH (a:EntityTypeA)-[:RELATIONSHIP_TYPE]->(b:EntityTypeB)
-WHERE toLower(a.name) CONTAINS 'arama_değeri'
-  AND b.property1 = 'filtre_değeri'
-RETURN b
+**a) Geniş arama (filtre yok):**
+```
+read_neo4j_cypher_with_embedding(
+  query_text="aranan kavram veya ifade",
+  cypher_query="MATCH (c:Chunk) 
+    WHERE c.embedding IS NOT NULL 
+      AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75 
+    RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score 
+    ORDER BY score DESC LIMIT 15"
+)
 ```
 
-## ⚠️ NEO4J 5.x SYNTAX
-
-| ❌ YANLIŞ | ✅ DOĞRU |
-|-----------|----------|
-| `exists(n.prop)` | `n.prop IS NOT NULL` |
-| `n[prop] IS STRING` | `n[prop] IS :: STRING` |
-| `RETURN ... WHERE` | `WHERE ... RETURN` |
-
-## 📊 ÇIKTI FORMATI
-
-Sonuçları şu formatta raporla:
+**b) Önceki keşiften bulunan filtrelerle (ÖNERİLEN):**
+Önce read_neo4j_cypher ile entity bul, sonra o entity'nin belgelerinde embedding ara:
 ```
-✅ BULUNAN ENTITY'LER:
-- Tip: [NodeType], Filtre: [property=değer]
-- Tip: [NodeType], Filtre: [property=değer]
+# ADIM 1: Keşif - entity ve belgelerini bul
+read_neo4j_cypher("MATCH (n) WHERE toLower(n.name) CONTAINS 'arama_terimi' 
+  RETURN labels(n)[0] as tip, n.name, elementId(n) as id LIMIT 5")
+# Sonuç: tip=Customer, name=ABC Şirketi, id=4:abc:123
 
-📌 DOĞRULANAN FİLTRELER:
-- [property1] = [değer1]
-- [property2] = [değer2]
-
-🔗 RELATIONSHIP ZİNCİRİ:
-(A)-[:REL1]->(B)-[:REL2]->(Document)-[:HAS_CHUNK]->(Chunk)
+# ADIM 2: Bulunan entity'nin belgelerinde içerik ara
+read_neo4j_cypher_with_embedding(
+  query_text="aranan detay kavramı",
+  cypher_query="MATCH (n)-[*1..3]-(d:Document)<-[:PART_OF]-(c:Chunk) 
+    WHERE elementId(n) = '4:abc:123'
+      AND c.embedding IS NOT NULL 
+      AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75 
+    RETURN c.text, d.fileName, 
+      gds.similarity.cosine(c.embedding, $embedding_vector) as score 
+    ORDER BY score DESC LIMIT 15"
+)
 ```
 
-## 🔄 BOŞ SONUÇ ALIRSAN - ALTERNATİF DÜŞÜNME (KRİTİK!)
-
-Bir aramada sonuç bulamadıysan, HEMEN VAZGEÇME! Düşünme stratejini değiştir:
-
-### 1. YAZIM VARYASYONLARI VE BİRLEŞTİRME (EN KRİTİK!)
-
-⚠️ **İLK ARAMADA MUTLAKA `toLower()` KULLAN!** ⚠️
-
-Veritabanında aynı kişi/kurum FARKLI YAZIMLARLA kaydedilmiş olabilir:
-- "Emrah Ertemiz" → 1 kayıt
-- "EMRAH ERTEMİZ" → 3 kayıt (Farklı ID'lerle!)
-
-**ZORUNLU SORGU PATTERN'İ** (Her aramada bunu kullan!):
-```cypher
-MATCH (n)-[r]-(related)
-WHERE toLower(n.name) CONTAINS toLower('arama_terimi')
-RETURN DISTINCT n.name, related.id, related.type
+**c) İsim filtresi ile:**
 ```
-
-❌ YANLIŞ (Sadece bir varyasyonu yakalar):
-```cypher
-WHERE n.name = 'Emrah Ertemiz'
-WHERE n.name CONTAINS 'Ertemiz'
+read_neo4j_cypher_with_embedding(
+  query_text="aranan kavram",
+  cypher_query="MATCH (n) WHERE toLower(n.name) CONTAINS 'bulunan_isim'
+    MATCH (n)-[*1..3]-(d:Document)<-[:PART_OF]-(c:Chunk)
+    WHERE c.embedding IS NOT NULL 
+      AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75 
+    RETURN c.text, d.fileName, n.name,
+      gds.similarity.cosine(c.embedding, $embedding_vector) as score 
+    ORDER BY score DESC LIMIT 15"
+)
 ```
+</Search_Templates>
 
-✅ DOĞRU (Tüm varyasyonları yakalar):
-```cypher
-WHERE toLower(n.name) CONTAINS toLower('ertemiz')
+<Output_Format>
+**GÖREV BİTTİĞİNDE:**
+
+1. **Detaylı sonuçları dosyaya yaz** (context yönetimi için):
 ```
+write_file("findings/explorer_results.md", \"\"\"
+# Keşif Sonuçları
 
-**NEDEN ÖNEMLİ?**
-- Bir varyasyonda 1 kayıt, diğerinde 3 kayıt olabilir
-- Her yazım varyasyonu FARKLI ID'lere ve ilişkilere sahip olabilir
-- **Bir varyasyonu kaçırırsan kritik bilgiyi kaçırırsın!**
+## Bulunan Entity'ler:
+- [EntityTip]: [id/isim], [önemli property'ler]
+...
 
-### 2. ANLAMSAL OLARAK YAKIN ENTITY TİPLERİ
-Şemada aradığın kavramı temsil edebilecek BİRDEN FAZLA entity tipi olabilir:
-- Aynı gerçek dünya kavramı, farklı bağlamlarda farklı node tiplerinde tutulabilir
-- Bir "kişi" veya "kurum" bilgisi, şemada birden fazla yerde geçebilir
-- Şemayı tekrar incele: Benzer anlama gelen veya ilişkili node tipleri var mı?
-
-### 3. DOLAYLI EŞLEŞMELER VE İLİŞKİLİ NODE'LAR
-Aranan bilgi doğrudan ana entity'de değil, İLİŞKİLİ NODE'LARDA olabilir:
-- Metin alanları (açıklama, not, dosya adı, text vb.) içinde geçiyor olabilir
-- İlişkili bir node'un property'sinde (name, id, text) saklı olabilir
-- Farklı relationship zincirleri üzerinden ulaşılabilir
-
-**ÖNEMLİ**: Detay bilgileri (alt kategori, özellik, şart, koşul vb.) genellikle:
-- Ana entity'ye BAĞLI alt node'larda tutulur
-- Şemada HAS_*, CONTAINS, INCLUDES gibi relationship'lerle bağlı olabilir
-- Bu alt node'ların name, text, description gibi property'lerinde bulunur
-
-Örnek zincir: `(MainEntity)-[:HAS_DETAIL]->(DetailNode)` → DetailNode.name içinde ara!
-
-### 4. GENİŞ KEŞİF SORGUSU
-Tüm node tiplerinde, tüm string property'lerde arama yap:
-```cypher
-MATCH (n) WHERE NOT 'Chunk' IN labels(n)
-  AND any(prop IN keys(n) WHERE n[prop] IS :: STRING 
-    AND toLower(n[prop]) CONTAINS toLower('ARAMA_TERİMİ'))
-RETURN labels(n)[0] AS nodeType, keys(n) AS props, n LIMIT 10
-```
-
-### 5. İLİŞKİLİ NODE'LARDA DETAY ARAMA (ÇOK ÖNEMLİ!)
-Ana entity bulunduktan sonra, ona bağlı detay node'larında ara:
-```cypher
-MATCH (main:MainEntityType)
-WHERE main.name CONTAINS 'BULUNAN_DEĞER'
-MATCH (main)-[r]->(detail)
-WHERE any(prop IN keys(detail) WHERE detail[prop] IS :: STRING 
-    AND toLower(detail[prop]) CONTAINS toLower('ARANAN_DETAY'))
-RETURN labels(detail)[0] AS detailType, detail.name, type(r) AS relationship
-LIMIT 10
-```
-
-Bu strateji şu durumlarda kritik:
-- Alt kategori detayları
-- Şart/koşul bilgileri
-- Alt kategoriler ve özellikler
-- İlişkili meta bilgiler
-
-❌ BİR YERDE BULAMADINSA VAZGEÇME!
-✅ ŞEMAYI TEKRAR İNCELE, İLİŞKİLİ NODE'LARI TARA!
-
-## ⚠️ KURALLAR
-
-1. Sadece şemada tanımlı node/property/relationship kullan
-2. Boş sonuç gelirse filtreleri gevşet veya alternatif ara
-3. Bulunan TÜM filtreleri raporla (içerik araması için gerekli!)
-4. KISA ve ÖZ cevap ver (max 300 kelime)
-5. Hata alırsan DÜZELT ve TEKRAR DENE!
-6. Tek bir node tipinde bulamadıysan, şemadaki benzer/ilişkili tipleri dene!
-7. **DETAY BİLGİLERİ için ana entity'ye BAĞLI node'ları mutlaka tara!**
-8. Embedding aramasından ÖNCE ilişkili node'larda metadata araması yap!
-9. **İLK ARAMADA `toLower()` KULLAN! `WHERE toLower(n.name) CONTAINS toLower('terim')` pattern'ini uygula!**
-10. **Bir entity bulduğunda durmadan TÜM ilişkili kayıtları tek sorguda çek!**
-11. **Sadece exact match kullanma! `n.name = 'X'` yerine `toLower(n.name) CONTAINS toLower('X')` kullan!**
-
-## 📋 TODO LIST TAKİBİ
-
-### GÖREV ALDIĞINDA:
-1. Orchestrator'dan gelen TODO listesini oku
-2. İlk bekleyen maddeyle başla
-3. Her madde için:
-   - Sorguyu çalıştır
-   - Sonucu `/research/madde_N.md` dosyasına yaz
-   - Orchestrator'a kısa bildirim yap
-
-### DOSYAYA YAZMA:
-```
-write_file("/research/madde_1.md", \"\"\"
-# Madde 1: [Görev Açıklaması]
-
-## Yapılan Sorgular:
-1. `MATCH (n:EntityType)...` → [N] kayıt bulundu
-
-## Bulgular:
-- [Özet bilgi 1]
-- [Özet bilgi 2]
-
-## Sonraki Adım İçin:
-- [Kullanılacak filtre veya relationship]
+## Sorgular ve Sonuçlar:
+1. [Sorgu 1] → [Sonuç detayı]
+2. [Sorgu 2] → [Sonuç detayı]
+...
 \"\"\")
 ```
 
-### MADDE TAMAMLAMA BİLDİRİMİ:
-Her madde bittiğinde şu formatta bildir:
-
+2. **Orchestrator'a kısa özet döndür:**
 ```
-MADDE 1 TAMAMLANDI ✅
+✅ KEŞİF TAMAMLANDI
 
-BULGU: [Kısa özet - max 2 cümle]
-DOSYA: /research/madde_1.md
+📁 Detaylı sonuçlar: findings/explorer_results.md
 
-ONAY BEKLİYORUM...
-```
+## Özet:
+- [N] entity bulundu: [isimler]
+- [N] belge bulundu: [belge isimleri]
 
-Orchestrator onay verene kadar sonraki maddeye GEÇME!
-
-## 🚨 ESCALATION MEKANİZMASI
-
-### NE ZAMAN ESCALATE ET:
-Kendi kararınla belirle, genellikle:
-- Aynı arama için 3-5 farklı sorgu başarısız olursa
-- Şemada beklenen entity/relationship bulunamazsa
-- Cypher hatası tekrar tekrar alınırsa
-
-### ESCALATION FORMATI:
-```
-🚨 ESCALATE: Madde [N] tamamlanamadı.
-
-DENEDİĞİM SORGULAR:
-1. MATCH (x:TypeA)... → Sonuç: 0 kayıt
-2. MATCH (y:TypeB)... → Sonuç: Hata - property yok
-3. MATCH (z:TypeC)... → Sonuç: 0 kayıt
-
-SORUN:
-[Ne aradım ama bulamadım]
-
-ÖNERİM:
-- [Alternatif entity/relationship önerisi varsa]
-
-ORCHESTRATOR TALİMATI BEKLİYORUM...
+## Sonraki Adım İçin:
+- Filtreler: [property=değer]
+- Relationship: (Customer)-[:HAS_POLICY]->(Policy)-[:HAS_DOCUMENT]->(Document)
 ```
 
-### ESCALATION SONRASI:
-Orchestrator yeni strateji verdiğinde:
-1. Önceki denemeleri TEKRARLAMA
-2. Yeni stratejiyi uygula
-3. Sonucu yine `/research/madde_N.md`'ye yaz
+**KRİTİK**: Bu sonucu döndürdükten sonra GÖREV BİTER!
+Orchestrator detayları read_file ile okuyabilir.
+</Output_Format>
 """
 
 # -----------------------------------------------------------------------------
-# SUB AGENT 2: CONTENT SEARCHER - Embedding ile İçerik Arama
+# SUB AGENT 2: CONTENT SEARCHER - Embedding ile İçerik Arama (Sadeleştirilmiş + Hard Limits)
 # -----------------------------------------------------------------------------
+# Referans: https://github.com/langchain-ai/deepagents-quickstarts/blob/main/deep_research/research_agent/prompts.py
 SEARCHER_SUBAGENT_PROMPT = """
 Sen belge içeriklerinde semantic arama yapan bir uzman ajansın.
+Bugünün tarihi: {date}
 
-## 🎯 GÖREV
-Verilen filtreler ve arama kavramı ile belge içeriklerinde (Chunk) arama yap.
+<Task>
+Verilen filtreler ve arama kavramı ile belge içeriklerinde (Chunk) embedding araması yap.
+</Task>
 
-## 🔧 KULLANILACAK TOOL
-`read_neo4j_cypher_with_embedding` - Semantic arama için
+<Available_Tools>
+1. **read_neo4j_cypher_with_embedding** - Semantic arama için (belge içeriklerinde)
+2. **think_tool** - Her sorgu sonrası düşünme ve strateji belirleme için
+3. **write_file** - Büyük sonuçları dosyaya kaydet (context yönetimi için)
 
-## ⚠️ CYPHER SYNTAX KURALLARI (KRİTİK!)
+**KRİTİK KURALLAR:**
+- Her sorgu sonrasında think_tool kullanarak sonuçları değerlendir!
+- Sonuç 500+ karakterse → write_file("findings/searcher_results.md", sonuç) ile kaydet (**başında `/` kullanma**)
+- Orchestrator'a kısa özet döndür, detaylar dosyada kalsın
+**KRİTİK: Her sorgu sonrasında think_tool kullanarak sonuçları değerlendir!**
+</Available_Tools>
 
-Cypher sorgusunda clause SIRASI ÇOK ÖNEMLİ:
+<Instructions>
+1. **Filtreleri koru** - Verilen doğrulanmış filtreleri MUTLAKA kullan
+2. **Semantic arama yap** - query_text ile embedding sorgusu
+3. **Her sorgu sonrası dur ve değerlendir** - think_tool kullan
+4. **Sonuç yeterliyse dur** - 3+ ilgili sonuç bulduğunda bitir
+</Instructions>
+
+<Hard_Limits>
+**⛔ MUTLAK SORGU LİMİTİ: 4 EMBEDDİNG SORGUSU!**
+- 4. sorgudan sonra ARAMAYI DURDUR
+- Bulduklarını özetle ve sonucu DÖNDÜR
+- Daha fazla arama YAPMA!
+
+**Hemen Dur ve Sonuç Döndür**:
+- 2+ yüksek skorlu sonuç bulduysan (skor > 0.75) → SONUÇLARI DÖNDÜR
+- İstenen bilgiyi içeren metin bulduysan → DÖNDÜR
+- 4 sorgu tamamlandıysa → NE BULDUYSAN ONU DÖNDÜR
+</Hard_Limits>
+
+<Escalate_Mechanism>
+**ESCALATE = Görevi bitir ve orchestrator'a geri dön**
+
+ESCALATE etmen gereken durumlar:
+- 4 embedding sorgusu yaptın ama içerik BULAMADIN
+- Verilen filtrelerle sonuç gelmiyor
+- Belge içeriğinde aranan kavram YOK
+
+**ESCALATE nasıl yapılır:**
+1. Araştırmayı DURDUR
+2. Şu formatta cevap VER ve BİTİR:
+
 ```
-MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
+🚨 ESCALATE
+
+## Ne aradım:
+[Aradığın kavram] + [Kullandığın filtreler]
+
+## Denediğim sorgular:
+1. query_text: [...], filtre: [...] → [N] sonuç
+2. query_text: [...], filtre: [...] → [N] sonuç
+
+## Bulamadım çünkü:
+[Olası neden]
+
+## Öneri:
+[Farklı filtre/zincir önerisi]
 ```
 
-❌ YANLIŞ (WHERE, RETURN'den sonra olamaz!):
+3. Bu cevabı verdikten sonra GÖREV BİTER
+</Escalate_Mechanism>
+
+<Show_Your_Thinking>
+Her sorgu sonrası think_tool ile analiz yap:
+- Dönen içerikler soruya cevap veriyor mu?
+- Kaç sorgu yaptım? (4'e yaklaşıyorsam sonlandırmalıyım)
+- Orchestrator'a ne aktarmalıyım?
+</Show_Your_Thinking>
+
+<Cypher_Syntax>
+Clause sırası: MATCH → WHERE → WITH → RETURN → ORDER BY → LIMIT
+
+Neo4j 5.x:
+- `ch.embedding IS NOT NULL` kontrolü ekle
+- `gds.similarity.cosine(ch.embedding, $embedding_vector) > 0.75`
+</Cypher_Syntax>
+
+<Query_Template>
 ```cypher
-MATCH (c:Chunk) RETURN c.text WHERE ...
-```
-
-✅ DOĞRU (WHERE, RETURN'den önce):
-```cypher
-MATCH (c:Chunk) WHERE ... RETURN c.text
-```
-
-## 🔄 HATA ALIRSAN
-
-Cypher hatası alırsan:
-1. Hata mesajını oku ve SORUNU ANLA
-2. Syntax sırasını kontrol et: MATCH → WHERE → RETURN
-3. Sorguyu DÜZELT ve TEKRAR DENE
-4. Aynı hatayı TEKRARLAMA!
-
-## ⚠️ KRİTİK: FİLTRELERİ KORU!
-
-Sana verilen doğrulanmış filtreleri embedding sorgusunda MUTLAKA kullan!
-
-❌ YANLIŞ - Filtresiz:
-```cypher
-MATCH (c:Chunk)
-WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8
-RETURN c.text
-```
-
-✅ DOĞRU - Filtreli:
-```cypher
-MATCH (a:EntityA)-[:REL1]->(b:EntityB)-[:REL2]->(d:Document)-[:HAS_CHUNK]->(ch:Chunk)
-WHERE toLower(a.name) CONTAINS 'verilen_filtre1'
-  AND b.property = 'verilen_filtre2'
+MATCH (a:Entity)-[:REL]->(d:Document)-[:HAS_CHUNK]->(ch:Chunk)
+WHERE toLower(a.name) CONTAINS 'filtre_değer'
   AND ch.embedding IS NOT NULL
   AND gds.similarity.cosine(ch.embedding, $embedding_vector) > 0.75
 RETURN ch.text, ch.page_link,
        gds.similarity.cosine(ch.embedding, $embedding_vector) as score
 ORDER BY score DESC LIMIT 5
 ```
+</Query_Template>
 
-## 📋 KULLANIM
+<Output_Format>
+**GÖREV BİTTİĞİNDE:**
 
-- `query_text`: Aranan KAVRAM (detay, özellik, koşul vb.)
-- `cypher_query`: Doğrulanmış filtreler + $embedding_vector + relationship zinciri
-
-## 📊 ÇIKTI FORMATI
-
-Sonuçları şu formatta raporla:
+1. **Detaylı içerikleri dosyaya yaz** (context yönetimi için):
 ```
-✅ BULUNAN İÇERİKLER:
+write_file("findings/searcher_results.md", \"\"\"
+# İçerik Arama Sonuçları
 
-📄 Sonuç 1 (Skor: 0.85):
-[Chunk içeriği özeti]
-Sayfa: [page_link]
+## Sonuç 1 (Skor: 0.XX)
+**Kaynak**: [Belge adı] - Sayfa: [link]
+**İçerik**: [İlgili metin parçası - TAM METİN]
 
-📄 Sonuç 2 (Skor: 0.82):
-[Chunk içeriği özeti]
-Sayfa: [page_link]
-```
+## Sonuç 2 (Skor: 0.XX)
+**Kaynak**: [Belge adı] - Sayfa: [link]
+**İçerik**: [İlgili metin parçası]
 
-## 🔄 BOŞ SONUÇ ALIRSAN - ALTERNATİF DÜŞÜNME
-
-Embedding aramasında sonuç bulamadıysan:
-
-### 1. FİLTRE ZİNCİRİNİ KONTROL ET
-- Verilen filtreler doğru entity tiplerine mi uygulanıyor?
-- Şemada aynı bilgiyi içerebilecek alternatif node tipleri var mı?
-- Relationship zinciri doğru mu? Farklı bir yol denenebilir mi?
-
-### 2. FİLTRELERİ GEVŞET
-- Çok spesifik filtreler sonuç döndürmeyebilir
-- Önce daha az filtre ile dene, sonra daralt
-- Metin eşleştirmelerinde tam eşleşme yerine CONTAINS kullan
-
-### 3. ALTERNATİF RELATIONSHIP ZİNCİRLERİ
-- Aynı belgeye farklı yollardan ulaşılabilir
-- Şemadaki tüm relationship'leri incele
-- Dolaylı bağlantıları düşün
-
-### 4. METADATA NODE'LARINDA ARA (ÖNCELİKLİ!)
-Bazı bilgiler Chunk içeriğinde değil, METADATA NODE'LARINDA olabilir:
-- Alt kategori, özellik, şart gibi detaylar → İlişkili alt node'ların name/text property'sinde
-- `(MainEntity)-[:HAS_*]->(DetailNode)` şeklinde bağlı olabilir
-- Embedding aramasından ÖNCE bu node'larda basit CONTAINS araması yap!
-
-```cypher
--- Önce metadata node'larında ara
-MATCH (main:MainEntity)-[:HAS_DETAIL]->(detail)
-WHERE main.name CONTAINS 'FİLTRE'
-  AND detail.name CONTAINS 'ARANAN_KAVRAM'
-RETURN detail.name, main
-```
-
-❌ FİLTRELER SONUÇ VERMİYORSA HEMEN VAZGEÇME!
-✅ ÖNCE METADATA NODE'LARI, SONRA CHUNK EMBEDDİNG!
-
-## ⚠️ KURALLAR
-
-1. Verilen filtreleri MUTLAKA kullan, filtresiz arama YAPMA!
-2. `ch.embedding IS NOT NULL` kontrolü ekle
-3. Şemadaki relationship zincirini takip et
-4. KISA ve ÖZ cevap ver (max 500 kelime)
-5. page_link varsa mutlaka raporla
-6. Hata alırsan DÜZELT ve TEKRAR DENE!
-7. Boş sonuç alırsan alternatif yolları dene!
-8. **Chunk aramasından ÖNCE ilişkili metadata node'larında basit arama yap!**
-9. **Detay bilgileri genellikle Chunk'ta değil, alt node'ların name/text property'sinde!**
-
-## 📋 TODO LIST TAKİBİ
-
-### GÖREV ALDIĞINDA:
-1. Orchestrator'dan gelen TODO listesini oku
-2. İlk bekleyen maddeyle başla
-3. Her madde için:
-   - Sorguyu çalıştır
-   - Sonucu `/research/madde_N.md` dosyasına yaz
-   - Orchestrator'a kısa bildirim yap
-
-### DOSYAYA YAZMA:
-```
-write_file("/research/madde_1.md", \"\"\"
-# Madde 1: [Görev Açıklaması]
-
-## Yapılan Sorgular:
-1. `MATCH ... WHERE gds.similarity.cosine...` → [N] sonuç
-
-## Bulunan İçerikler:
-- [Kaynak 1]: [Özet]
-- [Kaynak 2]: [Özet]
-
-## Sonraki Adım İçin:
-- [Ek arama gerekli mi?]
+## Tüm Kaynaklar:
+[1] [Belge adı] - [sayfa]
+[2] [Belge adı] - [sayfa]
 \"\"\")
 ```
 
-### MADDE TAMAMLAMA BİLDİRİMİ:
-Her madde bittiğinde şu formatta bildir:
-
+2. **Orchestrator'a kısa özet döndür:**
 ```
-MADDE 1 TAMAMLANDI ✅
+✅ İÇERİK ARAMASI TAMAMLANDI
 
-BULGU: [Kısa özet - max 2 cümle]
-DOSYA: /research/madde_1.md
+📁 Detaylı sonuçlar: findings/searcher_results.md
 
-ONAY BEKLİYORUM...
-```
+## Özet:
+[Bulunan bilgilerin 2-3 cümlelik özeti]
 
-Orchestrator onay verene kadar sonraki maddeye GEÇME!
-
-## 🚨 ESCALATION MEKANİZMASI
-
-### NE ZAMAN ESCALATE ET:
-Kendi kararınla belirle, genellikle:
-- Birkaç farklı embedding sorgusu başarısız olursa
-- Verilen filtreler sonuç döndürmezse
-- Relationship zinciri çalışmazsa
-
-### ESCALATION FORMATI:
-```
-🚨 ESCALATE: Madde [N] tamamlanamadı.
-
-DENEDİĞİM SORGULAR:
-1. Filtre: [...], Kavram: [...] → 0 sonuç
-2. Alternatif zincir: [...] → Hata
-3. Gevşetilmiş filtre: [...] → 0 sonuç
-
-SORUN:
-[Ne aradım ama bulamadım]
-
-ÖNERİM:
-- [Farklı relationship veya node tipi önerisi]
-
-ORCHESTRATOR TALİMATI BEKLİYORUM...
+## En İyi Eşleşmeler:
+1. [Belge adı] - Skor: 0.XX - [1 cümle özet]
+2. [Belge adı] - Skor: 0.XX - [1 cümle özet]
 ```
 
-### ESCALATION SONRASI:
-Orchestrator yeni strateji verdiğinde:
-1. Önceki denemeleri TEKRARLAMA
-2. Yeni stratejiyi uygula
-3. Sonucu yine `/research/madde_N.md`'ye yaz
+**KRİTİK**: Bu sonucu döndürdükten sonra GÖREV BİTER!
+Orchestrator detayları read_file ile okuyabilir.
+</Output_Format>
 """
 
 # -----------------------------------------------------------------------------
@@ -1190,7 +1175,7 @@ Birden fazla eşleşme/kriter varsa → Soru sorma, TÜM olasılıkları hesapla
 class DeepAgentIntegration:
     """LangGraph Deep Agent'i chat_bot_stream'e entegre eden sınıf - MCP Tools ile"""
 
-    def __init__(self, model: str = "gpt-5", graph=None, reasoning_effort: str = "medium"):
+    def __init__(self, model: str = "gpt-4o", graph=None, reasoning_effort: str = "none"):
         self.model = model
         self.graph = graph
         self.reasoning_effort = reasoning_effort  # none, low, medium, high
@@ -1520,20 +1505,17 @@ class DeepAgentIntegration:
         # =====================================================================
         # SUB AGENTS TANIMLAMA
         # =====================================================================
+        # 🆕 think_tool eklendi - Subagent'lar düşünme sürecini yönetir
+        subagent_tools = tools + [think_tool]  # MCP tools + think_tool
+        
+        # 🆕 TEK SUBAGENT: graph-explorer hem Cypher hem embedding search yapabilir
         subagents = [
             {
                 "name": "graph-explorer",
-                "description": "Veritabanında keşif sorguları yapar. İsim, kod veya terim arayarak ilgili kayıtları bulur. Bulunan entity tiplerini ve başarılı filtreleri raporlar. Metadata sorguları (kim, kaç, hangi tarih) için kullan.",
+                "description": "Veritabanında keşif ve içerik araması yapar. read_neo4j_cypher ile metadata sorgular (isim, kod, tarih, ilişkiler). read_neo4j_cypher_with_embedding ile belge içeriklerinde semantic arama yapar. Hem 'kim/kaç/hangi' hem 'neler/detaylar/liste' sorularını cevaplayabilir.",
                 "system_prompt": explorer_prompt_with_schema,
-                "tools": tools,  # MCP tools (read_neo4j_cypher)
-                "model": "gpt-5-mini",  # Reasoning yetenekli, hızlı
-            },
-            {
-                "name": "content-searcher",
-                "description": "Belge içeriklerinde detaylı arama yapar. Verilen filtreler ile semantic arama yaparak içerik detaylarını bulur. Detay, liste, açıklama, tablo istekleri için kullan. KRİTİK: Mutlaka doğrulanmış filtrelerle birlikte kullan!",
-                "system_prompt": searcher_prompt_with_schema,
-                "tools": tools,  # MCP tools (read_neo4j_cypher_with_embedding)
-                "model": "gpt-5-mini",  # Reasoning yetenekli, hızlı
+                "tools": subagent_tools,  # MCP tools + think_tool
+                "model": "gpt-4o-mini",  # Hızlı, reasoning yok
             },
         ]
         
@@ -1597,11 +1579,30 @@ class DeepAgentIntegration:
         if not DEEP_AGENT_AVAILABLE or create_deep_agent is None:
             raise ImportError("LangGraph Deep Agent not available. Install deepagents")
         
+        # 📁 FilesystemBackend - Agent bulguları gerçek dosya sistemine yazabilsin
+        backend = None
+        if FilesystemBackend is not None:
+            # Findings klasörünü backend çalışma dizininde oluştur
+            findings_dir = os.path.join(os.getcwd(), "agent_findings")
+            os.makedirs(findings_dir, exist_ok=True)
+            backend = FilesystemBackend(
+                root_dir=findings_dir,
+                # ÖNEMLİ: deepagents dosya tool'ları path'i çoğu zaman "/findings/..." gibi
+                # "virtual absolute" forma normalize eder. virtual_mode=True olursa bu path'ler
+                # OS root'a gitmez; root_dir altına güvenli şekilde map edilir.
+                virtual_mode=True,
+                max_file_size_mb=10
+            )
+            logging.info(f"📁 FilesystemBackend: Bulgular '{findings_dir}' klasörüne yazılacak")
+        else:
+            logging.warning("⚠️ FilesystemBackend kullanılamıyor, dosyalar ephemeral olacak")
+        
         agent = create_deep_agent(
             tools=tools,  # Ana agent de tools'a erişebilir (basit sorgular için)
             model=model,
             system_prompt=orchestrator_prompt,
-            subagents=subagents,  # 🆕 Sub agents eklendi!
+            subagents=cast(Any, subagents),  # 🆕 Sub agents eklendi! (typing: deepagents type'ları optional)
+            backend=backend,  # 📁 Gerçek dosya sistemi backend'i
         )
         
         logging.info(f"✅ Deep Agent oluşturuldu: Orchestrator + {len(subagents)} Sub Agent")
@@ -1738,8 +1739,28 @@ class DeepAgentIntegration:
                 if isinstance(chunk, tuple) and len(chunk) == 2:
                     namespace, chunk_data = chunk
                     # Namespace örnek: ('graph-explorer:abc123',) veya ('content-searcher:xyz789',)
+                    # veya ('tools:graph-explorer:abc123',) formatında olabilir
                     if namespace and len(namespace) > 0:
-                        subagent_name = namespace[0].split(':')[0] if ':' in namespace[0] else namespace[0]
+                        raw_namespace = namespace[0]
+                        # Debug: Gerçek namespace değerini logla
+                        if raw_namespace and raw_namespace != current_subagent:
+                            logging.debug(f"🔍 RAW NAMESPACE: {raw_namespace}")
+                        
+                        # Namespace parsing: farklı formatları destekle
+                        # Format 1: "graph-explorer:abc123" → "graph-explorer"
+                        # Format 2: "tools:graph-explorer:abc123" → "graph-explorer"
+                        # Format 3: "graph-explorer" → "graph-explorer"
+                        if ':' in raw_namespace:
+                            parts = raw_namespace.split(':')
+                            # "tools:graph-explorer:xxx" formatı
+                            if parts[0] == 'tools' and len(parts) > 1:
+                                subagent_name = parts[1]
+                            else:
+                                # "graph-explorer:xxx" formatı
+                                subagent_name = parts[0]
+                        else:
+                            subagent_name = raw_namespace
+                        
                         if subagent_name != current_subagent:
                             # 🆕 Önceki subagent bittiyse final output'u logla
                             if last_subagent and last_subagent in subagent_outputs:
@@ -1768,6 +1789,7 @@ class DeepAgentIntegration:
                             logging.info(f"")
                             logging.info(f"{'🔀'*20}")
                             logging.info(f"🔀 SUBAGENT BAŞLADI: {subagent_name}")
+                            logging.info(f"📦 Beklenen Tool'lar: read_neo4j_cypher, read_neo4j_cypher_with_embedding, think_tool, write_todos")
                             logging.info(f"{'🔀'*20}")
                             if subagent_name not in subagent_outputs:
                                 subagent_outputs[subagent_name] = []
@@ -1873,6 +1895,13 @@ class DeepAgentIntegration:
                             # Prompt'u kaydet
                             subagent_prompts[subagent_type] = task_description
                         
+                        # 🆕 Middleware tool kullanımını özel logla
+                        middleware_tools = ["write_file", "read_file", "write_todos", "ls", "edit_file", "glob", "grep", "execute"]
+                        if tool_name in middleware_tools:
+                            logging.info(f"📁 MIDDLEWARE TOOL KULLANILIYOR: {tool_name}")
+                            logging.info(f"   Subagent: {current_subagent or 'orchestrator'}")
+                            logging.info(f"   Args: {str(tool_args)[:500]}")
+                        
                         # 🆕 Subagent tool call'ı kaydet
                         if current_subagent and current_subagent in subagent_outputs:
                             subagent_outputs[current_subagent].append({
@@ -1883,11 +1912,21 @@ class DeepAgentIntegration:
                             })
                 
                 # AI'ın düşüncesi/reasoning varsa logla
+                # ToolMessage için content'i tekrar loglama (AIMessage'da zaten loglandı)
                 if hasattr(last_message, "content") and last_message.content:
-                    full_content = str(last_message.content)
-                    content_preview = full_content[:300]
+                    # Content'i normalize et (list/dict formatını plain text'e çevir)
+                    normalized_content = self._extract_text_from_reasoning_content(last_message.content)
+                    full_content = str(last_message.content)  # Orijinal format (subagent output için)
+                    content_preview = normalized_content[:300]
+                    content_hash = hash(normalized_content[:200].strip())  # Normalize edilmiş content için hash
+                    
+                    # ToolMessage'da aynı content tekrar loglanmasın
                     if content_preview.strip():
-                        logging.info(f"💭 Content: {content_preview}...")
+                        if msg_type == "ToolMessage" and content_hash in logged_message_ids:
+                            logging.info(f"💭 Content: [ToolMessage - önceki mesajla aynı, atlandı]")
+                        else:
+                            logging.info(f"💭 Content: {content_preview}...")
+                            logged_message_ids.add(content_hash)  # Content hash'i de kaydet
                         
                         # 🆕 Subagent content'i kaydet (full content ile)
                         if current_subagent and current_subagent in subagent_outputs:
@@ -1915,7 +1954,9 @@ class DeepAgentIntegration:
                     completion_tokens += usage["output_tokens"]
                     reasoning_tokens_total += usage["reasoning_tokens"]
                     llm_calls += 1
-                    logging.info(f"🔢 Token Usage - Input: {usage['input_tokens']}, Output: {usage['output_tokens']}, Reasoning: {usage['reasoning_tokens']}")
+                    # Reasoning token display - sadece reasoning modelleri için göster
+                    reasoning_display = usage['reasoning_tokens'] if usage['reasoning_tokens'] > 0 else "N/A"
+                    logging.info(f"🔢 Token Usage - Input: {usage['input_tokens']}, Output: {usage['output_tokens']}, Reasoning: {reasoning_display}")
                     step_info["tokens"] = usage
                 
                 logging.info(f"⏱️ Step {thinking_step} tamamlandı: {step_duration:.2f}s ({step_info['category'].upper()})")
@@ -2028,7 +2069,8 @@ class DeepAgentIntegration:
             logging.info(f"💰 TOKENS:")
             logging.info(f"   📥 Prompt:          {prompt_tokens}")
             logging.info(f"   📤 Completion:      {completion_tokens}")
-            logging.info(f"   🧠 Reasoning:       {reasoning_tokens_total}")
+            reasoning_display = reasoning_tokens_total if reasoning_tokens_total > 0 else "N/A"
+            logging.info(f"   🧠 Reasoning:       {reasoning_display}")
             logging.info(f"   🔢 Total:           {total_tokens}")
             logging.info(f"")
             logging.info(f"🔧 CALLS:")
@@ -2036,27 +2078,15 @@ class DeepAgentIntegration:
             logging.info(f"   🔧 Tool Calls:      {tool_call_count}")
             logging.info(f"   📊 Total Steps:     {thinking_step}")
             
-            # 🆕 SUBAGENT OUTPUTS LOGLAMA
+            # 🆕 SUBAGENT OUTPUTS LOGLAMA (sadece özet - detaylar step-by-step'te zaten loglandı)
             if subagent_outputs:
                 logging.info(f"")
-                logging.info(f"🔀 SUBAGENT ÇIKTILARI:")
+                logging.info(f"🔀 SUBAGENT ÖZETİ:")
                 for subagent_name, outputs in subagent_outputs.items():
-                    logging.info(f"   ─────────────────────────")
-                    logging.info(f"   📦 {subagent_name.upper()}:")
                     tool_calls_count = sum(1 for o in outputs if o["type"] == "tool_call")
                     content_count = sum(1 for o in outputs if o["type"] == "content")
-                    logging.info(f"      🔧 Tool Calls: {tool_calls_count}")
-                    logging.info(f"      💬 Responses:  {content_count}")
-                    
-                    # Detaylı çıktılar
-                    for output in outputs:
-                        if output["type"] == "tool_call":
-                            logging.info(f"      → Tool: {output['tool']} (Step {output['step']})")
-                            logging.info(f"        Args: {output['args'][:100]}...")
-                        elif output["type"] == "content":
-                            logging.info(f"      → Content (Step {output['step']}, {output['full_length']} chars):")
-                            logging.info(f"        {output['preview'][:150]}...")
-                logging.info(f"   ─────────────────────────")
+                    total_chars = sum(o.get("full_length", 0) for o in outputs if o["type"] == "content")
+                    logging.info(f"   📦 {subagent_name}: {tool_calls_count} tool calls, {content_count} responses ({total_chars:,} chars)")
             
             # 🔴 Redis Cache Stats
             if REDIS_CACHE_IMPORTED and is_cache_available is not None and is_cache_available():
@@ -2071,39 +2101,46 @@ class DeepAgentIntegration:
             logging.info(f"{'📊'*30}")
 
             # Tamamlanma durumu
+            include_debug_steps = os.environ.get("DEEPAGENT_INCLUDE_DEBUG_STEPS", "0") == "1"
+
+            info_payload = {
+                "agent_type": "langgraph_deep_agent",
+                "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
+                "page_links_count": len(session_page_links),
+                "mcp_tools_used": True,
+                "token_usage": {
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": reasoning_tokens_total,
+                    "llm_calls": llm_calls,
+                    "tool_calls": tool_call_count,
+                },
+                "timings": {
+                    "schema_fetch_sec": round(timings.get("schema_fetch", 0), 2),
+                    "history_fetch_sec": round(timings.get("history_fetch", 0), 2),
+                    "agent_create_sec": round(timings.get("agent_create", 0), 2),
+                    "llm_streaming_sec": round(timings.get("llm_streaming", 0), 2),
+                    "llm_thinking_sec": round(timings.get("llm_thinking", 0), 2),
+                    "tool_execution_sec": round(timings.get("tool_execution", 0), 2),
+                    "total_sec": round(total_time, 2),
+                },
+            }
+
+            # Tool/LLM step timeline frontend'de gürültü: sadece debug modunda gönder.
+            if include_debug_steps:
+                info_payload["steps"] = {
+                    "total_steps": thinking_step,
+                    "step_details": step_timings,
+                }
+
             yield {
                 "type": "complete",
                 "message": final_response,
                 "status": "finished",
                 "session_id": session_id,
-                "info": {
-                    "agent_type": "langgraph_deep_agent",
-                    "model": self.model,
-                    "reasoning_effort": self.reasoning_effort,
-                    "page_links_count": len(session_page_links),
-                    "mcp_tools_used": True,
-                    "token_usage": {
-                        "total_tokens": total_tokens,
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "reasoning_tokens": reasoning_tokens_total,
-                        "llm_calls": llm_calls,
-                        "tool_calls": tool_call_count,
-                    },
-                    "timings": {
-                        "schema_fetch_sec": round(timings.get("schema_fetch", 0), 2),
-                        "history_fetch_sec": round(timings.get("history_fetch", 0), 2),
-                        "agent_create_sec": round(timings.get("agent_create", 0), 2),
-                        "llm_streaming_sec": round(timings.get("llm_streaming", 0), 2),
-                        "llm_thinking_sec": round(timings.get("llm_thinking", 0), 2),
-                        "tool_execution_sec": round(timings.get("tool_execution", 0), 2),
-                        "total_sec": round(total_time, 2),
-                    },
-                    "steps": {
-                        "total_steps": thinking_step,
-                        "step_details": step_timings,
-                    },
-                },
+                "info": info_payload,
                 "timestamp": datetime.now().isoformat(),
             }
             
@@ -2123,12 +2160,42 @@ class DeepAgentIntegration:
             error_count = increment_mcp_error()
             logging.warning(f"⚠️ MCP hata sayısı: {error_count}/{MCP_MAX_ERRORS_BEFORE_RESET}")
 
+            # 🆕 Partial result recovery: Eğer findings dosyası varsa kullanıcıya göster
+            partial_result = None
+            try:
+                # agent_findings_dir backend çalışma dizininde
+                agent_findings_dir = os.path.join(os.getcwd(), "agent_findings")
+                findings_path = os.path.join(agent_findings_dir, "findings", "explorer_results.md")
+                if os.path.exists(findings_path):
+                    with open(findings_path, "r", encoding="utf-8") as f:
+                        partial_findings = f.read().strip()
+                    if partial_findings:
+                        partial_result = (
+                            "⚠️ Araştırma sırasında teknik bir sorun oluştu, "
+                            "ancak o ana kadar bulunan bilgiler aşağıdadır:\n\n"
+                            f"---\n\n{partial_findings}\n\n---\n\n"
+                            "Daha detaylı bilgi için sorunuzu tekrar sorabilirsiniz."
+                        )
+                        logging.info(f"📄 Partial result recovered from {findings_path}")
+            except Exception as recovery_error:
+                logging.warning(f"⚠️ Partial result recovery failed: {recovery_error}")
+
+            # Kullanıcı dostu mesaj oluştur
+            if partial_result:
+                user_message = partial_result
+            else:
+                user_message = (
+                    "Araştırma sırasında beklenmeyen bir hata oluştu. "
+                    "Lütfen sorunuzu tekrar sormayı deneyin veya farklı bir şekilde ifade edin."
+                )
+
             yield {
                 "type": "error",
-                "message": error_message,
+                "message": user_message,
                 "status": "failed",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
+                "_debug_error": error_message,  # Debug için orjinal hata (frontend göstermesin)
             }
 
 
@@ -2139,11 +2206,8 @@ class DeepAgentIntegration:
 # Session bazlı DeepAgent cache - her session için ayrı agent
 _session_agents: Dict[str, DeepAgentIntegration] = {}
 _session_access_times: Dict[str, datetime] = {}
-# Async lock for session cache to avoid race conditions in concurrent environments
-try:
-    _session_agent_lock = asyncio.Lock()
-except Exception:
-    _session_agent_lock = None
+# Async lock for session cache - lazy initialization (event loop gerektirir)
+_session_agent_lock: Optional[asyncio.Lock] = None
 
 # Config (env-overridable)
 SESSION_AGENT_MAX_AGE_HOURS = int(os.environ.get("SESSION_AGENT_MAX_AGE_HOURS", "24"))  # Session agent'ı bu süreden sonra temizle
@@ -2202,36 +2266,13 @@ async def get_or_create_session_agent(
     session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "medium"
 ) -> DeepAgentIntegration:
     """Session bazlı DeepAgent al veya oluştur"""
-    global _session_agents, _session_access_times
+    global _session_agents, _session_access_times, _session_agent_lock
     
-    # Güvenlik: session cache işlemlerini lock ile koru (concurrency safety)
-    if _session_agent_lock:
-        async with _session_agent_lock:
-            # Önce eski session'ları temizle
-            cleanup_old_session_agents()
-            # Session için agent var mı?
-            if session_id in _session_agents:
-                agent = _session_agents[session_id]
-                _session_access_times[session_id] = datetime.now()
-                # Model veya reasoning_effort değiştiyse güncelle
-                if agent.model != model or agent.reasoning_effort != reasoning_effort:
-                    logging.info(f"🔄 Session {session_id[:8]}: Model/reasoning güncelleniyor ({agent.model}/{agent.reasoning_effort} -> {model}/{reasoning_effort})")
-                    agent.model = model
-                    agent.reasoning_effort = reasoning_effort
-                    agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
-                if graph and agent.graph != graph:
-                    logging.debug(f"🔄 Session {session_id[:8]}: Graph güncelleniyor")
-                    agent.graph = graph
-                logging.debug(f"♻️ Session {session_id[:8]}: Mevcut agent kullanılıyor")
-                return agent
-            # Yeni agent oluştur
-            agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
-            _session_agents[session_id] = agent
-            _session_access_times[session_id] = datetime.now()
-            logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
-            return agent
-    else:
-        # Fallback without lock
+    # Lazy lock initialization - event loop içinde olmalı
+    if _session_agent_lock is None:
+        _session_agent_lock = asyncio.Lock()
+    
+    async with _session_agent_lock:
         # Önce eski session'ları temizle
         cleanup_old_session_agents()
         
@@ -2239,28 +2280,27 @@ async def get_or_create_session_agent(
         if session_id in _session_agents:
             agent = _session_agents[session_id]
             _session_access_times[session_id] = datetime.now()
+            
+            # Model veya reasoning_effort değiştiyse güncelle
+            if agent.model != model or agent.reasoning_effort != reasoning_effort:
+                logging.info(f"🔄 Session {session_id[:8]}: Model/reasoning güncelleniyor ({agent.model}/{agent.reasoning_effort} -> {model}/{reasoning_effort})")
+                agent.model = model
+                agent.reasoning_effort = reasoning_effort
+                agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
+            
+            if graph and agent.graph != graph:
+                logging.debug(f"🔄 Session {session_id[:8]}: Graph güncelleniyor")
+                agent.graph = graph
+            
+            logging.debug(f"♻️ Session {session_id[:8]}: Mevcut agent kullanılıyor")
+            return agent
         
-        # Model veya reasoning_effort değiştiyse güncelle
-        if agent.model != model or agent.reasoning_effort != reasoning_effort:
-            logging.info(f"🔄 Session {session_id[:8]}: Model/reasoning güncelleniyor ({agent.model}/{agent.reasoning_effort} -> {model}/{reasoning_effort})")
-            agent.model = model
-            agent.reasoning_effort = reasoning_effort
-            agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
-        
-        if graph and agent.graph != graph:
-            logging.debug(f"🔄 Session {session_id[:8]}: Graph güncelleniyor")
-            agent.graph = graph
-        
-        logging.debug(f"♻️ Session {session_id[:8]}: Mevcut agent kullanılıyor")
-        return agent
-    
         # Yeni agent oluştur
         agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
         _session_agents[session_id] = agent
         _session_access_times[session_id] = datetime.now()
         
         logging.info(f"🆕 Session {session_id[:8]}: Yeni agent oluşturuldu - Model: {model}, Reasoning: {reasoning_effort} (cache: {len(_session_agents)} session)")
-        
         return agent
 
 

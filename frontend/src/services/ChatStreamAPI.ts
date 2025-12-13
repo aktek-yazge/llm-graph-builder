@@ -56,6 +56,7 @@ export interface ChatStreamMessage {
 export interface ChatStreamOptions {
   question: string;
   session_id: string;
+  question_id: string;  // Unique ID per question for log correlation
   model: string;
   mode: string;
   document_names?: (string | undefined)[];
@@ -89,6 +90,7 @@ export class ChatStreamAPI {
       const formData = new FormData();
       formData.append('question', options.question);
       formData.append('session_id', options.session_id);
+      formData.append('question_id', options.question_id);  // Log correlation
       formData.append('model', options.model);
       formData.append('mode', options.mode);
 

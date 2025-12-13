@@ -1,6 +1,10 @@
 """
 OpenTelemetry Logging Setup for Loki Integration
 Bu dosya mevcut kodda değişiklik yapmadan tüm logları Loki'ye göndermek için kullanılır.
+
+Log Correlation:
+- session_id: Chat session (tüm konuşma boyunca aynı)
+- question_id: Her soru için unique ID (granüler debug için)
 """
 import os
 import logging
@@ -11,25 +15,25 @@ from io import StringIO
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 
+# Context variables for log correlation
+from src.shared.context import current_session_id, current_question_id
+
 
 class ConsoleHandler(logging.StreamHandler):
-    """Console'a sadece raw mesaj basan özel handler"""
+    """Console'a timestamp'li mesaj basan özel handler"""
+    
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        # Standart format: timestamp - message
+        self.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
     
     def emit(self, record):
         try:
-            # Orijinal mesajı al (JSON handler değiştirmeden önce)
-            if hasattr(record, 'msg') and record.args:
-                try:
-                    # Format edilmiş mesajı al
-                    message = record.msg % record.args if record.args else record.msg
-                except (TypeError, ValueError):
-                    # Format hatası varsa sadece msg'yi kullan
-                    message = str(record.msg)
-            else:
-                message = str(record.msg)
+            # getMessage() ile format edilmiş mesajı al
+            msg = self.format(record)
             
             # Direkt console'a yaz
-            self.stream.write(message + '\n')
+            self.stream.write(msg + '\n')
             self.flush()
         except Exception:
             # Hata durumunda sessizce geç
@@ -106,6 +110,10 @@ class JSONRotatingFileHandler(RotatingFileHandler):
                 component = 'http_server'
                 operation = 'http_request'
             
+            # Get correlation IDs from context for log tracing
+            session_id = current_session_id.get('unknown')
+            question_id = current_question_id.get('unknown')
+            
             log_record = {
                 "timestamp": current_time.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
                 "level": record.levelname,
@@ -113,7 +121,9 @@ class JSONRotatingFileHandler(RotatingFileHandler):
                 "component": component,
                 "operation": operation,
                 "logger_name": record.name,
-                "service_name": "llm-graph-builder"
+                "service_name": "llm-graph-builder",
+                "session_id": session_id,      # Log correlation - chat session
+                "question_id": question_id     # Granular tracing - per question
             }
             
             # HTTP request detaylarını ekle
@@ -198,6 +208,10 @@ class JSONFileHandler(logging.Handler):
                 component = 'http_server'
                 operation = 'http_request'
             
+            # Get correlation IDs from context for log tracing
+            session_id = current_session_id.get('unknown')
+            question_id = current_question_id.get('unknown')
+            
             log_record = {
                 "timestamp": current_time.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
                 "level": record.levelname,
@@ -205,7 +219,9 @@ class JSONFileHandler(logging.Handler):
                 "component": component,
                 "operation": operation,
                 "logger_name": record.name,
-                "service_name": "llm-graph-builder"
+                "service_name": "llm-graph-builder",
+                "session_id": session_id,      # Log correlation - chat session
+                "question_id": question_id     # Granular tracing - per question
             }
             
             # HTTP request detaylarını ekle
@@ -308,14 +324,20 @@ def setup_simple_json_logging():
     for handler_to_remove in existing_json_handlers:
         root_logger.removeHandler(handler_to_remove)
     
+    # Mevcut TÜM console/stream handler'ları temizle (çift log önleme)
+    # Not: Stream handler'ları kaldırıyoruz çünkü özel ConsoleHandler ekleyeceğiz
+    handlers_to_remove = []
+    for h in root_logger.handlers:
+        # StreamHandler ve alt sınıflarını tespit et (JSONRotatingFileHandler hariç)
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, (RotatingFileHandler, JSONRotatingFileHandler)):
+            handlers_to_remove.append(h)
+    
+    for handler_to_remove in handlers_to_remove:
+        root_logger.removeHandler(handler_to_remove)
+    
     # Console handler ekle (terminale de basılması için) - JSON handler'dan ÖNCE
     console_handler = ConsoleHandler()
     console_handler.setLevel(logging.INFO)  # INFO ve üzeri logları terminale bas
-    
-    # Mevcut console handler'larını temizle (tekrar önlemek için)
-    existing_console_handlers = [h for h in root_logger.handlers if isinstance(h, (logging.StreamHandler, ConsoleHandler)) and hasattr(h, 'stream') and h.stream.name == '<stdout>']
-    for handler_to_remove in existing_console_handlers:
-        root_logger.removeHandler(handler_to_remove)
     
     # Console handler'ı ÖNCE ekle
     root_logger.addHandler(console_handler)

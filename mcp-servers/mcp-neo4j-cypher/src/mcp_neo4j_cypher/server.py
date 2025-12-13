@@ -597,11 +597,27 @@ Sorguyu düzeltip TEKRAR DENE!"""
         logger.info(f"{'🟣'*20}")
 
         # Validate that cypher_query contains $embedding_vector parameter
+        # Soft-fail: Return error message instead of raising exception to allow agent retry
         if "$embedding_vector" not in cypher_query:
-            raise ToolError(
-                "Cypher query must include $embedding_vector parameter. "
-                "Example: 'MATCH (c:Chunk) WHERE gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c'"
+            error_msg = (
+                "❌ HATA: Cypher sorgusu $embedding_vector parametresi içermiyor! "
+                "Bu parametre semantic arama için zorunludur.\n\n"
+                "✅ DOĞRU KULLANIM:\n"
+                "read_neo4j_cypher_with_embedding(\n"
+                '  query_text="aranan kavram",\n'
+                '  cypher_query="MATCH (c:Chunk) WHERE c.embedding IS NOT NULL '
+                'AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75 '
+                'RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score '
+                'ORDER BY score DESC LIMIT 15"\n'
+                ")\n\n"
+                "💡 İPUCU: Entity filtresi eklemek için:\n"
+                "  MATCH (n)-[*1..3]-(d:Document)<-[:PART_OF]-(c:Chunk)\n"
+                "  WHERE n.name CONTAINS 'entity_name' AND c.embedding IS NOT NULL\n"
+                "  AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75\n\n"
+                "Lütfen sorguyu düzelt ve tekrar dene."
             )
+            logger.warning(f"⚠️ Embedding query validation failed: missing $embedding_vector")
+            return {"error": error_msg, "status": "validation_failed"}
 
         # Validate that query is not a write query
         if _is_write_query(cypher_query):

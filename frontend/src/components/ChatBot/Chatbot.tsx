@@ -255,6 +255,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
 
   const handleStreamingSubmit = async (inputMessage: string) => {
     const datetime = getDateTime();
+    // Generate unique question_id for log correlation
+    const questionId = uuidv4();
+    console.log(`📝 Question ID: ${questionId} | Session: ${sessionId}`);
+    
     const userMessage: Messages = {
       id: Date.now(),
       user: 'user',
@@ -282,6 +286,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
         {
           question: inputMessage,
           session_id: sessionId,
+          question_id: questionId,  // Log correlation ID
           model,
           mode: chatModes[0],
           document_names: selectedFileNames?.map((f) => f.name),
@@ -476,6 +481,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
 
     // Normal mode (mevcut kod)
     const datetime = getDateTime();
+    // Generate unique question_id for log correlation
+    const questionId = uuidv4();
+    console.log(`📝 Question ID: ${questionId} | Session: ${sessionId}`);
+    
     const userMessage: Messages = {
       id: Date.now(),
       user: 'user',
@@ -503,7 +512,8 @@ const Chatbot: FC<ChatbotProps> = (props) => {
           sessionId,
           model,
           mode,
-          selectedFileNames?.map((f) => f.name)
+          selectedFileNames?.map((f) => f.name),
+          questionId  // Log correlation ID - same for all modes
         )
       );
       setInputMessage('');

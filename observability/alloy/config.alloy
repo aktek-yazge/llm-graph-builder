@@ -191,14 +191,18 @@ loki.process "json_logs" {
       operation   = "operation",
       timestamp   = "timestamp",
       logger_name = "logger_name",
+      session_id  = "session_id",   // Log correlation - chat session
+      question_id = "question_id",  // Granular tracing - per question
     }
   }
 
   stage.labels {
     values = {
-      level     = "",
-      component = "",
-      operation = "",
+      level       = "",
+      component   = "",
+      operation   = "",
+      session_id  = "",   // Enables: {session_id="abc123"} in LogQL
+      question_id = "",   // Enables: {question_id="xyz789"} in LogQL
     }
   }
 

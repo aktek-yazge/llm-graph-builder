@@ -31,6 +31,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     
+    # 🔧 VOLUME MOUNT - Source code değişiklikleri restart ile uygulanır
+    volumes:
+      - ./src:/app/src
+    
     # 🔥 DOCKER COMPOSE WATCH - Otomatik dosya değişikliği izleme
     develop:
       watch:
@@ -60,11 +64,12 @@ services:
         max-file: "3"
     networks:
       - default
-      - preview
 
 networks:
   default:
     name: mcp-network
-  preview:
-    external: true
-    name: backend_preview
+  
+  # 🔧 SUNUCU İÇİN: Aşağıdaki satırları uncomment et
+  # preview:
+  #   external: true
+  #   name: backend_preview

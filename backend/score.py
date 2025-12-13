@@ -48,6 +48,7 @@ from src.qa_based_entity_extractor import (
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+from src.shared.context import set_request_context, clear_request_context
 import uvicorn
 import asyncio
 import base64
@@ -2408,10 +2409,13 @@ async def chat_bot(
     question=Form(None),
     document_names=Form(None),
     session_id=Form(None),
+    question_id=Form(None),  # Log correlation ID
     mode=Form(None),
     email=Form(None),
 ):
-    logging.info(f"QA_RAG called at {datetime.now()}")
+    # Set request context for log correlation
+    set_request_context(session_id=session_id, question_id=question_id)
+    logging.info(f"QA_RAG called at {datetime.now()} | question_id={question_id}")
     qa_rag_start_time = time.time()
     try:
         if mode == "graph":
@@ -2569,6 +2573,7 @@ async def chat_bot_stream(
     question: str = Form(None),
     document_names: str = Form(None),
     session_id: str = Form(None),
+    question_id: str = Form(None),  # Log correlation ID
     mode: str = Form(None),
     email: str = Form(None),
     files: Optional[str] = Form(None),
@@ -2577,7 +2582,14 @@ async def chat_bot_stream(
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile
     token-by-token chat cevapları gönderir.
+    
+    Log Correlation:
+    - session_id: Tüm chat session'ı boyunca aynı
+    - question_id: Her soru için unique - Grafana'da filtreleme için
     """
+    # Set request context for log correlation - all logs will include session_id and question_id
+    set_request_context(session_id=session_id, question_id=question_id)
+    logging.info(f"chat_bot_stream started | question_id={question_id} | session_id={session_id}")
 
     # print("chat_bot_stream files: ", files)
 
@@ -2654,7 +2666,7 @@ async def chat_bot_stream(
                     graph=graph,
                     model="gpt-5",
                     session_id=session_id,
-                    reasoning_effort="medium",  # none, low, medium, high
+                    reasoning_effort="low",  # none, low, medium, high
                 ):
                     # Client disconnect kontrolü
                     if await request.is_disconnected():

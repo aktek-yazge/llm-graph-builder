@@ -100,6 +100,53 @@ services:
       - rabbitmq
       - postgres
 
+  # MCP Neo4j Cypher Server
+  mcp-neo4j-cypher:
+    build:
+      context: ../mcp-servers/mcp-neo4j-cypher
+      dockerfile: Dockerfile
+    container_name: mcp-neo4j-cypher
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - NEO4J_URI=${NEO4J_URI:-bolt://host.docker.internal:7687}
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8002
+      - NEO4J_TRANSPORT=http
+      - NEO4J_MCP_SERVER_HOST=0.0.0.0
+      - NEO4J_MCP_SERVER_PORT=8002
+      - NEO4J_MCP_SERVER_PATH=/mcp/
+      - NEO4J_NAMESPACE=
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,backend-preview
+      - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
+      - NEO4J_READ_TIMEOUT=30
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../mcp-servers/mcp-neo4j-cypher/src:/app/src
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - preview
+      - observability
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   # Frontend - preview servisi
   frontend:
     build:

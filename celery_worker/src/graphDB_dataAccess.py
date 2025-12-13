@@ -1470,19 +1470,11 @@ class graphDBdataAccess:
             update_document_query = """
                 MATCH (d:Document {fileName: $file_name})
                 SET d.docType = $doc_type,
-                    d.year = $policy_year,
                     d.hasExtractedEntities = true,
                     d.entityExtractionMethod = 'LLM_comprehensive',
                     d.lastProcessedAt = datetime()
                 RETURN d.fileName as updated_file
             """
-
-            # Year'ı dates'ten veya policy'den al
-            policy_year = (
-                dates_data.get("start_date", "")[:4]
-                if dates_data.get("start_date")
-                else policy_data.get("year", "")
-            )
 
             # docType için standardize edilmiş değerler kullanıyoruz: MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION
             self.graph.query(
@@ -1490,7 +1482,6 @@ class graphDBdataAccess:
                 {
                     "file_name": file_name,
                     "doc_type": document_type,  # Artık direkt document_type değerini kullanıyoruz (MAIN_POLICY, ENDORSEMENT, etc.)
-                    "policy_year": policy_year,
                 },
                 session_params={"database": self.graph._database},
             )
@@ -2333,12 +2324,11 @@ class graphDBdataAccess:
                     f"✅ Ana poliçe bulundu, kronolojik zincir için: {main_policy['policy_id']}"
                 )
 
-                # Document'a endorsement bilgisi ve year ekle
+                # Document'a endorsement bilgisi ekle (year kaldırıldı)
                 update_document_query = """
                     MATCH (d:Document {fileName: $file_name})
                     SET d.docType = 'ENDORSEMENT',
                         d.linkedMainPolicy = $main_policy_id,
-                        d.year = $policy_year,
                         d.updatedAt = datetime()
                     RETURN d.fileName as updated_file
                 """
@@ -2348,7 +2338,6 @@ class graphDBdataAccess:
                     {
                         "file_name": file_name,
                         "main_policy_id": main_policy["policy_id"],
-                        "policy_year": policy_info.get("year", ""),
                     },
                     session_params={"database": self.graph._database},
                 )
@@ -4913,7 +4902,6 @@ KRİTİK:
                     p.policyNumber = $policy_number,
                     p.currency = $currency,
                     p.status = $status,
-                    p.type = $policy_type,
                     p.source_file = $file_name,
                     p.extraction_method = 'LLM_comprehensive',
                     p.createdAt = datetime()
@@ -4921,8 +4909,7 @@ KRİTİK:
                     p.updatedAt = datetime(),
                     p.source_file = $file_name,
                     p.currency = $currency,
-                    p.status = $status,
-                    p.type = $policy_type
+                    p.status = $status
                 WITH p
                 MATCH (d:Document {fileName: $file_name})
                 MERGE (p)-[r:DOCUMENTED_IN]->(d)
@@ -4938,7 +4925,6 @@ KRİTİK:
                     "policy_number": policy_data.get("policyNumber", ""),
                     "currency": policy_data.get("currency", "TRY"),
                     "status": policy_data.get("status", "Aktif"),
-                    "policy_type": policy_data.get("type", "Sigorta Poliçesi"),
                     "file_name": file_name,
                 },
                 session_params={"database": self.graph._database},
