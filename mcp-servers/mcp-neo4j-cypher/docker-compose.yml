@@ -1,3 +1,4 @@
+# ⚠️ OTOMATİK BAŞLATMA: restart: always - Docker başladığında otomatik açılır
 services:
   # MCP Neo4j Cypher Server
   mcp-neo4j-cypher:
@@ -5,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: mcp-neo4j-cypher
-    restart: unless-stopped
+    restart: always
     ports:
       - "${MCP_HTTP_PORT:-8002}:8002"
     environment:

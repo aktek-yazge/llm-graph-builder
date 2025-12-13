@@ -6,6 +6,9 @@ version: '3.8'
 # Grafana Alloy: Promtail + OTel Collector + Grafana Agent birleşimi
 # Tek araç ile logs, traces, metrics toplama
 #
+# ⚠️ OTOMATİK BAŞLATMA: Tüm servisler restart: always ile yapılandırılmış
+#    Docker daemon başladığında otomatik olarak açılırlar.
+#
 # Kullanım:
 #   1. Bağımsız: cd observability && docker-compose up -d
 #   2. Ana compose ile: docker-compose -f docker-compose.preview.yml -f observability/docker-compose.yml up -d
@@ -50,7 +53,7 @@ services:
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/var/lib/alloy/data
       - /etc/alloy/config.alloy
-    restart: unless-stopped
+    restart: always
     networks:
       - observability
     depends_on:
@@ -69,7 +72,7 @@ services:
     ports:
       - "3100:3100"
     command: -config.file=/etc/loki/config.yaml
-    restart: unless-stopped
+    restart: always
     networks:
       - observability
     healthcheck:
@@ -91,7 +94,7 @@ services:
       - "3200:3200"   # Tempo HTTP API
       - "9095:9095"   # Tempo gRPC
     command: ["-config.file=/etc/tempo/config.yaml"]
-    restart: unless-stopped
+    restart: always
     networks:
       - observability
     healthcheck:
@@ -120,7 +123,7 @@ services:
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,tempoSearch,tempoBackendSearch,tempoServiceGraph,tempoApmTable,traceQLStreaming
       # Türkçe timezone
       - TZ=Europe/Istanbul
-    restart: unless-stopped
+    restart: always
     networks:
       - observability
     depends_on:

@@ -617,7 +617,8 @@ Sorguyu düzeltip TEKRAR DENE!"""
                 "Lütfen sorguyu düzelt ve tekrar dene."
             )
             logger.warning(f"⚠️ Embedding query validation failed: missing $embedding_vector")
-            return {"error": error_msg, "status": "validation_failed"}
+            # Hata mesajını string olarak döndür - agent bu hatayı okuyup sorguyu düzeltebilir
+            return error_msg
 
         # Validate that query is not a write query
         if _is_write_query(cypher_query):

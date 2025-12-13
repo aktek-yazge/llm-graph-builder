@@ -106,7 +106,7 @@ services:
       context: ../mcp-servers/mcp-neo4j-cypher
       dockerfile: Dockerfile
     container_name: mcp-neo4j-cypher
-    restart: unless-stopped
+    restart: always
     ports:
       - "8002:8002"
     environment:

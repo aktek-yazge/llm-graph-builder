@@ -25,7 +25,7 @@ class ConsoleHandler(logging.StreamHandler):
     def __init__(self, stream=None):
         super().__init__(stream)
         # Standart format: timestamp - message
-        self.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        self.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
     
     def emit(self, record):
         try:

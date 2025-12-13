@@ -80,7 +80,7 @@ import time
 
 warnings.filterwarnings("ignore")
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(message)s", level="INFO")
+logging.basicConfig(format="%(asctime)s - %(message)s", datefmt="%H:%M:%S", level="INFO")
 
 # Neo4j notification ve deprecation warning'lerini kapat
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
