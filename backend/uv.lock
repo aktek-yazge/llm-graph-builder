@@ -325,7 +325,7 @@ requires-dist = [
     { name = "asyncio", specifier = "==3.4.3" },
     { name = "asyncpg", specifier = "==0.30.0" },
     { name = "celery", specifier = "==5.4.0" },
-    { name = "deepagents", specifier = ">=0.2.8" },
+    { name = "deepagents", specifier = ">=0.3.0" },
     { name = "docling", specifier = ">=2.64.1" },
     { name = "email-validator", specifier = "==2.3.0" },
     { name = "fast-agent-mcp" },
@@ -746,7 +746,7 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.2.8"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langchain" },
@@ -754,9 +754,9 @@ dependencies = [
     { name = "langchain-core" },
     { name = "wcmatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/9a/f4c3f610bc11e15e87537b5b657ad7050a613849e955d4de03695a4eb798/deepagents-0.2.8.tar.gz", hash = "sha256:5fbf7f0db06b923409b79a6598784e0e9925958efabd4b702eed9238b459ae09", size = 49217, upload-time = "2025-11-24T04:06:16.493Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/c7/d3c2840bd0e66b6cd5948aa69625e129328ad261308e18fcb9a9420709da/deepagents-0.3.0.tar.gz", hash = "sha256:3dd4d2ed53efb1ef78aeb1020a5696c0ec7e58e627b305a6665d33fe6fbdedff", size = 51387, upload-time = "2025-12-08T21:38:44.077Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/a7/a3993b58c013dae776f5880b4d83eca8d2804ea2a71793d2b96d22ca94a1/deepagents-0.2.8-py3-none-any.whl", hash = "sha256:d4c3d0df074be5e10f3a17005e68db3df18b3d51f48aca3e299d87c254fda797", size = 51973, upload-time = "2025-11-24T04:06:15.632Z" },
+    { url = "https://files.pythonhosted.org/packages/22/e9/60bab7f37ff38bf982ea578e457ed1878ded613a3425462bcd07b00487e9/deepagents-0.3.0-py3-none-any.whl", hash = "sha256:9e23532d8d535dc2b0b4e0834453a1223a6a8f81b77947c0faf54537d05ce89a", size = 54065, upload-time = "2025-12-08T21:38:42.956Z" },
 ]
 
 [[package]]
