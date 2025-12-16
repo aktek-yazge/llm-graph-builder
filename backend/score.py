@@ -40,7 +40,7 @@ from src.main import (
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
-from src.langchain_deepagents import stream_deep_agent_response, DEEP_AGENT_AVAILABLE
+from src.langchain_deepagents import stream_agent_response, LANGCHAIN_AGENT_AVAILABLE
 from src.qa_based_entity_extractor import (
     QABasedEntityExtractor,
     create_domain_specific_questions,
@@ -889,43 +889,18 @@ async def lifespan(app: FastAPI):
             f"İlk soru geldiğinde yüklenecek."
         )
 
-    # 🚀 SERVER STARTUP: MCP Serverları önceden başlat
+    # 🚀 SERVER STARTUP: MCP HTTP Server bağlantı kontrolü
     try:
-        from src.langchain_deepagents.dinkal_agent import (
-            MCP_ADAPTERS_AVAILABLE,
-            get_mcp_server_config,
-            set_global_mcp_tools,
-            MCP_HTTP_HOST,
-            MCP_HTTP_PORT,
-        )
+        from src.langchain_deepagents import MCP_ADAPTERS_AVAILABLE, MCP_HTTP_HOST, MCP_HTTP_PORT
         
         if MCP_ADAPTERS_AVAILABLE:
             # MCP Server start-backend-yedek.sh tarafından başlatılıyor
-            # Burada sadece client olarak bağlanıyoruz
-            logging.info(f"📡 Server Startup: MCP Client bağlanıyor (http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/)...")
-            
-            from langchain_mcp_adapters.client import MultiServerMCPClient
-            
-            mcp_config = get_mcp_server_config()
-            mcp_client = MultiServerMCPClient(mcp_config)
-            
-            # MCP tools'ları al
-            tools = await mcp_client.get_tools()
-            
-            logging.info(f"✅ Server Startup: {len(tools)} MCP tool yüklendi")
-            for tool in tools:
-                logging.info(f"   - {tool.name}: {tool.description[:50]}...")
-            
-            # MCP client ve tools'ları global cache'e kaydet (DeepAgent kullanacak)
-            set_global_mcp_tools(mcp_client, tools)
-            
-            # MCP client'ı app.state'e de sakla
-            app.state.mcp_client = mcp_client
+            # Agent instance'ları HTTP üzerinden bağlanacak - global cache yok
+            logging.info(f"📡 MCP HTTP Server: http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/ (agent başlatıldığında bağlanacak)")
         else:
-            logging.warning("⚠️ Server Startup: MCP Adapters mevcut değil, MCP serverları başlatılamadı")
+            logging.warning("⚠️ Server Startup: MCP Adapters mevcut değil")
     except Exception as mcp_error:
-        logging.warning(f"⚠️ Server Startup: MCP serverları başlatılamadı: {mcp_error}", exc_info=True)
-        # MCP serverları başlatılamazsa devam et, ilk request'te tekrar denenecek
+        logging.warning(f"⚠️ Server Startup: MCP config yüklenemedi: {mcp_error}", exc_info=True)
 
     yield
     # Shutdown - here you can add cleanup code if needed
@@ -2657,22 +2632,20 @@ async def chat_bot_stream(
             final_result = None
             total_tokens = 0
 
-            if agent_type == "deep_agent" and DEEP_AGENT_AVAILABLE:
-                # 🧠 LangGraph Deep Agent kullanarak streaming (YENİ - varsayılan)
-                yield f"data: {json.dumps({'type': 'status', 'message': '🧠 LangGraph Deep Agent ile işleniyor...', 'status': 'deep_agent_processing'}, ensure_ascii=False)}\n\n"
+            if agent_type == "deep_agent" and LANGCHAIN_AGENT_AVAILABLE:
+                # 🧠 LangChain Agent kullanarak streaming
+                yield f"data: {json.dumps({'type': 'status', 'message': '🧠 LangChain Agent ile işleniyor...', 'status': 'agent_processing'}, ensure_ascii=False)}\n\n"
 
-                async for chunk in stream_deep_agent_response(
+                async for chunk in stream_agent_response(
                     question=question,
                     graph=graph,
                     model="gpt-5",
                     session_id=session_id,
-                    reasoning_effort="low",  # none, low, medium, high
+                    reasoning_effort="low",
                 ):
                     # Client disconnect kontrolü
                     if await request.is_disconnected():
-                        logging.info(
-                            "SSE Client disconnected during Deep Agent streaming"
-                        )
+                        logging.info("SSE Client disconnected during agent streaming")
                         break
 
                     # Chunk'ı client'a gönder
@@ -2683,7 +2656,7 @@ async def chat_bot_stream(
                         final_result = chunk
                         total_tokens = chunk.get("info", {}).get("total_tokens", 0)
 
-            elif agent_type == "fast_agent" or (agent_type == "deep_agent" and not DEEP_AGENT_AVAILABLE):
+            elif agent_type == "fast_agent" or (agent_type == "deep_agent" and not LANGCHAIN_AGENT_AVAILABLE):
                 # FastAgent kullanarak streaming (fallback veya explicit)
                 yield f"data: {json.dumps({'type': 'status', 'message': 'FastAgent ile işleniyor...', 'status': 'fast_agent_processing'}, ensure_ascii=False)}\n\n"
 
@@ -2840,25 +2813,25 @@ async def test_deep_agent(
     model: str = Form("claude-sonnet-4-5-20250929"),
     session_id: str = Form("test_session"),
 ):
-    """LangGraph Deep Agent'i test etmek için basit endpoint"""
+    """LangChain Agent'i test etmek için basit endpoint"""
     try:
         from src.langchain_deepagents import (
-            stream_deep_agent_response,
-            DEEP_AGENT_AVAILABLE,
+            stream_agent_response,
+            LANGCHAIN_AGENT_AVAILABLE,
         )
 
-        if not DEEP_AGENT_AVAILABLE:
+        if not LANGCHAIN_AGENT_AVAILABLE:
             return create_api_response(
                 "Failed",
-                message="Deep Agent kurulu değil. 'pip install deepagents' ile kurun.",
+                message="LangChain Agent kurulu değil.",
             )
 
         # Test response'u topla
         response_parts = []
-        async for chunk in stream_deep_agent_response(
+        async for chunk in stream_agent_response(
             question=question,
             session_id=session_id,
-            reasoning_effort="medium",  # none, low, medium, high
+            reasoning_effort="medium",
         ):
             response_parts.append(chunk)
 

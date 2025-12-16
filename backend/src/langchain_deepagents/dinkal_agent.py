@@ -1,34 +1,38 @@
 """
-LangGraph Deep Agent Integration Module for Chat Bot Stream
+LangChain Agent Integration Module for Chat Bot Stream
 
-Bu modül LangGraph Deep Agents kullanarak chat_bot_stream endpoint'ine entegre eder.
+Bu modül LangChain create_agent kullanarak chat_bot_stream endpoint'ine entegre eder.
 MCP tools (neo4j-database) kullanılarak Neo4j sorguları yapılır.
 
 Features:
+- LangChain native create_agent yapısı
+- Middleware tabanlı planlama (TodoListMiddleware)
 - MCP Tools integration (neo4j-database server)
-- Planning with write_todos tool
-- File system tools for context management
-- Subagent spawning for complex tasks
+- Subagent as separate agent graphs
 - Conversation history support
 - Streaming response
 """
 
 import asyncio
-import json
 import logging
 import os
 import re
-import threading
 import urllib.parse
-from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING, Union, cast
+from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING, Sequence, Callable
 from datetime import datetime
 
 # Global Schema Cache import
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
 
 # Logging ayarları
-# logging.basicConfig(level=logging.DEBUG)  # main.py'de yapılıyor
 logger = logging.getLogger(__name__)
+
+# MCP client'ın verbose log'larını sustur (Negotiated protocol version vb.)
+logging.getLogger("mcp").setLevel(logging.WARNING)
+logging.getLogger("mcp.client").setLevel(logging.WARNING)
+logging.getLogger("langchain_mcp_adapters").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def _log(msg: str, level: str = "info"):
     """Minimal log helper - timestamp logging framework'ten gelir"""
@@ -40,6 +44,57 @@ def _log(msg: str, level: str = "info"):
         logging.error(msg)
     else:
         logging.info(msg)
+
+
+def create_sequential_model(model_name: str):
+    """
+    Paralel tool çağrılarını devre dışı bırakan model oluşturur.
+    
+    LangChain dokümantasyonu: model.bind_tools([tools], parallel_tool_calls=False)
+    https://python.langchain.com/docs/how_to/tool_calling_parallel/
+    
+    ChatOpenAI subclass kullanarak bind_tools çağrılarında
+    parallel_tool_calls=False parametresini explicit olarak geçiriyoruz.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+        
+        # Model adından gerçek model adını çıkar
+        # "openai:gpt-4o-mini" -> "gpt-4o-mini"
+        actual_model = model_name
+        if ":" in model_name:
+            actual_model = model_name.split(":", 1)[1]
+        
+        class SequentialChatOpenAI(ChatOpenAI):
+            """
+            ChatOpenAI subclass - bind_tools her zaman parallel_tool_calls=False kullanır.
+            
+            OpenAI'nin ChatOpenAI.bind_tools metodu:
+            - parallel_tool_calls parametresini explicit alır
+            - None ise kwargs'a eklemez
+            - Değer varsa kwargs'a ekler ve super().bind()'a geçirir
+            
+            Bu subclass her zaman parallel_tool_calls=False geçirir.
+            """
+            
+            def bind_tools(self, tools, **kwargs):
+                # CRITICAL: parallel_tool_calls=False olarak explicit geçir
+                # Bu ChatOpenAI.bind_tools'un signature'ına uygun
+                return super().bind_tools(
+                    tools,
+                    parallel_tool_calls=False,  # ← Explicit parametre
+                    **kwargs
+                )
+        
+        model = SequentialChatOpenAI(model=actual_model)
+        print(f"🔧 [create_sequential_model] Model: {actual_model}, SequentialChatOpenAI (parallel_tool_calls=False)")
+        return model
+        
+    except ImportError:
+        # Fallback: normal model döndür
+        if init_chat_model is not None:
+            return init_chat_model(model_name)
+        return None
 
 # Redis Semantic Cache import
 if TYPE_CHECKING:
@@ -55,26 +110,39 @@ except ImportError as e:
     is_cache_available = None  # type: ignore
     get_cache_stats = None  # type: ignore
 
-# Deep Agent imports
+# LangChain Agent imports
 if TYPE_CHECKING:
-    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
     from langchain.chat_models import init_chat_model
 
 try:
-    from deepagents import create_deep_agent  # type: ignore
-    from deepagents.backends import FilesystemBackend  # type: ignore
+    from langchain.agents import create_agent  # type: ignore
+    from langchain.agents.middleware import (  # type: ignore
+        AgentMiddleware,
+        TodoListMiddleware,
+        ModelCallLimitMiddleware,
+    )
     from langchain.chat_models import init_chat_model  # type: ignore
-    from langchain_core.messages import HumanMessage, AIMessage
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    from langchain_core.tools import BaseTool, tool
     from langchain_community.callbacks import get_openai_callback
     
-    DEEP_AGENT_AVAILABLE = True
-    logging.info("✅ LangGraph Deep Agent successfully imported")
+    LANGCHAIN_AGENT_AVAILABLE = True
+    logging.info("✅ LangChain Agent (create_agent) successfully imported")
 except ImportError as e:
-    logging.warning(f"⚠️ LangGraph Deep Agent not available: {e}")
-    DEEP_AGENT_AVAILABLE = False
-    create_deep_agent = None  # type: ignore
+    logging.warning(f"⚠️ LangChain Agent not available: {e}")
+    LANGCHAIN_AGENT_AVAILABLE = False
+    create_agent = None  # type: ignore
     init_chat_model = None  # type: ignore
-    FilesystemBackend = None  # type: ignore
+    AgentMiddleware = None  # type: ignore
+    TodoListMiddleware = None  # type: ignore
+    ModelCallLimitMiddleware = None  # type: ignore
+    tool = None  # type: ignore
+    BaseTool = None  # type: ignore
+    HumanMessage = None  # type: ignore
+    AIMessage = None  # type: ignore
+    SystemMessage = None  # type: ignore
 
 # MCP Adapters import
 if TYPE_CHECKING:
@@ -91,108 +159,9 @@ except ImportError as e:
 
 
 # ============================================================================
-# GLOBAL MCP TOOLS CACHE
+# MCP SERVER CONFIGURATION - HTTP Transport Only
 # ============================================================================
 
-# Global MCP client ve tools cache - server startup'ta bir kez oluşturulur
-_global_mcp_client = None
-_global_mcp_tools = None
-_mcp_request_count = 0  # Toplam istek sayısı
-_mcp_error_count = 0    # Hata sayısı
-_mcp_last_reset_time = None  # Son reset zamanı
-_mcp_counter_lock = threading.Lock()  # Thread-safe counter operations
-
-# Config
-MCP_MAX_REQUESTS_BEFORE_RESET = int(os.environ.get("MCP_MAX_REQUESTS_BEFORE_RESET", "1000"))  # Bu kadar istekten sonra reset
-MCP_MAX_ERRORS_BEFORE_RESET = int(os.environ.get("MCP_MAX_ERRORS_BEFORE_RESET", "5"))       # Bu kadar hatadan sonra reset
-MCP_RESET_INTERVAL_HOURS = int(os.environ.get("MCP_RESET_INTERVAL_HOURS", "24"))         # Bu kadar saat sonra reset
-
-
-def set_global_mcp_tools(mcp_client, tools):
-    """Server startup'ta MCP tools'ları global cache'e kaydet"""
-    global _global_mcp_client, _global_mcp_tools, _mcp_request_count, _mcp_error_count, _mcp_last_reset_time
-    _global_mcp_client = mcp_client
-    _global_mcp_tools = tools
-    _mcp_request_count = 0
-    _mcp_error_count = 0
-    _mcp_last_reset_time = datetime.now()
-    _log(f"MCP cached: {len(tools)} tools")
-
-
-def get_global_mcp_tools():
-    """Global MCP tools'ları döndür"""
-    return _global_mcp_tools
-
-
-def get_global_mcp_client():
-    """Global MCP client'ı döndür"""
-    return _global_mcp_client
-
-
-def increment_mcp_request():
-    """MCP istek sayacını artır (thread-safe)"""
-    global _mcp_request_count
-    with _mcp_counter_lock:
-        _mcp_request_count += 1
-        return _mcp_request_count
-
-
-def increment_mcp_error():
-    """MCP hata sayacını artır (thread-safe)"""
-    global _mcp_error_count
-    with _mcp_counter_lock:
-        _mcp_error_count += 1
-        return _mcp_error_count
-
-
-def reset_mcp_error_count():
-    """Başarılı istekte hata sayacını sıfırla (thread-safe)"""
-    global _mcp_error_count
-    with _mcp_counter_lock:
-        _mcp_error_count = 0
-
-
-def should_reset_mcp_client() -> tuple[bool, str]:
-    """
-    MCP client'ın reset edilmesi gerekip gerekmediğini kontrol et.
-    Returns: (should_reset, reason)
-    """
-    global _mcp_request_count, _mcp_error_count, _mcp_last_reset_time
-    
-    # Hata sayısı kontrolü
-    if _mcp_error_count >= MCP_MAX_ERRORS_BEFORE_RESET:
-        return True, f"Çok fazla hata ({_mcp_error_count} hata)"
-    
-    # İstek sayısı kontrolü (memory leak önlemi)
-    if _mcp_request_count >= MCP_MAX_REQUESTS_BEFORE_RESET:
-        return True, f"İstek limiti aşıldı ({_mcp_request_count} istek)"
-    
-    # Zaman kontrolü
-    if _mcp_last_reset_time:
-        hours_since_reset = (datetime.now() - _mcp_last_reset_time).total_seconds() / 3600
-        if hours_since_reset >= MCP_RESET_INTERVAL_HOURS:
-            return True, f"Zaman limiti aşıldı ({hours_since_reset:.1f} saat)"
-    
-    return False, ""
-
-
-def clear_global_mcp_cache():
-    """Global MCP cache'i temizle (reconnect için)"""
-    global _global_mcp_client, _global_mcp_tools, _mcp_request_count, _mcp_error_count
-    _global_mcp_client = None
-    _global_mcp_tools = None
-    _mcp_request_count = 0
-    _mcp_error_count = 0
-    logging.info("🔄 Global MCP cache temizlendi (reconnect hazır)")
-
-
-# ============================================================================
-# MCP SERVER CONFIGURATION
-# ============================================================================
-
-# MCP Transport Mode: "stdio" veya "http"
-# HTTP modunda MCP server ayrı process olarak çalışır (Streamable HTTP - her tool çağrısında subprocess başlamaz)
-MCP_TRANSPORT_MODE = os.environ.get("MCP_TRANSPORT_MODE", "http")
 MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8002"))
 
@@ -200,90 +169,98 @@ MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8002"))
 def get_mcp_server_config() -> Dict[str, Any]:
     """
     MCP server konfigürasyonunu döndürür.
-    SSE modunda URL kullanılır, STDIO modunda subprocess başlatılır.
+    Sadece HTTP transport kullanılır - MCP server ayrı process olarak çalışır.
     """
-    # Neo4j bağlantı bilgileri - environment'tan al
-    neo4j_uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    neo4j_username = os.environ.get("NEO4J_USERNAME", "neo4j")
-    neo4j_password = os.environ.get("NEO4J_PASSWORD", "password")
-    neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
-    openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-    
-    # MCP server path
-    mcp_server_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "mcp-servers", "mcp-neo4j-cypher", "src"
-    )
-    
-    # HTTP Transport (Streamable HTTP) - MCP server ayrı process olarak çalışır (her tool çağrısında subprocess başlamaz)
-    if MCP_TRANSPORT_MODE == "http":
-        logging.info(f"📡 MCP Config: Streamable HTTP transport kullanılıyor - http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/")
-        return {
-            "neo4j-database": {
-                "url": f"http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/",
-                "transport": "streamable_http",  # langchain-mcp-adapters requires this exact name
-            }
-        }
-    
-    # STDIO Transport (fallback) - her tool çağrısında subprocess başlar
-    logging.info("📡 MCP Config: STDIO transport kullanılıyor")
+    logging.info(f"📡 MCP Config: HTTP transport - http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/")
     return {
         "neo4j-database": {
-            "command": "uv",
-            "args": [
-                "run",
-                "python",
-                "-m",
-                "mcp_neo4j_cypher",
-                "--transport",
-                "stdio",
-                "--db-url",
-                neo4j_uri,
-                "--username",
-                neo4j_username,
-                "--password",
-                neo4j_password,
-                "--database",
-                neo4j_database,
-            ],
-            "transport": "stdio",
-            "cwd": mcp_server_path,
-            "env": {
-                "OPENAI_API_KEY": openai_api_key,
-            }
+            "url": f"http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/",
+            "transport": "streamable_http",
         }
     }
 
 
 # ============================================================================
-# THINK TOOL - Subagent Düşünme Aracı (LangChain DeepAgents Pattern)
+# CUSTOM TOOLS - Agent için özel araçlar
 # ============================================================================
-# Referans: https://github.com/langchain-ai/deepagents-quickstarts/blob/main/deep_research/research_agent/tools.py
-# think_tool, subagent'ların her sorgu sonrası düşünme ve strateji belirleme yapmasını sağlar.
 
-from langchain_core.tools import tool
+# Tool tanımları - sadece import başarılıysa tanımlanır
+think_tool = None
+write_finding = None
+read_finding = None
 
-@tool
-def think_tool(reflection: str) -> str:
-    """
-    Düşünme ve strateji belirleme aracı.
-    
-    Her sorgu sonrasında bu tool'u kullanarak:
-    - Ne buldum? (sonuç özeti)
-    - Eksik ne var? (henüz cevaplanamayan kısımlar)
-    - Yeterli bilgi var mı? (devam etmeli miyim?)
-    - Sonraki adım ne olmalı? (devam/dur/escalate)
-    
-    Args:
-        reflection: Düşünce ve strateji değerlendirmesi
-    
-    Returns:
-        Düşünce kaydedildi onayı
-    """
-    # Bu tool aslında bir "no-op" - model düşüncesini yapılandırması için kullanılır
-    # Trace'de görünmesi için log'lanır
-    _log(f"💭 THINK:\n{reflection}")
-    return f"Düşünce kaydedildi."
+if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
+    @tool
+    def _think_tool(reflection: str) -> str:
+        """
+        Düşünme ve strateji belirleme aracı.
+        
+        Her sorgu sonrasında bu tool'u kullanarak:
+        - Ne buldum? (sonuç özeti)
+        - Eksik ne var? (henüz cevaplanamayan kısımlar)
+        - Yeterli bilgi var mı? (devam etmeli miyim?)
+        - Sonraki adım ne olmalı? (devam/dur/escalate)
+        
+        Args:
+            reflection: Düşünce ve strateji değerlendirmesi
+        
+        Returns:
+            Düşünce kaydedildi onayı
+        """
+        _log(f"💭 THINK:\n{reflection}")
+        return "Düşünce kaydedildi."
+
+    @tool
+    def _write_finding(session_id: str, step_name: str, content: str) -> str:
+        """
+        Araştırma bulgularını dosyaya kaydet.
+        
+        Args:
+            session_id: Oturum ID'si (kısa versiyon)
+            step_name: Adım adı (örn: step_1_entity_search)
+            content: Kaydedilecek içerik (markdown formatında)
+        
+        Returns:
+            Dosya yolu
+        """
+        findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", session_id)
+        os.makedirs(findings_dir, exist_ok=True)
+        
+        file_path = os.path.join(findings_dir, f"{step_name}.md")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        
+        _log(f"📁 Finding saved: {file_path}")
+        return f"Bulgular kaydedildi: {file_path}"
+
+    @tool
+    def _read_finding(session_id: str, step_name: str) -> str:
+        """
+        Önceki araştırma bulgularını oku.
+        
+        Args:
+            session_id: Oturum ID'si (kısa versiyon)
+            step_name: Adım adı (örn: step_1_entity_search)
+        
+        Returns:
+            Dosya içeriği veya hata mesajı
+        """
+        findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", session_id)
+        file_path = os.path.join(findings_dir, f"{step_name}.md")
+        
+        if not os.path.exists(file_path):
+            return f"Dosya bulunamadı: {file_path}"
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        _log(f"📖 Finding read: {file_path}")
+        return content
+
+    # Global isimlere ata
+    think_tool = _think_tool
+    write_finding = _write_finding
+    read_finding = _read_finding
 
 
 # ============================================================================
@@ -291,316 +268,747 @@ def think_tool(reflection: str) -> str:
 # ============================================================================
 
 # -----------------------------------------------------------------------------
-# ANA AGENT (ORCHESTRATOR) - Adım Adım Planlama ve Koordinasyon
+# ANA AGENT (ORCHESTRATOR) - Planlama, Koordinasyon, Değerlendirme
 # -----------------------------------------------------------------------------
 ORCHESTRATOR_SYSTEM_PROMPT = """
-Sen kullanıcı sorularını analiz eden ve ADIM ADIM çözen bir koordinatörsün.
+Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine eden bir stratejistsin.
 
-## 🎯 TEMEL PRENSİP: ADIM ADIM İLERLE
+## 🎯 SENİN GÖREVLER
 
-Her soru için:
-1. Soruyu ADIM ADIM parçala (TODO listesi)
-2. Her adım için TEK BİR subagent çağır
-3. Subagent sonucunu OKU ve DEĞERLENDİR
-4. Sonraki adıma geç veya final cevabı oluştur
+1. **Plan yap** - write_todos ile adım adım TODO listesi oluştur
+2. **Strateji belirle** - Şemayı analiz et, olasılıkları belirle
+3. **Subagent'a görev ver** - spawn_graph_explorer ile araştırma yaptır
+4. **Sonucu değerlendir** - read_finding ile oku, TODO'yu güncelle
+5. **Final cevap oluştur** - Tüm bulgulardan kullanıcıya cevap ver
+
+## 🔧 TOOL'LAR
+
+1. **write_todos** - Plan oluştur ve güncelle
+2. **spawn_graph_explorer** - Subagent'a araştırma görevi ver
+3. **read_finding** - Subagent bulgularını oku
+4. **think_tool** - Strateji değerlendir
+
+⛔ **SEN HİÇBİR SORGU ÇALIŞTIRMA!** Tüm veritabanı sorguları subagent'a verilir.
+
+## 🔀 TÜM SORGULAR SUBAGENT'A VERİLİR
+
+Subagent'a verilecek görevler:
+- Varyasyon araması (KEŞİF)
+- Metadata sorguları
+- İçerik araması (embedding)
+- İlişki takibi
+- Sayım ve kontrol sorguları
+
+**⛔ Kendim sorgu çalıştırma!** Subagent başarısız olursa:
+- Farklı terimlerle yeni KEŞİF görevi ver
+- Farklı node'larla yeni KEŞİF görevi ver
+- Asla kendim sorgu yazıp çalıştırma!
+
+## 📋 SUBAGENT'A GÖREV FORMATI
+
+Her görevde **GÖREV TİPİ** belirt! Subagent buna göre araç seçer.
+
+### GÖREV TİPİ: KEŞİF
+Varyasyon bulma, entity keşfi, metadata sorgusu
+
+**🚨 ARAMA TERİMLERİ OLUŞTURURKEN:**
+- Tam ifadeyi ekle: "XYZ Company"
+- Kısaltmalı versiyonları ekle: "XYZ Corp", "XYZ Ltd"
+- **EN TEMEL PARÇAYI (kök kelime) MUTLAKA EKLE:** "XYZ" ← Bu çok önemli!
+
+Örnek: "ABC Holding A.Ş." araması için:
+```
+## 📝 ARAMA TERİMLERİ:
+- "ABC Holding A.Ş."
+- "ABC Holding"
+- "ABC"  ← KÖK KELİME - MUTLAKA EKLE!
+```
+
+```
+spawn_graph_explorer(task_description=\"\"\"
+## 🏷️ GÖREV TİPİ: KEŞİF
+## 🎯 GÖREV: [Entity]'nin veritabanındaki yazım varyasyonlarını bul
+
+## 🔎 MUHTEMEL NODE'LAR:
+- [NodeLabel] (property: name, fullName, title)
+
+## 📝 ARAMA TERİMLERİ:
+- "[tam_ifade]"
+- "[kısaltmalı_versiyon]"
+- "[kök_kelime]"  ← MUTLAKA EKLE!
+
+## 🔧 TEKNİK NOT:
+Tüm terimleri TEK SORGUDA OR ile birleştir (her node için):
+WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2' OR ...
+
+## 📁 KAYIT:
+- session_id: "[session]"
+- step_name: "[step_adı]"
+\"\"\")
+```
+
+### GÖREV TİPİ: İÇERİK
+Chunk'larda semantic arama (embedding)
+
+**ÖNEMLİ:** KEŞİF'ten gelen varyasyonları değerlendir!
+- Varyasyonlar aranan entity ile eşleşiyor mu? → EVET ise İÇERİK'e geç
+- Eşleşmiyor mu? → Yeni KEŞİF görevi ver
+
+🌍 **ÇOK DİLLİ ARAMA - KRİTİK!**
+Belgeler farklı dillerde olabilir! EMBEDDING QUERY'de HER İKİ DİLİ de ver:
+- Türkçe terim + İngilizce karşılık (veya tersi)
+- Örnek format: "türkçe_terim", "english_equivalent"
+Subagent önce embedding dener, 0 sonuç gelirse text CONTAINS ile arar.
+
+**DARALTMA TİPLERİ:**
+- **ENTITY**: KEŞİF'te bulunan varyasyonlar + node tipi + ilişki yolu
+- **FİLTRE**: Şemadan çıkardığın property/pattern (tarih, tip, vb.)
+- **TÜM VERİ**: Daraltma yok, tüm Chunk'lar taranacak (yavaş - bilinçli seç!)
+
+```
+spawn_graph_explorer(task_description=\"\"\"
+## 🏷️ GÖREV TİPİ: İÇERİK
+## 🎯 GÖREV: [Aranan konu] hakkında içerik ara
+
+## 📌 DARALTMA: ENTITY
+### Bulunan Varyasyonlar (KEŞİF'ten - RAW AYNEN KOPYALA!):
+| n.name (Veritabanındaki EXACT değer) | Node Tipi |
+|--------------------------------------|-----------|
+| [raw_value_1 - yazım hataları dahil] | [Label] |
+| [raw_value_2 - yazım hataları dahil] | [Label] |
+
+⚠️ Varyasyonları KEŞİF sonucundan AYNEN al, düzeltme yapma!
+
+### İlişki Yolu (şemadan - OK YÖNÜNE DİKKAT!):
+[Label]<-[:REL]-(Node) veya [Label]-[:REL]->(Node) - şemadaki gibi
+
+## 📝 EMBEDDING QUERY (sadece konu):
+- "[aranan konu - Türkçe]"
+- "[aranan konu - İngilizce karşılık]"  ← ÖNEMLİ: Belgeler İngilizce olabilir!
+
+## 📁 KAYIT:
+- session_id: "[session]"
+- step_name: "[step_adı]"
+\"\"\")
+```
+
+**Alternatif: FİLTRE daraltma**
+```
+## 📌 DARALTMA: FİLTRE
+### Filtre Koşulu (şemadan):
+- [property] [operator] [value]
+- Örnek: d.fileName STARTS WITH '2024'
+
+### İlişki Yolu:
+[Node]-[:REL]->...-[:PART_OF]->(Chunk)
+
+## 📝 EMBEDDING QUERY (sadece konu):
+- "[aranan konu]"
+```
+
+**Alternatif: TÜM VERİ**
+```
+## 📌 DARALTMA: TÜM VERİ
+⚠️ Bu seçenek bilinçli olarak seçildi - tüm Chunk'lar taranacak
+
+## 📝 EMBEDDING QUERY:
+- "[aranan konu]"
+```
+
+### GÖREV TİPİ: METADATA
+Basit ilişki takibi, listeleme
+```
+spawn_graph_explorer(task_description=\"\"\"
+## 🏷️ GÖREV TİPİ: METADATA
+## 🎯 GÖREV: [Entity]'nin [ilişkili entity]'lerini listele
+
+## 🔎 MUHTEMEL NODE'LAR ve İLİŞKİLER:
+- [NodeA]-[:REL]->[NodeB]
+
+## 📁 KAYIT:
+- session_id: "[session]"
+- step_name: "[step_adı]"
+\"\"\")
+```
 
 ## 🔄 ÇALIŞMA AKIŞI
 
-### ADIM 1: SORU ANALİZİ VE PLANLAMA
-Kullanıcı sorusunu analiz et ve TODO listesi oluştur:
-
 ```
-write_todos([
-  {"id": "1", "content": "[Entity]'yi veritabanında bul", "status": "in_progress"},
-  {"id": "2", "content": "[İlgili bilgiyi] ara", "status": "pending"},
-  {"id": "3", "content": "Sonuçları kullanıcıya sun", "status": "pending"}
-])
+1. write_todos → Adım adım plan (in_progress, pending, completed)
+2. spawn_graph_explorer → Subagent'a olasılıklar + teknikler ver
+3. read_finding → Sonucu oku
+4. think_tool → Değerlendir: Yeterli mi? Devam mı? Farklı strateji mi?
+5. write_todos → TODO durumunu güncelle
+6. (Tekrarla veya) Final cevap oluştur
 ```
 
-### ADIM 2: HER TODO İÇİN TEK SUBAGENT ÇAĞIR
-**KRİTİK:** Subagent'a sadece TEK BİR görev ver. Tüm adımları değil!
+## 🧠 ŞEMA ANALİZİ
 
-Subagent'a VERMESİ GEREKEN bilgiler:
-1. **Görev**: Ne araması gerektiği
-2. **Şema bilgisi**: Hangi node/relationship kullanacağı
-3. **Tool talimatı**: Hangi tool kullanacağı (cypher mi, embedding mi)
-4. **Arama kriterleri**: Yazım varyasyonları, match kriterleri
-5. **Dosya yolu**: Sonuçları nereye yazacağı
-
-### ADIM 3: SUBAGENT SONUCUNU OKU VE DEĞERLENDİR
-1. Subagent "Sonuçları X dosyasına kaydettim" der
-2. Sen `read_file("X")` ile dosyayı oku
-3. Sonuçları değerlendir:
-   - Aranan entity bulundu mu?
-   - Yeterli bilgi var mı?
-   - Sonraki adıma geçebilir miyiz?
-
-### ADIM 4: SONRAKI ADIM VEYA FİNAL
-- Sonuç yeterliyse → Sonraki TODO için yeni subagent çağır
-- Tüm TODO'lar bittiyse → Final cevabı oluştur
-
-## 📋 SUBAGENT'A GÖREV VERME FORMATI
-
-**ÖRNEK - Entity Arama Görevi:**
-```
-task(
-  name="graph-explorer",
-  task=\"\"\"
-## 🎯 GÖREV: [Şirket adı] kayıtlarını bul
-
-## 📁 DOSYA YOLU: findings/{session_id}/q_{question_id}_step_1.md
-
-## 🔎 ŞEMA BİLGİSİ:
-- Node: Customer (name, fullName alanları)
-- İlişkiler: Customer-[:HAS_POLICY]->Policy
-- Alternatif: Document.fileName içinde geçebilir
-
-## 🔧 TOOL: read_neo4j_cypher kullan
-
-## 📝 ARAMA KRİTERLERİ:
-- Varyasyonlar: "Akiş GYO", "Akis", "AKİŞ", "Akiş Gayrimenkul"
-- Türkçe karakter varyasyonları dene
-- Aranan: "Akiş GYO" - sadece bu entity'yi bul!
-
-## ✅ BEKLENEN ÇIKTI:
-- Bulunan entity ID'si ve adı
-- Kaç kayıt bulundu
-- "Sonuçları X dosyasına kaydettim" mesajı
-\"\"\"
-)
-```
-
-**ÖRNEK - İçerik Arama Görevi:**
-```
-task(
-  name="graph-explorer",
-  task=\"\"\"
-## 🎯 GÖREV: [Teminat adı] içerik araması
-
-## 📁 DOSYA YOLU: findings/{session_id}/q_{question_id}_step_2.md
-
-## 📌 ÖNCEKİ BULGULAR (tekrar arama!):
-- Customer: "Akiş Gayrimenkul Yatırım Ortaklığı", ID: xxx
-- Policy: 4 adet poliçe bulundu
-
-## 🔎 ŞEMA BİLGİSİ:
-- Chunk node'larında text alanı var
-- Chunk-[:PART_OF]->Document ilişkisi
-- Document-[:BELONGS_TO]->Policy ilişkisi
-
-## 🔧 TOOL: read_neo4j_cypher_with_embedding kullan
-- Semantic arama için bu tool daha iyi sonuç verir
-- query_text: "kira kaybı teminatı"
-
-## 📝 ARAMA KRİTERLERİ:
-- "kira kaybı", "kira mahrumiyeti" varyasyonları
-- Önceki adımda bulunan policy'lere filtrele
-
-## ✅ BEKLENEN ÇIKTI:
-- Teminat detayları (varsa)
-- Hangi belgede bulundu
-- Sigorta şirketi bilgisi
-\"\"\"
-)
-```
+Şemada gördüğün node'lardan OLASILIKLARI çıkar:
+- İsim/ad alanları: name, title, fullName, label, fileName
+- İlişki yolları: Hangi node'lar birbirine bağlı?
+- İçerik node'ları: Chunk, Text, Content
 
 ## ⚠️ KRİTİK KURALLAR
 
-1. **TEK GÖREV**: Subagent'a sadece TEK görev ver, tüm adımları değil!
-2. **ŞEMA BİLGİSİ**: Her görevde hangi node/relationship kullanacağını söyle
-3. **TOOL TALİMATI**: Hangi tool kullanacağını açıkça belirt
-4. **ÖNCEKİ BULGULAR**: Sonraki adımlarda önceki bulguları dahil et
-5. **DOSYA OKU**: Subagent sonuç döndükten sonra dosyayı oku ve değerlendir
-6. **HAM VERİ GÖSTERME**: Kullanıcıya teknik detay gösterme
+1. **KESİN SÖYLEME**: "X node'unda ara" değil, "X veya Y node'larında olabilir"
+2. **PROPERTY VER**: Hangi field'larda aranabilir
+3. **TEKNİK ÖNERİ VER**: toLower, CONTAINS, embedding
+4. **VARYASYON VER**: Türkçe karakter, kısaltma, tam isim
+5. **TEK GÖREV**: Her subagent çağrısı TEK iş
+6. **DEĞERLENDİR**: Subagent sonucunu oku, TODO'yu güncelle
 
-## 🚫 YAPMA!
+## 🚨 İLİŞKİ ADLARI - ÇOK KRİTİK!
 
-❌ Subagent'a tüm adımları verme
-❌ Subagent sonucunu okumadan sonraki adıma geçme
-❌ Şema bilgisi vermeden görev verme
-❌ Hangi tool kullanacağını söylemeden görev verme
+Şemada benzer isimli ama TAMAMEN FARKLI ilişkiler olabilir!
+
+**KURALLAR:**
+1. İlişki adını şemadan **BİREBİR KOPYALA** - asla "benzer" olanı yazma
+2. `HAS_X` ve `HAS_X_SOMETHING` FARKLI ilişkilerdir - dikkat!
+3. Hedef node'un şemadaki pattern ile eşleştiğini kontrol et
+
+**TEKNİK:**
+Şemada görmediğin bir ilişki adı YAZMA!
+- Şemada: `(A)-[:SOME_REL]->(B)` → Aynen yaz: `(A)-[:SOME_REL]->(B)`
+- Şemada yoksa: `(A)-[:SOME_OTHER_REL]->(B)` → YAZMA!
+
+**KONTROL (şema yukarıda verildi):**
+İlişki yolu yazarken her adımı yukarıdaki şemada GÖZÜNLE KONTROL ET:
+1. `(NodeA)-[:REL1]->(NodeB)` yukarıdaki şemada var mı? ✅
+2. `(NodeB)-[:REL2]->(NodeC)` yukarıdaki şemada var mı? ✅
+3. Yoksa yanlış ilişki adı kullanıyorsun - YUKARIDAKI ŞEMAYA BAK!
+
+## 🔄 KEŞİF SONRASI DEĞERLENDİRME
+
+KEŞİF tamamlandığında subagent'ın döndürdüğü varyasyonları değerlendir:
+
+1. **Varyasyonlar aranan entity ile eşleşiyor mu?**
+   - EVET → İÇERİK görevine geç, varyasyonları ENTITY daraltma olarak kullan
+   - HAYIR → Yeni KEŞİF görevi ver (farklı terimler/node'lar ile)
+
+2. **İÇERİK görevinde varyasyonları kullan:**
+   - TÜM varyasyonları filtre olarak geç
+   - Hangi node tipinde bulunduklarını belirt
+   - İlişki yolunu şemadan çıkar
+   - query_text = Sadece aranan KONU (varyasyonlar ayrı!)
+
+**Örnek:**
+```
+KEŞİF sonucu: "XYZ" → ["XYZ Corp", "XYZ CORP", "X.Y.Z."] (NodeA'da bulundu)
+Değerlendirme: ✅ Aranan entity ile eşleşiyor
+İÇERİK görevi:
+  - DARALTMA: ENTITY
+  - Varyasyonlar: ["XYZ Corp", "XYZ CORP", "X.Y.Z."]
+  - Node tipi: NodeA
+  - İlişki yolu: NodeA-[:REL1]->NodeB-[:REL2]->NodeC-[:PART_OF]->Chunk
+  - EMBEDDING QUERY: "aranan konu" (sadece konu - varyasyonlar DEĞİL!)
+```
+
+## 🚫 YAPMA
+
+❌ Karmaşık sorguları kendin yapma (subagent'a ver)
+❌ Kesin node belirtme (olasılık ver)
+❌ Subagent sonucunu okumadan ilerle
+❌ TODO güncellemeden sonraki adıma geç
 ❌ Ham veriyi kullanıcıya gösterme
 
-## ✅ DOĞRU AKIŞ ÖRNEĞİ
+## 📝 FİNAL CEVAP
 
-**Soru:** "Akiş GYO'nun kira kaybı teminatı hangi sigorta şirketinden?"
-
-**Adım 1 - Plan:**
-```
-write_todos([
-  {"id": "1", "content": "Akiş GYO kayıtlarını bul", "status": "in_progress"},
-  {"id": "2", "content": "Kira kaybı teminatını ara", "status": "pending"},
-  {"id": "3", "content": "Sigorta şirketini belirle", "status": "pending"}
-])
-```
-
-**Adım 2 - Entity Arama:**
-→ Subagent'a "Akiş GYO'yu bul" görevi ver
-→ Şema: Customer node, name alanı
-→ Tool: read_neo4j_cypher
-→ Subagent: "Buldum, findings/.../step_1.md'ye kaydettim"
-→ Sen: read_file ile oku, değerlendir
-
-**Adım 3 - İçerik Arama:**
-→ Subagent'a "Kira kaybı teminatını ara" görevi ver
-→ Önceki bulgu: Customer ID'si
-→ Şema: Chunk node, text alanı, PART_OF ilişkisi
-→ Tool: read_neo4j_cypher_with_embedding (semantic arama)
-→ Subagent: "Buldum, findings/.../step_2.md'ye kaydettim"
-→ Sen: read_file ile oku, değerlendir
-
-**Adım 4 - Final:**
-→ Tüm bulgulardan final cevabı oluştur
-→ Kullanıcıya sun
-
-## 📁 DOSYA YAPISI
-
-```
-findings/
-  {session_id}/
-    q_{question_id}_step_1.md  - Entity arama sonuçları
-    q_{question_id}_step_2.md  - İçerik arama sonuçları
-    q_{question_id}_step_3.md  - Ek araştırma sonuçları
-```
-
-## 🔄 ESCALATION YÖNETİMİ
-
-Subagent "Bulunamadı" derse:
-1. Farklı yazım varyasyonları ile yeni görev ver
-2. Alternatif şema yolu öner (Document.fileName'den başla)
-3. 3 denemeden sonra kullanıcıya "bulunamadı" de
-
-## 📝 FİNAL CEVAP FORMATI
-
-- Sade, anlaşılır Türkçe
-- Teknik terim yok
+- Sade, anlaşılır dil
+- Teknik detay yok
 - Kaynaklar belirtilmiş
 - Markdown formatında
 """
 
 # -----------------------------------------------------------------------------
-# SUB AGENT: GRAPH EXPLORER - Tek Görev, Hızlı Sonuç
+# SUB AGENT: GRAPH EXPLORER - Sorgu Yazıcı ve Uygulayıcı
 # -----------------------------------------------------------------------------
 EXPLORER_SUBAGENT_PROMPT = """
-Sen Neo4j veritabanında araştırma yapan bir uzman ajansın.
+Sen Neo4j graph veritabanında Cypher sorguları yazan ve çalıştıran bir uzmansın.
 Bugünün tarihi: {date}
 
-## 🎯 TEMEL PRENSİP: TEK GÖREV, HIZLI SONUÇ
+## 🎯 SENİN GÖREVİN
 
-Orchestrator sana TEK BİR görev verdi. Sadece o görevi yap ve sonucu dosyaya kaydet.
+Orchestrator sana şunları verir:
+- **Muhtemel node'lar** ve property'leri
+- **Muhtemel ilişkiler**
+- **Teknik öneriler** (toLower, CONTAINS, embedding vb.)
+- **Arama terimleri/varyasyonları** ← SADECE BUNLARI KULLAN!
 
-## 🔧 TOOL'LARIN
+Sen:
+1. Orchestrator'ın verdiği terimlerle Cypher sorgusu OLUŞTUR
+2. Çalıştır
+3. Sonucu KAYDET
+4. Kısa özet DÖNDÜR
 
-Sadece şu tool'ları kullanabilirsin:
-1. **read_neo4j_cypher** - Metadata sorguları (entity, ilişki bul)
-2. **read_neo4j_cypher_with_embedding** - Semantic içerik araması
-3. **write_file** - Sonuçları dosyaya kaydet
+⛔ **KENDİ TERİM TÜRETME!** Orchestrator ne verdiyse onu kullan, kısaltma/parçalama YAPMA!
 
-## ⛔ YASAK TOOL'LAR (ASLA ÇAĞIRMA!)
+## 🚨 NE ZAMAN KAYDET?
 
-❌ **task** - Bu orchestrator'ın tool'u, sen kullanamazsın!
-❌ **write_todos** - Bu orchestrator'ın tool'u, sen kullanamazsın!
-❌ **edit_file** - Kullanma, sadece write_file kullan
+**BULUNDU** → Hemen `write_finding` ile kaydet!
+```
+write_finding(..., content="✅ Bulundu: [sonuç özeti]. Denenen: N sorgu.")
+```
 
-**Bu tool'ları çağırırsan görev BAŞARISIZ olur!**
+**TÜM DENEMELER BİTTİ, BULUNAMADI** → Özet kaydet
+```
+write_finding(..., content="❌ Bulunamadı. Denenen varyasyonlar: [...]. N sorgu yapıldı.")
+```
+
+**BOŞ SONUÇ** → Kaydetme, sonraki varyasyonu dene
+
+## 🔧 TOOL'LAR
+
+1. **read_neo4j_cypher** - Metadata/node sorgusu
+2. **read_neo4j_cypher_with_embedding** - İçerik/semantic arama
+3. **write_finding** - Sonuç bulunduğunda veya tüm denemeler bittiğinde
+
+## 🏷️ GÖREV TİPİNE GÖRE ARAÇ SEÇ!
+
+Orchestrator sana **GÖREV TİPİ** verir. Buna göre araç seç:
+
+### KEŞİF → read_neo4j_cypher
+```cypher
+MATCH (n:Label) 
+WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
+RETURN DISTINCT n.name, n.fullName LIMIT 20
+```
+Amaç: Varyasyonları bul, entity keşfet
+
+⚠️ **KEŞİF'TE TÜM NODE'LARDA ARA!**
+
+Orchestrator sana MUHTEMEL NODE'LAR listesi verir:
+```
+## 🔎 MUHTEMEL NODE'LAR:
+- Customer (property: name, fullName)
+- Policyholder (property: name)
+- InsuredPerson (property: name)
+```
+
+**YAPMAN GEREKEN:**
+1. **İLK** node'da ara (örn: Customer)
+2. Sonuç BOŞ ise → **İKİNCİ** node'da ara (örn: Policyholder)
+3. Sonuç BOŞ ise → **ÜÇÜNCÜ** node'da ara
+4. Sonuç BULUNDUYSA → HEMEN KAYDET VE DUR!
+
+**AYNI NODE'DA TEKRAR TEKRAR ARAMA!**
+- Her node'u EN FAZLA 1 kez ara (tüm property'leri OR ile birleştir)
+- Bulamadıysan sonraki node'a geç
+- Aynı sorguyu ASLA tekrarlama!
+
+🚨 **AYNI SORGUYU TEKRARLAMA YASAĞI:**
+- Bir sorguyu çalıştırdıysan, AYNI sorguyu tekrar çalıştırma!
+- Sonuç geldi mi? → Kaydet ve bir sonraki node'a geç veya DUR
+- Aynı sorguyu 2, 3, 4 kez çalıştırma - bu kaynak israfı!
+
+⚠️ **OR İLE YAPILAN GENİŞ SORGU DAR SORGULARI KAPSAR!**
+- `WHERE X OR Y OR Z` ile aradıysan:
+  - Ayrıca `WHERE X` yapma - zaten dahil!
+  - Ayrıca `WHERE Y` yapma - zaten dahil!
+- Örnek: `CONTAINS 'abc' OR CONTAINS 'abc company'` yaptıysan
+  - Sonra `CONTAINS 'abc'` tek başına YAPMA - gereksiz tekrar!
+
+⛔ **YANLIŞ:**
+```
+Tool #1: Customer.name'de ara → boş
+Tool #2: Customer.fullName'de ara → boş
+Tool #3: Customer.name'de yine ara ← YANLIŞ! Tekrar aynı node!
+Tool #4: Customer.original_name'de ara
+...
+Tool #10: Hala Customer'da! Policyholder'a hiç bakmadı! ← FELAKET!
+```
+
+✅ **DOĞRU:**
+```
+Tool #1: Customer.name'de ara → boş
+Tool #2: Policyholder.name'de ara → 3 kayıt bulundu!
+Tool #3: write_finding(varyasyonlar) ← KAYDET VE DUR!
+```
+
+🚨🚨🚨 **KRİTİK: ARAMA TERİMİ KURALLARI** 🚨🚨🚨
+
+⛔⛔⛔ **MUTLAK YASAK: KENDİ TERİM TÜRETME!** ⛔⛔⛔
+
+Orchestrator sana `## 📝 ARAMA TERİMLERİ:` listesi verir.
+**SADECE O LİSTEDEKİ TERİMLERİ KULLAN!**
+
+❌ **ASLA YAPMA:**
+- Terimi parçalama: "XYZ Holding" → "XYZ" veya "Holding" ayrı ayrı
+- Terimi kesme: "Example" → "Exam" veya "Ex"
+- 3 karakterden kısa terim kullanma
+- Orchestrator'ın VERMEDİĞİ terimleri kendin türetme
+- Tam ifadeden kelime çıkarma: "ABC Real Estate Inc" → sadece "real estate" ❌
+
+**Orchestrator verdi:** `"ABC Real Estate"`, `"ABC"`
+❌ YASAK: `CONTAINS 'real estate'` tek başına - Orchestrator vermedi!
+❌ YASAK: `CONTAINS 'estate'` tek başına - Orchestrator vermedi!
+✅ İZİNLİ: `CONTAINS 'abc real estate'` - Orchestrator verdi
+✅ İZİNLİ: `CONTAINS 'abc'` - Orchestrator verdi
+
+✅ **İZİN VERİLEN:**
+- Orchestrator'ın verdiği TAM terimleri kullan
+- Türkçe karakter değişimi: ş→s, ı→i, ğ→g, ü→u, ö→o, ç→c
+- Büyük/küçük: toLower() ile normalize
+
+**ÖRNEK:**
+Orchestrator verdi: `"ABC Company"`, `"ABC Ltd"`, `"ABC"`
+
+✅ `CONTAINS 'abc company'` - tam terim
+✅ `CONTAINS 'abc'` - Orchestrator verdi
+❌ `CONTAINS 'ab'` - **YASAK! Kesik, Orchestrator vermedi!**
+❌ `CONTAINS 'company'` tek başına - **Orchestrator vermedi!**
+
+⚠️ **MİNİMUM 3 KARAKTER VE ORCHESTRATOR'IN VERDİĞİ TERİM OLMALI!**
+
+### METADATA → read_neo4j_cypher
+```cypher
+MATCH (a:LabelA)-[:REL]->(b:LabelB)
+WHERE a.prop = 'value'
+RETURN b.name, b.prop LIMIT 50
+```
+Amaç: İlişki takibi, listeleme
+
+### İÇERİK → read_neo4j_cypher_with_embedding
+
+Orchestrator sana **DARALTMA** tipi ve detayları verir. Buna göre sorgu yaz:
+
+⚠️ **KRİTİK:** query_text = Sadece aranan KONU (varyasyonlar Cypher filtresinde!)
+
+#### DARALTMA: ENTITY
+Orchestrator'dan gelen bilgiler:
+- Varyasyonlar (KEŞİF'ten - RAW): ["exact_db_value_1", "exact_db_value_2"]
+- Node tipi: Label
+- İlişki yolu: Label<-[:REL]-(Node) veya Label-[:REL]->(Node)
+
+⚠️ **İLİŞKİ YÖNÜ KRİTİK!** Orchestrator'ın verdiği ok yönünü AYNEN kullan:
+- `A<-[:REL]-(B)` → Cypher: `(a:A)<-[:REL]-(b:B)` 
+- `A-[:REL]->(B)` → Cypher: `(a:A)-[:REL]->(b:B)`
+
+⚠️ **VARYASYONLAR RAW!** Yazım hataları dahil, veritabanındaki EXACT değerler!
+
+```cypher
+-- query_text: "aranan konu" (varyasyonlar DEĞİL!)
+-- İlişki yönünü Orchestrator'dan AYNEN al!
+MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
+WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']  -- RAW varyasyonlar
+AND c.embedding IS NOT NULL
+AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+RETURN c.text, n.name AS source, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+ORDER BY score DESC LIMIT 10
+```
+
+#### DARALTMA: FİLTRE
+Orchestrator'dan gelen bilgiler:
+- Filtre koşulu: property operator value
+- İlişki yolu: Node-[:REL]->...-[:PART_OF]->(Chunk)
+
+```cypher
+-- query_text: "aranan konu"
+MATCH (n:Label)-[:REL]->...-[:PART_OF]->(c:Chunk)
+WHERE [Orchestrator'dan gelen filtre koşulu]  -- Örn: n.fileName STARTS WITH '2024'
+AND c.embedding IS NOT NULL
+AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+ORDER BY score DESC LIMIT 10
+```
+
+#### DARALTMA: TÜM VERİ
+```cypher
+-- ⚠️ Orchestrator bilinçli olarak "TÜM VERİ" dedi
+-- query_text: "aranan konu"
+MATCH (c:Chunk)
+WHERE c.embedding IS NOT NULL
+AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+ORDER BY score DESC LIMIT 10
+```
+
+#### DARALTMA: BELİRTİLMEMİŞ
+```
+⚠️ İÇERİK görevi ama daraltma tipi yok!
+→ write_finding(..., content="⚠️ Daraltma bilgisi eksik") kaydet ve DUR!
+```
+
+## 🔄 EMBEDDING BAŞARISIZ → TEXT FALLBACK
+
+⚠️ **Embedding araması 0 sonuç döndürürse:**
+
+1. **Aynı Cypher'da text CONTAINS ile dene:**
+```cypher
+-- Embedding 0 sonuç döndü, text araması dene
+MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
+WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']
+AND (toLower(c.text) CONTAINS 'terim_1' 
+     OR toLower(c.text) CONTAINS 'terim_2')
+RETURN c.text, n.name AS source
+LIMIT 10
+```
+
+2. **Orchestrator'ın verdiği TÜM terimleri kullan** (tüm dillerdeki karşılıklar)
+
+3. **Sonuç bulursan kaydet**, bulamazsan "Embedding ve text araması başarısız" olarak kaydet
+
+**Akış:**
+```
+Embedding "[terim]" → 0 sonuç
+Text CONTAINS "[terim_1]" OR "[terim_2]" → sonuç bulunabilir!
+```
+
+## ⛔ YASAK
+
+❌ **spawn_graph_explorer** - Orchestrator'ın tool'u
+❌ **write_todos** - Orchestrator'ın tool'u
+❌ **Daraltma belirtilmeden embedding araması** - Orchestrator daraltma tipi vermeli!
 
 ## 📋 ÇALIŞMA AKIŞI
 
-1. Orchestrator'ın verdiği görevi oku
-2. Belirtilen TOOL'u kullan (cypher veya embedding)
-3. Belirtilen ŞEMA bilgisini kullan
-4. Belirtilen varyasyonları dene
-5. Sonuçları belirtilen DOSYA YOLUNA kaydet
-6. Kısa özet mesajı döndür: "✅ Sonuçları X dosyasına kaydettim"
+⚠️ **EN KRİTİK KURAL: İLK BAŞARILI SONUÇTA HEMEN KAYDET VE DUR!**
 
-## 📝 CYPHER KULLANIMI
-
-**Doğru elementId kullanımı:**
-```cypher
--- Doğru:
-MATCH (c:Customer) WHERE c.name CONTAINS 'Akiş' RETURN c.name, elementId(c) AS id
-
--- Yanlış (id() fonksiyonu string ile çalışmaz):
-WHERE id(c) = '4:xxx:123'  -- YANLIŞ!
-WHERE elementId(c) = '4:xxx:123'  -- DOĞRU
+```
+1. GÖREV TİPİ'ni oku (KEŞİF / METADATA / İÇERİK)
+2. Tipe göre araç seç
+3. Sorguyu çalıştır
+4. ⭐ SONUÇ GELDİĞİNDE:
+   
+   EĞER sonuç BOŞ DEĞİLSE ([] değil, kayıt var):
+   → HEMEN write_finding çağır (RAW değerlerle!)
+   → HEMEN özet döndür
+   → BAŞKA SORGU YAPMA!
+   
+   EĞER sonuç BOŞ ise ([]):
+   → Sonraki varyasyonu dene
+   → Maksimum 3-4 sorgu
+   
+5. Tüm denemeler bittiyse → write_finding ile "bulunamadı" kaydet
 ```
 
-**Türkçe karakter arama:**
-```cypher
--- Hem ş hem s dene:
-WHERE toLower(c.name) CONTAINS 'akis' OR toLower(c.name) CONTAINS 'akış'
+### ⛔ YASAK DAVRANIŞLAR
+
+```
+❌ Sonuç bulduktan sonra "emin olmak için" başka sorgu yapmak
+❌ write_finding çağırmadan yeni sorgulara geçmek  
+❌ 4'ten fazla sorgu yapmak (limit: 10 tool call, güvenlik: 4 sorgu)
+❌ Limit aşılana kadar beklemek
 ```
 
-## 🎯 MATCH KONTROLÜ
+### ✅ DOĞRU ÖRNEK
 
-Orchestrator "X'ı bul" dedi. Sen "Y" buldun.
-- X = Y (veya X içinde Y) → ✅ Kullan
-- X ≠ Y → ❌ Kullanma, farklı entity!
+```
+Tool #1: NodeA'da ara → [] (boş)
+Tool #2: NodeB'de ara → 4 kayıt bulundu!
+Tool #3: write_finding(raw varyasyonlar) ← HEMEN KAYDET!
+→ Özet döndür, DUR!
+```
 
-**Örnek:**
-- Aranan: "Akiş GYO"
-- Bulunan: "AKİŞ GAYRİMENKUL YATIRIM ORTAKLIĞI A.Ş."
-- Bu AYNI entity! ✅
+### ❌ YANLIŞ ÖRNEK  
 
-- Aranan: "Akiş GYO"
-- Bulunan: "Mehmet Çiftçi"
-- Bu FARKLI entity! ❌ Kullanma!
+```
+Tool #1: NodeA'da ara → [] (boş)
+Tool #2: NodeB'de ara → 4 kayıt bulundu!
+Tool #3: "Emin olmak için" başka arama ← YANLIŞ!
+Tool #4: Başka arama ← YANLIŞ!
+...
+Tool #10: Limit aşıldı, write_finding çağrılmadı! ← FELAKET!
+```
 
-## ⏱️ HARD LIMITS
+## 🔍 SONUÇ DEĞERLENDİRME (KRİTİK!)
 
-- Maksimum **3 sorgu** yap
-- 3 sorguda bulamazsan → "Bulunamadı" de ve DUR
-- Aynı sorguyu tekrar yapma
-- **ASLA** task veya write_todos çağırma
+**HER sorgu sonucunda bu adımları uygula:**
 
-## 📁 DOSYA KAYDETME
+### 1. Sonuç boş mu?
+```
+[] veya "0 results" → BOŞ SONUÇ, sonraki varyasyonu dene
+```
 
-Sonuçları Orchestrator'ın belirttiği dosya yoluna kaydet:
+### 2. Sonuç döndüyse KAYIT SAYISINI SAY
+```
+(R:0)... → 1 kayıt
+(R:0)... (R:1)... (R:2)... → 3 kayıt
+(R:0)... (R:1)... (R:2)... (R:3)... → 4 kayıt
+```
 
+### 3. Dönen kayıtları ARANAN VARLIK ile KARŞILAŞTIR
+
+Orchestrator'ın görevinde aranan varlık ne?
+- Görevde "X" aranıyorsa
+- Dönen kayıtlarda "X", "X ile başlayan", "X içeren" veya "X'in tam adı" var mı?
+
+**Semantik Eşleştirme Kuralları:**
+- Kısaltmalar genişletilmiş haliyle EŞLEŞİR
+- Büyük/küçük harf farklılıkları EŞLEŞİR  
+- Ek bilgi içeren kayıtlar EŞLEŞİR (örn: numara + isim)
+- Hafif yazım farklılıkları EŞLEŞİR
+
+**Örnek Eşleştirmeler (domain-agnostic):**
+| Aranan | Dönen | Eşleşme |
+|--------|-------|---------|
+| "ABC Şirketi" | "ABC ŞİRKETİ A.Ş." | ✅ EVET |
+| "ABC" | "ABC Holding Ltd." | ✅ EVET |
+| "XYZ Ltd" | "12345 XYZ Ltd Şirketi" | ✅ EVET (numara + isim) |
+| "DEF" | "DEF Anonim Şirketi" | ✅ EVET |
+| "GHI Corp" | "Tamamen Farklı İsim" | ❌ HAYIR |
+
+### 4. Eşleşme varsa → HEMEN KAYDET VE DUR!
+
+```
+⚠️ ARRAY BOŞ DEĞİLSE (en az 1 kayıt var):
+   1. HEMEN write_finding çağır:
+      - TÜM raw varyasyonları yaz (veritabanındaki gibi!)
+      - Hangi node'da bulunduğunu belirt
+   2. Kısa özet döndür
+   3. BAŞKA SORGU YAPMA! DUR!
+
+🛑 DURMA KOŞULU:
+   Sonuç [] değilse → write_finding → DUR!
+   Başka arama için sebep ARAMA!
+```
+
+### ⚠️ KRİTİK: RAW VARYASYONLARI AYNEN YAZ!
+
+KEŞİF görevlerinde bulunan varyasyonları **AYNEN** (raw) yaz, temizleme/yorumlama YAPMA!
+
+**Neden?** Sonraki embedding sorgusunda `WHERE n.name IN [...]` kullanılacak.
+Veritabanındaki EXACT değer yazılmazsa sorgu 0 sonuç döner!
+
+🚨 **TÜM SORGU SONUÇLARINI DAHİL ET!**
+- Her sorguda dönen TÜM kayıtları final response'a ekle
+- Numara prefix'li kayıtları ATLAMA: "12345 ABC..." → AYNEN yaz!
+- Satır içi boşluklu kayıtları ATLAMA: "ABC\nXYZ..." → AYNEN yaz!
+- "Alakasız" diye düşündüklerini de yaz, Orchestrator değerlendirir
+
+```
+❌ YANLIŞ (temizlenmiş/yorumlanmış):
+   "ABC Şirketi A.Ş."  ← Kendin düzeltme yaptın
+   
+❌ YANLIŞ (eksik - bazı kayıtları atladın):
+   Tool #2'de 4 kayıt döndü ama sadece 2'sini yazdın!
+
+✅ DOĞRU (raw - veritabanındaki AYNEN):
+   - "ABC Şirket i A.Ş." (yazım hatası/boşluk VAR - AYNEN yaz!)
+   - "12345 ABC Şirket i A.Ş." (numara prefix VAR - AYNEN yaz!)
+   - "ABC Şirketi A.Ş." (temiz versiyon da VAR - AYNEN yaz!)
+   - "ABC\nŞirketi" (satır içi boşluk VAR - AYNEN yaz!)
+```
+
+**write_finding formatı (KEŞİF):**
 ```markdown
-# Araştırma Sonuçları
+✅ Bulundu: [N] varyasyon
 
-## Aranan Entity
-[Orchestrator'ın sorduğu entity]
+## RAW Varyasyonlar (AYNEN kopyala):
+| n.name (Veritabanındaki değer) | Node Tipi |
+|--------------------------------|-----------|
+| [EXACT raw value 1]            | [Label]   |
+| [EXACT raw value 2]            | [Label]   |
 
-## Bulunan Kayıtlar
-- [Entity adı]: [ID]
-- [İlgili bilgiler]
-
-## Sorgu Detayları
-- Kullanılan tool: [cypher/embedding]
-- Denenen varyasyonlar: [liste]
-
-## Sonuç
-[Bulundu/Bulunamadı] - [Kısa açıklama]
+Notlar:
+- Hariç tutulanlar: [homonim/alakasız kayıtlar]
 ```
 
-## 📤 FINAL MESAJ
+### 5. Toplam Sorgu Sayısını DOĞRU BİLDİR
 
-Görevi tamamladığında şu formatta mesaj döndür:
-
-**Bulundu:**
 ```
-✅ [Entity adı] bulundu.
-📁 Detaylar: findings/.../step_X.md
-📊 Özet: [Kaç kayıt, ne bulundu]
+Yaptığın sorgu sayısını say:
+- read_neo4j_cypher çağrısı = 1 sorgu
+- 3 paralel çağrı = 3 sorgu
+- 18 tool çağrısı = 18 sorgu (3 değil!)
 ```
 
-**Bulunamadı:**
+### ⚠️ HATALI DEĞERLENDİRME ÖRNEKLERİ
+
 ```
-❌ [Entity adı] bulunamadı.
-📁 Deneme detayları: findings/.../step_X.md
-💡 Öneri: [Alternatif yazım veya strateji]
+❌ YANLIŞ: Sonuçta 4 kayıt var ama "1 kayıt bulundu" demek
+❌ YANLIŞ: 18 sorgu yaptın ama "3 sorgu denendi" demek  
+❌ YANLIŞ: "ABC Şirketi A.Ş." bulundu ama "ABC bulunamadı" demek
+❌ YANLIŞ: İlk 3 sorgu boş dönünce sonrakileri görmezden gelmek
+
+✅ DOĞRU: Tüm sorguları say
+✅ DOĞRU: Tüm kayıtları say
+✅ DOĞRU: Semantik eşleştirme yap
+✅ DOĞRU: Eşleşen TÜM varyasyonları listele
 ```
 
-## ⚠️ ÖNEMLİ HATIRLATMALAR
+## 📝 CYPHER YAZARKEN
 
-1. **TEK GÖREV**: Sadece verilen görevi yap
-2. **ŞEMA KULLAN**: Orchestrator hangi node/relationship dedi, onu kullan
-3. **TOOL TALİMATI**: Orchestrator hangi tool dedi, onu kullan
-4. **DOSYAYA KAYDET**: Sonuçları mutlaka dosyaya kaydet
-5. **KISA MESAJ**: Final mesajın kısa ve öz olsun
-6. **YASAK TOOL**: task ve write_todos ASLA çağırma!
+Orchestrator'dan gelen teknik önerileri kullan:
+- toLower() + CONTAINS önerildiyse → `WHERE toLower(n.prop) CONTAINS 'term'`
+- Varyasyonlar verildiyse → OR ile birleştir
+- İlişki verildiyse → MATCH pattern'ı kur
+
+```cypher
+-- elementId kullan (id() değil):
+RETURN elementId(n) AS id, n.name, n.title
+
+-- Birden fazla property:
+WHERE toLower(n.name) CONTAINS 'x' OR toLower(n.title) CONTAINS 'x'
+
+-- Birden fazla varyasyon:
+WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
+
+-- İlişki takibi:
+MATCH (a:NodeA)-[:REL]->(b:NodeB) WHERE a.prop = 'X' RETURN b
+```
+
+## ❌ HATA ALDIĞINDA
+
+Tool sonucunda hata mesajı görürsen:
+1. **Hata mesajını OKU** - Neo4j hatanın nedenini söyler
+2. **Sorguyu DÜZELT** - Hataya göre sorguyu değiştir
+3. **TEKRAR DENE** - Düzeltilmiş sorguyu çalıştır
+
+### Sık Yapılan Hatalar:
+
+```cypher
+-- ❌ YANLIŞ: İki RETURN kullanma
+RETURN x, y, (p)-[:REL]->(n) RETURN n.name
+
+-- ✅ DOĞRU: WITH ile ayır, tek RETURN
+WITH p MATCH (p)-[:REL]->(n) RETURN n.name
+
+-- ❌ YANLIŞ: RETURN içinde yeni değişken tanımlama
+RETURN (p)-[:REL]->(ic:InsuranceCompany)
+
+-- ✅ DOĞRU: Önce MATCH, sonra RETURN
+MATCH (p)-[:REL]->(ic:InsuranceCompany) RETURN ic.name
+
+-- ❌ YANLIŞ: Clause sırası yanlış
+MATCH ... RETURN ... WHERE ...
+
+-- ✅ DOĞRU: Clause sırası
+MATCH ... WHERE ... WITH ... RETURN ... ORDER BY ... LIMIT
+```
+
+⚠️ Hata sayısı 3'ü geçerse → DUR ve "Sorgu hatası" olarak kaydet
+
+## ⏱️ LİMİTLER
+
+- **3 sorgu** maksimum
+- Aynı sorguyu tekrarlama
+- 3 sorguda bulamazsan → Özet kaydet ve DUR
+
+## 📁 KAYIT FORMATI
+
+**Başarılı:**
+```
+write_finding(
+    session_id="[orchestrator'dan gelen]",
+    step_name="[orchestrator'dan gelen]", 
+    content="✅ Bulundu: [N kayıt]. [Kısa özet]. Denenen: M sorgu."
+)
+```
+
+**Başarısız (tüm denemeler bitti):**
+```
+write_finding(
+    session_id="[orchestrator'dan gelen]",
+    step_name="[orchestrator'dan gelen]", 
+    content="❌ Bulunamadı. Denenen: [varyasyon1, varyasyon2, ...]. M sorgu yapıldı."
+)
+```
+
+## 📤 ÖZET
+
+**Bulundu:** `✅ Bulundu. N kayıt. [Kısa bilgi]`
+**Bulunamadı:** `❌ Bulunamadı. Denenen: [node'lar ve varyasyonlar]`
 """
 
 
@@ -610,17 +1018,18 @@ Görevi tamamladığında şu formatta mesaj döndür:
 
 
 # ============================================================================
-# DEEP AGENT INTEGRATION CLASS
+# LANGCHAIN AGENT INTEGRATION CLASS
 # ============================================================================
 
-class DeepAgentIntegration:
-    """LangGraph Deep Agent'i chat_bot_stream'e entegre eden sınıf - MCP Tools ile"""
+class LangChainAgentIntegration:
+    """LangChain create_agent ile chat_bot_stream'e entegre eden sınıf - MCP Tools + Middleware"""
 
     def __init__(self, model: str = "gpt-4o", graph=None, reasoning_effort: str = "none"):
         self.model = model
         self.graph = graph
         self.reasoning_effort = reasoning_effort  # none, low, medium, high
         self.agent = None
+        self.subagent = None  # Graph explorer subagent
         self.mcp_client = None
         self.mcp_tools = None
         # NOT: page_links artık session bazlı lokal değişken olarak yönetiliyor
@@ -846,92 +1255,59 @@ class DeepAgentIntegration:
         return markdown_section
 
     async def _get_mcp_tools(self) -> List:
-        """MCP server'dan tools'ları al - global cache varsa onu kullan, gerekirse reset et"""
-        if not MCP_ADAPTERS_AVAILABLE:
+        """MCP HTTP server'dan tools'ları al"""
+        if not MCP_ADAPTERS_AVAILABLE or MultiServerMCPClient is None:
             logging.warning("⚠️ MCP Adapters not available, no tools loaded")
             return []
         
-        # Reset gerekli mi kontrol et
-        should_reset, reset_reason = should_reset_mcp_client()
-        if should_reset:
-            logging.warning(f"🔄 MCP client reset ediliyor: {reset_reason}")
-            clear_global_mcp_cache()
-        
-        # Önce global cache'i kontrol et (server startup'ta oluşturulan)
-        global_tools = get_global_mcp_tools()
-        if global_tools:
-            self.mcp_client = get_global_mcp_client()
-            self.mcp_tools = global_tools
-            # İstek sayacını artır
-            request_count = increment_mcp_request()
-            _log(f"MCP cache: {len(global_tools)} tools (req #{request_count})")
-            return global_tools
-        
-        # Global cache yoksa veya reset edildiyse yeni oluştur
-        if not MCP_ADAPTERS_AVAILABLE or MultiServerMCPClient is None:
-            raise ImportError("LangChain MCP Adapters not available. Install langchain-mcp-adapters")
+        # Instance'da zaten varsa kullan
+        if self.mcp_tools:
+            _log(f"MCP tools: {len(self.mcp_tools)} (cached)")
+            return self.mcp_tools
         
         try:
-            logging.info("🔄 DeepAgent: MCP client oluşturuluyor (reconnect)...")
             mcp_config = get_mcp_server_config()
             self.mcp_client = MultiServerMCPClient(mcp_config)
             
             # MCP tools'ları al
             tools = await self.mcp_client.get_tools()
-            _log(f"MCP tools: {len(tools)} loaded")
-            
-            # Global cache'e kaydet (gelecek istekler için)
-            set_global_mcp_tools(self.mcp_client, tools)
+            self.mcp_tools = tools
+            _log(f"MCP tools: {len(tools)} loaded from HTTP server")
             
             return tools
             
         except Exception as e:
-            logging.error(f"❌ DeepAgent: MCP tools yüklenemedi: {e}", exc_info=True)
+            logging.error(f"❌ MCP tools yüklenemedi: {e}", exc_info=True)
             return []
 
     async def _create_agent(self, schema_info: str = "", session_id: str = ""):
-        """Deep Agent oluştur - Orchestrator + Sub Agents yapısı ile"""
-        if not DEEP_AGENT_AVAILABLE:
-            raise ImportError("deepagents package is not installed")
-
-        # 🔴 Redis Semantic Cache - DeepAgents ile uyumsuzluk nedeniyle geçici olarak devre dışı
-        logging.debug("ℹ️ Redis Semantic Cache devre dışı (DeepAgents uyumsuzluğu)")
+        """LangChain Agent oluştur - Orchestrator + Middleware yapısı ile"""
+        if not LANGCHAIN_AGENT_AVAILABLE:
+            raise ImportError("langchain.agents package is not installed or outdated")
 
         # MCP tools'ları al
         tools = await self._get_mcp_tools()
         
         if not tools:
-            logging.warning("⚠️ DeepAgent: No tools available, agent may have limited functionality")
+            logging.warning("⚠️ LangChainAgent: No tools available, agent may have limited functionality")
         
         # =====================================================================
-        # ORCHESTRATOR (ANA AGENT) PROMPT - TAM ŞEMA BİLGİSİ + SESSION CONTEXT
+        # SESSION CONTEXT
         # =====================================================================
-        # Orchestrator plan yapan ana agent - TAM şema bilgisine sahip olmalı
-        # Böylece doğru strateji belirleyip subagent'lara yön verebilir
-        
-        # Session ID'nin kısa versiyonu (dosya yolları için)
         short_session = session_id[:8] if session_id else "default"
         
-        # Session context bilgisi - step bazlı dosya yapısı
         session_context = f"""## 🔐 SESSION CONTEXT
 - **Session ID:** {short_session}
 
 ## 📁 DOSYA YAPISI:
-Her adım için ayrı dosya oluştur:
-```
-findings/{short_session}/
-  q_[question_id]_step_1.md  → Entity arama sonuçları
-  q_[question_id]_step_2.md  → İçerik arama sonuçları
-  q_[question_id]_step_3.md  → Ek araştırma (gerekirse)
-```
-
-## 📋 HER SUBAGENT GÖREVİNDE BELİRT:
-1. **Dosya yolu**: `findings/{short_session}/q_[qid]_step_N.md`
-2. **Şema bilgisi**: Hangi node/relationship kullanacağı
-3. **Tool talimatı**: `read_neo4j_cypher` veya `read_neo4j_cypher_with_embedding`
-4. **Arama kriterleri**: Yazım varyasyonları, match kuralları
+Bulgularını kaydetmek için write_finding tool'unu kullan:
+- session_id: "{short_session}"
+- step_name: "step_1_entity_search", "step_2_content_search" vb.
 """
         
+        # =====================================================================
+        # ORCHESTRATOR PROMPT - TAM ŞEMA BİLGİSİ
+        # =====================================================================
         orchestrator_prompt = ORCHESTRATOR_SYSTEM_PROMPT
         if schema_info:
             orchestrator_prompt = f"""{session_context}
@@ -946,49 +1322,6 @@ findings/{short_session}/
 {ORCHESTRATOR_SYSTEM_PROMPT}"""
 
         # =====================================================================
-        # SUB AGENT PROMPTS - Şema YOK, Orchestrator görev açıklamasında bildirecek
-        # =====================================================================
-        # Subagent şemayı görmez - Orchestrator her görevde gerekli node/relationship
-        # bilgisini açıkça yazacak. Bu sayede:
-        # 1. Token tasarrufu sağlanır
-        # 2. Subagent sadece verilen göreve odaklanır
-        # 3. Orchestrator tam kontrol sahibi olur
-        
-        explorer_prompt_with_schema = EXPLORER_SUBAGENT_PROMPT
-
-        # =====================================================================
-        # SUB AGENTS TANIMLAMA (Artık tek subagent kullanıyoruz)
-        # =====================================================================
-        # Subagent sadece MCP tools kullanır - task ve write_todos çağıramaz
-        # MCP tools: read_neo4j_cypher, read_neo4j_cypher_with_embedding, write_file
-        subagent_tools = tools  # Sadece MCP tools (task/write_todos yok!)
-        
-        # TEK SUBAGENT: graph-explorer - tek görevi yapar, sonucu dosyaya kaydeder
-        subagents = [
-            {
-                "name": "graph-explorer",
-                "description": """Veritabanında TEK BİR görev yapar ve sonucu dosyaya kaydeder.
-                
-TOOL'LARI:
-- read_neo4j_cypher: Metadata sorguları (entity, ilişki, tarih, sayı)
-- read_neo4j_cypher_with_embedding: Semantic içerik araması
-- write_file: Sonuçları dosyaya kaydet
-
-KURALLAR:
-- Orchestrator'dan aldığı TEK görevi yapar
-- Maksimum 3 sorgu çalıştırır
-- Sonuçları belirtilen dosya yoluna kaydeder
-- Kısa özet mesajı döndürür: "✅ Sonuçları X dosyasına kaydettim"
-- task ve write_todos ASLA çağırmaz!""",
-                "system_prompt": explorer_prompt_with_schema,
-                "tools": subagent_tools,  # Sadece MCP tools
-                "model": "gpt-4o-mini",  # Hızlı, reasoning yok
-            },
-        ]
-        
-        _log(f"Subagents: {[s['name'] for s in subagents]}")
-
-        # =====================================================================
         # MODEL OLUŞTUR
         # =====================================================================
         try:
@@ -1000,8 +1333,6 @@ KURALLAR:
                 from pydantic import SecretStr
                 
                 api_key = os.environ.get("OPENAI_API_KEY")
-                
-                # Environment variable varsa onu kullan, yoksa instance'ın reasoning_effort değerini
                 reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT", self.reasoning_effort)
                 _log(f"Model: {model_name}, reasoning={reasoning_effort}")
                 
@@ -1015,8 +1346,8 @@ KURALLAR:
                 model = ChatOpenAI(**model_kwargs)
             else:
                 # Standart modeller (gpt-4o, gpt-4o-mini, vb.)
-                if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
-                    raise ImportError("LangGraph Deep Agent not available. Install deepagents")
+                if not LANGCHAIN_AGENT_AVAILABLE or init_chat_model is None:
+                    raise ImportError("LangChain Agent not available. Install langchain>=0.3")
                 
                 # init_chat_model OpenAI modelleri için "openai:" prefix'i bekler
                 if not model_name.startswith("openai:") and "gpt" in model_name.lower():
@@ -1027,53 +1358,217 @@ KURALLAR:
             
         except Exception as e:
             logging.warning(f"⚠️ Model {self.model} yüklenemedi, fallback gpt-4o: {e}")
-            if not DEEP_AGENT_AVAILABLE or init_chat_model is None:
-                raise ImportError("LangGraph Deep Agent not available. Install deepagents")
+            if not LANGCHAIN_AGENT_AVAILABLE or init_chat_model is None:
+                raise ImportError("LangChain Agent not available. Install langchain>=0.3")
             model = init_chat_model("openai:gpt-4o")
 
-        # System Prompt - minimal
-        _log(f"Prompt: {len(orchestrator_prompt)} chars | Subagents: {[s['name'] for s in subagents]}")
+        # =====================================================================
+        # MIDDLEWARE YAPISI - Sadece belirtilen middleware'lar
+        # =====================================================================
+        middleware_list = []
+        
+        # 1. TodoListMiddleware - Planlama için write_todos tool'u sağlar
+        if TodoListMiddleware is not None:
+            todo_middleware = TodoListMiddleware()
+            middleware_list.append(todo_middleware)
+            _log("Middleware: TodoListMiddleware added")
+        
+        # 2. ModelCallLimitMiddleware - Sonsuz döngü önleme (opsiyonel)
+        max_model_calls = int(os.environ.get("AGENT_MAX_MODEL_CALLS", "50"))
+        if ModelCallLimitMiddleware is not None:
+            limit_middleware = ModelCallLimitMiddleware(run_limit=max_model_calls)
+            middleware_list.append(limit_middleware)
+            _log(f"Middleware: ModelCallLimitMiddleware (run_limit={max_model_calls})")
         
         # =====================================================================
-        # DEEP AGENT OLUŞTUR - ORCHESTRATOR + SUB AGENTS
+        # ORCHESTRATOR TOOLS - Sadece koordinasyon tool'ları (MCP YOK!)
         # =====================================================================
-        if not DEEP_AGENT_AVAILABLE or create_deep_agent is None:
-            raise ImportError("LangGraph Deep Agent not available. Install deepagents")
+        # Orchestrator hiçbir veritabanı sorgusu çalıştırmaz!
+        # Tüm sorgular subagent'a delege edilir.
+        all_tools = []  # MCP tools Orchestrator'a VERİLMEZ!
         
-        # 📁 FilesystemBackend - Agent bulguları gerçek dosya sistemine yazabilsin
-        backend = None
-        if FilesystemBackend is not None:
-            # Findings klasörünü backend çalışma dizininde oluştur
-            findings_dir = os.path.join(os.getcwd(), "agent_findings")
-            os.makedirs(findings_dir, exist_ok=True)
-            backend = FilesystemBackend(
-                root_dir=findings_dir,
-                # ÖNEMLİ: deepagents dosya tool'ları path'i çoğu zaman "/findings/..." gibi
-                # "virtual absolute" forma normalize eder. virtual_mode=True olursa bu path'ler
-                # OS root'a gitmez; root_dir altına güvenli şekilde map edilir.
-                virtual_mode=True,
-                max_file_size_mb=10
-            )
-            _log(f"Backend: {findings_dir}")
-        else:
-            logging.warning("⚠️ FilesystemBackend kullanılamıyor, dosyalar ephemeral olacak")
+        if think_tool is not None:
+            all_tools.append(think_tool)
+        if write_finding is not None:
+            all_tools.append(write_finding)
+        if read_finding is not None:
+            all_tools.append(read_finding)
         
-        agent = create_deep_agent(
-            tools=tools,  # Ana agent de tools'a erişebilir (basit sorgular için)
+        _log(f"Orchestrator Tools: {len(all_tools)} coordination tools (NO MCP!)")
+
+        # =====================================================================
+        # SUBAGENT - Graph Explorer (ayrı bir agent graph olarak)
+        # =====================================================================
+        # Subagent'ı lazy olarak oluşturuyoruz - orchestrator'ın spawn_subagent tool'u ile çağrılacak
+        self.subagent = await self._create_subagent(tools, short_session)
+
+        # =====================================================================
+        # SPAWN SUBAGENT TOOL - Orchestrator'ın subagent çağırması için
+        # =====================================================================
+        if tool is None:
+            raise ImportError("LangChain tool decorator not available")
+        
+        @tool
+        async def spawn_graph_explorer(task_description: str) -> str:
+            """
+            Graph Explorer subagent'ını çağır.
+            
+            Args:
+                task_description: Subagent'a verilecek görev açıklaması
+            
+            Returns:
+                Subagent'ın çalışma sonucu
+            """
+            if self.subagent is None:
+                return "❌ Subagent mevcut değil"
+            
+            # Task zaten Orchestrator log'unda gösteriliyor, tekrar loglama
+            
+            try:
+                # Subagent'ı streaming ile çalıştır - gerçek zamanlı loglama için
+                subagent_tool_count = 0
+                final_response = ""
+                
+                async for event in self.subagent.astream_events(
+                    {"messages": [{"role": "user", "content": task_description}]},
+                    version="v2"
+                ):
+                    kind = event.get("event", "")
+                    
+                    # Tool çağrısı başladığında logla
+                    if kind == "on_tool_start":
+                        subagent_tool_count += 1
+                        tool_name = event.get("name", "?")
+                        tool_input = event.get("data", {}).get("input", {})
+                        
+                        _log(f"[SUBAGENT] Tool #{subagent_tool_count}: {tool_name}")
+                        
+                        if tool_name == "read_neo4j_cypher":
+                            query = tool_input.get("query", "")
+                            _log(f"   📝 CYPHER:\n{query}")
+                        elif tool_name == "read_neo4j_cypher_with_embedding":
+                            query_text = tool_input.get('query_text', '')
+                            cypher = tool_input.get('cypher_query', '')
+                            _log(f"   🔎 SEARCH TEXT: {query_text}")
+                            _log(f"   📝 CYPHER:\n{cypher}")
+                        else:
+                            _log(f"   Args: {tool_input}")
+                    
+                    # Tool sonucu geldiğinde logla
+                    elif kind == "on_tool_end":
+                        tool_name = event.get("name", "?")
+                        output = event.get("data", {}).get("output", "")
+                        if isinstance(output, str):
+                            _log(f"[SUBAGENT_RESULT] {tool_name}:\n{output}")
+                        else:
+                            _log(f"[SUBAGENT_RESULT] {tool_name}: {output}")
+                    
+                    # Agent son yanıtı - çeşitli event isimlerini kontrol et
+                    elif kind == "on_chain_end":
+                        event_name = event.get("name", "")
+                        output = event.get("data", {}).get("output", {})
+                        
+                        # messages içeren output'u yakala
+                        if isinstance(output, dict) and "messages" in output:
+                            messages = output["messages"]
+                            if messages:
+                                last_msg = messages[-1]
+                                if hasattr(last_msg, "content") and last_msg.content:
+                                    candidate = self._extract_text_from_reasoning_content(last_msg.content)
+                                    if candidate and len(candidate) > len(final_response):
+                                        final_response = candidate
+                                        _log(f"[SUBAGENT] Final response captured from {event_name} ({len(final_response)} chars)")
+                
+                _log(f"← SUBAGENT summary: {subagent_tool_count} tool calls")
+                
+                if final_response:
+                    _log(f"← graph-explorer completed ({len(final_response)} chars)")
+                    _log(f"   📤 FULL RESPONSE:\n{final_response}")
+                    return final_response
+                
+                return "Subagent sonuç döndürmedi"
+                
+            except Exception as e:
+                logging.error(f"Subagent error: {e}", exc_info=True)
+                return f"❌ Subagent hatası: {str(e)}"
+        
+        all_tools.append(spawn_graph_explorer)
+        _log("Tool: spawn_graph_explorer added")
+
+        # =====================================================================
+        # ANA AGENT OLUŞTUR - create_agent ile
+        # =====================================================================
+        if not LANGCHAIN_AGENT_AVAILABLE or create_agent is None:
+            raise ImportError("LangChain Agent not available. Install langchain>=0.3")
+        
+        agent = create_agent(
             model=model,
+            tools=all_tools,
             system_prompt=orchestrator_prompt,
-            subagents=cast(Any, subagents),  # 🆕 Sub agents eklendi! (typing: deepagents type'ları optional)
-            backend=backend,  # 📁 Gerçek dosya sistemi backend'i
+            middleware=middleware_list,
+            debug=os.environ.get("AGENT_DEBUG", "0") == "1",
+            name="orchestrator",
         )
         
-        _log(f"Agent ready: {len(subagents)} subagents")
+        _log(f"Agent ready: {len(middleware_list)} middleware, {len(all_tools)} tools")
 
         return agent
+
+    async def _create_subagent(self, mcp_tools: List, session_id: str):
+        """Graph Explorer Subagent oluştur - MCP tools ile"""
+        if not LANGCHAIN_AGENT_AVAILABLE or create_agent is None:
+            return None
+        
+        # Subagent için model - daha hızlı ve ucuz
+        if init_chat_model is None:
+            return None
+            
+        subagent_model_name = os.environ.get("SUBAGENT_MODEL", "gpt-4o-mini")
+        if not subagent_model_name.startswith("openai:") and "gpt" in subagent_model_name.lower():
+            subagent_model_name = f"openai:{subagent_model_name}"
+        
+        # Paralel tool çağrısını KAPAT - subagent sıralı çalışsın
+        # Böylece her sorgu sonucunu değerlendirebilir ve "ilk başarılıda dur" kuralını uygulayabilir
+        # 
+        # LangChain dokümantasyonu: model.bind_tools([tools], parallel_tool_calls=False)
+        # https://docs.langchain.com/oss/python/langchain/models#parallel-tool-calls
+        subagent_model = create_sequential_model(subagent_model_name)
+        
+        # Subagent system prompt
+        today = datetime.now().strftime("%Y-%m-%d")
+        subagent_prompt = EXPLORER_SUBAGENT_PROMPT.format(date=today)
+        
+        # Subagent tools - sadece MCP tools + write_finding + think_tool
+        subagent_tools = list(mcp_tools)
+        if think_tool is not None:
+            subagent_tools.append(think_tool)
+        if write_finding is not None:
+            subagent_tools.append(write_finding)
+        if read_finding is not None:
+            subagent_tools.append(read_finding)
+        
+        # Subagent middleware - minimal
+        subagent_middleware = []
+        
+        # ModelCallLimitMiddleware - subagent için daha düşük limit
+        if ModelCallLimitMiddleware is not None:
+            subagent_middleware.append(ModelCallLimitMiddleware(run_limit=10))
+        
+        subagent = create_agent(
+            model=subagent_model,  # type: ignore[arg-type]
+            tools=subagent_tools,
+            system_prompt=subagent_prompt,
+            middleware=subagent_middleware,
+            name="graph-explorer",
+        )
+        
+        _log(f"Subagent ready: graph-explorer (model={subagent_model_name})")
+        return subagent
 
     async def stream_query_response(
         self, question: str, session_id: str = "", **kwargs
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Deep Agent kullanarak streaming cevap üret - MCP tools ile"""
+        """LangChain Agent kullanarak streaming cevap üret - Middleware + MCP tools ile"""
         import time
 
         # Session bazlı page_links - her request için ayrı set (concurrent safety)
@@ -1087,7 +1582,7 @@ KURALLAR:
             # Başlangıç durumu
             yield {
                 "type": "status",
-                "message": "🧠 LangGraph Deep Agent ile sorgunuz işleniyor...",
+                "message": "🧠 LangChain Agent ile sorgunuz işleniyor...",
                 "status": "processing",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
@@ -1149,7 +1644,7 @@ KURALLAR:
             # Agent'ı çalıştır
             yield {
                 "type": "status",
-                "message": "🔍 Deep Agent araştırma yapıyor...",
+                "message": "🔍 LangChain Agent araştırma yapıyor...",
                 "status": "agent_working",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
@@ -1175,227 +1670,135 @@ KURALLAR:
             # 🧠 Agent düşünme süreci için sayaç
             thinking_step = 0
             logged_message_ids = set()  # Daha önce loglanan mesajları takip et
+            step_timings = []
             
-            # 🆕 Subagent tracking
-            subagent_outputs = {}  # Her subagent için output'ları topla
-            current_subagent = None  # Şu an hangi subagent çalışıyor
-            subagent_prompts = {}  # Her subagent'a gönderilen prompt
-            subagent_final_outputs = {}  # Her subagent'ın final çıktısı
-            last_subagent = None  # Son aktif subagent (bitişi tespit için)
-            
+            # LangChain create_agent stream_mode="updates" kullanır
             async for chunk in agent.astream(
                 {"messages": messages},
-                stream_mode="values",
-                subgraphs=True  # 🆕 Subagent çıktılarını da stream et
+                stream_mode="updates",
             ):
-                # 🆕 subgraphs=True ile chunk tuple olarak gelir: (namespace, data)
-                namespace = None
-                chunk_data = chunk
-                
-                if isinstance(chunk, tuple) and len(chunk) == 2:
-                    namespace, chunk_data = chunk
-                    # Namespace örnek: ('graph-explorer:abc123',) veya ('content-searcher:xyz789',)
-                    # veya ('tools:graph-explorer:abc123',) formatında olabilir
-                    if namespace and len(namespace) > 0:
-                        raw_namespace = namespace[0]
-                        # Debug: Gerçek namespace değerini logla
-                        if raw_namespace and raw_namespace != current_subagent:
-                            logging.debug(f"🔍 RAW NAMESPACE: {raw_namespace}")
-                        
-                        # Namespace parsing: farklı formatları destekle
-                        # Format 1: "graph-explorer:abc123" → "graph-explorer"
-                        # Format 2: "tools:graph-explorer:abc123" → "graph-explorer"
-                        # Format 3: "graph-explorer" → "graph-explorer"
-                        if ':' in raw_namespace:
-                            parts = raw_namespace.split(':')
-                            # "tools:graph-explorer:xxx" formatı
-                            if parts[0] == 'tools' and len(parts) > 1:
-                                subagent_name = parts[1]
-                            else:
-                                # "graph-explorer:xxx" formatı
-                                subagent_name = parts[0]
-                        else:
-                            subagent_name = raw_namespace
-                        
-                        if subagent_name != current_subagent:
-                            # Önceki subagent bittiyse final output'u kaydet
-                            if last_subagent and last_subagent in subagent_outputs:
-                                last_content = None
-                                for output in reversed(subagent_outputs[last_subagent]):
-                                    if output.get("type") == "content":
-                                        last_content = output.get("full_content", output.get("preview", ""))
-                                        break
-                                if last_content:
-                                    subagent_final_outputs[last_subagent] = last_content
-                                    short_id = last_subagent[:8] if len(last_subagent) > 8 else last_subagent
-                                    _log(f"[{short_id}] done ({len(last_content)} chars)")
-                            
-                            current_subagent = subagent_name
-                            last_subagent = subagent_name
-                            # Subagent ID'yi kısalt
-                            short_id = subagent_name[:8] if len(subagent_name) > 8 else subagent_name
-                            _log(f"→ [{short_id}] started")
-                            if subagent_name not in subagent_outputs:
-                                subagent_outputs[subagent_name] = []
-                else:
-                    # Orchestrator'a dönüldüğünde son subagent'ın final output'unu kaydet
-                    if current_subagent and current_subagent in subagent_outputs and current_subagent not in subagent_final_outputs:
-                        last_content = None
-                        for output in reversed(subagent_outputs[current_subagent]):
-                            if output.get("type") == "content":
-                                last_content = output.get("full_content", output.get("preview", ""))
-                                break
-                        if last_content:
-                            subagent_final_outputs[current_subagent] = last_content
-                            short_id = current_subagent[:8] if len(current_subagent) > 8 else current_subagent
-                            _log(f"[{short_id}] done ({len(last_content)} chars) → ORCH")
-                        current_subagent = None
-                
-                if not isinstance(chunk_data, dict) or "messages" not in chunk_data or not chunk_data["messages"]:
+                # chunk format: {"node_name": {"messages": [...], ...}}
+                if not isinstance(chunk, dict):
                     continue
+                
+                # Her node'un çıktısını işle
+                for node_name, node_output in chunk.items():
+                    if not isinstance(node_output, dict):
+                        continue
                     
-                last_message = chunk_data["messages"][-1]
+                    # messages varsa işle
+                    if "messages" not in node_output or not node_output["messages"]:
+                        continue
                     
-                # Mesajın benzersiz ID'sini al (id veya content hash)
-                msg_id = getattr(last_message, "id", None) or hash(str(last_message.content)[:100] if hasattr(last_message, "content") else "")
-                
-                # Daha önce loglandıysa atla
-                if msg_id in logged_message_ids:
-                    continue
-                logged_message_ids.add(msg_id)
-                
-                # Step süresini hesapla
-                current_time = time.time()
-                step_duration = current_time - last_step_time
-                last_step_time = current_time
-                
-                thinking_step += 1
-                
-                # Agent düşünme süreci loglama (minimal)
-                msg_type = type(last_message).__name__
-                
-                # Subagent ID'yi kısalt (ilk 8 karakter)
-                short_subagent = current_subagent[:8] if current_subagent else None
-                agent_label = f"[{short_subagent}]" if short_subagent else "[ORCH]"
-                
-                # ToolMessage step'lerini loglama (sadece tool sonucu, bilgi vermiyor)
-                if msg_type != "ToolMessage":
-                    _log(f"{agent_label} Step {thinking_step}: {msg_type} ({step_duration:.2f}s)")
-                
-                # Step timing kaydet
-                step_info = {
-                    "step": thinking_step,
-                    "type": msg_type,
-                    "duration": step_duration,
-                }
-                
-                # Mesaj tipine göre süreyi kategorize et
-                if msg_type == "AIMessage":
-                    llm_thinking_time += step_duration
-                    step_info["category"] = "llm"
-                elif msg_type == "ToolMessage":
-                    tool_execution_time += step_duration
-                    step_info["category"] = "tool"
-                else:
-                    step_info["category"] = "other"
-                
-                # Tool calls - NET LOG BAŞLIKLARI
-                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                    tool_calls += len(last_message.tool_calls)
-                    for i, tc in enumerate(last_message.tool_calls, 1):
-                        tool_call_count += 1
-                        tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                        tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                    for message in node_output["messages"]:
+                        # Mesajın benzersiz ID'sini al
+                        msg_id = getattr(message, "id", None) or hash(str(message.content)[:100] if hasattr(message, "content") else "")
                         
-                        # ÇAĞIRAN'I NET GÖSTER: [ORCH] veya [SUBAGENT:xxx]
-                        caller = f"[SUBAGENT:{short_subagent}]" if current_subagent else "[ORCH]"
-                        _log(f"{caller} Tool #{tool_call_count}: {tool_name}")
-                        _log(f"   Args: {tool_args}")
-                        step_info["tool_name"] = tool_name
+                        if msg_id in logged_message_ids:
+                            continue
+                        logged_message_ids.add(msg_id)
                         
-                        # TASK TOOL - Subagent spawn
-                        if tool_name == "task":
-                            task_description = tool_args.get("description", "") if isinstance(tool_args, dict) else ""
-                            subagent_type = tool_args.get("subagent_type", "unknown") if isinstance(tool_args, dict) else "unknown"
-                            
-                            # ⚠️ SUBAGENT TASK ÇAĞIRIYORSA UYARI VER!
-                            if current_subagent:
-                                _log(f"⚠️⚠️⚠️ UYARI: SUBAGENT [{short_subagent}] TASK ÇAĞIRDI! BU YASAK! ⚠️⚠️⚠️")
-                                _log(f"   Subagent {subagent_type} başlatmaya çalışıyor - BU OLMAMALI!")
-                            else:
-                                _log(f"→ [ORCH] Subagent başlatıyor: {subagent_type}")
-                            
-                            _log(f"   PROMPT:\n{task_description}")
-                            subagent_prompts[subagent_type] = task_description
+                        # Step süresini hesapla
+                        current_time = time.time()
+                        step_duration = current_time - last_step_time
+                        last_step_time = current_time
                         
-                        # WRITE_TODOS - Sadece orchestrator kullanmalı
-                        if tool_name == "write_todos":
-                            if current_subagent:
-                                _log(f"⚠️⚠️⚠️ UYARI: SUBAGENT [{short_subagent}] WRITE_TODOS ÇAĞIRDI! BU YASAK! ⚠️⚠️⚠️")
-                            else:
-                                _log(f"→ [ORCH] TODO listesi güncelleniyor")
+                        thinking_step += 1
+                        msg_type = type(message).__name__
                         
-                        # Subagent tool call'ı kaydet
-                        if current_subagent and current_subagent in subagent_outputs:
-                            subagent_outputs[current_subagent].append({
-                                "type": "tool_call",
-                                "tool": tool_name,
-                                "args": str(tool_args),
-                                "step": thinking_step,
-                                "caller": "subagent" if current_subagent else "orchestrator",
-                            })
-                
-                # Content - tam log (sadece AIMessage için anlamlı içerik varsa)
-                if hasattr(last_message, "content") and last_message.content and msg_type == "AIMessage":
-                    normalized_content = self._extract_text_from_reasoning_content(last_message.content)
-                    full_content = str(last_message.content)
-                    content_hash = hash(normalized_content[:200].strip())
-                    
-                    # THINK tool çıktısını ve boş içeriği loglama (zaten THINK: olarak loglandı)
-                    if normalized_content.strip() and "Düşünce kaydedildi" not in normalized_content and content_hash not in logged_message_ids:
-                        _log(f"→ CONTENT:\n{normalized_content}")
-                        logged_message_ids.add(content_hash)
+                        # Loglama
+                        if msg_type != "ToolMessage":
+                            _log(f"[{node_name}] Step {thinking_step}: {msg_type} ({step_duration:.2f}s)")
                         
-                    if current_subagent and current_subagent in subagent_outputs:
-                        subagent_outputs[current_subagent].append({
-                            "type": "content",
-                            "content": normalized_content,
-                            "full_content": full_content,
-                            "full_length": len(full_content),
+                        # Step timing kaydet
+                        step_info = {
                             "step": thinking_step,
-                        })
-                
-                # Token usage (reasoning ve standart modeller için) + kümülatif log
-                usage = self._extract_token_usage(last_message)
-                if usage["total_tokens"] > 0:
-                    total_tokens += usage["total_tokens"]
-                    prompt_tokens += usage["input_tokens"]
-                    completion_tokens += usage["output_tokens"]
-                    reasoning_tokens_total += usage["reasoning_tokens"]
-                    llm_calls += 1
-                    step_info["tokens"] = usage
-                    # Kümülatif token logla
-                    _log(f"💰 tokens: +{usage['total_tokens']} (total: {total_tokens:,})")
-                
-                step_timings.append(step_info)
-                
-                # Content parsing - reasoning modeller için özel handling
-                if hasattr(last_message, "content") and last_message.content:
-                    # Reasoning modellerinin list formatını parse et
-                    new_content = self._extract_text_from_reasoning_content(last_message.content)
-                    if new_content != response_text:
-                        # Yeni içerik varsa stream et
-                        delta = new_content[len(response_text):]
-                        response_text = new_content
+                            "type": msg_type,
+                            "node": node_name,
+                            "duration": step_duration,
+                        }
                         
-                        if delta.strip():
-                            yield {
-                                "type": "message_chunk",
-                                "content": delta,
-                                "full_message": response_text,
-                                "session_id": session_id,
-                                "timestamp": datetime.now().isoformat(),
-                            }
+                        # Mesaj tipine göre süreyi kategorize et
+                        if msg_type == "AIMessage":
+                            llm_thinking_time += step_duration
+                            step_info["category"] = "llm"
+                        elif msg_type == "ToolMessage":
+                            tool_execution_time += step_duration
+                            step_info["category"] = "tool"
+                            # Tool sonucunu logla - TAM içerik
+                            tool_content = getattr(message, "content", "")
+                            tool_msg_name = getattr(message, "name", "unknown")
+                            if tool_content:
+                                _log(f"[TOOL_RESULT] {tool_msg_name}:\n{tool_content}")
+                        else:
+                            step_info["category"] = "other"
+                        
+                        # Tool calls loglama
+                        if hasattr(message, "tool_calls") and message.tool_calls:
+                            tool_calls += len(message.tool_calls)
+                            for tc in message.tool_calls:
+                                tool_call_count += 1
+                                tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                                tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                
+                                _log(f"[ORCHESTRATOR] Tool #{tool_call_count}: {tool_name}")
+                                
+                                # Tüm tool'ları TAM detaylı logla
+                                if tool_name == "read_neo4j_cypher":
+                                    query = tool_args.get("query", "")
+                                    _log(f"   📝 CYPHER QUERY:\n{query}")
+                                elif tool_name == "read_neo4j_cypher_with_embedding":
+                                    query_text = tool_args.get("query_text", "")
+                                    cypher = tool_args.get("cypher_query", "")
+                                    _log(f"   🔎 EMBEDDING SEARCH: {query_text}")
+                                    _log(f"   📝 CYPHER:\n{cypher}")
+                                elif tool_name == "spawn_graph_explorer":
+                                    task = tool_args.get("task_description", "")
+                                    _log(f"   📋 FULL TASK:\n{task}")
+                                elif tool_name == "write_todos":
+                                    todos = tool_args.get("todos", [])
+                                    _log(f"   📋 TODOs: {len(todos)} items")
+                                    for todo in todos:
+                                        _log(f"      - [{todo.get('status', '?')}] {todo.get('content', '')}")
+                                else:
+                                    _log(f"   Args: {tool_args}")
+                                
+                                step_info["tool_name"] = tool_name
+                        
+                        # Token usage
+                        usage = self._extract_token_usage(message)
+                        if usage["total_tokens"] > 0:
+                            total_tokens += usage["total_tokens"]
+                            prompt_tokens += usage["input_tokens"]
+                            completion_tokens += usage["output_tokens"]
+                            reasoning_tokens_total += usage["reasoning_tokens"]
+                            llm_calls += 1
+                            step_info["tokens"] = usage
+                            _log(f"💰 tokens: +{usage['total_tokens']} (total: {total_tokens:,})")
+                        
+                        step_timings.append(step_info)
+                        
+                        # Content streaming - sadece AIMessage için
+                        if hasattr(message, "content") and message.content and msg_type == "AIMessage":
+                            new_content = self._extract_text_from_reasoning_content(message.content)
+                            if new_content and new_content != response_text:
+                                # Yeni içerik varsa stream et
+                                delta = new_content[len(response_text):] if len(new_content) > len(response_text) else new_content
+                                response_text = new_content
+                                
+                                if delta.strip():
+                                    yield {
+                                        "type": "message_chunk",
+                                        "content": delta,
+                                        "full_message": response_text,
+                                        "session_id": session_id,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
+                    
+                    # TODO listesi varsa logla
+                    if "todos" in node_output and node_output["todos"]:
+                        todos = node_output["todos"]
+                        _log(f"📋 TODOs updated: {len(todos)} items")
 
             # LLM streaming tamamlandı
             timings["llm_streaming"] = time.time() - llm_start
@@ -1440,11 +1843,12 @@ KURALLAR:
             include_debug_steps = os.environ.get("DEEPAGENT_INCLUDE_DEBUG_STEPS", "0") == "1"
 
             info_payload = {
-                "agent_type": "langgraph_deep_agent",
+                "agent_type": "langchain_create_agent",
                 "model": self.model,
                 "reasoning_effort": self.reasoning_effort,
                 "page_links_count": len(session_page_links),
                 "mcp_tools_used": True,
+                "middleware": ["TodoListMiddleware", "ModelCallLimitMiddleware"],
                 "token_usage": {
                     "total_tokens": total_tokens,
                     "prompt_tokens": prompt_tokens,
@@ -1480,23 +1884,11 @@ KURALLAR:
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # NOT: session_page_links lokal değişken, otomatik temizlenir
-            
-            # Başarılı istek - hata sayacını sıfırla
-            reset_mcp_error_count()
-            
-            # NOT: MCP client'ı temizleme - global cache kullanılıyor
-            # Server shutdown'da temizlenecek
-
         except Exception as e:
-            error_message = f"Deep Agent error: {str(e)}"
+            error_message = f"LangChain Agent error: {str(e)}"
             logging.error(error_message, exc_info=True)
-            
-            # Hata sayacını artır (MCP reconnect için)
-            error_count = increment_mcp_error()
-            logging.warning(f"⚠️ MCP hata sayısı: {error_count}/{MCP_MAX_ERRORS_BEFORE_RESET}")
 
-            # 🆕 Partial result recovery: Eğer findings dosyası varsa kullanıcıya göster
+            # Partial result recovery: Eğer findings dosyası varsa kullanıcıya göster
             partial_result = None
             try:
                 # agent_findings_dir backend çalışma dizininde
@@ -1539,8 +1931,8 @@ KURALLAR:
 # SESSION BASED AGENT CACHE
 # ============================================================================
 
-# Session bazlı DeepAgent cache - her session için ayrı agent
-_session_agents: Dict[str, DeepAgentIntegration] = {}
+# Session bazlı LangChainAgent cache - her session için ayrı agent
+_session_agents: Dict[str, LangChainAgentIntegration] = {}
 _session_access_times: Dict[str, datetime] = {}
 # Async lock for session cache - lazy initialization (event loop gerektirir)
 _session_agent_lock: Optional[asyncio.Lock] = None
@@ -1599,9 +1991,9 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "medium"
-) -> DeepAgentIntegration:
-    """Session bazlı DeepAgent al veya oluştur"""
+    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "none"
+) -> LangChainAgentIntegration:
+    """Session bazlı LangChainAgent al veya oluştur"""
     global _session_agents, _session_access_times, _session_agent_lock
     
     # Lazy lock initialization - event loop içinde olmalı
@@ -1623,6 +2015,7 @@ async def get_or_create_session_agent(
                 agent.model = model
                 agent.reasoning_effort = reasoning_effort
                 agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
+                agent.subagent = None  # Subagent'ı da yeniden oluştur
             
             if graph and agent.graph != graph:
                 _log(f"Session {session_id[:8]}: graph update", "debug")
@@ -1632,7 +2025,7 @@ async def get_or_create_session_agent(
             return agent
         
         # Yeni agent oluştur
-        agent = DeepAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
+        agent = LangChainAgentIntegration(model=model, graph=graph, reasoning_effort=reasoning_effort)
         _session_agents[session_id] = agent
         _session_access_times[session_id] = datetime.now()
         
@@ -1650,16 +2043,16 @@ def get_session_agent_stats() -> Dict[str, Any]:
     }
 
 
-async def stream_deep_agent_response(
+async def stream_agent_response(
     question: str,
     model: str = "gpt-5-mini",
     session_id: str = "",
     graph=None,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = "none",
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    LangGraph Deep Agent kullanarak streaming cevap üret - MCP tools ile
+    LangChain Agent kullanarak streaming cevap üret - Middleware + MCP tools ile
     
     Session bazlı agent cache kullanır - her session için ayrı agent instance
 
@@ -1668,17 +2061,17 @@ async def stream_deep_agent_response(
         model: Kullanılacak LLM modeli (default: gpt-5-mini)
         session_id: Oturum ID'si (conversation history için) - ZORUNLU
         graph: Neo4j graph connection
-        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (none, low, medium, high) - default: high
+        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (none, low, medium, high) - default: none
         **kwargs: Ek parametreler
 
     Yields:
         Dict: Streaming chunk'ları
     """
 
-    if not DEEP_AGENT_AVAILABLE:
+    if not LANGCHAIN_AGENT_AVAILABLE:
         yield {
             "type": "error",
-            "message": "LangGraph Deep Agent kurulu değil. 'pip install deepagents' ile kurun.",
+            "message": "LangChain Agent kurulu değil. 'pip install langchain>=0.3' ile kurun.",
             "status": "not_available",
             "session_id": session_id,
             "timestamp": datetime.now().isoformat(),
@@ -1704,10 +2097,10 @@ async def stream_deep_agent_response(
             yield chunk
 
     except Exception as e:
-        logging.error(f"Deep Agent streaming failed: {e}", exc_info=True)
+        logging.error(f"LangChain Agent streaming failed: {e}", exc_info=True)
         yield {
             "type": "error",
-            "message": f"Deep Agent hatası: {str(e)}",
+            "message": f"LangChain Agent hatası: {str(e)}",
             "status": "failed",
             "session_id": session_id,
             "timestamp": datetime.now().isoformat(),
