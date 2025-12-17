@@ -43,7 +43,7 @@ else
     echo "   🚀 Starting MCP Server container..."
     
     # Export Neo4j variables for docker-compose
-    export NEO4J_URI="${NEO4J_URI:-bolt://host.docker.internal:7687}"
+    export NEO4J_URI="${NEO4J_URI:-bolt://host.docker.internal:7688}"
     export NEO4J_USERNAME="${NEO4J_USERNAME:-neo4j}"
     export NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
     export NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
