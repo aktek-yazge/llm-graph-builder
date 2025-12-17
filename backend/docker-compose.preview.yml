@@ -85,6 +85,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Logs klasörü - Alloy tarafından okunacak
       - ./logs:/code/backend/logs
+      # Agent findings - Agent araştırma sonuçları
+      - ./agent_findings:/code/backend/agent_findings
     labels:
       - "logging=alloy"
     logging:
