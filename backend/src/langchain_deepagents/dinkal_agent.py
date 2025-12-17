@@ -704,7 +704,7 @@ WHERE toLower(n.[property]) CONTAINS 'term1' OR toLower(n.[property]) CONTAINS '
 
 ## ⚠️ ÖNEMLİ - TÜM NODE'LARDA ARA!
 Worker, verilen TÜM node'larda paralel arama yapmalı:
-- Her node için ayrı step_name kullan (örn: step_1_customer, step_1_policyholder)
+- Her node için ayrı step_name kullan (örn: step_1_nodeA, step_1_nodeB)
 - Birinde sonuç bulunsa bile DİĞERLERİNİ ATLAMA - farklı varyasyonlar olabilir!
 - Tüm sonuçlar blackboard'a yazılacak
 
@@ -715,6 +715,8 @@ Worker, verilen TÜM node'larda paralel arama yapmalı:
 
 ### GÖREV TİPİ: İÇERİK
 Chunk'larda semantic arama (embedding)
+
+🚫 **İÇERİK GÖREVİ KULLANMA EĞER:** Şemada yapılandırılmış node varsa (Amount, Price, Date vb.) → Direkt METADATA ile node traversal yap!
 
 ⚠️ **İÇERİK GÖREVİ VERMEDEN ÖNCE:**
 1. `read_blackboard_dynamic()` çağır
@@ -907,6 +909,7 @@ RETURN DISTINCT n2.name, d.fileName AS dosya, c.page_link AS sayfa_gorseli
 4. **VARYASYON VER**: Türkçe karakter, kısaltma, tam isim
 5. **TEK GÖREV**: Her worker çağrısı TEK iş
 6. **DEĞERLENDİR**: Worker sonucunu oku, TODO'yu güncelle
+7. **YAPILANDIRILMIŞ VERİ VARSA EMBEDDING ATLA**: Şemada sayısal/tarih/tutar node'u varsa (ör: Amount, Date, Price, Quantity) direkt node traversal yap, chunk/embedding araması YAPMA!
 
 ## 🔗 ARDIŞIK GÖREVLERDE FİLTRE MİRASI (ÇOK KRİTİK!)
 
@@ -1030,13 +1033,50 @@ Aksiyon: Text CONTAINS ile aranan terimi explicit ara
 ❌ **Dosya adı (.pdf) geçen cevap vermeden ÖNCE add_source çağırmadan bırakma!**
    - Cevabında dosya adı geçecekse → ÖNCE add_source("document", "Belge.pdf")
    - add_source çağırmadan dosya adı yazdığında kullanıcı tıklayamaz!
+❌ **Kullanıcıya soru sorma - CEVAP VER!**
+   - "Devam edeyim mi?", "İster misiniz?", "Onaylar mısınız?" → YAPMA!
+   - Veriyi bulduysan analiz et ve kesin cevap ver
+   - Sayısal soru varsa (toplam, kaç, ne kadar) → HESAPLA ve RAPORLA!
+   - Kullanıcı zaten sorusunu sordu, senin görevin CEVAPLAMAK
 
 ## 📝 FİNAL CEVAP
+
+### 🚨 KRİTİK: SORU SORMA - CEVAP VER!
+❌ **YAPMA:** "Devam edeyim mi?", "Hesaplamamı ister misiniz?", "Onay verir misiniz?"
+✅ **YAP:** Verileri analiz et, hesapla ve kesin cevap ver!
+
+### 📊 SAYISAL ANALİZ (TOPLAM/ORTALAMA/HESAPLAMA)
+Kullanıcı "toplam", "kaç", "ne kadar", "tutarı" gibi sayısal bir şey soruyorsa:
+
+1. **DUPLICATE TEMİZLE:** Aynı kayıt (policy_no + amount) birden fazla gelmiş olabilir
+   - Farklı chunk'lardan aynı veri gelebilir
+   - DISTINCT policy_no bazında hesapla
+
+2. **PARA BİRİMİ AYIR:** TRY, TL, USD, EUR ayrı ayrı topla
+   - TRY ve TL AYNI para birimi → birleştir
+   - USD ayrı hesapla
+   - Mümkünse toplam için döviz kurunu belirt
+
+3. **HESAPLA ve RAPORLA:**
+   ```
+   Örnek cevap formatı:
+   
+   **[Entity] [Yıl] Toplam [Değer] Tutarları:**
+   - TRY/TL: X TL (N adet kayıt)
+   - USD: Y USD (M adet kayıt)
+   
+   Detaylar:
+   | Kategori | Tutar | Para Birimi |
+   |----------|-------|-------------|
+   | Tip A    | 20,220.53 | TRY |
+   | ...      | ...   | ... |
+   ```
 
 ### Format Kuralları:
 - Sade, anlaşılır dil
 - Teknik detay yok (Cypher, node, property vs. gösterme)
 - Markdown formatında
+- **SAYI/TUTAR VARSA MUTLAKA HESAPLA!**
 
 ### 📎 KAYNAK EKLEME (ZORUNLU!)
 
@@ -1072,6 +1112,7 @@ Cevap: "İlgili belge bulundu."
 ```
 
 **⚠️ Kaynak eklemeden FİNAL CEVAP VERME!**
+**⚠️ Sayısal soru varsa HESAPLAMA yapmadan FİNAL CEVAP VERME!**
 
 """
 
@@ -1559,10 +1600,10 @@ Cevap: "İlgili belge bulundu."
 # WITH p MATCH (p)-[:REL]->(n) RETURN n.name
 
 # -- ❌ YANLIŞ: RETURN içinde yeni değişken tanımlama
-# RETURN (p)-[:REL]->(ic:InsuranceCompany)
+# RETURN (p)-[:REL]->(n2:NodeB)
 
 # -- ✅ DOĞRU: Önce MATCH, sonra RETURN
-# MATCH (p)-[:REL]->(ic:InsuranceCompany) RETURN ic.name
+# MATCH (p)-[:REL]->(n2:NodeB) RETURN n2.name
 
 # -- ❌ YANLIŞ: Clause sırası yanlış
 # MATCH ... RETURN ... WHERE ...
