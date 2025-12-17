@@ -1908,6 +1908,9 @@ class LangChainAgentIntegration:
         Reasoning modellerinin content formatını parse eder.
         GPT-5 modelleri content'i liste olarak döndürür:
         [{'type': 'reasoning', ...}, {'type': 'text', 'text': '...'}]
+        
+        ⚠️ SADECE 'text' tipindeki blokları döndür!
+        - reasoning, function_call, tool_call gibi internal bloklar client'a GİTMEMELİ
         """
         if content is None:
             return ""
@@ -1916,25 +1919,35 @@ class LangChainAgentIntegration:
         if isinstance(content, str):
             return content
         
-        # Liste ise text bloklarını birleştir
+        # Liste ise SADECE text bloklarını birleştir
         if isinstance(content, list):
             text_parts = []
             for block in content:
                 if isinstance(block, dict):
-                    # type: text olan blokların text alanını al
-                    if block.get("type") == "text" and "text" in block:
+                    block_type = block.get("type", "")
+                    
+                    # SADECE type: text olan blokları al
+                    if block_type == "text" and "text" in block:
                         text_parts.append(block["text"])
+                    
+                    # ⛔ reasoning, function_call, tool_call vb. ATLANIYOR
+                    # Bu bloklar client'a gönderilmemeli!
+                    
                 elif isinstance(block, str):
                     text_parts.append(block)
             
-            if text_parts:
-                return "\n".join(text_parts)
-            
-            # Hiç text bloğu yoksa, tüm listeyi string'e çevir (fallback)
-            return str(content)
+            # Sadece text blokları döndür (boş olabilir - sorun değil)
+            return "\n".join(text_parts) if text_parts else ""
         
-        # Başka bir tip ise string'e çevir
-        return str(content)
+        # Dict ise sadece text tipini kontrol et
+        if isinstance(content, dict):
+            if content.get("type") == "text" and "text" in content:
+                return content["text"]
+            # Diğer tipler (reasoning, function_call) için boş döndür
+            return ""
+        
+        # Başka bir tip ise boş döndür (güvenli tarafta kal)
+        return ""
 
     def _extract_token_usage(self, message) -> dict:
         """
