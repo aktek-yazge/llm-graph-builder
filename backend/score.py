@@ -1140,8 +1140,16 @@ async def serve_document_file(file_name: str, inline: bool = False):
             logging.error(f"S3 get_object error: {e}")
             raise HTTPException(status_code=404, detail=f"File not found: {file_name}")
 
-        # Content-Disposition header'ını ayarla
-        content_disposition = "inline" if inline else f'attachment; filename="{normalized_file_name}"'
+        # Content-Disposition header'ını ayarla (RFC 5987 UTF-8 encoding)
+        # Türkçe karakterler için UTF-8 encoding gerekli
+        ascii_filename = normalized_file_name.encode('ascii', errors='replace').decode('ascii')
+        utf8_filename = urllib.parse.quote(normalized_file_name, safe='')
+        
+        if inline:
+            content_disposition = "inline"
+        else:
+            # RFC 5987: filename*=UTF-8''encoded_filename
+            content_disposition = f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{utf8_filename}"
 
         # Dosyayı tamamen oku (streaming yerine) - PDF viewer için daha güvenilir
         file_content = s3_response["Body"].read()

@@ -177,6 +177,24 @@ def get_mcp_server_config() -> Dict[str, Any]:
 
 
 # ============================================================================
+# SESSION-BASED SOURCE MANAGEMENT - Kaynak yönetimi
+# ============================================================================
+
+# Session bazlı kaynaklar - {question_id: {"documents": set(), "pages": set()}}
+_session_sources: Dict[str, Dict[str, set]] = {}
+
+def _get_session_sources(question_id: str) -> Dict[str, set]:
+    """Session için kaynak dict'ini al veya oluştur"""
+    if question_id not in _session_sources:
+        _session_sources[question_id] = {"documents": set(), "pages": set()}
+    return _session_sources[question_id]
+
+def _clear_session_sources(question_id: str):
+    """Session kaynaklarını temizle"""
+    if question_id in _session_sources:
+        del _session_sources[question_id]
+
+# ============================================================================
 # CUSTOM TOOLS - Agent için özel araçlar
 # ============================================================================
 
@@ -184,6 +202,7 @@ def get_mcp_server_config() -> Dict[str, Any]:
 think_tool = None
 write_finding = None
 read_finding = None
+add_source = None
 
 if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
     @tool
@@ -313,11 +332,44 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         _log(f"📋 Blackboard read: {blackboard_path}")
         return content
 
+    @tool
+    def _add_source(question_id: str, source_type: str, value: str) -> str:
+        """
+        Cevaba kaynak ekle. LLM doğru bilgiyi bulduğunda bu tool ile kaynağı kaydeder.
+        
+        Args:
+            question_id: Soru ID'si (kısa versiyon, örn: "a1b2c3d4")
+            source_type: Kaynak tipi - "document" veya "page"
+                - "document": PDF dosya adı (örn: "Rapor_2024.pdf")
+                - "page": Sayfa görseli (örn: "Rapor_2024_page_001.png")
+            value: Kaynak değeri (dosya adı veya sayfa linki)
+        
+        Returns:
+            Ekleme onayı
+        
+        Örnek:
+            add_source("a1b2c3d4", "document", "Rapor_2024.pdf")
+            add_source("a1b2c3d4", "page", "Rapor_2024_page_001.png")
+        """
+        sources = _get_session_sources(question_id)
+        
+        if source_type == "document":
+            sources["documents"].add(value)
+            _log(f"📎 Document source added: {value}")
+            return f"✅ Belge kaynağı eklendi: {value}"
+        elif source_type == "page":
+            sources["pages"].add(value)
+            _log(f"🖼️ Page source added: {value}")
+            return f"✅ Sayfa kaynağı eklendi: {value}"
+        else:
+            return f"❌ Geçersiz source_type: {source_type}. 'document' veya 'page' olmalı."
+
     # Global isimlere ata
     think_tool = _think_tool
     write_finding = _write_finding
     read_finding = _read_finding
     read_blackboard = _read_blackboard
+    add_source = _add_source
 
 
 # ============================================================================
@@ -478,7 +530,7 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
                 ❌ KESİNLİKLE YASAK: MATCH (c:Chunk) WHERE ... (tüm chunk'lar - ASLA!)
                 ✅ ZORUNLU: MATCH (n:Label)<-[:REL]-...->(c:Chunk) WHERE n.name IN [varyasyonlar] AND c.embedding...
                 ⚠️ Orchestrator'ın verdiği varyasyon + ilişki yolunu MUTLAKA kullan!
-                📄 RETURN: c.text, c.page_link, score (page_link ZORUNLU - sayfa görselleri için!)
+                📄 RETURN: c.text, d.fileName, c.page_link, score (fileName + page_link ZORUNLU!)
             step_name: Adım adı (örn: step_2_content_search)
         
         Returns:
@@ -610,7 +662,7 @@ read_finding_dynamic(step_name, result_type, include_query=True, start_record=0,
 Her görevde **GÖREV TİPİ** belirt! Worker buna göre araç seçer.
 
 ### GÖREV TİPİ: KEŞİF
-Varyasyon bulma, entity keşfi, metadata sorgusu
+Varyasyon bulma, entity keşfi ⛔ **CHUNK HARİÇ!** (Chunk → İÇERİK görevi)
 
 **🚨 ARAMA TERİMLERİ OLUŞTURURKEN:**
 - Tam ifadeyi ekle: "XYZ Company"
@@ -631,6 +683,7 @@ spawn_worker(queries=\"\"\"
 ## 🎯 GÖREV: [Entity]'nin veritabanındaki yazım varyasyonlarını bul
 
 ## 🔎 MUHTEMEL NODE'LAR ve PROPERTY'LERİ (şemadan):
+⛔ CHUNK DAHİL ETME! (Chunk → İÇERİK görevinde aranır)
 - [NodeLabel1] → property: [prop1, prop2, ...]
 - [NodeLabel2] → property: [prop1, prop2, ...]
 
@@ -729,12 +782,12 @@ spawn_worker(queries=\"\"\"
 Embedding sonuç döndürse bile MUTLAKA DOĞRULA:
 
 1. **read_finding ile chunk.text'leri oku** - Dönen içerikleri incele
-2. **Aranan terim metinde GEÇİYOR MU?** - "kira kaybı" arıyorsan, text'te bu kelime var mı?
+2. **Aranan terim metinde GEÇİYOR MU?** - Aranan kelime text'te var mı?
 3. **GEÇMIYORSA → FALSE POSITIVE!** - Embedding yanlış pozitif vermiş demektir
 
 ⚠️ **Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
-Embedding domain benzerliği yakalar (genel sigorta terminolojisi),
-ama kavramsal farklılığı yakalayamaz (kira kaybı ≠ tehlikeli atık)
+Embedding alan benzerliği yakalar (genel terminoloji),
+ama kavramsal farklılığı yakalayamaz (aranan terim ≠ alakasız içerik)
 
 **FALSE POSITIVE TESPİT EDİLDİĞİNDE:**
 - `think_tool` ile analiz et: "Embedding sonuçları aranan terimi içermiyor - FALSE POSITIVE"
@@ -797,6 +850,13 @@ spawn_worker(queries=\"\"\"
 - [NodeA]-[:REL]->[NodeB]
 - [NodeB] → property: [prop1, prop2]
 
+## 📤 RETURN KURALI (KAYNAK BİLGİSİ ZORUNLU!):
+- Aranan entity property'leri + **HEM d.fileName HEM c.page_link**
+- `d.fileName` → PDF dosyasına link oluşturur (/files/{fileName})
+- `c.page_link` → Sayfa görseline link oluşturur (/images/{page_link})
+- Örnek: RETURN DISTINCT n.name, d.fileName, c.page_link LIMIT 10
+- ⚠️ Kaynak bilgisi olmadan METADATA sorgusu YAPMA!
+
 ## 📁 KAYIT:
 - step_name: "[step_adı]"
 \"\"\")
@@ -808,11 +868,14 @@ MATCH (c:Chunk)-[:PART_OF]->(d)-[:REL1]-(n1)-[:REL2]->(n2)
 WHERE c.text CONTAINS 'aranan_terim'  ← TÜM VERİTABANINDA ARAR!
 ```
 
-**DOĞRU (Entity filtresi ile):**
+**DOĞRU (Entity filtresi + kaynak bilgisi ile):**
 ```cypher
 MATCH (e:EntityNode)<-[:REL1]-(n1)-[:REL2]->(n2)
 WHERE e.name IN ['Varyasyon1', 'Varyasyon2']  ← SADECE İLGİLİ KAYITLAR!
-AND EXISTS { (n1)-[:REL3]->(d)<-[:PART_OF]-(c) WHERE c.text CONTAINS 'aranan_terim' }
+MATCH (n1)-[:REL3]->(d:Document)<-[:PART_OF]-(c:Chunk)
+WHERE c.text CONTAINS 'aranan_terim'
+RETURN DISTINCT n2.name, d.fileName AS dosya, c.page_link AS sayfa_gorseli
+← HEM PDF HEM SAYFA GÖRSELİ DAHİL!
 ```
 
 ## 🔄 ÇALIŞMA AKIŞI
@@ -833,7 +896,7 @@ AND EXISTS { (n1)-[:REL3]->(d)<-[:PART_OF]-(c) WHERE c.text CONTAINS 'aranan_ter
 - İlişki yolları: Hangi node'lar birbirine bağlı?
 - İçerik node'ları: Chunk, Text, Content
 
-⚠️ **KEŞİF'te Chunk ARAMA!** → İÇERİK görevinde kullan (embedding → text CONTAINS)
+⚠️ **KEŞİF'te Chunk ARAMA yapmayın!** → İÇERİK görevinde kullan (embedding → text CONTAINS)
    Document.fileName'de arama yapılabilir.
 
 ## ⚠️ KRİTİK KURALLAR
@@ -922,7 +985,7 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 ```
 read_finding_dynamic(step_name, result_type="success", include_query=False)
 → Dönen chunk.text'leri incele
-→ "kira kaybı" arıyorsan, text'te bu kelime geçiyor mu?
+→ Aranan terim text'te geçiyor mu?
 ```
 
 ### 3. FALSE POSITIVE Kontrolü
@@ -945,12 +1008,12 @@ FALSE POSITIVE - Text-based arama gerekli.")
 
 **Örnek FALSE POSITIVE:**
 ```
-Arama: "kira kaybı teminatı"
-Embedding sonucu: "TEHLİKELİ ATIK SİGORTA POLİÇESİ" (score: 0.82)
-Kontrol: "kira kaybı" text'te geçiyor mu? → HAYIR
-Karar: ❌ FALSE POSITIVE - Her iki metin de sigorta terminolojisi içerdiği için 
+Arama: "aranan_terim"
+Embedding sonucu: "alakasız_içerik" (score: 0.82)
+Kontrol: "aranan_terim" text'te geçiyor mu? → HAYIR
+Karar: ❌ FALSE POSITIVE - Her iki metin de aynı alan terminolojisi içerdiği için 
        embedding benzer buldu ama kavramsal olarak farklılar.
-Aksiyon: Text CONTAINS ile "kira kaybı" OR "loss of rent" ara
+Aksiyon: Text CONTAINS ile aranan terimi explicit ara
 ```
 
 ## 🚫 YAPMA
@@ -960,17 +1023,56 @@ Aksiyon: Text CONTAINS ile "kira kaybı" OR "loss of rent" ara
 ❌ Worker sonucunu okumadan ilerle
 ❌ TODO güncellemeden sonraki adıma geç
 ❌ Ham veriyi kullanıcıya gösterme
-❌ **Embedding sonuçlarını doğrulamadan kabul etme!** ← YENİ
+❌ **Embedding sonuçlarını doğrulamadan kabul etme!**
    - Yüksek skor (>0.85) doğru sonuç DEMEK DEĞİL!
    - chunk.text'te aranan terim geçiyor mu kontrol et
    - Geçmiyorsa FALSE POSITIVE - text CONTAINS ile tekrar ara
+❌ **Dosya adı (.pdf) geçen cevap vermeden ÖNCE add_source çağırmadan bırakma!**
+   - Cevabında dosya adı geçecekse → ÖNCE add_source("document", "Belge.pdf")
+   - add_source çağırmadan dosya adı yazdığında kullanıcı tıklayamaz!
 
 ## 📝 FİNAL CEVAP
 
+### Format Kuralları:
 - Sade, anlaşılır dil
-- Teknik detay yok
-- Kaynaklar belirtilmiş
+- Teknik detay yok (Cypher, node, property vs. gösterme)
 - Markdown formatında
+
+### 📎 KAYNAK EKLEME (ZORUNLU!)
+
+⚠️ **Cevabında dosya adı (.pdf) geçecekse ÖNCE `add_source` çağır!**
+
+**MUTLAKA UYGULA:**
+```
+# 1. Önce kaynağı ekle
+add_source("document", "Dosya_Adi.pdf")
+
+# 2. Sayfa görseli varsa ekle
+add_source("page", "Dosya_Adi_page_001.png")
+
+# 3. SONRA cevabı yaz (dosya adını YAZMA - sistem ekleyecek)
+```
+
+**KRİTİK KONTROL:**
+- Cevabında `.pdf` uzantılı dosya adı geçecek mi? → EVET ise `add_source` ÇAĞIR!
+- Worker sonucunda `fileName` var mı? → EVET ise `add_source` ÇAĞIR!
+- KEŞİF'te dosya adı buldun mu? → EVET ise `add_source` ÇAĞIR!
+
+**YANLIŞ (add_source yok):**
+```
+Cevap: "Dosya adı: Rapor_2024.pdf bulundu."
+→ ❌ Sistem link oluşturamaz çünkü add_source çağrılmadı!
+```
+
+**DOĞRU (add_source var):**
+```
+add_source("document", "Rapor_2024.pdf")
+Cevap: "İlgili belge bulundu."
+→ ✅ Sistem otomatik tıklanabilir link ekler
+```
+
+**⚠️ Kaynak eklemeden FİNAL CEVAP VERME!**
+
 """
 
 # -----------------------------------------------------------------------------
@@ -1654,10 +1756,11 @@ Orchestrator'dan gelen teknik önerileri kullan:
 ✅ DÖNDÜR: RETURN DISTINCT n.name AS name
 ```
 
-**İÇERİK (Chunk)'te RETURN kuralı - page_link ZORUNLU:**
+**İÇERİK (Chunk)'te RETURN kuralı - fileName + page_link ZORUNLU:**
 ```
-✅ ZORUNLU: RETURN c.text, c.page_link, score LIMIT 10
-⚠️ page_link olmadan sorgu YAPMA! Sayfa görselleri için şart!
+✅ ZORUNLU: RETURN c.text, d.fileName, c.page_link, score LIMIT 10
+⚠️ d.fileName → PDF dosyası linki
+⚠️ c.page_link → Sayfa görseli linki
 ```
 
 ```cypher
@@ -1928,10 +2031,67 @@ class LangChainAgentIntegration:
                     except:
                         pass
 
+                # Markdown image
                 markdown_section += f"![{page_info}]({image_url})\n\n"
 
             except Exception as e:
                 logging.error(f"❌ DeepAgent: page_link markdown hatası: {e}")
+                continue
+
+        return markdown_section
+
+    def _extract_file_names_from_response(self, response_text: str) -> Set[str]:
+        """Response text'inden fileName'leri extract eder (PDF dosyaları için)"""
+        file_names = set()
+
+        try:
+            # JSON formatında fileName araması
+            json_pattern = r'"fileName"\s*:\s*"([^"]+\.pdf)"'
+            matches = re.findall(json_pattern, response_text, re.IGNORECASE)
+            file_names.update(matches)
+
+            # Cypher query result formatında (d.fileName:xxx.pdf veya fileName:xxx.pdf)
+            cypher_result_pattern = r'(?:d\.)?fileName[:=]\s*([^,}]+\.pdf)'
+            matches = re.findall(cypher_result_pattern, response_text, re.IGNORECASE)
+            file_names.update(matches)
+
+            # file: veya dosya: formatında (tool sonuçlarında kullanılıyor)
+            file_pattern = r'(?:file|dosya)[:=]\s*([^,}]+\.pdf)'
+            matches = re.findall(file_pattern, response_text, re.IGNORECASE)
+            file_names.update(matches)
+
+            if file_names:
+                _log(f"📁 File names extracted: {len(file_names)}")
+
+            return file_names
+
+        except Exception as e:
+            logging.error(f"❌ DeepAgent: fileName extract hatası: {e}")
+            return set()
+
+    def _generate_file_links_markdown(self, file_names: Set[str]) -> str:
+        """fileName'lerden markdown formatında dosya linkleri oluşturur"""
+        if not file_names:
+            return ""
+
+        base_url = os.getenv("BASE_URL", "http://localhost:8000")
+        markdown_section = "\n\n## 📎 Kaynak Belgeler\n\n"
+
+        for file_name in sorted(file_names):
+            try:
+                encoded_file_name = urllib.parse.quote(file_name, safe="", encoding="utf-8")
+                file_url = f"{base_url}/files/{encoded_file_name}"
+                
+                # Dosya adını kısalt (çok uzunsa)
+                display_name = file_name
+                if len(display_name) > 60:
+                    display_name = display_name[:57] + "..."
+
+                # Markdown link
+                markdown_section += f"- 📄 [{display_name}]({file_url})\n"
+
+            except Exception as e:
+                logging.error(f"❌ DeepAgent: fileName markdown hatası: {e}")
                 continue
 
         return markdown_section
@@ -2190,6 +2350,36 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         all_tools.append(read_finding_dynamic)
         all_tools.append(read_blackboard_dynamic)
         
+        # add_source - Dinamik versiyon (question_id otomatik)
+        @tool_decorator
+        def add_source_dynamic(source_type: str, value: str) -> str:
+            """
+            Cevaba kaynak ekle. Doğru bilgiyi bulduğunda bu tool ile kaynağı kaydet.
+            
+            Args:
+                source_type: "document" (PDF dosya adı) veya "page" (sayfa görseli)
+                value: Dosya adı veya sayfa linki
+            
+            Örnek:
+                add_source("document", "Rapor_2024.pdf")
+                add_source("page", "Rapor_2024_page_001.png")
+            """
+            q_id = self.current_question_id or short_session
+            sources = _get_session_sources(q_id)
+            
+            if source_type == "document":
+                sources["documents"].add(value)
+                _log(f"📎 Document source added: {value}")
+                return f"✅ Belge kaynağı eklendi: {value}"
+            elif source_type == "page":
+                sources["pages"].add(value)
+                _log(f"🖼️ Page source added: {value}")
+                return f"✅ Sayfa kaynağı eklendi: {value}"
+            else:
+                return f"❌ Geçersiz source_type. 'document' veya 'page' olmalı."
+        
+        all_tools.append(add_source_dynamic)
+        
         _log(f"Orchestrator Tools: {len(all_tools)} coordination tools (NO MCP!)")
 
         # =====================================================================
@@ -2401,9 +2591,6 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         """LangChain Agent kullanarak streaming cevap üret - Middleware + MCP tools ile"""
         import time
 
-        # Session bazlı page_links - her request için ayrı set (concurrent safety)
-        session_page_links: Set[str] = set()
-        
         # Question ID - her soru için unique (dosya yapısı için)
         # session_id gibi ilk 8 karakter kullanılır
         if not question_id:
@@ -2412,6 +2599,9 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         else:
             question_id = question_id[:8]  # session_id gibi kısa format
         self.current_question_id = question_id
+        
+        # Session sources'ı temizle (yeni soru için)
+        _clear_session_sources(question_id)
         
         # ⏱️ Timing metrikleri
         timings = {}
@@ -2569,11 +2759,8 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                             tool_msg_name = getattr(message, "name", "unknown")
                             if tool_content:
                                 _log(f"[TOOL_RESULT] {tool_msg_name}:\n{tool_content}")
-                                # Tool sonuçlarından page_link extract et
-                                tool_page_links = self._extract_page_links_from_response(tool_content)
-                                if tool_page_links:
-                                    session_page_links.update(tool_page_links)
-                                    _log(f"📄 Tool sonucundan {len(tool_page_links)} page_link bulundu")
+                                # NOT: Kaynaklar artık add_source tool ile ekleniyor
+                                # Regex extraction kaldırıldı - LLM explicit olarak kaynak ekler
                         else:
                             step_info["category"] = "other"
                         
@@ -2650,13 +2837,31 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             timings["llm_thinking"] = llm_thinking_time
             timings["tool_execution"] = tool_execution_time
             
-            # Page link'leri extract et (session bazlı - concurrent safe)
-            extracted_links = self._extract_page_links_from_response(response_text)
-            if extracted_links:
-                session_page_links.update(extracted_links)
+            # Session sources'tan kaynakları al (add_source tool ile eklenenler)
+            sources = _get_session_sources(question_id)
+            session_file_names = sources["documents"]
+            session_page_links = sources["pages"]
+            
+            _log(f"📎 Sources from add_source tool: {len(session_file_names)} docs, {len(session_page_links)} pages")
 
             # Final response
             final_response = response_text
+            
+            # Dosya linklerini ekle (PDF belgeler)
+            if session_file_names:
+                file_links_markdown = self._generate_file_links_markdown(session_file_names)
+                final_response += file_links_markdown
+                
+                # Markdown'ı da stream et
+                yield {
+                    "type": "message_chunk",
+                    "content": file_links_markdown,
+                    "full_message": final_response,
+                    "session_id": session_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            
+            # Sayfa görsellerini ekle
             if session_page_links:
                 page_links_markdown = self._generate_page_links_markdown(session_page_links)
                 final_response += page_links_markdown
@@ -2674,7 +2879,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             self._save_to_history(session_id, "AI", final_response)
 
             # Final response - minimal log
-            _log(f"DONE | len={len(final_response)} chars | links={len(session_page_links)}")
+            _log(f"DONE | len={len(final_response)} chars | files={len(session_file_names)} | pages={len(session_page_links)}")
 
             # Toplam süre
             total_time = time.time() - total_start
@@ -2691,6 +2896,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                 "agent_type": "langchain_create_agent",
                 "model": self.model,
                 "reasoning_effort": self.reasoning_effort,
+                "file_names_count": len(session_file_names),
                 "page_links_count": len(session_page_links),
                 "mcp_tools_used": True,
                 "middleware": ["TodoListMiddleware", "ModelCallLimitMiddleware"],
