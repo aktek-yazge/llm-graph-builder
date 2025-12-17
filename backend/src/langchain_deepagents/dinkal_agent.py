@@ -774,10 +774,23 @@ ama kavramsal farklılığı yakalayamaz (kira kaybı ≠ tehlikeli atık)
 
 ### GÖREV TİPİ: METADATA
 Basit ilişki takibi, listeleme
+
+⚠️ **KRİTİK:** İÇERİK görevinden sonra METADATA görevi veriyorsan, 
+**ÖNCEKİ ADIMLARIN FİLTRELERİNİ MUTLAKA MİRAS AL!**
+
 ```
 spawn_worker(queries=\"\"\"
 ## 🏷️ GÖREV TİPİ: METADATA
 ## 🎯 GÖREV: [Entity]'nin [ilişkili entity]'lerini listele
+
+## 📌 DARALTMA: ENTITY (ÖNCEKİ ADIMLARDAN MİRAS!)
+| n.name (Veritabanındaki EXACT değer) | Node Tipi |
+|--------------------------------------|-----------|
+| [Önceki adımda bulunan varyasyon 1]  | [Node]    |
+| [Önceki adımda bulunan varyasyon 2]  | [Node]    |
+
+⚠️ ÖNCEKİ İÇERİK sorgusundaki entity filtrelerini AYNEN kullan!
+   KEŞİF'te bulunan varyasyonları TEKRAR belirt!
 
 ## 🔎 NODE'LAR, İLİŞKİLER ve PROPERTY'LER (şemadan):
 - [NodeA] → property: [prop1, prop2]
@@ -787,6 +800,19 @@ spawn_worker(queries=\"\"\"
 ## 📁 KAYIT:
 - step_name: "[step_adı]"
 \"\"\")
+```
+
+**YANLIŞ (Filtre olmadan):**
+```cypher
+MATCH (c:Chunk)-[:PART_OF]->(d)-[:REL1]-(n1)-[:REL2]->(n2)
+WHERE c.text CONTAINS 'aranan_terim'  ← TÜM VERİTABANINDA ARAR!
+```
+
+**DOĞRU (Entity filtresi ile):**
+```cypher
+MATCH (e:EntityNode)<-[:REL1]-(n1)-[:REL2]->(n2)
+WHERE e.name IN ['Varyasyon1', 'Varyasyon2']  ← SADECE İLGİLİ KAYITLAR!
+AND EXISTS { (n1)-[:REL3]->(d)<-[:PART_OF]-(c) WHERE c.text CONTAINS 'aranan_terim' }
 ```
 
 ## 🔄 ÇALIŞMA AKIŞI
@@ -818,6 +844,25 @@ spawn_worker(queries=\"\"\"
 4. **VARYASYON VER**: Türkçe karakter, kısaltma, tam isim
 5. **TEK GÖREV**: Her worker çağrısı TEK iş
 6. **DEĞERLENDİR**: Worker sonucunu oku, TODO'yu güncelle
+
+## 🔗 ARDIŞIK GÖREVLERDE FİLTRE MİRASI (ÇOK KRİTİK!)
+
+**KEŞİF → İÇERİK → METADATA** zincirinde:
+- KEŞİF'te bulunan entity varyasyonları TÜM sonraki adımlarda kullanılmalı!
+- İÇERİK'te entity filtresi kullandıysan, METADATA'da da AYNI filtreyi kullan!
+
+**NEDEN?** Aksi halde:
+- İÇERİK: "X entity'sinin Y konusu" → 2 chunk bulundu ✅
+- METADATA: "Y konusu içeren chunk'ların ilişkili node'ları" → TÜM veritabanı tarandı ❌
+
+**DOĞRU YAKLAŞIM:**
+```
+METADATA görevinde:
+## 📌 ÖNCEKİ ADIMLARDAN MİRAS:
+- Entity filtreleri: e.name IN ['KEŞİF varyasyonları...']
+- İçerik filtresi: c.text CONTAINS 'aranan_terim'
+→ HER İKİSİNİ DE KULLAN!
+```
 
 ## 🚨 İLİŞKİ ADLARI - ÇOK KRİTİK!
 
