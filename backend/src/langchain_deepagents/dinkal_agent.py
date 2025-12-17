@@ -711,9 +711,38 @@ spawn_worker(queries=\"\"\"
 ## 🔧 TOOL HATIRLATMA:
 1. ÖNCELİK: `execute_embedding_query` ile semantic arama yap
    - query_text: sadece konu (yukarıdaki terimler)
-   - cypher_query: $embedding_vector + gds.similarity.cosine içermeli!
-2. BAŞARISIZ (0 sonuç) ise: `execute_cypher_query` ile TEXT CONTAINS ara
-   - WHERE toLower(c.text) CONTAINS 'terim1' OR CONTAINS 'terim2' ...
+   - cypher_query: $embedding_vector + gds.similarity.cosine > 0.85 içermeli!
+   - ⚠️ Eşik değeri EN AZ 0.85 olmalı (düşük değerler false positive verir)
+
+2. **0 SONUÇ GELİRSE → TEXT FALLBACK ZORUNLU!**
+   ```
+   execute_cypher_query ile TEXT CONTAINS ara:
+   WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2' ...
+   ```
+   - Türkçe ve İngilizce terimlerin HEPSİNİ ekle
+   - İlişki yolunu PART_OF ile dene (FIRST_CHUNK sadece başlık getirir!)
+
+3. **N SONUÇ GELİRSE → DOĞRULAMA ZORUNLU!**
+   - chunk.text'te aranan terim geçiyor mu? (aşağıdaki bölüme bak)
+
+## 🚨 İÇERİK SONUÇ DOĞRULAMA (KRİTİK!):
+Embedding sonuç döndürse bile MUTLAKA DOĞRULA:
+
+1. **read_finding ile chunk.text'leri oku** - Dönen içerikleri incele
+2. **Aranan terim metinde GEÇİYOR MU?** - "kira kaybı" arıyorsan, text'te bu kelime var mı?
+3. **GEÇMIYORSA → FALSE POSITIVE!** - Embedding yanlış pozitif vermiş demektir
+
+⚠️ **Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
+Embedding domain benzerliği yakalar (genel sigorta terminolojisi),
+ama kavramsal farklılığı yakalayamaz (kira kaybı ≠ tehlikeli atık)
+
+**FALSE POSITIVE TESPİT EDİLDİĞİNDE:**
+- `think_tool` ile analiz et: "Embedding sonuçları aranan terimi içermiyor - FALSE POSITIVE"
+- Text-based fallback dene: `execute_cypher_query` ile explicit text CONTAINS
+- ⚠️ **Chunk ilişki yolunu değiştir:** 
+  - `FIRST_CHUNK` sadece başlık chunk'ını getirir!
+  - `PART_OF` TÜM chunk'ları getirir: `(Chunk)-[:PART_OF]->(Document)`
+  - Örnek: `(d:Document)<-[:PART_OF]-(c:Chunk)` kullan
 
 ## 📁 KAYIT:
 - step_name: "[step_adı]"
@@ -836,6 +865,49 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
   - EMBEDDING QUERY: "aranan konu" (sadece konu - varyasyonlar DEĞİL!)
 ```
 
+## 🔄 İÇERİK SONRASI DEĞERLENDİRME (KRİTİK!)
+
+İÇERİK araması (embedding) tamamlandığında MUTLAKA doğrula:
+
+### 1. Sonuç döndü mü?
+- **0 sonuç** → Text CONTAINS ile fallback dene
+- **N sonuç** → ⚠️ DOĞRULAMA GEREKLİ (aşağıya bak)
+
+### 2. Dönen içerik GERÇEKTEN aranan terimi içeriyor mu?
+```
+read_finding_dynamic(step_name, result_type="success", include_query=False)
+→ Dönen chunk.text'leri incele
+→ "kira kaybı" arıyorsan, text'te bu kelime geçiyor mu?
+```
+
+### 3. FALSE POSITIVE Kontrolü
+| Durum | Aksiyon |
+|-------|---------|
+| Text'te aranan terim VAR | ✅ Doğru sonuç, devam et |
+| Text'te aranan terim YOK | ❌ FALSE POSITIVE! |
+
+### 4. FALSE POSITIVE Durumunda:
+```
+think_tool(reflection="Embedding sonuçları aranan terimi içermiyor. 
+Score yüksek (0.82) ama bu domain benzerliğinden kaynaklanıyor.
+FALSE POSITIVE - Text-based arama gerekli.")
+
+→ Yeni İÇERİK görevi ver:
+  - Embedding KULLANMA!
+  - Sadece text CONTAINS kullan
+  - chunk ilişki yolu (Chunk)-[:PART_OF]->(Document)
+```
+
+**Örnek FALSE POSITIVE:**
+```
+Arama: "kira kaybı teminatı"
+Embedding sonucu: "TEHLİKELİ ATIK SİGORTA POLİÇESİ" (score: 0.82)
+Kontrol: "kira kaybı" text'te geçiyor mu? → HAYIR
+Karar: ❌ FALSE POSITIVE - Her iki metin de sigorta terminolojisi içerdiği için 
+       embedding benzer buldu ama kavramsal olarak farklılar.
+Aksiyon: Text CONTAINS ile "kira kaybı" OR "loss of rent" ara
+```
+
 ## 🚫 YAPMA
 
 ❌ Karmaşık sorguları kendin yapma (worker'a ver)
@@ -843,6 +915,10 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 ❌ Worker sonucunu okumadan ilerle
 ❌ TODO güncellemeden sonraki adıma geç
 ❌ Ham veriyi kullanıcıya gösterme
+❌ **Embedding sonuçlarını doğrulamadan kabul etme!** ← YENİ
+   - Yüksek skor (>0.85) doğru sonuç DEMEK DEĞİL!
+   - chunk.text'te aranan terim geçiyor mu kontrol et
+   - Geçmiyorsa FALSE POSITIVE - text CONTAINS ile tekrar ara
 
 ## 📝 FİNAL CEVAP
 
@@ -1058,7 +1134,7 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 # MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
 # WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']  -- RAW varyasyonlar
 # AND c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
 # RETURN c.text, n.name AS source, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -1073,7 +1149,7 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 # MATCH (n:Label)-[:REL]->...-[:PART_OF]->(c:Chunk)
 # WHERE [Orchestrator'dan gelen filtre koşulu]  -- Örn: n.fileName STARTS WITH '2024'
 # AND c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
 # RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -1084,7 +1160,7 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 # -- query_text: "aranan konu"
 # MATCH (c:Chunk)
 # WHERE c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
 # RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -1416,7 +1492,7 @@ Orchestrator sana araştırma görevi verir. Sen:
 - Örnek:
 ```cypher
 MATCH (c:Chunk) WHERE c.embedding IS NOT NULL 
-AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score
 ```
 
