@@ -478,6 +478,7 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
                 ❌ KESİNLİKLE YASAK: MATCH (c:Chunk) WHERE ... (tüm chunk'lar - ASLA!)
                 ✅ ZORUNLU: MATCH (n:Label)<-[:REL]-...->(c:Chunk) WHERE n.name IN [varyasyonlar] AND c.embedding...
                 ⚠️ Orchestrator'ın verdiği varyasyon + ilişki yolunu MUTLAKA kullan!
+                📄 RETURN: c.text, c.page_link, score (page_link ZORUNLU - sayfa görselleri için!)
             step_name: Adım adı (örn: step_2_content_search)
         
         Returns:
@@ -1532,6 +1533,12 @@ Orchestrator'dan gelen teknik önerileri kullan:
 ✅ DÖNDÜR: RETURN DISTINCT n.name AS name
 ```
 
+**İÇERİK (Chunk)'te RETURN kuralı - page_link ZORUNLU:**
+```
+✅ ZORUNLU: RETURN c.text, c.page_link, score LIMIT 10
+⚠️ page_link olmadan sorgu YAPMA! Sayfa görselleri için şart!
+```
+
 ```cypher
 -- Birden fazla varyasyon OR ile:
 WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
@@ -2441,6 +2448,11 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                             tool_msg_name = getattr(message, "name", "unknown")
                             if tool_content:
                                 _log(f"[TOOL_RESULT] {tool_msg_name}:\n{tool_content}")
+                                # Tool sonuçlarından page_link extract et
+                                tool_page_links = self._extract_page_links_from_response(tool_content)
+                                if tool_page_links:
+                                    session_page_links.update(tool_page_links)
+                                    _log(f"📄 Tool sonucundan {len(tool_page_links)} page_link bulundu")
                         else:
                             step_info["category"] = "other"
                         
