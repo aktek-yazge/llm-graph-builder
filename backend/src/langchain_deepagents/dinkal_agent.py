@@ -46,18 +46,21 @@ def _log(msg: str, level: str = "info"):
         logging.info(msg)
 
 
-def create_sequential_model(model_name: str):
+def create_worker_model(model_name: str, reasoning_effort: Optional[str] = None):
     """
-    Paralel tool çağrılarını devre dışı bırakan model oluşturur.
+    Worker için ChatOpenAI model oluşturur.
     
-    LangChain dokümantasyonu: model.bind_tools([tools], parallel_tool_calls=False)
-    https://python.langchain.com/docs/how_to/tool_calling_parallel/
+    - Paralel tool çağrıları AÇIK (LLM yeteneği varsa kullanır)
+    - GPT-5 modelleri için reasoning_effort destekler
+    - GPT-4o-mini gibi modeller de sorunsuz çalışır
     
-    ChatOpenAI subclass kullanarak bind_tools çağrılarında
-    parallel_tool_calls=False parametresini explicit olarak geçiriyoruz.
+    Args:
+        model_name: Model adı (örn: "gpt-4o-mini", "openai:gpt-5-mini")
+        reasoning_effort: GPT-5 modelleri için reasoning effort ("minimal", "low", "medium", "high")
     """
     try:
         from langchain_openai import ChatOpenAI
+        from pydantic import SecretStr
         
         # Model adından gerçek model adını çıkar
         # "openai:gpt-4o-mini" -> "gpt-4o-mini"
@@ -65,29 +68,22 @@ def create_sequential_model(model_name: str):
         if ":" in model_name:
             actual_model = model_name.split(":", 1)[1]
         
-        class SequentialChatOpenAI(ChatOpenAI):
-            """
-            ChatOpenAI subclass - bind_tools her zaman parallel_tool_calls=False kullanır.
-            
-            OpenAI'nin ChatOpenAI.bind_tools metodu:
-            - parallel_tool_calls parametresini explicit alır
-            - None ise kwargs'a eklemez
-            - Değer varsa kwargs'a ekler ve super().bind()'a geçirir
-            
-            Bu subclass her zaman parallel_tool_calls=False geçirir.
-            """
-            
-            def bind_tools(self, tools, **kwargs):
-                # CRITICAL: parallel_tool_calls=False olarak explicit geçir
-                # Bu ChatOpenAI.bind_tools'un signature'ına uygun
-                return super().bind_tools(
-                    tools,
-                    parallel_tool_calls=False,  # ← Explicit parametre
-                    **kwargs
-                )
+        # Model kwargs oluştur
+        model_kwargs: Dict[str, Any] = {"model": actual_model}
         
-        model = SequentialChatOpenAI(model=actual_model)
-        print(f"🔧 [create_sequential_model] Model: {actual_model}, SequentialChatOpenAI (parallel_tool_calls=False)")
+        # API key
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            model_kwargs["api_key"] = SecretStr(api_key)
+        
+        # GPT-5 modelleri için reasoning_effort ekle
+        if "gpt-5" in actual_model.lower() and reasoning_effort:
+            model_kwargs["reasoning"] = {"effort": reasoning_effort}
+            print(f"🔧 [create_worker_model] Model: {actual_model}, reasoning={reasoning_effort}, parallel_tools=ON")
+        else:
+            print(f"🔧 [create_worker_model] Model: {actual_model}, parallel_tools=ON")
+        
+        model = ChatOpenAI(**model_kwargs)
         return model
         
     except ImportError:
@@ -193,13 +189,25 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
     @tool
     def _think_tool(reflection: str) -> str:
         """
-        Düşünme ve strateji belirleme aracı.
+        Strateji değerlendirme ve analiz aracı.
         
-        Her sorgu sonrasında bu tool'u kullanarak:
-        - Ne buldum? (sonuç özeti)
-        - Eksik ne var? (henüz cevaplanamayan kısımlar)
-        - Yeterli bilgi var mı? (devam etmeli miyim?)
-        - Sonraki adım ne olmalı? (devam/dur/escalate)
+        ÖZELLİKLE ŞU DURUMLARDA KULLAN:
+        1. Worker 0 sonuç döndürdüğünde - Neden bulamadı?
+        2. Strateji değişikliği gerektiğinde - Farklı ne denenebilir?
+        3. Sonuçları yorumlarken - Aranan entity ile eşleşiyor mu?
+        
+        BAŞARISIZ SONUÇ ANALİZİ:
+        - Hangi node'larda arandı?
+        - Hangi terimler denendi?
+        - Arama terimleri yanlış olabilir mi?
+        - Farklı property'ler denenebilir mi?
+        - Varyasyonlar eksik olabilir mi?
+        
+        KARAR VER:
+        - Farklı terimlerle yeni KEŞİF mi?
+        - Farklı node'larla yeni KEŞİF mi?
+        - İçerik aramasına geç mi?
+        - Kullanıcıya "bulunamadı" mı?
         
         Args:
             reflection: Düşünce ve strateji değerlendirmesi
@@ -234,22 +242,39 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         return f"Bulgular kaydedildi: {file_path}"
 
     @tool
-    def _read_finding(session_id: str, step_name: str) -> str:
+    def _read_finding(session_id: str, question_id: str, step_name: str, result_type: str = "success") -> str:
         """
-        Önceki araştırma bulgularını oku.
+        Worker'ın kaydettiği sonuç dosyasını oku.
         
         Args:
-            session_id: Oturum ID'si (kısa versiyon)
-            step_name: Adım adı (örn: step_1_entity_search)
+            session_id: Oturum ID'si
+            question_id: Soru ID'si
+            step_name: Adım adı (örn: step_1_customer_search)
+            result_type: "success", "failed" veya "error"
         
-        Returns:
-            Dosya içeriği veya hata mesajı
+        Dosya Formatı:
+            <query>
+            MATCH ...
+            </query>
+            
+            <result>
+            (R:0){...}
+            </result>
         """
-        findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", session_id)
-        file_path = os.path.join(findings_dir, f"{step_name}.md")
+        findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", session_id, question_id)
+        
+        # Önce .txt dene (yeni format)
+        file_path = os.path.join(findings_dir, f"{step_name}_{result_type}.txt")
         
         if not os.path.exists(file_path):
-            return f"Dosya bulunamadı: {file_path}"
+            # Eski formatları dene (geriye uyumluluk)
+            for ext in [".xml", ".md"]:
+                alt_path = os.path.join(findings_dir, f"{step_name}_{result_type}{ext}")
+                if os.path.exists(alt_path):
+                    file_path = alt_path
+                    break
+            else:
+                return f"Dosya bulunamadı: {file_path}"
         
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -257,14 +282,278 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         _log(f"📖 Finding read: {file_path}")
         return content
 
+    @tool
+    def _read_blackboard(session_id: str, question_id: str) -> str:
+        """
+        Ortak tahta dosyasını oku - tüm bulgular burada!
+        
+        Worker her sorgu sonucunu blackboard'a yazar.
+        Bu tool ile tüm KEŞİF sonuçlarını, varyasyonları ve dosya listesini görürsün.
+        
+        Args:
+            session_id: Oturum ID'si
+            question_id: Soru ID'si
+        
+        Returns:
+            Blackboard içeriği (tüm bulgular, varyasyonlar, dosya listesi)
+        
+        ⚠️ İÇERİK görevi vermeden önce MUTLAKA blackboard'u oku!
+        KEŞİF'te bulunan varyasyonları buradan al ve İÇERİK görevine aktar.
+        """
+        blackboard_path = os.path.join(
+            os.getcwd(), "agent_findings", "findings", session_id, question_id, "_blackboard.txt"
+        )
+        
+        if not os.path.exists(blackboard_path):
+            return "Blackboard henüz oluşturulmadı - Worker henüz sorgu çalıştırmadı."
+        
+        with open(blackboard_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        _log(f"📋 Blackboard read: {blackboard_path}")
+        return content
+
     # Global isimlere ata
     think_tool = _think_tool
     write_finding = _write_finding
     read_finding = _read_finding
+    read_blackboard = _read_blackboard
 
 
 # ============================================================================
-# SYSTEM PROMPTS - ORCHESTRATOR & SUB AGENTS
+# ADAPTER TOOLS - Worker için MCP tool wrapper'ları
+# ============================================================================
+# Bu tool'lar LangChainAgent._create_agent içinde dinamik olarak oluşturulur
+# çünkü MCP client instance'ına erişim gerekiyor.
+# Aşağıdaki fonksiyonlar factory pattern ile tool oluşturur.
+
+def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
+    """
+    Worker için adapter tool'ları oluşturur.
+    
+    Her adapter:
+    1. MCP tool'u çağırır
+    2. Sonucu dosyaya yazar
+    3. İstatistik döndürür (ham data değil!)
+    
+    Args:
+        mcp_tools: MCP'den alınan tool listesi
+        session_id: Oturum ID'si
+        question_id: Soru ID'si
+    
+    Returns:
+        [execute_cypher_query, execute_embedding_query] tool listesi
+    """
+    if not LANGCHAIN_AGENT_AVAILABLE or tool is None:
+        return []
+    
+    # MCP tool'larını isimle eşle
+    mcp_tool_map = {t.name: t for t in mcp_tools}
+    
+    # Findings dizinini hazırla
+    findings_base = os.path.join(os.getcwd(), "agent_findings", "findings", session_id, question_id)
+    os.makedirs(findings_base, exist_ok=True)
+    
+    # Blackboard dosyası - ortak tahta
+    blackboard_path = os.path.join(findings_base, "_blackboard.txt")
+    
+    def _append_to_blackboard(step_name: str, file_path: str, record_count: int, success: bool):
+        """Blackboard'a sadece dosya yolu ekle"""
+        try:
+            # Mevcut içeriği oku
+            existing = ""
+            if os.path.exists(blackboard_path):
+                with open(blackboard_path, "r", encoding="utf-8") as f:
+                    existing = f.read()
+            
+            # Yeni içerik - sadece dosya yolu
+            status = "✅" if success else "❌"
+            entry = f"{status} {step_name}: {record_count} kayıt → {os.path.basename(file_path)}\n"
+            
+            # Dosyaya yaz
+            with open(blackboard_path, "w", encoding="utf-8") as f:
+                if not existing:
+                    f.write(f"# 📋 BLACKBOARD\n")
+                    f.write(f"# Session: {session_id} | Question: {question_id}\n")
+                    f.write(f"# Detaylar için: read_finding(session_id, question_id, step_name, result_type)\n\n")
+                else:
+                    f.write(existing)
+                f.write(entry)
+                
+        except Exception as e:
+            _log(f"⚠️ Blackboard yazma hatası: {e}")
+    
+    @tool
+    async def execute_cypher_query(cypher: str, step_name: str) -> str:
+        """
+        Cypher sorgusunu çalıştır, sonucu dosyaya yaz, istatistik döndür.
+        
+        USE THIS TOOL FOR:
+        - METADATA queries: names, numbers, dates, counts, IDs
+        - Questions like: "Who?", "How many?", "Which date?", "What number?"
+        - Finding entities and their properties from graph nodes
+        
+        Args:
+            cypher: Çalıştırılacak Cypher sorgusu
+            step_name: Adım adı (örn: step_1_customer_search)
+        
+        Returns:
+            İstatistik özeti (kayıt sayısı, başarı durumu, dosya yolu)
+        """
+        mcp_read = mcp_tool_map.get("read_neo4j_cypher")
+        if not mcp_read:
+            return '{"success": false, "error": "MCP read_neo4j_cypher tool not found"}'
+        
+        try:
+            # MCP tool'u çağır
+            result = await mcp_read.ainvoke({"query": cypher})
+            result_str = str(result) if result else ""
+            
+            # Hata kontrolü - MCP tool hata döndüyse
+            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+            
+            # Sonucu parse et
+            records = []
+            if result_str and result_str.strip() and not is_error:
+                # Her satırı bir kayıt olarak say
+                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(R:')]
+                records = lines
+            
+            record_count = len(records)
+            success = record_count > 0 and not is_error
+            
+            # Sadece 2 etiket: query ve result
+            suffix = "success" if success else "failed"
+            file_path = os.path.join(findings_base, f"{step_name}_{suffix}.txt")
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"<query>\n{cypher}\n</query>\n\n")
+                f.write(f"<result>\n{result_str}\n</result>\n")
+            
+            _log(f"📁 Adapter wrote: {file_path} ({record_count} records)")
+            
+            # Blackboard'a dosya yolunu yaz
+            _append_to_blackboard(step_name, file_path, record_count, success)
+            
+            # Detaylı istatistik döndür (HAM DATA YOK - kayıt içerikleri yok!)
+            return f"""{{
+  "success": {str(success).lower()},
+  "record_count": {record_count},
+  "step_name": "{step_name}",
+  "result_type": "{suffix}",
+  "file_path": "{file_path}",
+  "query_type": "cypher"
+}}"""
+            
+        except Exception as e:
+            # Hata durumu
+            file_path = os.path.join(findings_base, f"{step_name}_error.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"<query>\n{cypher}\n</query>\n\n")
+                f.write(f"<result>\nERROR: {str(e)}\n</result>\n")
+            
+            return f"""{{
+  "success": false,
+  "record_count": 0,
+  "step_name": "{step_name}",
+  "result_type": "error",
+  "file_path": "{file_path}",
+  "query_type": "cypher",
+  "error": "{str(e)}"
+}}"""
+    
+    @tool
+    async def execute_embedding_query(query_text: str, cypher_query: str, step_name: str) -> str:
+        """
+        Embedding araması yap, sonucu dosyaya yaz, istatistik döndür.
+        
+        USE THIS TOOL FOR:
+        - Content/detail questions: "What does it say?", "What are the details?"
+        - Searching within document content using semantic similarity
+        - Finding information that exists IN DOCUMENT CONTENT, not in graph nodes
+        
+        Args:
+            query_text: Aranacak metin (semantic search için - sadece KONU, varyasyonlar DEĞİL!)
+            cypher_query: ⛔ HER ZAMAN FİLTRELİ SORGU!
+                ❌ KESİNLİKLE YASAK: MATCH (c:Chunk) WHERE ... (tüm chunk'lar - ASLA!)
+                ✅ ZORUNLU: MATCH (n:Label)<-[:REL]-...->(c:Chunk) WHERE n.name IN [varyasyonlar] AND c.embedding...
+                ⚠️ Orchestrator'ın verdiği varyasyon + ilişki yolunu MUTLAKA kullan!
+            step_name: Adım adı (örn: step_2_content_search)
+        
+        Returns:
+            İstatistik özeti (kayıt sayısı, başarı durumu, dosya yolu)
+        """
+        mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
+        if not mcp_embedding:
+            return '{"success": false, "error": "MCP read_neo4j_cypher_with_embedding tool not found"}'
+        
+        try:
+            # MCP tool'u çağır
+            result = await mcp_embedding.ainvoke({
+                "query_text": query_text,
+                "cypher_query": cypher_query
+            })
+            result_str = str(result) if result else ""
+            
+            # Hata kontrolü - MCP tool hata döndüyse
+            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+            
+            # Sonucu parse et
+            records = []
+            if result_str and result_str.strip() and not is_error:
+                lines = [l.strip() for l in result_str.split('\n') if l.strip()]
+                # Score içeren satırları say
+                records = [l for l in lines if 'score' in l.lower() or l.startswith('(')]
+            
+            record_count = len(records)
+            success = record_count > 0 and not is_error
+            
+            # Sadece 2 etiket: query ve result
+            suffix = "success" if success else "failed"
+            file_path = os.path.join(findings_base, f"{step_name}_{suffix}.txt")
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"<query>\nSEARCH: {query_text}\n{cypher_query}\n</query>\n\n")
+                f.write(f"<result>\n{result_str}\n</result>\n")
+            
+            _log(f"📁 Adapter wrote: {file_path} ({record_count} records)")
+            
+            # Blackboard'a dosya yolunu yaz
+            _append_to_blackboard(step_name, file_path, record_count, success)
+            
+            # Detaylı istatistik döndür (HAM DATA YOK - kayıt içerikleri yok!)
+            return f"""{{
+  "success": {str(success).lower()},
+  "record_count": {record_count},
+  "step_name": "{step_name}",
+  "result_type": "{suffix}",
+  "file_path": "{file_path}",
+  "query_type": "embedding",
+  "search_term": "{query_text}"
+}}"""
+            
+        except Exception as e:
+            file_path = os.path.join(findings_base, f"{step_name}_error.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"<query>\nSEARCH: {query_text}\n{cypher_query}\n</query>\n\n")
+                f.write(f"<result>\nERROR: {str(e)}\n</result>\n")
+            
+            return f"""{{
+  "success": false,
+  "record_count": 0,
+  "step_name": "{step_name}",
+  "result_type": "error",
+  "file_path": "{file_path}",
+  "query_type": "embedding",
+  "search_term": "{query_text}",
+  "error": "{str(e)}"
+}}"""
+    
+    return [execute_cypher_query, execute_embedding_query]
+
+
+# ============================================================================
+# SYSTEM PROMPTS - ORCHESTRATOR & WORKER AGENT
 # ============================================================================
 
 # -----------------------------------------------------------------------------
@@ -277,36 +566,47 @@ Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine ede
 
 1. **Plan yap** - write_todos ile adım adım TODO listesi oluştur
 2. **Strateji belirle** - Şemayı analiz et, olasılıkları belirle
-3. **Subagent'a görev ver** - spawn_graph_explorer ile araştırma yaptır
-4. **Sonucu değerlendir** - read_finding ile oku, TODO'yu güncelle
+3. **Worker'a görev ver** - spawn_worker ile araştırma görevi ver
+4. **Sonuçları değerlendir** - İstatistik + tahtayı oku, TODO'yu güncelle
 5. **Final cevap oluştur** - Tüm bulgulardan kullanıcıya cevap ver
 
 ## 🔧 TOOL'LAR
 
 1. **write_todos** - Plan oluştur ve güncelle
-2. **spawn_graph_explorer** - Subagent'a araştırma görevi ver
-3. **read_finding** - Subagent bulgularını oku
-4. **think_tool** - Strateji değerlendir
+2. **spawn_worker(queries)** - Worker'a araştırma görevi ver
+3. **read_blackboard_dynamic()** - 📋 TÜM BULGULARI gör (session/question ID otomatik)
+4. **read_finding_dynamic(step_name, result_type, include_query, start_record, end_record)** - Tek dosya oku
+5. **think_tool** - Strateji değerlendir, başarısız sonuçları analiz et
 
-⛔ **SEN HİÇBİR SORGU ÇALIŞTIRMA!** Tüm veritabanı sorguları subagent'a verilir.
+## 💰 PAGINATION - Kayıtları sayfa sayfa oku
 
-## 🔀 TÜM SORGULAR SUBAGENT'A VERİLİR
+```python
+read_finding_dynamic(step_name, result_type, include_query=True, start_record=0, end_record=0)
+# start_record: başlangıç kayıt no, end_record: bitiş (0=tümü)
+# Örnek: start_record=10, end_record=20 → R:10-R:19 arası
+```
 
-Subagent'a verilecek görevler:
-- Varyasyon araması (KEŞİF)
-- Metadata sorguları
-- İçerik araması (embedding)
-- İlişki takibi
-- Sayım ve kontrol sorguları
+## 🏗️ AKIŞ
 
-**⛔ Kendim sorgu çalıştırma!** Subagent başarısız olursa:
-- Farklı terimlerle yeni KEŞİF görevi ver
-- Farklı node'larla yeni KEŞİF görevi ver
-- Asla kendim sorgu yazıp çalıştırma!
+1. **spawn_worker(görev, question_id)** → Worker sorgu yazar, çalıştırır, dosyaya kaydeder
+2. **İstatistik döner:**
+   ```
+   {success: true, record_count: 4, file_path: "findings/.../step_1_success.md"}
+   ```
+3. **Başarılı (success=true)?**
+   → `read_blackboard_dynamic()` ile TÜM bulgulara bak
+   → Varyasyonları al, sonraki adıma geç
+4. **Başarısız (success=false)?**
+   → `read_blackboard` ile önceki başarılı sonuçları kontrol et
+   → `think_tool` ile strateji değiştir
+   → `think_tool` ile analiz et: Neden bulamadı? Farklı ne denenebilir?
+   → Yeni strateji ile tekrar dene
 
-## 📋 SUBAGENT'A GÖREV FORMATI
+⛔ **SEN SORGU ÇALIŞTIRMA!** Görev ver, Worker halleder.
 
-Her görevde **GÖREV TİPİ** belirt! Subagent buna göre araç seçer.
+## 📋 WORKER'A GÖREV FORMATI
+
+Her görevde **GÖREV TİPİ** belirt! Worker buna göre araç seçer.
 
 ### GÖREV TİPİ: KEŞİF
 Varyasyon bulma, entity keşfi, metadata sorgusu
@@ -325,12 +625,13 @@ Varyasyon bulma, entity keşfi, metadata sorgusu
 ```
 
 ```
-spawn_graph_explorer(task_description=\"\"\"
+spawn_worker(queries=\"\"\"
 ## 🏷️ GÖREV TİPİ: KEŞİF
 ## 🎯 GÖREV: [Entity]'nin veritabanındaki yazım varyasyonlarını bul
 
-## 🔎 MUHTEMEL NODE'LAR:
-- [NodeLabel] (property: name, fullName, title)
+## 🔎 MUHTEMEL NODE'LAR ve PROPERTY'LERİ (şemadan):
+- [NodeLabel1] → property: [prop1, prop2, ...]
+- [NodeLabel2] → property: [prop1, prop2, ...]
 
 ## 📝 ARAMA TERİMLERİ:
 - "[tam_ifade]"
@@ -339,16 +640,32 @@ spawn_graph_explorer(task_description=\"\"\"
 
 ## 🔧 TEKNİK NOT:
 Tüm terimleri TEK SORGUDA OR ile birleştir (her node için):
-WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2' OR ...
+WHERE toLower(n.[property]) CONTAINS 'term1' OR toLower(n.[property]) CONTAINS 'term2' OR ...
+
+## 📤 RETURN KURALI:
+- Sadece property değerlerini döndür (name, fullName vb.)
+- elementId() DÖNME - sonraki sorgularda kullanılmaz
+- DISTINCT kullan
+Örnek: RETURN DISTINCT n.name AS name
+
+## ⚠️ ÖNEMLİ - TÜM NODE'LARDA ARA!
+Worker, verilen TÜM node'larda paralel arama yapmalı:
+- Her node için ayrı step_name kullan (örn: step_1_customer, step_1_policyholder)
+- Birinde sonuç bulunsa bile DİĞERLERİNİ ATLAMA - farklı varyasyonlar olabilir!
+- Tüm sonuçlar blackboard'a yazılacak
 
 ## 📁 KAYIT:
-- session_id: "[session]"
-- step_name: "[step_adı]"
+- step_name: "[step_adı]_[node_label]"
 \"\"\")
 ```
 
 ### GÖREV TİPİ: İÇERİK
 Chunk'larda semantic arama (embedding)
+
+⚠️ **İÇERİK GÖREVİ VERMEDEN ÖNCE:**
+1. `read_blackboard_dynamic()` çağır
+2. KEŞİF'te bulunan TÜM varyasyonları blackboard'dan al
+3. Bu varyasyonları İÇERİK görevine AYNEN kopyala!
 
 **ÖNEMLİ:** KEŞİF'ten gelen varyasyonları değerlendir!
 - Varyasyonlar aranan entity ile eşleşiyor mu? → EVET ise İÇERİK'e geç
@@ -358,7 +675,7 @@ Chunk'larda semantic arama (embedding)
 Belgeler farklı dillerde olabilir! EMBEDDING QUERY'de HER İKİ DİLİ de ver:
 - Türkçe terim + İngilizce karşılık (veya tersi)
 - Örnek format: "türkçe_terim", "english_equivalent"
-Subagent önce embedding dener, 0 sonuç gelirse text CONTAINS ile arar.
+Worker önce embedding dener, 0 sonuç gelirse text CONTAINS ile arar.
 
 **DARALTMA TİPLERİ:**
 - **ENTITY**: KEŞİF'te bulunan varyasyonlar + node tipi + ilişki yolu
@@ -366,7 +683,7 @@ Subagent önce embedding dener, 0 sonuç gelirse text CONTAINS ile arar.
 - **TÜM VERİ**: Daraltma yok, tüm Chunk'lar taranacak (yavaş - bilinçli seç!)
 
 ```
-spawn_graph_explorer(task_description=\"\"\"
+spawn_worker(queries=\"\"\"
 ## 🏷️ GÖREV TİPİ: İÇERİK
 ## 🎯 GÖREV: [Aranan konu] hakkında içerik ara
 
@@ -382,12 +699,22 @@ spawn_graph_explorer(task_description=\"\"\"
 ### İlişki Yolu (şemadan - OK YÖNÜNE DİKKAT!):
 [Label]<-[:REL]-(Node) veya [Label]-[:REL]->(Node) - şemadaki gibi
 
+## 📊 NODE PROPERTY'LERİ (şemadan):
+- Chunk içeriği: `text` property'sinde (c.text CONTAINS ...)
+- [Diğer ilgili property'ler şemadan]
+
 ## 📝 EMBEDDING QUERY (sadece konu):
 - "[aranan konu - Türkçe]"
 - "[aranan konu - İngilizce karşılık]"  ← ÖNEMLİ: Belgeler İngilizce olabilir!
 
+## 🔧 TOOL HATIRLATMA:
+1. ÖNCELİK: `execute_embedding_query` ile semantic arama yap
+   - query_text: sadece konu (yukarıdaki terimler)
+   - cypher_query: $embedding_vector + gds.similarity.cosine içermeli!
+2. BAŞARISIZ (0 sonuç) ise: `execute_cypher_query` ile TEXT CONTAINS ara
+   - WHERE toLower(c.text) CONTAINS 'terim1' OR CONTAINS 'terim2' ...
+
 ## 📁 KAYIT:
-- session_id: "[session]"
 - step_name: "[step_adı]"
 \"\"\")
 ```
@@ -418,15 +745,16 @@ spawn_graph_explorer(task_description=\"\"\"
 ### GÖREV TİPİ: METADATA
 Basit ilişki takibi, listeleme
 ```
-spawn_graph_explorer(task_description=\"\"\"
+spawn_worker(queries=\"\"\"
 ## 🏷️ GÖREV TİPİ: METADATA
 ## 🎯 GÖREV: [Entity]'nin [ilişkili entity]'lerini listele
 
-## 🔎 MUHTEMEL NODE'LAR ve İLİŞKİLER:
+## 🔎 NODE'LAR, İLİŞKİLER ve PROPERTY'LER (şemadan):
+- [NodeA] → property: [prop1, prop2]
 - [NodeA]-[:REL]->[NodeB]
+- [NodeB] → property: [prop1, prop2]
 
 ## 📁 KAYIT:
-- session_id: "[session]"
 - step_name: "[step_adı]"
 \"\"\")
 ```
@@ -435,7 +763,7 @@ spawn_graph_explorer(task_description=\"\"\"
 
 ```
 1. write_todos → Adım adım plan (in_progress, pending, completed)
-2. spawn_graph_explorer → Subagent'a olasılıklar + teknikler ver
+2. spawn_worker → Worker'a görev ver (ne aranacak, hangi node'larda)
 3. read_finding → Sonucu oku
 4. think_tool → Değerlendir: Yeterli mi? Devam mı? Farklı strateji mi?
 5. write_todos → TODO durumunu güncelle
@@ -449,14 +777,17 @@ spawn_graph_explorer(task_description=\"\"\"
 - İlişki yolları: Hangi node'lar birbirine bağlı?
 - İçerik node'ları: Chunk, Text, Content
 
+⚠️ **KEŞİF'te Chunk ARAMA!** → İÇERİK görevinde kullan (embedding → text CONTAINS)
+   Document.fileName'de arama yapılabilir.
+
 ## ⚠️ KRİTİK KURALLAR
 
 1. **KESİN SÖYLEME**: "X node'unda ara" değil, "X veya Y node'larında olabilir"
 2. **PROPERTY VER**: Hangi field'larda aranabilir
 3. **TEKNİK ÖNERİ VER**: toLower, CONTAINS, embedding
 4. **VARYASYON VER**: Türkçe karakter, kısaltma, tam isim
-5. **TEK GÖREV**: Her subagent çağrısı TEK iş
-6. **DEĞERLENDİR**: Subagent sonucunu oku, TODO'yu güncelle
+5. **TEK GÖREV**: Her worker çağrısı TEK iş
+6. **DEĞERLENDİR**: Worker sonucunu oku, TODO'yu güncelle
 
 ## 🚨 İLİŞKİ ADLARI - ÇOK KRİTİK!
 
@@ -480,7 +811,7 @@ spawn_graph_explorer(task_description=\"\"\"
 
 ## 🔄 KEŞİF SONRASI DEĞERLENDİRME
 
-KEŞİF tamamlandığında subagent'ın döndürdüğü varyasyonları değerlendir:
+KEŞİF tamamlandığında worker'ın döndürdüğü varyasyonları değerlendir:
 
 1. **Varyasyonlar aranan entity ile eşleşiyor mu?**
    - EVET → İÇERİK görevine geç, varyasyonları ENTITY daraltma olarak kullan
@@ -506,9 +837,9 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 
 ## 🚫 YAPMA
 
-❌ Karmaşık sorguları kendin yapma (subagent'a ver)
+❌ Karmaşık sorguları kendin yapma (worker'a ver)
 ❌ Kesin node belirtme (olasılık ver)
-❌ Subagent sonucunu okumadan ilerle
+❌ Worker sonucunu okumadan ilerle
 ❌ TODO güncellemeden sonraki adıma geç
 ❌ Ham veriyi kullanıcıya gösterme
 
@@ -523,408 +854,669 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
 # -----------------------------------------------------------------------------
 # SUB AGENT: GRAPH EXPLORER - Sorgu Yazıcı ve Uygulayıcı
 # -----------------------------------------------------------------------------
-EXPLORER_SUBAGENT_PROMPT = """
-Sen Neo4j graph veritabanında Cypher sorguları yazan ve çalıştıran bir uzmansın.
+# EXPLORER_SUBAGENT_PROMPT = """
+# Sen Neo4j graph veritabanında Cypher sorguları yazan ve çalıştıran bir uzmansın.
+# Bugünün tarihi: {date}
+
+# ## 🎯 SENİN GÖREVİN
+
+# Orchestrator sana şunları verir:
+# - **Muhtemel node'lar** ve property'leri
+# - **Muhtemel ilişkiler**
+# - **Teknik öneriler** (toLower, CONTAINS, embedding vb.)
+# - **Arama terimleri/varyasyonları** ← SADECE BUNLARI KULLAN!
+
+# Sen:
+# 1. Orchestrator'ın verdiği terimlerle Cypher sorgusu OLUŞTUR
+# 2. Çalıştır
+# 3. Sonucu KAYDET
+# 4. Kısa özet DÖNDÜR
+
+# ⛔ **KENDİ TERİM TÜRETME!** Orchestrator ne verdiyse onu kullan, kısaltma/parçalama YAPMA!
+
+# ## 🚨 NE ZAMAN KAYDET?
+
+# **BULUNDU** → Hemen `write_finding` ile kaydet!
+# ```
+# write_finding(..., content="✅ Bulundu: [sonuç özeti]. Denenen: N sorgu.")
+# ```
+
+# **TÜM DENEMELER BİTTİ, BULUNAMADI** → Özet kaydet
+# ```
+# write_finding(..., content="❌ Bulunamadı. Denenen varyasyonlar: [...]. N sorgu yapıldı.")
+# ```
+
+# **BOŞ SONUÇ** → Kaydetme, sonraki varyasyonu dene
+
+# ## 🔧 TOOL'LAR
+
+# 1. **read_neo4j_cypher** - Metadata/node sorgusu
+# 2. **read_neo4j_cypher_with_embedding** - İçerik/semantic arama
+# 3. **write_finding** - Sonuç bulunduğunda veya tüm denemeler bittiğinde
+
+# ## 🏷️ GÖREV TİPİNE GÖRE ARAÇ SEÇ!
+
+# Orchestrator sana **GÖREV TİPİ** verir. Buna göre araç seç:
+
+# ### KEŞİF → read_neo4j_cypher
+# ```cypher
+# MATCH (n:Label) 
+# WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
+# RETURN DISTINCT n.name, n.fullName LIMIT 20
+# ```
+# Amaç: Varyasyonları bul, entity keşfet
+
+# ⚠️ **KEŞİF'TE TÜM NODE'LARDA ARA - PARALEL!**
+
+# Orchestrator sana "MUHTEMEL NODE'LAR" listesi verirse, **HEPSİNDE** aramalısın:
+
+
+# **YAPMAN GEREKEN:**
+# 1. **TÜM node'lar için AYNI ANDA** sorgu çalıştır (paralel tool call)
+# 2. Her node için AYRI step_name kullan (step_1_nodeA, step_1_nodeB)
+# 3. HEPSİ tamamlandıktan sonra özet döndür
+
+# **⛔ YASAK DAVRANIŞLAR:**
+# - Sadece birinde ara, diğerlerini atla ← YASAK!
+# - Birinde sonuç bulunca diğerlerini atlama ← YASAK! (farklı varyasyonlar kaçırılır)
+# - Aynı node'u birden fazla kez ara ← YASAK!
+
+# 🚨🚨🚨 **BİREBİR AYNI SORGUYU TEKRARLAMA YASAĞI - EN KRİTİK KURAL!** 🚨🚨🚨
+
+# ⛔⛔⛔ **ÇALIŞTIRDIĞIN BİR SORGUYU ASLA TEKRAR ÇALIŞTIRMA!** ⛔⛔⛔
+
+# **HER TOOL ÇAĞRISINDAN ÖNCE KONTROL ET:**
+# 1. Bu Cypher sorgusunu daha önce çalıştırdım mı?
+# 2. EVET ise → **ÇALIŞTIRMA!** Sonraki adıma geç.
+# 3. HAYIR ise → Çalıştır.
+
+# **SONUÇ GELDİĞİNDE:**
+# - Sonuç VAR → Bu node için iş bitti, sonraki node'a geç veya write_finding çağır
+# - Sonuç BOŞ → Farklı node'a geç. 
+
+# **⛔ YASAK SENARYO:**
+# ```
+# Tool #3: NodeA'da ara → 4 sonuç bulundu ✅
+# Tool #4: NodeA'da ara (BİREBİR AYNI SORGU!) → 4 sonuç ← YASAK!
+# Tool #5: NodeA'da ara (BİREBİR AYNI SORGU!) → 4 sonuç ← YASAK!
+# ```
+
+# **✅ DOĞRU SENARYO:**
+# ```
+# Tool #3: NodeA'da ara → 4 sonuç bulundu ✅
+# Tool #4: NodeB'de ara (farklı node) VEYA write_finding çağır ✅
+# ```
+
+# ⚠️ **OR İLE YAPILAN GENİŞ SORGU DAR SORGULARI KAPSAR!**
+# - `WHERE X OR Y OR Z` ile aradıysan:
+#   - Ayrıca `WHERE X` yapma - zaten dahil!
+#   - Ayrıca `WHERE Y` yapma - zaten dahil!
+# - Örnek: `CONTAINS 'abc' OR CONTAINS 'abc company'` yaptıysan
+#   - Sonra `CONTAINS 'abc'` tek başına YAPMA - gereksiz tekrar!
+
+# ⛔ **YANLIŞ:**
+# ```
+# Tool #1: NodeA.name'de ara → boş
+# Tool #2: NodeA.fullName'de ara → boş
+# Tool #3: NodeA.name'de yine ara ← YANLIŞ! Tekrar aynı node!
+# Tool #4: NodeA.other_prop'da ara
+# ...
+# Tool #10: Hala NodeA'da! NodeB'ye hiç bakmadı! 
+# ```
+
+# ✅ **DOĞRU:**
+# ```
+# Tool #1: NodeA.name'de ara → boş
+# Tool #2: NodeB.name'de ara → 3 kayıt bulundu!
+# ```
+
+# 🚨🚨🚨 **KRİTİK: ARAMA TERİMİ KURALLARI** 🚨🚨🚨
+
+# ⛔⛔⛔ **MUTLAK YASAK: KENDİ TERİM TÜRETME!** ⛔⛔⛔
+
+# Orchestrator sana `## 📝 ARAMA TERİMLERİ:` listesi verir.
+# **SADECE O LİSTEDEKİ TERİMLERİ KULLAN!**
+
+# ❌ **ASLA YAPMA:**
+# - Terimi parçalama: "XYZ Holding" → "XYZ" veya "Holding" ayrı ayrı
+# - Terimi kesme: "Example" → "Exam" veya "Ex"
+# - 3 karakterden kısa terim kullanma
+# - Orchestrator'ın VERMEDİĞİ terimleri kendin türetme
+# - Tam ifadeden kelime çıkarma: "ABC Real Estate Inc" → sadece "real estate" ❌
+
+# **Orchestrator verdi:** `"ABC Real Estate"`, `"ABC"`
+# ❌ YASAK: `CONTAINS 'real estate'` tek başına - Orchestrator vermedi!
+# ❌ YASAK: `CONTAINS 'estate'` tek başına - Orchestrator vermedi!
+# ✅ İZİNLİ: `CONTAINS 'abc real estate'` - Orchestrator verdi
+# ✅ İZİNLİ: `CONTAINS 'abc'` - Orchestrator verdi
+
+# ✅ **İZİN VERİLEN:**
+# - Orchestrator'ın verdiği TAM terimleri kullan
+# - Türkçe karakter değişimi: ş→s, ı→i, ğ→g, ü→u, ö→o, ç→c
+# - Büyük/küçük: toLower() ile normalize
+
+# **ÖRNEK:**
+# Orchestrator verdi: `"ABC Company"`, `"ABC Ltd"`, `"ABC"`
+
+# ✅ `CONTAINS 'abc company'` - tam terim
+# ✅ `CONTAINS 'abc'` - Orchestrator verdi
+# ❌ `CONTAINS 'ab'` - **YASAK! Kesik, Orchestrator vermedi!**
+# ❌ `CONTAINS 'company'` tek başına - **Orchestrator vermedi!**
+
+# ⚠️ **MİNİMUM 3 KARAKTER VE ORCHESTRATOR'IN VERDİĞİ TERİM OLMALI!**
+
+# ### METADATA → read_neo4j_cypher
+# ```cypher
+# MATCH (a:LabelA)-[:REL]->(b:LabelB)
+# WHERE a.prop = 'value'
+# RETURN b.name, b.prop LIMIT 50
+# ```
+# Amaç: İlişki takibi, listeleme
+
+# ### İÇERİK → read_neo4j_cypher_with_embedding
+
+# Orchestrator sana **DARALTMA** tipi ve detayları verir. Buna göre sorgu yaz:
+
+# ⚠️ **KRİTİK:** query_text = Sadece aranan KONU (varyasyonlar Cypher filtresinde!)
+
+# ## ⛔ ZORUNLU KURAL - DARALTMA KULLAN!
+
+# **İÇERİK görevinde DARALTMA verilmişse MUTLAKA kullan!**
+
+# ```
+# ❌ YASAK: Tüm Chunk'larda ara (daraltma yokmuş gibi)
+#    MATCH (c:Chunk) WHERE ... ← YANLIŞ!
+
+# ✅ ZORUNLU: Varyasyonlar + İlişki yolu ile daralt
+#    MATCH (n:Label)<-[:REL]-...->(c:Chunk)
+#    WHERE n.name IN ['varvasyon1', 'varyasyon2'] ← DOĞRU!
+# ```
+
+# **Orchestrator sana şunları verdi ise HEPSİNİ kullan:**
+# 1. Varyasyonlar (KEŞİF'ten) → `WHERE n.name IN [...]`
+# 2. Node tipi → `MATCH (n:Label)`
+# 3. İlişki yolu → `...<-[:REL]-...->(c:Chunk)`
+
+# **Bu kuralı ihlal etme! Daraltma varsa kullan, yoksa sor!**
+
+# #### DARALTMA: ENTITY
+# Orchestrator'dan gelen bilgiler:
+# - Varyasyonlar (KEŞİF'ten - RAW): ["exact_db_value_1", "exact_db_value_2"]
+# - Node tipi: Label
+# - İlişki yolu: Label<-[:REL]-(Node) veya Label-[:REL]->(Node)
+
+# ⚠️ **İLİŞKİ YÖNÜ KRİTİK!** Orchestrator'ın verdiği ok yönünü AYNEN kullan:
+# - `A<-[:REL]-(B)` → Cypher: `(a:A)<-[:REL]-(b:B)` 
+# - `A-[:REL]->(B)` → Cypher: `(a:A)-[:REL]->(b:B)`
+
+# ⚠️ **VARYASYONLAR RAW!** Yazım hataları dahil, veritabanındaki EXACT değerler!
+
+# ```cypher
+# -- query_text: "aranan konu" (varyasyonlar DEĞİL!)
+# -- İlişki yönünü Orchestrator'dan AYNEN al!
+# MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
+# WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']  -- RAW varyasyonlar
+# AND c.embedding IS NOT NULL
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# RETURN c.text, n.name AS source, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+# ORDER BY score DESC LIMIT 10
+# ```
+
+# #### DARALTMA: FİLTRE
+# Orchestrator'dan gelen bilgiler:
+# - Filtre koşulu: property operator value
+# - İlişki yolu: Node-[:REL]->...-[:PART_OF]->(Chunk)
+
+# ```cypher
+# -- query_text: "aranan konu"
+# MATCH (n:Label)-[:REL]->...-[:PART_OF]->(c:Chunk)
+# WHERE [Orchestrator'dan gelen filtre koşulu]  -- Örn: n.fileName STARTS WITH '2024'
+# AND c.embedding IS NOT NULL
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+# ORDER BY score DESC LIMIT 10
+# ```
+
+# #### DARALTMA: TÜM VERİ
+# ```cypher
+# -- ⚠️ Orchestrator bilinçli olarak "TÜM VERİ" dedi
+# -- query_text: "aranan konu"
+# MATCH (c:Chunk)
+# WHERE c.embedding IS NOT NULL
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
+# RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
+# ORDER BY score DESC LIMIT 10
+# ```
+
+# #### DARALTMA: BELİRTİLMEMİŞ
+# ```
+# ⚠️ HATA: Orchestrator daraltma belirtmedi!
+# → İstatistik döndür: "DARALTMA eksik, görev tamamlanamadı"
+# → TÜM CHUNK'LARDA ARAMA YAPMA!
+# ```
+
+# ```
+# ⚠️ İÇERİK görevi ama daraltma tipi yok!
+# → write_finding(..., content="⚠️ Daraltma bilgisi eksik") kaydet ve DUR!
+# ```
+
+# ## 🔄 EMBEDDING BAŞARISIZ → TEXT FALLBACK
+
+# ⚠️ **Embedding araması 0 sonuç döndürürse:**
+
+# 1. **Aynı Cypher'da text CONTAINS ile dene:**
+# ```cypher
+# -- Embedding 0 sonuç döndü, text araması dene
+# MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
+# WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']
+# AND (toLower(c.text) CONTAINS 'terim_1' 
+#      OR toLower(c.text) CONTAINS 'terim_2')
+# RETURN c.text, n.name AS source
+# LIMIT 10
+# ```
+
+# 2. **Orchestrator'ın verdiği TÜM terimleri kullan** (tüm dillerdeki karşılıklar)
+
+# 3. **Sonuç bulursan kaydet**, bulamazsan "Embedding ve text araması başarısız" olarak kaydet
+
+# **Akış:**
+# ```
+# Embedding "[terim]" → 0 sonuç
+# Text CONTAINS "[terim_1]" OR "[terim_2]" → sonuç bulunabilir!
+# ```
+
+# ## ⛔ YASAK
+
+# ❌ **spawn_worker** - Orchestrator'ın tool'u
+# ❌ **write_todos** - Orchestrator'ın tool'u
+# ❌ **Daraltma belirtilmeden embedding araması** - Orchestrator daraltma tipi vermeli!
+
+# ## 📋 ÇALIŞMA AKIŞI
+
+# ⚠️ **EN KRİTİK KURAL: İLK BAŞARILI SONUÇTA HEMEN KAYDET VE DUR!**
+
+# ```
+# 1. GÖREV TİPİ'ni oku (KEŞİF / METADATA / İÇERİK)
+# 2. Tipe göre araç seç
+# 3. Sorguyu çalıştır
+# 4. ⭐ SONUÇ GELDİĞİNDE:
+   
+#    EĞER sonuç BOŞ DEĞİLSE ([] değil, kayıt var):
+#    → HEMEN write_finding çağır (RAW değerlerle!)
+#    → HEMEN özet döndür
+#    → BAŞKA SORGU YAPMA!
+   
+#    EĞER sonuç BOŞ ise ([]):
+#    → Sonraki varyasyonu dene
+#    → Maksimum 3-4 sorgu
+   
+# 5. Tüm denemeler bittiyse → write_finding ile "bulunamadı" kaydet
+# ```
+
+# ### ⛔ YASAK DAVRANIŞLAR
+
+# ```
+# ❌ Sonuç bulduktan sonra "emin olmak için" başka sorgu yapmak
+# ❌ write_finding çağırmadan yeni sorgulara geçmek  
+# ❌ 4'ten fazla sorgu yapmak (limit: 10 tool call, güvenlik: 4 sorgu)
+# ❌ Limit aşılana kadar beklemek
+# ```
+
+# ### ✅ DOĞRU ÖRNEK
+
+# ```
+# Tool #1: NodeA'da ara → [] (boş)
+# Tool #2: NodeB'de ara → 4 kayıt bulundu!
+# Tool #3: write_finding(raw varyasyonlar) ← HEMEN KAYDET!
+# → Özet döndür, DUR!
+# ```
+
+# ### ❌ YANLIŞ ÖRNEK  
+
+# ```
+# Tool #1: NodeA'da ara → [] (boş)
+# Tool #2: NodeB'de ara → 4 kayıt bulundu!
+# Tool #3: "Emin olmak için" başka arama ← YANLIŞ!
+# Tool #4: Başka arama ← YANLIŞ!
+# ...
+# ```
+
+# ## 🔍 SONUÇ DEĞERLENDİRME (KRİTİK!)
+
+# **HER sorgu sonucunda bu adımları uygula:**
+
+# ### 1. Sonuç boş mu?
+# ```
+# [] veya "0 results" → BOŞ SONUÇ, sonraki varyasyonu dene
+# ```
+
+# ### 2. Sonuç döndüyse KAYIT SAYISINI SAY
+# ```
+# (R:0)... → 1 kayıt
+# (R:0)... (R:1)... (R:2)... → 3 kayıt
+# (R:0)... (R:1)... (R:2)... (R:3)... → 4 kayıt
+# ```
+
+# ### 3. Dönen kayıtları ARANAN VARLIK ile KARŞILAŞTIR
+
+# Orchestrator'ın görevinde aranan varlık ne?
+# - Görevde "X" aranıyorsa
+# - Dönen kayıtlarda "X", "X ile başlayan", "X içeren" veya "X'in tam adı" var mı?
+
+# **Semantik Eşleştirme Kuralları:**
+# - Kısaltmalar genişletilmiş haliyle EŞLEŞİR
+# - Büyük/küçük harf farklılıkları EŞLEŞİR  
+# - Ek bilgi içeren kayıtlar EŞLEŞİR (örn: numara + isim)
+# - Hafif yazım farklılıkları EŞLEŞİR
+
+# **Örnek Eşleştirmeler (domain-agnostic):**
+# | Aranan | Dönen | Eşleşme |
+# |--------|-------|---------|
+# | "ABC Şirketi" | "ABC ŞİRKETİ A.Ş." | ✅ EVET |
+# | "ABC" | "ABC Holding Ltd." | ✅ EVET |
+# | "XYZ Ltd" | "12345 XYZ Ltd Şirketi" | ✅ EVET (numara + isim) |
+# | "DEF" | "DEF Anonim Şirketi" | ✅ EVET |
+# | "GHI Corp" | "Tamamen Farklı İsim" | ❌ HAYIR |
+
+# ### 4. Eşleşme varsa → HEMEN KAYDET VE DUR!
+
+# ```
+# ⚠️ ARRAY BOŞ DEĞİLSE (en az 1 kayıt var):
+#    1. HEMEN write_finding çağır:
+#       - TÜM raw varyasyonları yaz (veritabanındaki gibi!)
+#       - Hangi node'da bulunduğunu belirt
+#    2. Kısa özet döndür
+#    3. BAŞKA SORGU YAPMA! DUR!
+
+# 🛑 DURMA KOŞULU:
+#    Sonuç [] değilse → write_finding → DUR!
+#    Başka arama için sebep ARAMA!
+# ```
+
+# ### ⚠️ KRİTİK: RAW VARYASYONLARI AYNEN YAZ!
+
+# KEŞİF görevlerinde bulunan varyasyonları **AYNEN** (raw) yaz, temizleme/yorumlama YAPMA!
+
+# **Neden?** Sonraki embedding sorgusunda `WHERE n.name IN [...]` kullanılacak.
+# Veritabanındaki EXACT değer yazılmazsa sorgu 0 sonuç döner!
+
+# 🚨 **TÜM SORGU SONUÇLARINI DAHİL ET!**
+# - Her sorguda dönen TÜM kayıtları final response'a ekle
+# - Numara prefix'li kayıtları ATLAMA: "12345 ABC..." → AYNEN yaz!
+# - Satır içi boşluklu kayıtları ATLAMA: "ABC\nXYZ..." → AYNEN yaz!
+# - "Alakasız" diye düşündüklerini de yaz, Orchestrator değerlendirir
+
+# ```
+# ❌ YANLIŞ (temizlenmiş/yorumlanmış):
+#    "ABC Şirketi A.Ş."  ← Kendin düzeltme yaptın
+   
+# ❌ YANLIŞ (eksik - bazı kayıtları atladın):
+#    Tool #2'de 4 kayıt döndü ama sadece 2'sini yazdın!
+
+# ✅ DOĞRU (raw - veritabanındaki AYNEN):
+#    - "ABC Şirket i A.Ş." (yazım hatası/boşluk VAR - AYNEN yaz!)
+#    - "12345 ABC Şirket i A.Ş." (numara prefix VAR - AYNEN yaz!)
+#    - "ABC Şirketi A.Ş." (temiz versiyon da VAR - AYNEN yaz!)
+#    - "ABC\nŞirketi" (satır içi boşluk VAR - AYNEN yaz!)
+# ```
+
+# **write_finding formatı (KEŞİF):**
+# ```markdown
+# ✅ Bulundu: [N] varyasyon
+
+# ## RAW Varyasyonlar (AYNEN kopyala):
+# | n.name (Veritabanındaki değer) | Node Tipi |
+# |--------------------------------|-----------|
+# | [EXACT raw value 1]            | [Label]   |
+# | [EXACT raw value 2]            | [Label]   |
+
+# Notlar:
+# - Hariç tutulanlar: [homonim/alakasız kayıtlar]
+# ```
+
+# ### 5. Toplam Sorgu Sayısını DOĞRU BİLDİR
+
+# ```
+# Yaptığın sorgu sayısını say:
+# - read_neo4j_cypher çağrısı = 1 sorgu
+# - 3 paralel çağrı = 3 sorgu
+# - 18 tool çağrısı = 18 sorgu (3 değil!)
+# ```
+
+# ### ⚠️ HATALI DEĞERLENDİRME ÖRNEKLERİ
+
+# ```
+# ❌ YANLIŞ: Sonuçta 4 kayıt var ama "1 kayıt bulundu" demek
+# ❌ YANLIŞ: 18 sorgu yaptın ama "3 sorgu denendi" demek  
+# ❌ YANLIŞ: "ABC Şirketi A.Ş." bulundu ama "ABC bulunamadı" demek
+# ❌ YANLIŞ: İlk 3 sorgu boş dönünce sonrakileri görmezden gelmek
+
+# ✅ DOĞRU: Tüm sorguları say
+# ✅ DOĞRU: Tüm kayıtları say
+# ✅ DOĞRU: Semantik eşleştirme yap
+# ✅ DOĞRU: Eşleşen TÜM varyasyonları listele
+# ```
+
+# ## 📝 CYPHER YAZARKEN
+
+# Orchestrator'dan gelen teknik önerileri kullan:
+# - toLower() + CONTAINS önerildiyse → `WHERE toLower(n.prop) CONTAINS 'term'`
+# - Varyasyonlar verildiyse → OR ile birleştir
+# - İlişki verildiyse → MATCH pattern'ı kur
+
+# ```cypher
+# -- elementId kullan (id() değil):
+# RETURN elementId(n) AS id, n.name, n.title
+
+# -- Birden fazla property:
+# WHERE toLower(n.name) CONTAINS 'x' OR toLower(n.title) CONTAINS 'x'
+
+# -- Birden fazla varyasyon:
+# WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
+
+# -- İlişki takibi:
+# MATCH (a:NodeA)-[:REL]->(b:NodeB) WHERE a.prop = 'X' RETURN b
+# ```
+
+# ## ❌ HATA ALDIĞINDA
+
+# Tool sonucunda hata mesajı görürsen:
+# 1. **Hata mesajını OKU** - Neo4j hatanın nedenini söyler
+# 2. **Sorguyu DÜZELT** - Hataya göre sorguyu değiştir
+# 3. **TEKRAR DENE** - Düzeltilmiş sorguyu çalıştır
+
+# ### Sık Yapılan Hatalar:
+
+# ```cypher
+# -- ❌ YANLIŞ: İki RETURN kullanma
+# RETURN x, y, (p)-[:REL]->(n) RETURN n.name
+
+# -- ✅ DOĞRU: WITH ile ayır, tek RETURN
+# WITH p MATCH (p)-[:REL]->(n) RETURN n.name
+
+# -- ❌ YANLIŞ: RETURN içinde yeni değişken tanımlama
+# RETURN (p)-[:REL]->(ic:InsuranceCompany)
+
+# -- ✅ DOĞRU: Önce MATCH, sonra RETURN
+# MATCH (p)-[:REL]->(ic:InsuranceCompany) RETURN ic.name
+
+# -- ❌ YANLIŞ: Clause sırası yanlış
+# MATCH ... RETURN ... WHERE ...
+
+# -- ✅ DOĞRU: Clause sırası
+# MATCH ... WHERE ... WITH ... RETURN ... ORDER BY ... LIMIT
+# ```
+
+# ⚠️ Hata sayısı 3'ü geçerse → DUR ve "Sorgu hatası" olarak kaydet
+
+# ## ⏱️ LİMİTLER
+
+# - **3 sorgu** maksimum
+# - Aynı sorguyu tekrarlama
+# - 3 sorguda bulamazsan → Özet kaydet ve DUR
+
+# ## 📁 KAYIT FORMATI
+
+# **Başarılı:**
+# ```
+# write_finding(
+#     session_id="[orchestrator'dan gelen]",
+#     step_name="[orchestrator'dan gelen]", 
+#     content="✅ Bulundu: [N kayıt]. [Kısa özet]. Denenen: M sorgu."
+# )
+# ```
+
+# **Başarısız (tüm denemeler bitti):**
+# ```
+# write_finding(
+#     session_id="[orchestrator'dan gelen]",
+#     step_name="[orchestrator'dan gelen]", 
+#     content="❌ Bulunamadı. Denenen: [varyasyon1, varyasyon2, ...]. M sorgu yapıldı."
+# )
+# ```
+
+# ## 📤 ÖZET
+
+# **Bulundu:** `✅ Bulundu. N kayıt. [Kısa bilgi]`
+# **Bulunamadı:** `❌ Bulunamadı. Denenen: [node'lar ve varyasyonlar]`
+# """
+
+
+# Eski SEARCHER_SUBAGENT_PROMPT kaldırıldı - artık tek subagent kullanıyoruz
+
+# Eski DEEP_AGENT_SYSTEM_PROMPT kaldırıldı - artık ORCHESTRATOR_SYSTEM_PROMPT kullanılıyor
+
+
+# ============================================================================
+# WORKER AGENT PROMPT - Minimal, sadece sorgu çalıştırma
+# ============================================================================
+
+WORKER_AGENT_PROMPT = """Sen Neo4j graph veritabanında Cypher sorguları yazan ve çalıştıran bir uzmansın.
+
 Bugünün tarihi: {date}
 
-## 🎯 SENİN GÖREVİN
+## 🎯 GÖREV
 
-Orchestrator sana şunları verir:
-- **Muhtemel node'lar** ve property'leri
-- **Muhtemel ilişkiler**
-- **Teknik öneriler** (toLower, CONTAINS, embedding vb.)
-- **Arama terimleri/varyasyonları** ← SADECE BUNLARI KULLAN!
-
-Sen:
-1. Orchestrator'ın verdiği terimlerle Cypher sorgusu OLUŞTUR
-2. Çalıştır
-3. Sonucu KAYDET
-4. Kısa özet DÖNDÜR
-
-⛔ **KENDİ TERİM TÜRETME!** Orchestrator ne verdiyse onu kullan, kısaltma/parçalama YAPMA!
-
-## 🚨 NE ZAMAN KAYDET?
-
-**BULUNDU** → Hemen `write_finding` ile kaydet!
-```
-write_finding(..., content="✅ Bulundu: [sonuç özeti]. Denenen: N sorgu.")
-```
-
-**TÜM DENEMELER BİTTİ, BULUNAMADI** → Özet kaydet
-```
-write_finding(..., content="❌ Bulunamadı. Denenen varyasyonlar: [...]. N sorgu yapıldı.")
-```
-
-**BOŞ SONUÇ** → Kaydetme, sonraki varyasyonu dene
+Orchestrator sana araştırma görevi verir. Sen:
+1. Göreve uygun Cypher sorguları YAZ
+2. Sorguları adapter tool'ları ile ÇALIŞITIR
+3. Sonuçları değerlendir ve istatistik DÖNDÜR
 
 ## 🔧 TOOL'LAR
 
-1. **read_neo4j_cypher** - Metadata/node sorgusu
-2. **read_neo4j_cypher_with_embedding** - İçerik/semantic arama
-3. **write_finding** - Sonuç bulunduğunda veya tüm denemeler bittiğinde
+- `execute_cypher_query(cypher, step_name)`: Cypher sorgusu çalıştır, dosyaya yaz, istatistik döndür
+- `execute_embedding_query(query_text, cypher_query, step_name)`: Embedding araması yap, dosyaya yaz, istatistik döndür
 
-## 🏷️ GÖREV TİPİNE GÖRE ARAÇ SEÇ!
+## 🔧 TOOL SEÇİM KURALLARI - KRİTİK!
 
-Orchestrator sana **GÖREV TİPİ** verir. Buna göre araç seç:
-
-### KEŞİF → read_neo4j_cypher
+### execute_embedding_query KULLAN:
+- "EMBEDDING QUERY" veya "semantic arama" görürsen
+- cypher_query İÇİNDE MUTLAKA: `$embedding_vector` + `gds.similarity.cosine`
+- Örnek:
 ```cypher
-MATCH (n:Label) 
-WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
-RETURN DISTINCT n.name, n.fullName LIMIT 20
-```
-Amaç: Varyasyonları bul, entity keşfet
-
-⚠️ **KEŞİF'TE TÜM NODE'LARDA ARA!**
-
-Orchestrator sana MUHTEMEL NODE'LAR listesi verir:
-```
-## 🔎 MUHTEMEL NODE'LAR:
-- Customer (property: name, fullName)
-- Policyholder (property: name)
-- InsuredPerson (property: name)
-```
-
-**YAPMAN GEREKEN:**
-1. **İLK** node'da ara (örn: Customer)
-2. Sonuç BOŞ ise → **İKİNCİ** node'da ara (örn: Policyholder)
-3. Sonuç BOŞ ise → **ÜÇÜNCÜ** node'da ara
-4. Sonuç BULUNDUYSA → HEMEN KAYDET VE DUR!
-
-**AYNI NODE'DA TEKRAR TEKRAR ARAMA!**
-- Her node'u EN FAZLA 1 kez ara (tüm property'leri OR ile birleştir)
-- Bulamadıysan sonraki node'a geç
-- Aynı sorguyu ASLA tekrarlama!
-
-🚨 **AYNI SORGUYU TEKRARLAMA YASAĞI:**
-- Bir sorguyu çalıştırdıysan, AYNI sorguyu tekrar çalıştırma!
-- Sonuç geldi mi? → Kaydet ve bir sonraki node'a geç veya DUR
-- Aynı sorguyu 2, 3, 4 kez çalıştırma - bu kaynak israfı!
-
-⚠️ **OR İLE YAPILAN GENİŞ SORGU DAR SORGULARI KAPSAR!**
-- `WHERE X OR Y OR Z` ile aradıysan:
-  - Ayrıca `WHERE X` yapma - zaten dahil!
-  - Ayrıca `WHERE Y` yapma - zaten dahil!
-- Örnek: `CONTAINS 'abc' OR CONTAINS 'abc company'` yaptıysan
-  - Sonra `CONTAINS 'abc'` tek başına YAPMA - gereksiz tekrar!
-
-⛔ **YANLIŞ:**
-```
-Tool #1: Customer.name'de ara → boş
-Tool #2: Customer.fullName'de ara → boş
-Tool #3: Customer.name'de yine ara ← YANLIŞ! Tekrar aynı node!
-Tool #4: Customer.original_name'de ara
-...
-Tool #10: Hala Customer'da! Policyholder'a hiç bakmadı! ← FELAKET!
-```
-
-✅ **DOĞRU:**
-```
-Tool #1: Customer.name'de ara → boş
-Tool #2: Policyholder.name'de ara → 3 kayıt bulundu!
-Tool #3: write_finding(varyasyonlar) ← KAYDET VE DUR!
-```
-
-🚨🚨🚨 **KRİTİK: ARAMA TERİMİ KURALLARI** 🚨🚨🚨
-
-⛔⛔⛔ **MUTLAK YASAK: KENDİ TERİM TÜRETME!** ⛔⛔⛔
-
-Orchestrator sana `## 📝 ARAMA TERİMLERİ:` listesi verir.
-**SADECE O LİSTEDEKİ TERİMLERİ KULLAN!**
-
-❌ **ASLA YAPMA:**
-- Terimi parçalama: "XYZ Holding" → "XYZ" veya "Holding" ayrı ayrı
-- Terimi kesme: "Example" → "Exam" veya "Ex"
-- 3 karakterden kısa terim kullanma
-- Orchestrator'ın VERMEDİĞİ terimleri kendin türetme
-- Tam ifadeden kelime çıkarma: "ABC Real Estate Inc" → sadece "real estate" ❌
-
-**Orchestrator verdi:** `"ABC Real Estate"`, `"ABC"`
-❌ YASAK: `CONTAINS 'real estate'` tek başına - Orchestrator vermedi!
-❌ YASAK: `CONTAINS 'estate'` tek başına - Orchestrator vermedi!
-✅ İZİNLİ: `CONTAINS 'abc real estate'` - Orchestrator verdi
-✅ İZİNLİ: `CONTAINS 'abc'` - Orchestrator verdi
-
-✅ **İZİN VERİLEN:**
-- Orchestrator'ın verdiği TAM terimleri kullan
-- Türkçe karakter değişimi: ş→s, ı→i, ğ→g, ü→u, ö→o, ç→c
-- Büyük/küçük: toLower() ile normalize
-
-**ÖRNEK:**
-Orchestrator verdi: `"ABC Company"`, `"ABC Ltd"`, `"ABC"`
-
-✅ `CONTAINS 'abc company'` - tam terim
-✅ `CONTAINS 'abc'` - Orchestrator verdi
-❌ `CONTAINS 'ab'` - **YASAK! Kesik, Orchestrator vermedi!**
-❌ `CONTAINS 'company'` tek başına - **Orchestrator vermedi!**
-
-⚠️ **MİNİMUM 3 KARAKTER VE ORCHESTRATOR'IN VERDİĞİ TERİM OLMALI!**
-
-### METADATA → read_neo4j_cypher
-```cypher
-MATCH (a:LabelA)-[:REL]->(b:LabelB)
-WHERE a.prop = 'value'
-RETURN b.name, b.prop LIMIT 50
-```
-Amaç: İlişki takibi, listeleme
-
-### İÇERİK → read_neo4j_cypher_with_embedding
-
-Orchestrator sana **DARALTMA** tipi ve detayları verir. Buna göre sorgu yaz:
-
-⚠️ **KRİTİK:** query_text = Sadece aranan KONU (varyasyonlar Cypher filtresinde!)
-
-#### DARALTMA: ENTITY
-Orchestrator'dan gelen bilgiler:
-- Varyasyonlar (KEŞİF'ten - RAW): ["exact_db_value_1", "exact_db_value_2"]
-- Node tipi: Label
-- İlişki yolu: Label<-[:REL]-(Node) veya Label-[:REL]->(Node)
-
-⚠️ **İLİŞKİ YÖNÜ KRİTİK!** Orchestrator'ın verdiği ok yönünü AYNEN kullan:
-- `A<-[:REL]-(B)` → Cypher: `(a:A)<-[:REL]-(b:B)` 
-- `A-[:REL]->(B)` → Cypher: `(a:A)-[:REL]->(b:B)`
-
-⚠️ **VARYASYONLAR RAW!** Yazım hataları dahil, veritabanındaki EXACT değerler!
-
-```cypher
--- query_text: "aranan konu" (varyasyonlar DEĞİL!)
--- İlişki yönünü Orchestrator'dan AYNEN al!
-MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
-WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']  -- RAW varyasyonlar
-AND c.embedding IS NOT NULL
+MATCH (c:Chunk) WHERE c.embedding IS NOT NULL 
 AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
-RETURN c.text, n.name AS source, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
-ORDER BY score DESC LIMIT 10
+RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score
 ```
 
-#### DARALTMA: FİLTRE
-Orchestrator'dan gelen bilgiler:
-- Filtre koşulu: property operator value
-- İlişki yolu: Node-[:REL]->...-[:PART_OF]->(Chunk)
-
+### execute_cypher_query KULLAN:
+- "TEXT CONTAINS" veya "CONTAINS fallback" görürsen
+- "KEŞİF" veya "METADATA" görevlerinde
+- Örnek:
 ```cypher
--- query_text: "aranan konu"
-MATCH (n:Label)-[:REL]->...-[:PART_OF]->(c:Chunk)
-WHERE [Orchestrator'dan gelen filtre koşulu]  -- Örn: n.fileName STARTS WITH '2024'
-AND c.embedding IS NOT NULL
-AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
-RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
-ORDER BY score DESC LIMIT 10
+WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2'
 ```
 
-#### DARALTMA: TÜM VERİ
-```cypher
--- ⚠️ Orchestrator bilinçli olarak "TÜM VERİ" dedi
--- query_text: "aranan konu"
-MATCH (c:Chunk)
-WHERE c.embedding IS NOT NULL
-AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.75
-RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
-ORDER BY score DESC LIMIT 10
+### ⚠️ KARIŞTIRMA!
 ```
+❌ YANLIŞ: execute_embedding_query + CONTAINS sorgusu
+   → MCP Server hata verir!
 
-#### DARALTMA: BELİRTİLMEMİŞ
+✅ DOĞRU: 
+   - Embedding → execute_embedding_query + $embedding_vector
+   - CONTAINS → execute_cypher_query + toLower(...) CONTAINS
 ```
-⚠️ İÇERİK görevi ama daraltma tipi yok!
-→ write_finding(..., content="⚠️ Daraltma bilgisi eksik") kaydet ve DUR!
-```
-
-## 🔄 EMBEDDING BAŞARISIZ → TEXT FALLBACK
-
-⚠️ **Embedding araması 0 sonuç döndürürse:**
-
-1. **Aynı Cypher'da text CONTAINS ile dene:**
-```cypher
--- Embedding 0 sonuç döndü, text araması dene
-MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
-WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']
-AND (toLower(c.text) CONTAINS 'terim_1' 
-     OR toLower(c.text) CONTAINS 'terim_2')
-RETURN c.text, n.name AS source
-LIMIT 10
-```
-
-2. **Orchestrator'ın verdiği TÜM terimleri kullan** (tüm dillerdeki karşılıklar)
-
-3. **Sonuç bulursan kaydet**, bulamazsan "Embedding ve text araması başarısız" olarak kaydet
-
-**Akış:**
-```
-Embedding "[terim]" → 0 sonuç
-Text CONTAINS "[terim_1]" OR "[terim_2]" → sonuç bulunabilir!
-```
-
-## ⛔ YASAK
-
-❌ **spawn_graph_explorer** - Orchestrator'ın tool'u
-❌ **write_todos** - Orchestrator'ın tool'u
-❌ **Daraltma belirtilmeden embedding araması** - Orchestrator daraltma tipi vermeli!
 
 ## 📋 ÇALIŞMA AKIŞI
 
-⚠️ **EN KRİTİK KURAL: İLK BAŞARILI SONUÇTA HEMEN KAYDET VE DUR!**
+1. **Görevi OKU** - Orchestrator'ın verdiği görevi anla
+2. **Sorgu YAZ** - Her node için AYRI sorgu oluştur
+3. **PARALEL Çalıştır** - Birden fazla node varsa TÜM sorguları AYNI ANDA çalıştır!
+4. **Sonuç VAR mı?**
+   - EVET → İstatistik döndür, DUR
+   - HAYIR → Özet döndür
 
+## ⚡ TÜM NODE'LARDA ARA - ZORUNLU!
+
+Orchestrator sana "MUHTEMEL NODE'LAR" listesi verirse:
 ```
-1. GÖREV TİPİ'ni oku (KEŞİF / METADATA / İÇERİK)
-2. Tipe göre araç seç
-3. Sorguyu çalıştır
-4. ⭐ SONUÇ GELDİĞİNDE:
-   
-   EĞER sonuç BOŞ DEĞİLSE ([] değil, kayıt var):
-   → HEMEN write_finding çağır (RAW değerlerle!)
-   → HEMEN özet döndür
-   → BAŞKA SORGU YAPMA!
-   
-   EĞER sonuç BOŞ ise ([]):
-   → Sonraki varyasyonu dene
-   → Maksimum 3-4 sorgu
-   
-5. Tüm denemeler bittiyse → write_finding ile "bulunamadı" kaydet
+## 🔎 MUHTEMEL NODE'LAR:
+- NodeA → property: name, fullName
+- NodeB → property: name
+- NodeC → property: title
 ```
 
-### ⛔ YASAK DAVRANIŞLAR
+**KURAL: HEPSİNDE ARA, SONRA SONUÇ DÖNDÜR!**
 
 ```
-❌ Sonuç bulduktan sonra "emin olmak için" başka sorgu yapmak
-❌ write_finding çağırmadan yeni sorgulara geçmek  
-❌ 4'ten fazla sorgu yapmak (limit: 10 tool call, güvenlik: 4 sorgu)
-❌ Limit aşılana kadar beklemek
+✅ DOĞRU: Tüm node'lar için AYNI ANDA tool çağırabilirsin
+   Tool #1: execute_cypher_query(NodeA sorgusu, step_name="step_1_nodeA")
+   Tool #2: execute_cypher_query(NodeB sorgusu, step_name="step_1_nodeB")  
+   Tool #3: execute_cypher_query(NodeC sorgusu, step_name="step_1_nodeC")
+   → Hepsi paralel çalışır, hepsi tahtaya yazılır!
+
+❌ YASAK: Sadece birinde ara, diğerlerini atla
+   Tool #1: execute_cypher_query(NodeA sorgusu)
+   → Diğerlerini atla ← YANLIŞ! Orchestrator eksik bilgi alır!
+
+❌ YASAK: Birinde sonuç bulunca diğerlerini atlama
+   Tool #1: NodeA'da 2 sonuç buldu
+   → NodeB ve NodeC'yi atla ← YANLIŞ! Farklı varyasyonlar kaçırılır!
 ```
 
-### ✅ DOĞRU ÖRNEK
+**⚠️ SONUÇ DÖNDÜRMEDEN ÖNCE:**
+- Verilen TÜM node'larda arama TAMAMLANMALI
+- Her node için ayrı step_name ile dosya yazılmalı
+- Tüm sonuçlar tahtaya kaydedilmeli
 
+## 🚨 KRİTİK KURALLAR
+
+### 0. ⛔ TÜM CHUNK'LARDA ARAMA YASAK!
 ```
-Tool #1: NodeA'da ara → [] (boş)
-Tool #2: NodeB'de ara → 4 kayıt bulundu!
-Tool #3: write_finding(raw varyasyonlar) ← HEMEN KAYDET!
-→ Özet döndür, DUR!
-```
+❌ KESİNLİKLE YASAK: MATCH (c:Chunk) WHERE ... (tüm chunk'lar - ASLA YAPMA!)
+✅ HER ZAMAN FİLTRELİ: MATCH (n:Label)<-[:REL]-...->(c:Chunk) WHERE n.name IN [varyasyonlar]
 
-### ❌ YANLIŞ ÖRNEK  
+Orchestrator'ın verdiği FİLTRELERİ MUTLAKA KULLAN:
+- Varyasyonları → WHERE n.name IN [...]
+- Node tipini → MATCH (n:Label)
+- İlişki yolunu → ...<-[:REL]-...
 
-```
-Tool #1: NodeA'da ara → [] (boş)
-Tool #2: NodeB'de ara → 4 kayıt bulundu!
-Tool #3: "Emin olmak için" başka arama ← YANLIŞ!
-Tool #4: Başka arama ← YANLIŞ!
-...
-Tool #10: Limit aşıldı, write_finding çağrılmadı! ← FELAKET!
-```
-
-## 🔍 SONUÇ DEĞERLENDİRME (KRİTİK!)
-
-**HER sorgu sonucunda bu adımları uygula:**
-
-### 1. Sonuç boş mu?
-```
-[] veya "0 results" → BOŞ SONUÇ, sonraki varyasyonu dene
+⚠️ FİLTRE YOKSA SORGUYU ÇALIŞTIRMA! Orchestrator'a "Filtre eksik" döndür.
 ```
 
-### 2. Sonuç döndüyse KAYIT SAYISINI SAY
+### 1. AYNI SORGUYU TEKRARLAMA!
 ```
-(R:0)... → 1 kayıt
-(R:0)... (R:1)... (R:2)... → 3 kayıt
-(R:0)... (R:1)... (R:2)... (R:3)... → 4 kayıt
-```
+❌ Tool #1: NodeA'da ara → 4 sonuç
+   Tool #2: NodeA'da ara (AYNI!) → 4 sonuç ← YASAK!
 
-### 3. Dönen kayıtları ARANAN VARLIK ile KARŞILAŞTIR
-
-Orchestrator'ın görevinde aranan varlık ne?
-- Görevde "X" aranıyorsa
-- Dönen kayıtlarda "X", "X ile başlayan", "X içeren" veya "X'in tam adı" var mı?
-
-**Semantik Eşleştirme Kuralları:**
-- Kısaltmalar genişletilmiş haliyle EŞLEŞİR
-- Büyük/küçük harf farklılıkları EŞLEŞİR  
-- Ek bilgi içeren kayıtlar EŞLEŞİR (örn: numara + isim)
-- Hafif yazım farklılıkları EŞLEŞİR
-
-**Örnek Eşleştirmeler (domain-agnostic):**
-| Aranan | Dönen | Eşleşme |
-|--------|-------|---------|
-| "ABC Şirketi" | "ABC ŞİRKETİ A.Ş." | ✅ EVET |
-| "ABC" | "ABC Holding Ltd." | ✅ EVET |
-| "XYZ Ltd" | "12345 XYZ Ltd Şirketi" | ✅ EVET (numara + isim) |
-| "DEF" | "DEF Anonim Şirketi" | ✅ EVET |
-| "GHI Corp" | "Tamamen Farklı İsim" | ❌ HAYIR |
-
-### 4. Eşleşme varsa → HEMEN KAYDET VE DUR!
-
-```
-⚠️ ARRAY BOŞ DEĞİLSE (en az 1 kayıt var):
-   1. HEMEN write_finding çağır:
-      - TÜM raw varyasyonları yaz (veritabanındaki gibi!)
-      - Hangi node'da bulunduğunu belirt
-   2. Kısa özet döndür
-   3. BAŞKA SORGU YAPMA! DUR!
-
-🛑 DURMA KOŞULU:
-   Sonuç [] değilse → write_finding → DUR!
-   Başka arama için sebep ARAMA!
+✅ Tool #1: NodeA'da ara → 4 sonuç
+   → İstatistik döndür, DUR!
 ```
 
-### ⚠️ KRİTİK: RAW VARYASYONLARI AYNEN YAZ!
-
-KEŞİF görevlerinde bulunan varyasyonları **AYNEN** (raw) yaz, temizleme/yorumlama YAPMA!
-
-**Neden?** Sonraki embedding sorgusunda `WHERE n.name IN [...]` kullanılacak.
-Veritabanındaki EXACT değer yazılmazsa sorgu 0 sonuç döner!
-
-🚨 **TÜM SORGU SONUÇLARINI DAHİL ET!**
-- Her sorguda dönen TÜM kayıtları final response'a ekle
-- Numara prefix'li kayıtları ATLAMA: "12345 ABC..." → AYNEN yaz!
-- Satır içi boşluklu kayıtları ATLAMA: "ABC\nXYZ..." → AYNEN yaz!
-- "Alakasız" diye düşündüklerini de yaz, Orchestrator değerlendirir
-
+### 2. SONUÇ BULUNCA DUR!
 ```
-❌ YANLIŞ (temizlenmiş/yorumlanmış):
-   "ABC Şirketi A.Ş."  ← Kendin düzeltme yaptın
-   
-❌ YANLIŞ (eksik - bazı kayıtları atladın):
-   Tool #2'de 4 kayıt döndü ama sadece 2'sini yazdın!
+Tool çağrısından dönen istatistikte:
+  "success": true, "record_count": 4
 
-✅ DOĞRU (raw - veritabanındaki AYNEN):
-   - "ABC Şirket i A.Ş." (yazım hatası/boşluk VAR - AYNEN yaz!)
-   - "12345 ABC Şirket i A.Ş." (numara prefix VAR - AYNEN yaz!)
-   - "ABC Şirketi A.Ş." (temiz versiyon da VAR - AYNEN yaz!)
-   - "ABC\nŞirketi" (satır içi boşluk VAR - AYNEN yaz!)
+→ HEMEN özet döndür, başka sorgu YAPMA!
 ```
 
-**write_finding formatı (KEŞİF):**
-```markdown
-✅ Bulundu: [N] varyasyon
-
-## RAW Varyasyonlar (AYNEN kopyala):
-| n.name (Veritabanındaki değer) | Node Tipi |
-|--------------------------------|-----------|
-| [EXACT raw value 1]            | [Label]   |
-| [EXACT raw value 2]            | [Label]   |
-
-Notlar:
-- Hariç tutulanlar: [homonim/alakasız kayıtlar]
+### 3. STEP NAME'LERİ FARKLILAŞTIR
 ```
-
-### 5. Toplam Sorgu Sayısını DOĞRU BİLDİR
-
-```
-Yaptığın sorgu sayısını say:
-- read_neo4j_cypher çağrısı = 1 sorgu
-- 3 paralel çağrı = 3 sorgu
-- 18 tool çağrısı = 18 sorgu (3 değil!)
-```
-
-### ⚠️ HATALI DEĞERLENDİRME ÖRNEKLERİ
-
-```
-❌ YANLIŞ: Sonuçta 4 kayıt var ama "1 kayıt bulundu" demek
-❌ YANLIŞ: 18 sorgu yaptın ama "3 sorgu denendi" demek  
-❌ YANLIŞ: "ABC Şirketi A.Ş." bulundu ama "ABC bulunamadı" demek
-❌ YANLIŞ: İlk 3 sorgu boş dönünce sonrakileri görmezden gelmek
-
-✅ DOĞRU: Tüm sorguları say
-✅ DOĞRU: Tüm kayıtları say
-✅ DOĞRU: Semantik eşleştirme yap
-✅ DOĞRU: Eşleşen TÜM varyasyonları listele
+Paralel sorgularda her biri için farklı step_name kullan:
+- step_1_nodeA_search
+- step_1_nodeB_search
+- step_1_nodeC_search
 ```
 
 ## 📝 CYPHER YAZARKEN
@@ -934,18 +1526,21 @@ Orchestrator'dan gelen teknik önerileri kullan:
 - Varyasyonlar verildiyse → OR ile birleştir
 - İlişki verildiyse → MATCH pattern'ı kur
 
+**KEŞİF'te RETURN kuralı:**
+```
+❌ DÖNME: elementId(n), NULL değerler
+✅ DÖNDÜR: RETURN DISTINCT n.name AS name
+```
+
 ```cypher
--- elementId kullan (id() değil):
-RETURN elementId(n) AS id, n.name, n.title
-
--- Birden fazla property:
-WHERE toLower(n.name) CONTAINS 'x' OR toLower(n.title) CONTAINS 'x'
-
--- Birden fazla varyasyon:
+-- Birden fazla varyasyon OR ile:
 WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
 
 -- İlişki takibi:
 MATCH (a:NodeA)-[:REL]->(b:NodeB) WHERE a.prop = 'X' RETURN b
+
+-- KEŞİF sonucu:
+RETURN DISTINCT n.name AS name
 ```
 
 ## ❌ HATA ALDIĞINDA
@@ -955,66 +1550,25 @@ Tool sonucunda hata mesajı görürsen:
 2. **Sorguyu DÜZELT** - Hataya göre sorguyu değiştir
 3. **TEKRAR DENE** - Düzeltilmiş sorguyu çalıştır
 
-### Sık Yapılan Hatalar:
+⚠️ Hata sayısı 2'yi geçerse → DUR ve "Sorgu hatası" olarak döndür
 
-```cypher
--- ❌ YANLIŞ: İki RETURN kullanma
-RETURN x, y, (p)-[:REL]->(n) RETURN n.name
-
--- ✅ DOĞRU: WITH ile ayır, tek RETURN
-WITH p MATCH (p)-[:REL]->(n) RETURN n.name
-
--- ❌ YANLIŞ: RETURN içinde yeni değişken tanımlama
-RETURN (p)-[:REL]->(ic:InsuranceCompany)
-
--- ✅ DOĞRU: Önce MATCH, sonra RETURN
-MATCH (p)-[:REL]->(ic:InsuranceCompany) RETURN ic.name
-
--- ❌ YANLIŞ: Clause sırası yanlış
-MATCH ... RETURN ... WHERE ...
-
--- ✅ DOĞRU: Clause sırası
-MATCH ... WHERE ... WITH ... RETURN ... ORDER BY ... LIMIT
-```
-
-⚠️ Hata sayısı 3'ü geçerse → DUR ve "Sorgu hatası" olarak kaydet
-
-## ⏱️ LİMİTLER
-
-- **3 sorgu** maksimum
-- Aynı sorguyu tekrarlama
-- 3 sorguda bulamazsan → Özet kaydet ve DUR
-
-## 📁 KAYIT FORMATI
+## 📤 ÖZET FORMATI
 
 **Başarılı:**
 ```
-write_finding(
-    session_id="[orchestrator'dan gelen]",
-    step_name="[orchestrator'dan gelen]", 
-    content="✅ Bulundu: [N kayıt]. [Kısa özet]. Denenen: M sorgu."
-)
+✅ Bulundu: [N] kayıt
+- Node: [Label]
+- Sample: [ilk birkaç değer]
+- Dosya: [file_path]
 ```
 
-**Başarısız (tüm denemeler bitti):**
+**Başarısız:**
 ```
-write_finding(
-    session_id="[orchestrator'dan gelen]",
-    step_name="[orchestrator'dan gelen]", 
-    content="❌ Bulunamadı. Denenen: [varyasyon1, varyasyon2, ...]. M sorgu yapıldı."
-)
+❌ Bulunamadı
+- Denenen: [node listesi]
+- Sorgu sayısı: [N]
 ```
-
-## 📤 ÖZET
-
-**Bulundu:** `✅ Bulundu. N kayıt. [Kısa bilgi]`
-**Bulunamadı:** `❌ Bulunamadı. Denenen: [node'lar ve varyasyonlar]`
 """
-
-
-# Eski SEARCHER_SUBAGENT_PROMPT kaldırıldı - artık tek subagent kullanıyoruz
-
-# Eski DEEP_AGENT_SYSTEM_PROMPT kaldırıldı - artık ORCHESTRATOR_SYSTEM_PROMPT kullanılıyor
 
 
 # ============================================================================
@@ -1024,12 +1578,12 @@ write_finding(
 class LangChainAgentIntegration:
     """LangChain create_agent ile chat_bot_stream'e entegre eden sınıf - MCP Tools + Middleware"""
 
-    def __init__(self, model: str = "gpt-4o", graph=None, reasoning_effort: str = "none"):
+    def __init__(self, model: str = "gpt-5", graph=None, reasoning_effort: str = "minimal"):
         self.model = model
         self.graph = graph
-        self.reasoning_effort = reasoning_effort  # none, low, medium, high
+        self.reasoning_effort = reasoning_effort  # minimal, low, medium, high (GPT-5 için)
         self.agent = None
-        self.subagent = None  # Graph explorer subagent
+        self.worker = None  # Worker agent (sorgu yazıcı ve çalıştırıcı)
         self.mcp_client = None
         self.mcp_tools = None
         # NOT: page_links artık session bazlı lokal değişken olarak yönetiliyor
@@ -1384,91 +1938,241 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         # ORCHESTRATOR TOOLS - Sadece koordinasyon tool'ları (MCP YOK!)
         # =====================================================================
         # Orchestrator hiçbir veritabanı sorgusu çalıştırmaz!
-        # Tüm sorgular subagent'a delege edilir.
+        # Tüm sorgular worker'a delege edilir.
         all_tools = []  # MCP tools Orchestrator'a VERİLMEZ!
         
         if think_tool is not None:
             all_tools.append(think_tool)
         if write_finding is not None:
             all_tools.append(write_finding)
-        if read_finding is not None:
-            all_tools.append(read_finding)
+        
+        # read_finding ve read_blackboard - self.current_question_id kullanacak dinamik versiyonlar
+        # Orchestrator'ın geçtiği yanlış question_id'yi ignore et
+        from langchain_core.tools import tool as tool_decorator
+        
+        @tool_decorator
+        def read_finding_dynamic(
+            step_name: str, 
+            result_type: str = "success",
+            include_query: bool = True,
+            start_record: int = 0,
+            end_record: int = 0
+        ) -> str:
+            """
+            Worker'ın kaydettiği sonuç dosyasını oku - KAYIT KAYIT okuyabilirsin!
+            Session ve question ID otomatik alınır.
+            
+            Args:
+                step_name: Adım adı (örn: step_1_customer_search)
+                result_type: "success", "failed" veya "error"
+                include_query: True ise <query> kısmını dahil et
+                start_record: Hangi kayıttan başla (0 = baştan)
+                end_record: Hangi kayıtta bitir (0 = sınırsız, tümü)
+            
+            Örnekler:
+                İlk 10 kayıt: start_record=0, end_record=10
+                10-20 arası:  start_record=10, end_record=20
+                Sadece query: include_query=True, end_record=0 (hiç kayıt yok)
+            """
+            import re
+            
+            q_id = self.current_question_id if self.current_question_id else "default"
+            findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", short_session, q_id)
+            
+            file_path = os.path.join(findings_dir, f"{step_name}_{result_type}.txt")
+            if not os.path.exists(file_path):
+                for ext in [".xml", ".md"]:
+                    alt_path = os.path.join(findings_dir, f"{step_name}_{result_type}{ext}")
+                    if os.path.exists(alt_path):
+                        file_path = alt_path
+                        break
+                else:
+                    return f"Dosya bulunamadı: {file_path}"
+            
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            _log(f"📖 Finding read: {file_path} (records {start_record}-{end_record if end_record > 0 else 'all'})")
+            
+            output_parts = []
+            
+            # Query kısmını ayıkla
+            if include_query:
+                query_match = content.find("<query>")
+                query_end = content.find("</query>")
+                if query_match != -1 and query_end != -1:
+                    output_parts.append(content[query_match:query_end + 8])
+            
+            # Result kısmını ayıkla ve kayıt bazlı filtrele
+            result_match = content.find("<result>")
+            result_end = content.find("</result>")
+            
+            if result_match != -1 and result_end != -1:
+                result_content = content[result_match + 8:result_end]  # <result> ve </result> hariç
+                
+                # Kayıtları parse et - (R:N) pattern'i ile
+                # Her kayıt (R:N){ ile başlıyor
+                record_pattern = r'\(R:(\d+)\)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}'
+                records = list(re.finditer(record_pattern, result_content, re.DOTALL))
+                
+                total_records = len(records)
+                
+                if total_records == 0:
+                    # Pattern bulunamadı, raw content döndür (ama pagination uygulanamaz)
+                    if end_record == 0:
+                        output_parts.append(f"<result>\n{result_content.strip()}\n</result>")
+                    else:
+                        output_parts.append(f"<result>\n(Kayıt formatı tanınmadı - raw içerik)\n{result_content.strip()}\n</result>")
+                else:
+                    # Pagination uygula
+                    effective_end = end_record if end_record > 0 else total_records
+                    filtered_records = []
+                    
+                    for match in records:
+                        record_num = int(match.group(1))
+                        if start_record <= record_num < effective_end:
+                            filtered_records.append(match.group(0))
+                    
+                    if filtered_records:
+                        pagination_info = f"[Kayıtlar {start_record}-{min(effective_end, total_records)-1} / Toplam: {total_records}]"
+                        output_parts.append(f"<result>\n{pagination_info}\n" + "\n".join(filtered_records) + "\n</result>")
+                    else:
+                        output_parts.append(f"<result>\n[Toplam {total_records} kayıt - gösterilen: 0 (aralık dışı)]\n</result>")
+            
+            return "\n\n".join(output_parts) if output_parts else "Dosya boş veya parse edilemedi."
+        
+        @tool_decorator
+        def read_blackboard_dynamic() -> str:
+            """
+            Ortak tahta dosyasını oku - tüm bulgular burada!
+            Session ve question ID otomatik alınır.
+            """
+            q_id = self.current_question_id if self.current_question_id else "default"
+            blackboard_path = os.path.join(
+                os.getcwd(), "agent_findings", "findings", short_session, q_id, "_blackboard.txt"
+            )
+            
+            if not os.path.exists(blackboard_path):
+                return "Blackboard henüz oluşturulmadı - Worker henüz sorgu çalıştırmadı."
+            
+            with open(blackboard_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            _log(f"📋 Blackboard read: {blackboard_path}")
+            return content
+        
+        all_tools.append(read_finding_dynamic)
+        all_tools.append(read_blackboard_dynamic)
         
         _log(f"Orchestrator Tools: {len(all_tools)} coordination tools (NO MCP!)")
 
         # =====================================================================
-        # SUBAGENT - Graph Explorer (ayrı bir agent graph olarak)
+        # WORKER AGENT - Sorgu çalıştırıcı (adapter tool'ları ile)
         # =====================================================================
-        # Subagent'ı lazy olarak oluşturuyoruz - orchestrator'ın spawn_subagent tool'u ile çağrılacak
-        self.subagent = await self._create_subagent(tools, short_session)
+        # Worker her soru için yeniden oluşturulur (question_id ile)
+        # Adapter tool'ları session_id ve question_id ile dosya yapar
+        
+        # question_id stream_query_response'da set ediliyor (her soru için unique)
+        # Eğer henüz set edilmediyse short_session kullan (fallback)
+        if not hasattr(self, 'current_question_id') or not self.current_question_id:
+            self.current_question_id = short_session
+        self.mcp_tools_for_worker = tools
+        self.short_session = short_session
 
         # =====================================================================
-        # SPAWN SUBAGENT TOOL - Orchestrator'ın subagent çağırması için
+        # SPAWN WORKER TOOL - Orchestrator'ın worker çağırması için
         # =====================================================================
         if tool is None:
             raise ImportError("LangChain tool decorator not available")
         
         @tool
-        async def spawn_graph_explorer(task_description: str) -> str:
+        async def spawn_worker(queries: str) -> str:
             """
-            Graph Explorer subagent'ını çağır.
+            Worker agent'ı çağır - Verilen sorguları çalıştır, sonuçları dosyalara yaz.
+            
+            Worker:
+            - Sorguları SIRASYLA çalıştırır
+            - Sonuçları dosyalara YAZAR
+            - İstatistik DÖNDÜRÜR (ham data değil!)
+            
+            Session ve Question ID otomatik alınır.
             
             Args:
-                task_description: Subagent'a verilecek görev açıklaması
+                queries: Çalıştırılacak sorgular (yapılandırılmış format)
             
             Returns:
-                Subagent'ın çalışma sonucu
+                Her sorgu için istatistik özeti
             """
-            if self.subagent is None:
-                return "❌ Subagent mevcut değil"
-            
-            # Task zaten Orchestrator log'unda gösteriliyor, tekrar loglama
+            # Frontend'den gelen question_id'yi kullan (self.current_question_id)
+            q_id = self.current_question_id if self.current_question_id else "default"
             
             try:
-                # Subagent'ı streaming ile çalıştır - gerçek zamanlı loglama için
-                subagent_tool_count = 0
+                # Worker için adapter tool'ları oluştur
+                adapter_tools = create_adapter_tools(
+                    self.mcp_tools_for_worker, 
+                    self.short_session, 
+                    q_id
+                )
+                
+                if not adapter_tools:
+                    return "❌ Adapter tools oluşturulamadı"
+                
+                # Worker agent oluştur
+                worker = await self._create_worker(adapter_tools)
+                
+                if worker is None:
+                    return "❌ Worker agent oluşturulamadı"
+                
+                _log(f"[WORKER] Starting with question_id={q_id}")
+                
+                # Worker'ı streaming ile çalıştır
+                worker_tool_count = 0
                 final_response = ""
                 
-                async for event in self.subagent.astream_events(
-                    {"messages": [{"role": "user", "content": task_description}]},
+                async for event in worker.astream_events(
+                    {"messages": [{"role": "user", "content": queries}]},
                     version="v2"
                 ):
                     kind = event.get("event", "")
                     
                     # Tool çağrısı başladığında logla
                     if kind == "on_tool_start":
-                        subagent_tool_count += 1
                         tool_name = event.get("name", "?")
                         tool_input = event.get("data", {}).get("input", {})
                         
-                        _log(f"[SUBAGENT] Tool #{subagent_tool_count}: {tool_name}")
-                        
-                        if tool_name == "read_neo4j_cypher":
-                            query = tool_input.get("query", "")
-                            _log(f"   📝 CYPHER:\n{query}")
-                        elif tool_name == "read_neo4j_cypher_with_embedding":
+                        # Sadece adapter tool'larını logla, MCP tool'larını değil
+                        if tool_name == "execute_cypher_query":
+                            worker_tool_count += 1
+                            cypher = tool_input.get("cypher", "")
+                            step = tool_input.get("step_name", "")
+                            _log(f"[WORKER] Tool #{worker_tool_count}: {tool_name}")
+                            _log(f"   📝 STEP: {step}")
+                            _log(f"   📝 CYPHER:\n{cypher}")
+                        elif tool_name == "execute_embedding_query":
+                            worker_tool_count += 1
                             query_text = tool_input.get('query_text', '')
                             cypher = tool_input.get('cypher_query', '')
+                            step = tool_input.get("step_name", "")
+                            _log(f"[WORKER] Tool #{worker_tool_count}: {tool_name}")
+                            _log(f"   📝 STEP: {step}")
                             _log(f"   🔎 SEARCH TEXT: {query_text}")
                             _log(f"   📝 CYPHER:\n{cypher}")
-                        else:
-                            _log(f"   Args: {tool_input}")
+                        # MCP tool'ları (read_neo4j_cypher vb.) loglanmaz - adapter içinden çağrılıyor
                     
-                    # Tool sonucu geldiğinde logla
+                    # Tool sonucu geldiğinde logla - sadece adapter tool'ları
                     elif kind == "on_tool_end":
                         tool_name = event.get("name", "?")
-                        output = event.get("data", {}).get("output", "")
-                        if isinstance(output, str):
-                            _log(f"[SUBAGENT_RESULT] {tool_name}:\n{output}")
-                        else:
-                            _log(f"[SUBAGENT_RESULT] {tool_name}: {output}")
+                        # Sadece adapter tool sonuçlarını logla
+                        if tool_name in ["execute_cypher_query", "execute_embedding_query"]:
+                            output = event.get("data", {}).get("output", "")
+                            if isinstance(output, str):
+                                _log(f"[WORKER_RESULT] {tool_name}:\n{output}")
+                            else:
+                                _log(f"[WORKER_RESULT] {tool_name}: {output}")
                     
-                    # Agent son yanıtı - çeşitli event isimlerini kontrol et
+                    # Agent son yanıtı
                     elif kind == "on_chain_end":
                         event_name = event.get("name", "")
                         output = event.get("data", {}).get("output", {})
                         
-                        # messages içeren output'u yakala
                         if isinstance(output, dict) and "messages" in output:
                             messages = output["messages"]
                             if messages:
@@ -1477,23 +2181,21 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                                     candidate = self._extract_text_from_reasoning_content(last_msg.content)
                                     if candidate and len(candidate) > len(final_response):
                                         final_response = candidate
-                                        _log(f"[SUBAGENT] Final response captured from {event_name} ({len(final_response)} chars)")
                 
-                _log(f"← SUBAGENT summary: {subagent_tool_count} tool calls")
+                _log(f"← WORKER summary: {worker_tool_count} tool calls")
                 
                 if final_response:
-                    _log(f"← graph-explorer completed ({len(final_response)} chars)")
-                    _log(f"   📤 FULL RESPONSE:\n{final_response}")
+                    _log(f"← worker completed ({len(final_response)} chars)")
                     return final_response
                 
-                return "Subagent sonuç döndürmedi"
+                return f"Worker {worker_tool_count} sorgu çalıştırdı"
                 
             except Exception as e:
-                logging.error(f"Subagent error: {e}", exc_info=True)
-                return f"❌ Subagent hatası: {str(e)}"
+                logging.error(f"Worker error: {e}", exc_info=True)
+                return f"❌ Worker hatası: {str(e)}"
         
-        all_tools.append(spawn_graph_explorer)
-        _log("Tool: spawn_graph_explorer added")
+        all_tools.append(spawn_worker)
+        _log("Tool: spawn_worker added")
 
         # =====================================================================
         # ANA AGENT OLUŞTUR - create_agent ile
@@ -1514,65 +2216,74 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
 
         return agent
 
-    async def _create_subagent(self, mcp_tools: List, session_id: str):
-        """Graph Explorer Subagent oluştur - MCP tools ile"""
+    async def _create_worker(self, adapter_tools: List):
+        """Worker Agent oluştur - Adapter tools ile (sadece sorgu çalıştırır)
+        
+        Environment Variables:
+            WORKER_MODEL: Worker modeli (default: gpt-5-mini)
+            WORKER_REASONING_EFFORT: GPT-5 için reasoning effort (default: none)
+        """
         if not LANGCHAIN_AGENT_AVAILABLE or create_agent is None:
             return None
         
-        # Subagent için model - daha hızlı ve ucuz
+        # Worker için model - parametrik
         if init_chat_model is None:
             return None
             
-        subagent_model_name = os.environ.get("SUBAGENT_MODEL", "gpt-4o-mini")
-        if not subagent_model_name.startswith("openai:") and "gpt" in subagent_model_name.lower():
-            subagent_model_name = f"openai:{subagent_model_name}"
+        # Environment variables'dan model ve reasoning_effort al
+        # GPT-5-mini için desteklenen değerler: minimal, low, medium, high (none desteklenmiyor!)
+        worker_model_name = os.environ.get("WORKER_MODEL", "gpt-5-mini")
+        worker_reasoning_effort = os.environ.get("WORKER_REASONING_EFFORT", "minimal")
         
-        # Paralel tool çağrısını KAPAT - subagent sıralı çalışsın
-        # Böylece her sorgu sonucunu değerlendirebilir ve "ilk başarılıda dur" kuralını uygulayabilir
-        # 
-        # LangChain dokümantasyonu: model.bind_tools([tools], parallel_tool_calls=False)
-        # https://docs.langchain.com/oss/python/langchain/models#parallel-tool-calls
-        subagent_model = create_sequential_model(subagent_model_name)
+        if not worker_model_name.startswith("openai:") and "gpt" in worker_model_name.lower():
+            worker_model_name = f"openai:{worker_model_name}"
         
-        # Subagent system prompt
+        # Paralel tool çağrıları AÇIK - worker birden fazla node'da aynı anda arama yapabilir
+        # GPT-5 modelleri için reasoning_effort parametresi geç
+        worker_model = create_worker_model(worker_model_name, reasoning_effort=worker_reasoning_effort)
+        
+        # Worker system prompt
         today = datetime.now().strftime("%Y-%m-%d")
-        subagent_prompt = EXPLORER_SUBAGENT_PROMPT.format(date=today)
+        worker_prompt = WORKER_AGENT_PROMPT.format(date=today)
         
-        # Subagent tools - sadece MCP tools + write_finding + think_tool
-        subagent_tools = list(mcp_tools)
-        if think_tool is not None:
-            subagent_tools.append(think_tool)
-        if write_finding is not None:
-            subagent_tools.append(write_finding)
-        if read_finding is not None:
-            subagent_tools.append(read_finding)
+        # Worker tools - sadece adapter tools
+        worker_tools = list(adapter_tools)
         
-        # Subagent middleware - minimal
-        subagent_middleware = []
+        # Worker middleware - minimal
+        worker_middleware = []
         
-        # ModelCallLimitMiddleware - subagent için daha düşük limit
+        # ModelCallLimitMiddleware - worker için düşük limit (sadece verilen sorguları çalıştır)
         if ModelCallLimitMiddleware is not None:
-            subagent_middleware.append(ModelCallLimitMiddleware(run_limit=10))
+            worker_middleware.append(ModelCallLimitMiddleware(run_limit=15))
         
-        subagent = create_agent(
-            model=subagent_model,  # type: ignore[arg-type]
-            tools=subagent_tools,
-            system_prompt=subagent_prompt,
-            middleware=subagent_middleware,
-            name="graph-explorer",
+        worker = create_agent(
+            model=worker_model,  # type: ignore[arg-type]
+            tools=worker_tools,
+            system_prompt=worker_prompt,
+            middleware=worker_middleware,
+            name="worker",
         )
         
-        _log(f"Subagent ready: graph-explorer (model={subagent_model_name})")
-        return subagent
+        _log(f"Worker ready (model={worker_model_name}, reasoning={worker_reasoning_effort})")
+        return worker
 
     async def stream_query_response(
-        self, question: str, session_id: str = "", **kwargs
+        self, question: str, session_id: str = "", question_id: str = "", **kwargs
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """LangChain Agent kullanarak streaming cevap üret - Middleware + MCP tools ile"""
         import time
 
         # Session bazlı page_links - her request için ayrı set (concurrent safety)
         session_page_links: Set[str] = set()
+        
+        # Question ID - her soru için unique (dosya yapısı için)
+        # session_id gibi ilk 8 karakter kullanılır
+        if not question_id:
+            import uuid
+            question_id = str(uuid.uuid4())[:8]
+        else:
+            question_id = question_id[:8]  # session_id gibi kısa format
+        self.current_question_id = question_id
         
         # ⏱️ Timing metrikleri
         timings = {}
@@ -1752,9 +2463,10 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                                     cypher = tool_args.get("cypher_query", "")
                                     _log(f"   🔎 EMBEDDING SEARCH: {query_text}")
                                     _log(f"   📝 CYPHER:\n{cypher}")
-                                elif tool_name == "spawn_graph_explorer":
-                                    task = tool_args.get("task_description", "")
-                                    _log(f"   📋 FULL TASK:\n{task}")
+                                elif tool_name == "spawn_worker":
+                                    queries = tool_args.get("queries", "")
+                                    q_id = tool_args.get("question_id", "")
+                                    _log(f"   📋 WORKER TASK (q_id={q_id}):\n{queries}")
                                 elif tool_name == "write_todos":
                                     todos = tool_args.get("todos", [])
                                     _log(f"   📋 TODOs: {len(todos)} items")
@@ -1991,7 +2703,7 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "none"
+    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "minimal"
 ) -> LangChainAgentIntegration:
     """Session bazlı LangChainAgent al veya oluştur"""
     global _session_agents, _session_access_times, _session_agent_lock
@@ -2015,7 +2727,7 @@ async def get_or_create_session_agent(
                 agent.model = model
                 agent.reasoning_effort = reasoning_effort
                 agent.agent = None  # Agent'ı yeniden oluşturulacak şekilde işaretle
-                agent.subagent = None  # Subagent'ı da yeniden oluştur
+                agent.worker = None  # Worker'ı da yeniden oluştur
             
             if graph and agent.graph != graph:
                 _log(f"Session {session_id[:8]}: graph update", "debug")
@@ -2045,10 +2757,11 @@ def get_session_agent_stats() -> Dict[str, Any]:
 
 async def stream_agent_response(
     question: str,
-    model: str = "gpt-5-mini",
+    model: str = "gpt-5",
     session_id: str = "",
+    question_id: str = "",
     graph=None,
-    reasoning_effort: str = "none",
+    reasoning_effort: str = "minimal",
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -2060,8 +2773,9 @@ async def stream_agent_response(
         question: Kullanıcının sorusu
         model: Kullanılacak LLM modeli (default: gpt-5-mini)
         session_id: Oturum ID'si (conversation history için) - ZORUNLU
+        question_id: Soru ID'si (her soru için unique - dosya yapısı için)
         graph: Neo4j graph connection
-        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (none, low, medium, high) - default: none
+        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (minimal, low, medium, high) - default: minimal
         **kwargs: Ek parametreler
 
     Yields:
@@ -2092,7 +2806,7 @@ async def stream_agent_response(
         agent = await get_or_create_session_agent(session_id, model, graph, reasoning_effort)
         
         async for chunk in agent.stream_query_response(
-            question=question, session_id=session_id, **kwargs
+            question=question, session_id=session_id, question_id=question_id, **kwargs
         ):
             yield chunk
 
