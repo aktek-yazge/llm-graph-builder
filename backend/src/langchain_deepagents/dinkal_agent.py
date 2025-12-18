@@ -1791,6 +1791,15 @@ Orchestrator'dan gelen teknik önerileri kullan:
 - Varyasyonlar verildiyse → OR ile birleştir
 - İlişki verildiyse → MATCH pattern'ı kur
 
+## 📅 TARİHSEL SORGULAR
+
+Tarih bilgileri ayrı **Date node**'larında tutulur (`year`, `month`, `day` property'leri).
+`HAS_START_DATE` ilişkisi bir belgenin hangi döneme ait olduğunu belirtir.
+Tarih filtresi için `HAS_START_DATE` veya `HAS_END_DATE` ilişkilerini kullan:
+```cypher
+MATCH (n:Entity)-[:HAS_START_DATE]->(d:Date) WHERE d.year = 2024 RETURN count(n)
+```
+
 **KEŞİF'te RETURN kuralı:**
 ```
 ❌ DÖNME: elementId(n), NULL değerler
