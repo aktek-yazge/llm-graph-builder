@@ -638,6 +638,14 @@ read_finding_dynamic(step_name, result_type, include_query=True, start_record=0,
 # start_record: başlangıç kayıt no, end_record: bitiş (0=tümü)
 # Örnek: start_record=10, end_record=20 → R:10-R:19 arası
 ```
+## 🚨 CYPHER KRİTİK KURALLAR
+
+### 1. İLİŞKİ YÖNÜ → ŞEMADAN AYNEN KOPYALA!
+```cypher
+-- Şema: (A)-[:REL]->(B) ise
+✅ MATCH (a:A)-[:REL]->(b:B)
+❌ MATCH (b:B)-[:REL]->(a:A)  -- Ters yön çalışmaz!
+```
 
 ## 🏗️ AKIŞ
 
