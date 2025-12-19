@@ -201,8 +201,8 @@ def _clear_session_sources(question_id: str):
 # Tool tanımları - sadece import başarılıysa tanımlanır
 think_tool = None
 write_finding = None
-read_finding = None
 add_source = None
+get_guide = None
 
 if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
     @tool
@@ -235,7 +235,19 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
             Düşünce kaydedildi onayı
         """
         _log(f"💭 THINK:\n{reflection}")
-        return "Düşünce kaydedildi."
+        return """Düşünce kaydedildi.
+
+📎 KAYNAK KONTROLÜ:
+- Cevabında `.pdf` dosya adı geçecek mi? → EVET ise add_source("document", "Dosya.pdf") çağır!
+- Worker sonucunda `fileName` var mı? → EVET ise add_source("document", fileName) çağır!
+- Worker sonucunda `page_link` var mı? → EVET ise add_source("page", page_link) çağır!
+
+💡 EKSTRA BİLGİ KONTROLÜ:
+- Sorgu sonuçlarında kullanıcının sormadığı ama ilginç/faydalı ekstra bilgi var mı?
+- EVET ise → Cevabın sonunda "Ayrıca şunu da buldum: ..." şeklinde ekle
+- Örnek: Para birimi dağılımı, döküman sayısı, tarih aralığı vb.
+
+⚠️ add_source çağırmadan dosya adı/link YAZMA!"""
 
     @tool
     def _write_finding(session_id: str, step_name: str, content: str) -> str:
@@ -259,78 +271,6 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         
         _log(f"📁 Finding saved: {file_path}")
         return f"Bulgular kaydedildi: {file_path}"
-
-    @tool
-    def _read_finding(session_id: str, question_id: str, step_name: str, result_type: str = "success") -> str:
-        """
-        Worker'ın kaydettiği sonuç dosyasını oku.
-        
-        Args:
-            session_id: Oturum ID'si
-            question_id: Soru ID'si
-            step_name: Adım adı (örn: step_1_customer_search)
-            result_type: "success", "failed" veya "error"
-        
-        Dosya Formatı:
-            <query>
-            MATCH ...
-            </query>
-            
-            <result>
-            (R:0){...}
-            </result>
-        """
-        findings_dir = os.path.join(os.getcwd(), "agent_findings", "findings", session_id, question_id)
-        
-        # Önce .txt dene (yeni format)
-        file_path = os.path.join(findings_dir, f"{step_name}_{result_type}.txt")
-        
-        if not os.path.exists(file_path):
-            # Eski formatları dene (geriye uyumluluk)
-            for ext in [".xml", ".md"]:
-                alt_path = os.path.join(findings_dir, f"{step_name}_{result_type}{ext}")
-                if os.path.exists(alt_path):
-                    file_path = alt_path
-                    break
-            else:
-                return f"Dosya bulunamadı: {file_path}"
-        
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        _log(f"📖 Finding read: {file_path}")
-        return content
-
-    @tool
-    def _read_blackboard(session_id: str, question_id: str) -> str:
-        """
-        Ortak tahta dosyasını oku - tüm bulgular burada!
-        
-        Worker her sorgu sonucunu blackboard'a yazar.
-        Bu tool ile tüm KEŞİF sonuçlarını, varyasyonları ve dosya listesini görürsün.
-        
-        Args:
-            session_id: Oturum ID'si
-            question_id: Soru ID'si
-        
-        Returns:
-            Blackboard içeriği (tüm bulgular, varyasyonlar, dosya listesi)
-        
-        ⚠️ İÇERİK görevi vermeden önce MUTLAKA blackboard'u oku!
-        KEŞİF'te bulunan varyasyonları buradan al ve İÇERİK görevine aktar.
-        """
-        blackboard_path = os.path.join(
-            os.getcwd(), "agent_findings", "findings", session_id, question_id, "_blackboard.txt"
-        )
-        
-        if not os.path.exists(blackboard_path):
-            return "Blackboard henüz oluşturulmadı - Worker henüz sorgu çalıştırmadı."
-        
-        with open(blackboard_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        _log(f"📋 Blackboard read: {blackboard_path}")
-        return content
 
     @tool
     def _add_source(question_id: str, source_type: str, value: str) -> str:
@@ -364,12 +304,70 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         else:
             return f"❌ Geçersiz source_type: {source_type}. 'document' veya 'page' olmalı."
 
+    @tool
+    def _get_guide(topic: str) -> str:
+        """
+        Belirli bir konu hakkında detaylı strateji rehberi al.
+        
+        MEVCUT REHBERLER:
+        - KESIF: Entity keşfi, varyasyon bulma, arama terimleri oluşturma
+        - ICERIK: Chunk araması, embedding, daraltma stratejileri
+        - METADATA: İlişki takibi, kaynak bilgisi, fileName/page_link
+        - FALSE_POSITIVE: Embedding doğrulama, text fallback stratejisi
+        - CYPHER_RULES: İlişki yönleri, property kuralları, sorgu yazımı
+        
+        ⚠️ İhtiyaç duyduğun konunun rehberini oku, tüm kuralları ezberlemene gerek yok!
+        
+        Args:
+            topic: Rehber konusu (KESIF, ICERIK, METADATA, FALSE_POSITIVE, CYPHER_RULES)
+        
+        Returns:
+            Detaylı strateji rehberi
+        """
+        # Rehber dosyalarının dizini
+        prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
+        
+        # Topic'i normalize et
+        topic_lower = topic.lower().replace("_", "")
+        
+        # Mapping
+        topic_map = {
+            "kesif": "kesif.md",
+            "keşif": "kesif.md",
+            "icerik": "icerik.md",
+            "içerik": "icerik.md",
+            "metadata": "metadata.md",
+            "falsepositive": "false_positive.md",
+            "false_positive": "false_positive.md",
+            "cypherrules": "cypher_rules.md",
+            "cypher_rules": "cypher_rules.md",
+            "cypher": "cypher_rules.md",
+            "finalcevap": "final_cevap.md",
+            "final_cevap": "final_cevap.md",
+            "cevap": "final_cevap.md",
+        }
+        
+        filename = topic_map.get(topic_lower)
+        if not filename:
+            available = ", ".join(["KESIF", "ICERIK", "METADATA", "FALSE_POSITIVE", "CYPHER_RULES", "FINAL_CEVAP"])
+            return f"❌ Bilinmeyen rehber: {topic}. Mevcut rehberler: {available}"
+        
+        guide_path = os.path.join(prompts_dir, filename)
+        
+        if not os.path.exists(guide_path):
+            return f"❌ Rehber dosyası bulunamadı: {guide_path}"
+        
+        with open(guide_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        _log(f"📖 Guide loaded: {topic} ({filename})")
+        return content
+
     # Global isimlere ata
     think_tool = _think_tool
     write_finding = _write_finding
-    read_finding = _read_finding
-    read_blackboard = _read_blackboard
     add_source = _add_source
+    get_guide = _get_guide
 
 
 # ============================================================================
@@ -379,7 +377,7 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
 # çünkü MCP client instance'ına erişim gerekiyor.
 # Aşağıdaki fonksiyonlar factory pattern ile tool oluşturur.
 
-def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
+def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, user_question: str = ""):
     """
     Worker için adapter tool'ları oluşturur.
     
@@ -392,6 +390,7 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
         mcp_tools: MCP'den alınan tool listesi
         session_id: Oturum ID'si
         question_id: Soru ID'si
+        user_question: Kullanıcının sorduğu orijinal soru
     
     Returns:
         [execute_cypher_query, execute_embedding_query] tool listesi
@@ -409,8 +408,33 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
     # Blackboard dosyası - ortak tahta
     blackboard_path = os.path.join(findings_base, "_blackboard.txt")
     
+    def _init_blackboard():
+        """Blackboard'u başlat - sadece dosya yoksa"""
+        # Zaten varsa üzerine yazma!
+        if os.path.exists(blackboard_path):
+            return
+            
+        try:
+            with open(blackboard_path, "w", encoding="utf-8") as f:
+                f.write(f"# 📋 BLACKBOARD\n")
+                f.write(f"# Session: {session_id} | Question: {question_id}\n")
+                f.write(f"# Detaylar için: read_finding_dynamic(step_name, result_type)\n\n")
+                
+                # Kullanıcı sorusu
+                if user_question:
+                    f.write(f"## 💬 KULLANICI SORUSU\n")
+                    f.write(f"{user_question}\n\n")
+                
+                f.write(f"## 📊 SONUÇLAR\n")
+                
+        except Exception as e:
+            _log(f"⚠️ Blackboard init hatası: {e}")
+    
+    # Blackboard'u başlat (sadece yoksa)
+    _init_blackboard()
+    
     def _append_to_blackboard(step_name: str, file_path: str, record_count: int, success: bool):
-        """Blackboard'a sadece dosya yolu ekle"""
+        """Blackboard'a step sonucunu ekle"""
         try:
             # Mevcut içeriği oku
             existing = ""
@@ -422,14 +446,8 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
             status = "✅" if success else "❌"
             entry = f"{status} {step_name}: {record_count} kayıt → {os.path.basename(file_path)}\n"
             
-            # Dosyaya yaz
-            with open(blackboard_path, "w", encoding="utf-8") as f:
-                if not existing:
-                    f.write(f"# 📋 BLACKBOARD\n")
-                    f.write(f"# Session: {session_id} | Question: {question_id}\n")
-                    f.write(f"# Detaylar için: read_finding(session_id, question_id, step_name, result_type)\n\n")
-                else:
-                    f.write(existing)
+            # Dosyaya ekle
+            with open(blackboard_path, "a", encoding="utf-8") as f:
                 f.write(entry)
                 
         except Exception as e:
@@ -615,512 +633,74 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str):
 ORCHESTRATOR_SYSTEM_PROMPT = """
 Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine eden bir stratejistsin.
 
-## 🎯 SENİN GÖREVLER
+## 🎯 SENİN GÖREVLERİN
 
 1. **Plan yap** - write_todos ile adım adım TODO listesi oluştur
-2. **Strateji belirle** - Şemayı analiz et, olasılıkları belirle
+2. **Şemayı analiz et** - Hangi node'larda, hangi property'lerde aranabilir?
 3. **Worker'a görev ver** - spawn_worker ile araştırma görevi ver
-4. **Sonuçları değerlendir** - İstatistik + tahtayı oku, TODO'yu güncelle
+4. **Sonuçları değerlendir** - read_blackboard_dynamic ile bulgulara bak, think_tool ile analiz et
 5. **Final cevap oluştur** - Tüm bulgulardan kullanıcıya cevap ver
 
 ## 🔧 TOOL'LAR
 
-1. **write_todos** - Plan oluştur ve güncelle
-2. **spawn_worker(queries)** - Worker'a araştırma görevi ver
-3. **read_blackboard_dynamic()** - 📋 TÜM BULGULARI gör (session/question ID otomatik)
-4. **read_finding_dynamic(step_name, result_type, include_query, start_record, end_record)** - Tek dosya oku
-5. **think_tool** - Strateji değerlendir, başarısız sonuçları analiz et
+| Tool | Amaç |
+|------|------|
+| **write_todos** | Plan oluştur ve güncelle |
+| **get_guide(topic)** | 📖 Detaylı strateji rehberi al (KESIF, ICERIK, METADATA, FALSE_POSITIVE, FINAL_CEVAP) |
+| **spawn_worker(queries)** | Worker'a araştırma görevi ver |
+| **read_blackboard_dynamic()** | Tüm bulgulara bak |
+| **read_finding_dynamic(...)** | Tek dosya oku (pagination destekli) |
+| **think_tool** | Strateji değerlendir |
+| **add_source(...)** | Kaynak ekle (dosya adı geçecekse ZORUNLU!) |
 
-## 💰 PAGINATION - Kayıtları sayfa sayfa oku
+## 📖 REHBERLER - İhtiyaç duyduğunda `get_guide(topic)` çağır!
 
-```python
-read_finding_dynamic(step_name, result_type, include_query=True, start_record=0, end_record=0)
-# start_record: başlangıç kayıt no, end_record: bitiş (0=tümü)
-# Örnek: start_record=10, end_record=20 → R:10-R:19 arası
-```
-## 🚨 CYPHER KRİTİK KURALLAR
+| Rehber | Ne Zaman Oku |
+|--------|--------------|
+| **KESIF** | Entity varyasyonu ararken, arama terimleri oluştururken |
+| **ICERIK** | Chunk/embedding araması yaparken, daraltma stratejisi seçerken |
+| **METADATA** | İlişki takibi, kaynak bilgisi alırken |
+| **FALSE_POSITIVE** | Embedding sonuç doğrulaması yaparken |
+| **FINAL_CEVAP** | ⚠️ Kullanıcıya cevap vermeden ÖNCE oku! |
 
-### 1. İLİŞKİ YÖNÜ → ŞEMADAN AYNEN KOPYALA!
-```cypher
--- Şema: (A)-[:REL]->(B) ise
-✅ MATCH (a:A)-[:REL]->(b:B)
-❌ MATCH (b:B)-[:REL]->(a:A)  -- Ters yön çalışmaz!
-```
+⚠️ **Detaylı bilgi için:** `get_guide("KONU_ADI")` çağır! Tüm kuralları ezberleme, ihtiyaç duyduğunda oku.
 
-## 🏗️ AKIŞ
-
-1. **spawn_worker(görev, question_id)** → Worker sorgu yazar, çalıştırır, dosyaya kaydeder
-2. **İstatistik döner:**
-   ```
-   {success: true, record_count: 4, file_path: "findings/.../step_1_success.md"}
-   ```
-3. **Başarılı (success=true)?**
-   → `read_blackboard_dynamic()` ile TÜM bulgulara bak
-   → Varyasyonları al, sonraki adıma geç
-4. **Başarısız (success=false)?**
-   → `read_blackboard` ile önceki başarılı sonuçları kontrol et
-   → `think_tool` ile strateji değiştir
-   → `think_tool` ile analiz et: Neden bulamadı? Farklı ne denenebilir?
-   → Yeni strateji ile tekrar dene
-
-⛔ **SEN SORGU ÇALIŞTIRMA!** Görev ver, Worker halleder.
-
-## 📋 WORKER'A GÖREV FORMATI
-
-Her görevde **GÖREV TİPİ** belirt! Worker buna göre araç seçer.
-
-### GÖREV TİPİ: KEŞİF
-Varyasyon bulma, entity keşfi ⛔ **CHUNK HARİÇ!** (Chunk → İÇERİK görevi)
-
-**🚨 ARAMA TERİMLERİ OLUŞTURURKEN:**
-- Tam ifadeyi ekle: "XYZ Company"
-- Kısaltmalı versiyonları ekle: "XYZ Corp", "XYZ Ltd"
-- **EN TEMEL PARÇAYI (kök kelime) MUTLAKA EKLE:** "XYZ" ← Bu çok önemli!
-
-Örnek: "ABC Holding A.Ş." araması için:
-```
-## 📝 ARAMA TERİMLERİ:
-- "ABC Holding A.Ş."
-- "ABC Holding"
-- "ABC"  ← KÖK KELİME - MUTLAKA EKLE!
-```
+## 🏗️ TEMEL AKIŞ
 
 ```
-spawn_worker(queries=\"\"\"
-## 🏷️ GÖREV TİPİ: KEŞİF
-## 🎯 GÖREV: [Entity]'nin veritabanındaki yazım varyasyonlarını bul
-
-## 🔎 MUHTEMEL NODE'LAR ve PROPERTY'LERİ (şemadan):
-⛔ CHUNK DAHİL ETME! (Chunk → İÇERİK görevinde aranır)
-- [NodeLabel1] → property: [prop1, prop2, ...]
-- [NodeLabel2] → property: [prop1, prop2, ...]
-
-## 📝 ARAMA TERİMLERİ:
-- "[tam_ifade]"
-- "[kısaltmalı_versiyon]"
-- "[kök_kelime]"  ← MUTLAKA EKLE!
-
-## 🔧 TEKNİK NOT:
-Tüm terimleri TEK SORGUDA OR ile birleştir (her node için):
-WHERE toLower(n.[property]) CONTAINS 'term1' OR toLower(n.[property]) CONTAINS 'term2' OR ...
-
-## 📤 RETURN KURALI:
-- Sadece property değerlerini döndür (name, fullName vb.)
-- elementId() DÖNME - sonraki sorgularda kullanılmaz
-- DISTINCT kullan
-Örnek: RETURN DISTINCT n.name AS name
-
-## ⚠️ ÖNEMLİ - TÜM NODE'LARDA ARA!
-Worker, verilen TÜM node'larda paralel arama yapmalı:
-- Her node için ayrı step_name kullan (örn: step_1_nodeA, step_1_nodeB)
-- Birinde sonuç bulunsa bile DİĞERLERİNİ ATLAMA - farklı varyasyonlar olabilir!
-- Tüm sonuçlar blackboard'a yazılacak
-
-## 📁 KAYIT:
-- step_name: "[step_adı]_[node_label]"
-\"\"\")
+1. write_todos → Plan oluştur
+2. get_guide("KESIF") → Strateji oku (ilk kez yapıyorsan)
+3. spawn_worker → Görev ver (GÖREV TİPİ belirt: KEŞİF, İÇERİK, METADATA)
+4. read_blackboard_dynamic → Sonuçları gör
+5. think_tool → Değerlendir: Yeterli mi? Devam mı?
+6. (Tekrarla veya) Final cevap
 ```
 
-### GÖREV TİPİ: İÇERİK
-Chunk'larda semantic arama (embedding)
-
-🚫 **İÇERİK GÖREVİ KULLANMA EĞER:** Şemada yapılandırılmış node varsa (Amount, Price, Date vb.) → Direkt METADATA ile node traversal yap!
-
-⚠️ **İÇERİK GÖREVİ VERMEDEN ÖNCE:**
-1. `read_blackboard_dynamic()` çağır
-2. KEŞİF'te bulunan TÜM varyasyonları blackboard'dan al
-3. Bu varyasyonları İÇERİK görevine AYNEN kopyala!
-
-**ÖNEMLİ:** KEŞİF'ten gelen varyasyonları değerlendir!
-- Varyasyonlar aranan entity ile eşleşiyor mu? → EVET ise İÇERİK'e geç
-- Eşleşmiyor mu? → Yeni KEŞİF görevi ver
-
-🌍 **ÇOK DİLLİ ARAMA - KRİTİK!**
-Belgeler farklı dillerde olabilir! EMBEDDING QUERY'de HER İKİ DİLİ de ver:
-- Türkçe terim + İngilizce karşılık (veya tersi)
-- Örnek format: "türkçe_terim", "english_equivalent"
-Worker önce embedding dener, 0 sonuç gelirse text CONTAINS ile arar.
-
-**DARALTMA TİPLERİ:**
-- **ENTITY**: KEŞİF'te bulunan varyasyonlar + node tipi + ilişki yolu
-- **FİLTRE**: Şemadan çıkardığın property/pattern (tarih, tip, vb.)
-- **TÜM VERİ**: Daraltma yok, tüm Chunk'lar taranacak (yavaş - bilinçli seç!)
-
-```
-spawn_worker(queries=\"\"\"
-## 🏷️ GÖREV TİPİ: İÇERİK
-## 🎯 GÖREV: [Aranan konu] hakkında içerik ara
-
-## 📌 DARALTMA: ENTITY
-### Bulunan Varyasyonlar (KEŞİF'ten - RAW AYNEN KOPYALA!):
-| n.name (Veritabanındaki EXACT değer) | Node Tipi |
-|--------------------------------------|-----------|
-| [raw_value_1 - yazım hataları dahil] | [Label] |
-| [raw_value_2 - yazım hataları dahil] | [Label] |
-
-⚠️ Varyasyonları KEŞİF sonucundan AYNEN al, düzeltme yapma!
-
-### İlişki Yolu (şemadan - OK YÖNÜNE DİKKAT!):
-[Label]<-[:REL]-(Node) veya [Label]-[:REL]->(Node) - şemadaki gibi
-
-## 📊 NODE PROPERTY'LERİ (şemadan):
-- Chunk içeriği: `text` property'sinde (c.text CONTAINS ...)
-- [Diğer ilgili property'ler şemadan]
-
-## 📝 EMBEDDING QUERY (sadece konu):
-- "[aranan konu - Türkçe]"
-- "[aranan konu - İngilizce karşılık]"  ← ÖNEMLİ: Belgeler İngilizce olabilir!
-
-## 🔧 TOOL HATIRLATMA:
-1. ÖNCELİK: `execute_embedding_query` ile semantic arama yap
-   - query_text: sadece konu (yukarıdaki terimler)
-   - cypher_query: $embedding_vector + gds.similarity.cosine > 0.85 içermeli!
-   - ⚠️ Eşik değeri EN AZ 0.85 olmalı (düşük değerler false positive verir)
-
-2. **0 SONUÇ GELİRSE → TEXT FALLBACK ZORUNLU!**
-   ```
-   execute_cypher_query ile TEXT CONTAINS ara:
-   WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2' ...
-   ```
-   - Türkçe ve İngilizce terimlerin HEPSİNİ ekle
-   - İlişki yolunu PART_OF ile dene (FIRST_CHUNK sadece başlık getirir!)
-
-3. **N SONUÇ GELİRSE → DOĞRULAMA ZORUNLU!**
-   - chunk.text'te aranan terim geçiyor mu? (aşağıdaki bölüme bak)
-
-## 🚨 İÇERİK SONUÇ DOĞRULAMA (KRİTİK!):
-Embedding sonuç döndürse bile MUTLAKA DOĞRULA:
-
-1. **read_finding ile chunk.text'leri oku** - Dönen içerikleri incele
-2. **Aranan terim metinde GEÇİYOR MU?** - Aranan kelime text'te var mı?
-3. **GEÇMIYORSA → FALSE POSITIVE!** - Embedding yanlış pozitif vermiş demektir
-
-⚠️ **Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
-Embedding alan benzerliği yakalar (genel terminoloji),
-ama kavramsal farklılığı yakalayamaz (aranan terim ≠ alakasız içerik)
-
-**FALSE POSITIVE TESPİT EDİLDİĞİNDE:**
-- `think_tool` ile analiz et: "Embedding sonuçları aranan terimi içermiyor - FALSE POSITIVE"
-- Text-based fallback dene: `execute_cypher_query` ile explicit text CONTAINS
-- ⚠️ **Chunk ilişki yolunu değiştir:** 
-  - `FIRST_CHUNK` sadece başlık chunk'ını getirir!
-  - `PART_OF` TÜM chunk'ları getirir: `(Chunk)-[:PART_OF]->(Document)`
-  - Örnek: `(d:Document)<-[:PART_OF]-(c:Chunk)` kullan
-
-## 📁 KAYIT:
-- step_name: "[step_adı]"
-\"\"\")
-```
-
-**Alternatif: FİLTRE daraltma**
-```
-## 📌 DARALTMA: FİLTRE
-### Filtre Koşulu (şemadan):
-- [property] [operator] [value]
-- Örnek: d.fileName STARTS WITH '2024'
-
-### İlişki Yolu:
-[Node]-[:REL]->...-[:PART_OF]->(Chunk)
-
-## 📝 EMBEDDING QUERY (sadece konu):
-- "[aranan konu]"
-```
-
-**Alternatif: TÜM VERİ**
-```
-## 📌 DARALTMA: TÜM VERİ
-⚠️ Bu seçenek bilinçli olarak seçildi - tüm Chunk'lar taranacak
-
-## 📝 EMBEDDING QUERY:
-- "[aranan konu]"
-```
-
-### GÖREV TİPİ: METADATA
-Basit ilişki takibi, listeleme
-
-⚠️ **KRİTİK:** İÇERİK görevinden sonra METADATA görevi veriyorsan, 
-**ÖNCEKİ ADIMLARIN FİLTRELERİNİ MUTLAKA MİRAS AL!**
-
-```
-spawn_worker(queries=\"\"\"
-## 🏷️ GÖREV TİPİ: METADATA
-## 🎯 GÖREV: [Entity]'nin [ilişkili entity]'lerini listele
-
-## 📌 DARALTMA: ENTITY (ÖNCEKİ ADIMLARDAN MİRAS!)
-| n.name (Veritabanındaki EXACT değer) | Node Tipi |
-|--------------------------------------|-----------|
-| [Önceki adımda bulunan varyasyon 1]  | [Node]    |
-| [Önceki adımda bulunan varyasyon 2]  | [Node]    |
-
-⚠️ ÖNCEKİ İÇERİK sorgusundaki entity filtrelerini AYNEN kullan!
-   KEŞİF'te bulunan varyasyonları TEKRAR belirt!
-
-## 🔎 NODE'LAR, İLİŞKİLER ve PROPERTY'LER (şemadan):
-- [NodeA] → property: [prop1, prop2]
-- [NodeA]-[:REL]->[NodeB]
-- [NodeB] → property: [prop1, prop2]
-
-## 📤 RETURN KURALI (KAYNAK BİLGİSİ ZORUNLU!):
-- Aranan entity property'leri + **HEM d.fileName HEM c.page_link**
-- `d.fileName` → PDF dosyasına link oluşturur (/files/{fileName})
-- `c.page_link` → Sayfa görseline link oluşturur (/images/{page_link})
-- Örnek: RETURN DISTINCT n.name, d.fileName, c.page_link LIMIT 10
-- ⚠️ Kaynak bilgisi olmadan METADATA sorgusu YAPMA!
-
-## 📁 KAYIT:
-- step_name: "[step_adı]"
-\"\"\")
-```
-
-**YANLIŞ (Filtre olmadan):**
-```cypher
-MATCH (c:Chunk)-[:PART_OF]->(d)-[:REL1]-(n1)-[:REL2]->(n2)
-WHERE c.text CONTAINS 'aranan_terim'  ← TÜM VERİTABANINDA ARAR!
-```
-
-**DOĞRU (Entity filtresi + kaynak bilgisi ile):**
-```cypher
-MATCH (e:EntityNode)<-[:REL1]-(n1)-[:REL2]->(n2)
-WHERE e.name IN ['Varyasyon1', 'Varyasyon2']  ← SADECE İLGİLİ KAYITLAR!
-MATCH (n1)-[:REL3]->(d:Document)<-[:PART_OF]-(c:Chunk)
-WHERE c.text CONTAINS 'aranan_terim'
-RETURN DISTINCT n2.name, d.fileName AS dosya, c.page_link AS sayfa_gorseli
-← HEM PDF HEM SAYFA GÖRSELİ DAHİL!
-```
-
-## 🔄 ÇALIŞMA AKIŞI
-
-```
-1. write_todos → Adım adım plan (in_progress, pending, completed)
-2. spawn_worker → Worker'a görev ver (ne aranacak, hangi node'larda)
-3. read_finding → Sonucu oku
-4. think_tool → Değerlendir: Yeterli mi? Devam mı? Farklı strateji mi?
-5. write_todos → TODO durumunu güncelle
-6. (Tekrarla veya) Final cevap oluştur
-```
-
-## 🧠 ŞEMA ANALİZİ
-
-Şemada gördüğün node'lardan OLASILIKLARI çıkar:
-- İsim/ad alanları: name, title, fullName, label, fileName
-- İlişki yolları: Hangi node'lar birbirine bağlı?
-- İçerik node'ları: Chunk, Text, Content
-
-⚠️ **KEŞİF'te Chunk ARAMA yapmayın!** → İÇERİK görevinde kullan (embedding → text CONTAINS)
-   Document.fileName'de arama yapılabilir.
-
-## ⚠️ KRİTİK KURALLAR
-
-1. **KESİN SÖYLEME**: "X node'unda ara" değil, "X veya Y node'larında olabilir"
-2. **PROPERTY VER**: Hangi field'larda aranabilir
-3. **TEKNİK ÖNERİ VER**: toLower, CONTAINS, embedding
-4. **VARYASYON VER**: Türkçe karakter, kısaltma, tam isim
-5. **TEK GÖREV**: Her worker çağrısı TEK iş
-6. **DEĞERLENDİR**: Worker sonucunu oku, TODO'yu güncelle
-7. **YAPILANDIRILMIŞ VERİ VARSA EMBEDDING ATLA**: Şemada sayısal/tarih/tutar node'u varsa (ör: Amount, Date, Price, Quantity) direkt node traversal yap, chunk/embedding araması YAPMA!
-
-## 🔗 ARDIŞIK GÖREVLERDE FİLTRE MİRASI (ÇOK KRİTİK!)
-
-**KEŞİF → İÇERİK → METADATA** zincirinde:
-- KEŞİF'te bulunan entity varyasyonları TÜM sonraki adımlarda kullanılmalı!
-- İÇERİK'te entity filtresi kullandıysan, METADATA'da da AYNI filtreyi kullan!
-
-**NEDEN?** Aksi halde:
-- İÇERİK: "X entity'sinin Y konusu" → 2 chunk bulundu ✅
-- METADATA: "Y konusu içeren chunk'ların ilişkili node'ları" → TÜM veritabanı tarandı ❌
-
-**DOĞRU YAKLAŞIM:**
-```
-METADATA görevinde:
-## 📌 ÖNCEKİ ADIMLARDAN MİRAS:
-- Entity filtreleri: e.name IN ['KEŞİF varyasyonları...']
-- İçerik filtresi: c.text CONTAINS 'aranan_terim'
-→ HER İKİSİNİ DE KULLAN!
-```
-
-## 🚨 İLİŞKİ ADLARI - ÇOK KRİTİK!
-
-Şemada benzer isimli ama TAMAMEN FARKLI ilişkiler olabilir!
-
-**KURALLAR:**
-1. İlişki adını şemadan **BİREBİR KOPYALA** - asla "benzer" olanı yazma
-2. `HAS_X` ve `HAS_X_SOMETHING` FARKLI ilişkilerdir - dikkat!
-3. Hedef node'un şemadaki pattern ile eşleştiğini kontrol et
-
-**TEKNİK:**
-Şemada görmediğin bir ilişki adı YAZMA!
-- Şemada: `(A)-[:SOME_REL]->(B)` → Aynen yaz: `(A)-[:SOME_REL]->(B)`
-- Şemada yoksa: `(A)-[:SOME_OTHER_REL]->(B)` → YAZMA!
-
-**KONTROL (şema yukarıda verildi):**
-İlişki yolu yazarken her adımı yukarıdaki şemada GÖZÜNLE KONTROL ET:
-1. `(NodeA)-[:REL1]->(NodeB)` yukarıdaki şemada var mı? ✅
-2. `(NodeB)-[:REL2]->(NodeC)` yukarıdaki şemada var mı? ✅
-3. Yoksa yanlış ilişki adı kullanıyorsun - YUKARIDAKI ŞEMAYA BAK!
-
-## 🔄 KEŞİF SONRASI DEĞERLENDİRME
-
-KEŞİF tamamlandığında worker'ın döndürdüğü varyasyonları değerlendir:
-
-1. **Varyasyonlar aranan entity ile eşleşiyor mu?**
-   - EVET → İÇERİK görevine geç, varyasyonları ENTITY daraltma olarak kullan
-   - HAYIR → Yeni KEŞİF görevi ver (farklı terimler/node'lar ile)
-
-2. **İÇERİK görevinde varyasyonları kullan:**
-   - TÜM varyasyonları filtre olarak geç
-   - Hangi node tipinde bulunduklarını belirt
-   - İlişki yolunu şemadan çıkar
-   - query_text = Sadece aranan KONU (varyasyonlar ayrı!)
-
-**Örnek:**
-```
-KEŞİF sonucu: "XYZ" → ["XYZ Corp", "XYZ CORP", "X.Y.Z."] (NodeA'da bulundu)
-Değerlendirme: ✅ Aranan entity ile eşleşiyor
-İÇERİK görevi:
-  - DARALTMA: ENTITY
-  - Varyasyonlar: ["XYZ Corp", "XYZ CORP", "X.Y.Z."]
-  - Node tipi: NodeA
-  - İlişki yolu: NodeA-[:REL1]->NodeB-[:REL2]->NodeC-[:PART_OF]->Chunk
-  - EMBEDDING QUERY: "aranan konu" (sadece konu - varyasyonlar DEĞİL!)
-```
-
-## 🔄 İÇERİK SONRASI DEĞERLENDİRME (KRİTİK!)
-
-İÇERİK araması (embedding) tamamlandığında MUTLAKA doğrula:
-
-### 1. Sonuç döndü mü?
-- **0 sonuç** → Text CONTAINS ile fallback dene
-- **N sonuç** → ⚠️ DOĞRULAMA GEREKLİ (aşağıya bak)
-
-### 2. Dönen içerik GERÇEKTEN aranan terimi içeriyor mu?
-```
-read_finding_dynamic(step_name, result_type="success", include_query=False)
-→ Dönen chunk.text'leri incele
-→ Aranan terim text'te geçiyor mu?
-```
-
-### 3. FALSE POSITIVE Kontrolü
-| Durum | Aksiyon |
-|-------|---------|
-| Text'te aranan terim VAR | ✅ Doğru sonuç, devam et |
-| Text'te aranan terim YOK | ❌ FALSE POSITIVE! |
-
-### 4. FALSE POSITIVE Durumunda:
-```
-think_tool(reflection="Embedding sonuçları aranan terimi içermiyor. 
-Score yüksek (0.82) ama bu domain benzerliğinden kaynaklanıyor.
-FALSE POSITIVE - Text-based arama gerekli.")
-
-→ Yeni İÇERİK görevi ver:
-  - Embedding KULLANMA!
-  - Sadece text CONTAINS kullan
-  - chunk ilişki yolu (Chunk)-[:PART_OF]->(Document)
-```
-
-**Örnek FALSE POSITIVE:**
-```
-Arama: "aranan_terim"
-Embedding sonucu: "alakasız_içerik" (score: 0.82)
-Kontrol: "aranan_terim" text'te geçiyor mu? → HAYIR
-Karar: ❌ FALSE POSITIVE - Her iki metin de aynı alan terminolojisi içerdiği için 
-       embedding benzer buldu ama kavramsal olarak farklılar.
-Aksiyon: Text CONTAINS ile aranan terimi explicit ara
-```
-
-## 🚫 YAPMA
-
-❌ Karmaşık sorguları kendin yapma (worker'a ver)
-❌ Kesin node belirtme (olasılık ver)
-❌ Worker sonucunu okumadan ilerle
-❌ TODO güncellemeden sonraki adıma geç
-❌ Ham veriyi kullanıcıya gösterme
-❌ **Embedding sonuçlarını doğrulamadan kabul etme!**
-   - Yüksek skor (>0.85) doğru sonuç DEMEK DEĞİL!
-   - chunk.text'te aranan terim geçiyor mu kontrol et
-   - Geçmiyorsa FALSE POSITIVE - text CONTAINS ile tekrar ara
-❌ **Dosya adı (.pdf) geçen cevap vermeden ÖNCE add_source çağırmadan bırakma!**
-   - Cevabında dosya adı geçecekse → ÖNCE add_source("document", "Belge.pdf")
-   - add_source çağırmadan dosya adı yazdığında kullanıcı tıklayamaz!
-❌ **Kullanıcıya soru sorma - CEVAP VER!**
-   - "Devam edeyim mi?", "İster misiniz?", "Onaylar mısınız?" → YAPMA!
-   - Veriyi bulduysan analiz et ve kesin cevap ver
-   - Sayısal soru varsa (toplam, kaç, ne kadar) → HESAPLA ve RAPORLA!
-   - Kullanıcı zaten sorusunu sordu, senin görevin CEVAPLAMAK
-
-## 📝 FİNAL CEVAP
-
-### 🚨 KRİTİK: SORU SORMA - CEVAP VER!
-❌ **YAPMA:** "Devam edeyim mi?", "Hesaplamamı ister misiniz?", "Onay verir misiniz?"
-✅ **YAP:** Verileri analiz et, hesapla ve kesin cevap ver!
-
-### 📊 SAYISAL ANALİZ (TOPLAM/ORTALAMA/HESAPLAMA)
-Kullanıcı "toplam", "kaç", "ne kadar", "tutarı" gibi sayısal bir şey soruyorsa:
-
-1. **DUPLICATE TEMİZLE:** Aynı kayıt (policy_no + amount) birden fazla gelmiş olabilir
-   - Farklı chunk'lardan aynı veri gelebilir
-   - DISTINCT policy_no bazında hesapla
-
-2. **PARA BİRİMİ AYIR:** TRY, TL, USD, EUR ayrı ayrı topla
-   - TRY ve TL AYNI para birimi → birleştir
-   - USD ayrı hesapla
-   - Mümkünse toplam için döviz kurunu belirt
-
-3. **HESAPLA ve RAPORLA:**
-   ```
-   Örnek cevap formatı:
-   
-   **[Entity] [Yıl] Toplam [Değer] Tutarları:**
-   - TRY/TL: X TL (N adet kayıt)
-   - USD: Y USD (M adet kayıt)
-   
-   Detaylar:
-   | Kategori | Tutar | Para Birimi |
-   |----------|-------|-------------|
-   | Tip A    | 20,220.53 | TRY |
-   | ...      | ...   | ... |
-   ```
-
-### Format Kuralları:
-- Sade, anlaşılır dil
-- Teknik detay yok (Cypher, node, property vs. gösterme)
-- Markdown formatında
-- **SAYI/TUTAR VARSA MUTLAKA HESAPLA!**
-
-### 📎 KAYNAK EKLEME (ZORUNLU!)
-
-⚠️ **Cevabında dosya adı (.pdf) geçecekse ÖNCE `add_source` çağır!**
-
-**MUTLAKA UYGULA:**
-```
-# 1. Önce kaynağı ekle
-add_source("document", "Dosya_Adi.pdf")
-
-# 2. Sayfa görseli varsa ekle
-add_source("page", "Dosya_Adi_page_001.png")
-
-# 3. SONRA cevabı yaz (dosya adını YAZMA - sistem ekleyecek)
-```
-
-**KRİTİK KONTROL:**
-- Cevabında `.pdf` uzantılı dosya adı geçecek mi? → EVET ise `add_source` ÇAĞIR!
-- Worker sonucunda `fileName` var mı? → EVET ise `add_source` ÇAĞIR!
-- KEŞİF'te dosya adı buldun mu? → EVET ise `add_source` ÇAĞIR!
-
-**YANLIŞ (add_source yok):**
-```
-Cevap: "Dosya adı: Rapor_2024.pdf bulundu."
-→ ❌ Sistem link oluşturamaz çünkü add_source çağrılmadı!
-```
-
-**DOĞRU (add_source var):**
-```
-add_source("document", "Rapor_2024.pdf")
-Cevap: "İlgili belge bulundu."
-→ ✅ Sistem otomatik tıklanabilir link ekler
-```
-
-**⚠️ Kaynak eklemeden FİNAL CEVAP VERME!**
-**⚠️ Sayısal soru varsa HESAPLAMA yapmadan FİNAL CEVAP VERME!**
+## 🏷️ GÖREV TİPLERİ (spawn_worker için)
+
+| Tip | Amaç | Rehber |
+|-----|------|--------|
+| **KEŞİF** | Entity varyasyonları bul | get_guide("KESIF") |
+| **İÇERİK** | Chunk'larda semantic arama | get_guide("ICERIK") |
+| **METADATA** | İlişki takibi, listeleme | get_guide("METADATA") |
+
+⛔ **SEN SORGU ÇALIŞTIRMA!** Görev formatını rehberden öğren, Worker'a ver.
+
+## ⚠️ EN KRİTİK KURALLAR
+
+1. **İlişki yönü** → Şemadan AYNEN kopyala (ters yazarsan çalışmaz!)
+2. **Varyasyonları miras al** → KEŞİF→İÇERİK→METADATA zincirinde filtreleri aktar
+3. **Embedding doğrula** → Yüksek skor ≠ doğru sonuç (get_guide("FALSE_POSITIVE"))
+4. **Kaynak ekle** → Dosya adı geçecekse ÖNCE add_source çağır!
+5. **Soru sorma** → "Devam edeyim mi?" YAPMA, veriyi bulduysan CEVAP VER!
+6. **Hesaplama yapma** → Toplam/ortalama sorularında kayıtları okuyup KENDİN hesaplama yapma! Worker'a Cypher aggregate (SUM, AVG, COUNT) kullandır
+7. **Tarih filtresi belirleme** → "Start veya End" gibi yorumlama yapma, kullanıcının orijinal ifadesini aynen Worker'a aktar!
+8. **⛔ CYPHER KODU YAZMA!** → Sadece şema bilgisi, entity varyasyonları ve görev tanımı ver. Cypher'ı Worker yazacak!
+9. **Hata durumunda yönlendir** → Worker 0 sonuç veya hata dönerse, şemayı kontrol et ve yeni görevde doğru ilişki yönü/adını vurgula (Cypher yazmadan!)
+
+## 📎 FİNAL CEVAP
+
+⚠️ **Cevap vermeden ÖNCE:** `get_guide("FINAL_CEVAP")` oku!
 
 """
 
@@ -1713,11 +1293,13 @@ WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2'
 ## 📋 ÇALIŞMA AKIŞI
 
 1. **Görevi OKU** - Orchestrator'ın verdiği görevi anla
-2. **Sorgu YAZ** - Her node için AYRI sorgu oluştur
+2. **Sorgu YAZ** - Cypher sorgusunu yaz
 3. **PARALEL Çalıştır** - Birden fazla node varsa TÜM sorguları AYNI ANDA çalıştır!
 4. **Sonuç VAR mı?**
    - EVET → İstatistik döndür, DUR
    - HAYIR → Özet döndür
+
+💡 **GEREKİRSE:** Tarih filtresi, karmaşık ilişki yönü gibi konularda emin değilsen → `get_guide("CYPHER_RULES")` oku
 
 ## ⚡ TÜM NODE'LARDA ARA - ZORUNLU!
 
@@ -1794,52 +1376,11 @@ Paralel sorgularda her biri için farklı step_name kullan:
 
 ## 📝 CYPHER YAZARKEN
 
-Orchestrator'dan gelen teknik önerileri kullan:
-- toLower() + CONTAINS önerildiyse → `WHERE toLower(n.prop) CONTAINS 'term'`
-- Varyasyonlar verildiyse → OR ile birleştir
-- İlişki verildiyse → MATCH pattern'ı kur
-
-## 📅 TARİHSEL SORGULAR
-
-Tarih bilgileri ayrı **Date node**'larında tutulur (`year`, `month`, `day` property'leri).
-`HAS_START_DATE` ilişkisi bir belgenin hangi döneme ait olduğunu belirtir.
-Tarih filtresi için `HAS_START_DATE` veya `HAS_END_DATE` ilişkilerini kullan:
-```cypher
-MATCH (n:Entity)-[:HAS_START_DATE]->(d:Date) WHERE d.year = 2024 RETURN count(n)
-```
-
-**KEŞİF'te RETURN kuralı:**
-```
-❌ DÖNME: elementId(n), NULL değerler
-✅ DÖNDÜR: RETURN DISTINCT n.name AS name
-```
-
-**İÇERİK (Chunk)'te RETURN kuralı - fileName + page_link ZORUNLU:**
-```
-✅ ZORUNLU: RETURN c.text, d.fileName, c.page_link, score LIMIT 10
-⚠️ d.fileName → PDF dosyası linki
-⚠️ c.page_link → Sayfa görseli linki
-```
-
-```cypher
--- Birden fazla varyasyon OR ile:
-WHERE toLower(n.name) CONTAINS 'term1' OR toLower(n.name) CONTAINS 'term2'
-
--- İlişki takibi:
-MATCH (a:NodeA)-[:REL]->(b:NodeB) WHERE a.prop = 'X' RETURN b
-
--- KEŞİF sonucu:
-RETURN DISTINCT n.name AS name
-```
+⚠️ **Cypher kuralları için:** `get_guide("CYPHER_RULES")` çağır!
 
 ## ❌ HATA ALDIĞINDA
 
-Tool sonucunda hata mesajı görürsen:
-1. **Hata mesajını OKU** - Neo4j hatanın nedenini söyler
-2. **Sorguyu DÜZELT** - Hataya göre sorguyu değiştir
-3. **TEKRAR DENE** - Düzeltilmiş sorguyu çalıştır
-
-⚠️ Hata sayısı 2'yi geçerse → DUR ve "Sorgu hatası" olarak döndür
+Hata mesajını oku → Sorguyu düzelt → Tekrar dene. 2 hatadan sonra DUR!
 
 ## 📤 ÖZET FORMATI
 
@@ -2234,6 +1775,9 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
 
 {ORCHESTRATOR_SYSTEM_PROMPT}"""
 
+        # Tam prompt'u logla (debug için)
+        _log(f"📜 ORCHESTRATOR FULL PROMPT:\n{'='*80}\n{orchestrator_prompt}\n{'='*80}")
+
         # =====================================================================
         # MODEL OLUŞTUR
         # =====================================================================
@@ -2302,6 +1846,8 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         
         if think_tool is not None:
             all_tools.append(think_tool)
+        if get_guide is not None:
+            all_tools.append(get_guide)
         if write_finding is not None:
             all_tools.append(write_finding)
         
@@ -2493,12 +2039,16 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             # Frontend'den gelen question_id'yi kullan (self.current_question_id)
             q_id = self.current_question_id if self.current_question_id else "default"
             
+            # Kullanıcı sorusu
+            user_question = getattr(self, 'current_user_question', '')
+            
             try:
                 # Worker için adapter tool'ları oluştur
                 adapter_tools = create_adapter_tools(
                     self.mcp_tools_for_worker, 
                     self.short_session, 
-                    q_id
+                    q_id,
+                    user_question=user_question
                 )
                 
                 if not adapter_tools:
@@ -2568,7 +2118,9 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                                 last_msg = messages[-1]
                                 if hasattr(last_msg, "content") and last_msg.content:
                                     candidate = self._extract_text_from_reasoning_content(last_msg.content)
-                                    if candidate and len(candidate) > len(final_response):
+                                    # get_guide içeriğini (rehber) final response olarak kullanma
+                                    is_guide_content = candidate and candidate.strip().startswith("# ") and "REHBERİ" in candidate[:100]
+                                    if candidate and len(candidate) > len(final_response) and not is_guide_content:
                                         final_response = candidate
                 
                 _log(f"← WORKER summary: {worker_tool_count} tool calls")
@@ -2635,8 +2187,10 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         today = datetime.now().strftime("%Y-%m-%d")
         worker_prompt = WORKER_AGENT_PROMPT.format(date=today)
         
-        # Worker tools - sadece adapter tools
+        # Worker tools - adapter tools + get_guide (cypher kurallarına erişim için)
         worker_tools = list(adapter_tools)
+        if get_guide is not None:
+            worker_tools.append(get_guide)
         
         # Worker middleware - minimal
         worker_middleware = []
@@ -2670,6 +2224,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         else:
             question_id = question_id[:8]  # session_id gibi kısa format
         self.current_question_id = question_id
+        self.current_user_question = question  # Blackboard için kullanıcı sorusunu kaydet
         
         # Session sources'ı temizle (yeni soru için)
         _clear_session_sources(question_id)
@@ -2682,7 +2237,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             # Başlangıç durumu
             yield {
                 "type": "status",
-                "message": "🧠 LangChain Agent ile sorgunuz işleniyor...",
+                "message": "🧠 Agent ile sorgunuz işleniyor...",
                 "status": "processing",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
@@ -2744,7 +2299,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             # Agent'ı çalıştır
             yield {
                 "type": "status",
-                "message": "🔍 LangChain Agent araştırma yapıyor...",
+                "message": "🔍 Agent araştırma yapıyor...",
                 "status": "agent_working",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
@@ -2771,6 +2326,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             thinking_step = 0
             logged_message_ids = set()  # Daha önce loglanan mesajları takip et
             step_timings = []
+            final_step_sent = False  # Final cevap thinking mesajı sadece 1 kez gönderilsin
             
             # LangChain create_agent stream_mode="updates" kullanır
             async for chunk in agent.astream(
@@ -2829,13 +2385,60 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                             tool_content = getattr(message, "content", "")
                             tool_msg_name = getattr(message, "name", "unknown")
                             if tool_content:
-                                _log(f"[TOOL_RESULT] {tool_msg_name}:\n{tool_content}")
+                                # get_guide için sadece dosya adı logla, içerik değil
+                                if tool_msg_name == "_get_guide":
+                                    # İlk satırı al (başlık)
+                                    first_line = tool_content.split('\n')[0] if tool_content else ""
+                                    _log(f"[TOOL_RESULT] {tool_msg_name}: {first_line[:80]}...")
+                                else:
+                                    _log(f"[TOOL_RESULT] {tool_msg_name}:\n{tool_content}")
                                 # NOT: Kaynaklar artık add_source tool ile ekleniyor
                                 # Regex extraction kaldırıldı - LLM explicit olarak kaynak ekler
+                                
+                                # Kullanıcıya sonuç durumunu bildir
+                                result_msg = None
+                                result_type = "info"  # info, success, warning, error
+                                
+                                # Hata kontrolü
+                                if "error" in tool_content.lower() or "hata" in tool_content.lower():
+                                    if "bulunamadı" in tool_content.lower() or "not found" in tool_content.lower():
+                                        result_msg = "⚠️ Sonuç bulunamadı, farklı strateji deneniyor"
+                                        result_type = "warning"
+                                    else:
+                                        result_msg = "⚠️ Bir sorun oluştu, tekrar deneniyor"
+                                        result_type = "warning"
+                                
+                                # Başarılı sonuç kontrolü - kayıt sayısını extract et
+                                elif "success" in tool_content.lower() or "✅" in tool_content or '"success": true' in tool_content:
+                                    # JSON formatında record_count ara
+                                    record_match = re.search(r'"record_count":\s*(\d+)', tool_content)
+                                    if record_match:
+                                        count = record_match.group(1)
+                                        if int(count) > 0:
+                                            result_msg = f"✅ {count} kayıt bulundu!"
+                                            result_type = "success"
+                                    else:
+                                        # Alternatif format
+                                        alt_match = re.search(r'(\d+)\s*kayıt', tool_content)
+                                        if alt_match:
+                                            count = alt_match.group(1)
+                                            if int(count) > 0:
+                                                result_msg = f"✅ {count} kayıt bulundu!"
+                                                result_type = "success"
+                                
+                                # Stream result status to user
+                                if result_msg:
+                                    yield {
+                                        "type": "thinking_step",
+                                        "message": result_msg,
+                                        "result_type": result_type,
+                                        "session_id": session_id,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
                         else:
                             step_info["category"] = "other"
                         
-                        # Tool calls loglama
+                        # Tool calls loglama VE kullanıcıya stream etme
                         if hasattr(message, "tool_calls") and message.tool_calls:
                             tool_calls += len(message.tool_calls)
                             for tc in message.tool_calls:
@@ -2845,28 +2448,106 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                                 
                                 _log(f"[ORCHESTRATOR] Tool #{tool_call_count}: {tool_name}")
                                 
-                                # Tüm tool'ları TAM detaylı logla
+                                # Kullanıcıya gösterilecek düşünce mesajı
+                                thinking_msg = None
+                                thinking_details = None
+                                
+                                # Tüm tool'ları TAM detaylı logla + thinking mesajı oluştur
                                 if tool_name == "read_neo4j_cypher":
                                     query = tool_args.get("query", "")
                                     _log(f"   📝 CYPHER QUERY:\n{query}")
+                                    thinking_msg = "🔍 Veritabanında kayıtlar kontrol ediliyor"
+                                    
                                 elif tool_name == "read_neo4j_cypher_with_embedding":
                                     query_text = tool_args.get("query_text", "")
                                     cypher = tool_args.get("cypher_query", "")
                                     _log(f"   🔎 EMBEDDING SEARCH: {query_text}")
                                     _log(f"   📝 CYPHER:\n{cypher}")
+                                    thinking_msg = f"📄 İçerik araması: {query_text[:50]}..." if len(query_text) > 50 else f"📄 İçerik araması: {query_text}"
+                                    
                                 elif tool_name == "spawn_worker":
                                     queries = tool_args.get("queries", "")
                                     q_id = tool_args.get("question_id", "")
                                     _log(f"   📋 WORKER TASK (q_id={q_id}):\n{queries}")
+                                    # Görev tipini belirle
+                                    if "KEŞİF" in queries.upper():
+                                        thinking_msg = "🔍 Veritabanında ilgili kayıtlar kontrol ediliyor"
+                                    elif "İÇERİK" in queries.upper():
+                                        thinking_msg = "📄 Belge içerikleri taranıyor"
+                                    elif "METADATA" in queries.upper():
+                                        thinking_msg = "📊 Detaylı bilgiler sorgulanıyor"
+                                    else:
+                                        thinking_msg = "🔎 Araştırma yapılıyor"
+                                    
                                 elif tool_name == "write_todos":
                                     todos = tool_args.get("todos", [])
                                     _log(f"   📋 TODOs: {len(todos)} items")
+                                    
+                                    # Plan detaylarını kullanıcıya göster
+                                    in_progress = [t for t in todos if t.get("status") == "in_progress"]
+                                    pending = [t for t in todos if t.get("status") == "pending"]
+                                    
+                                    if in_progress:
+                                        current_task = in_progress[0].get("content", "")
+                                        thinking_msg = f"📋 Şu an: {current_task}"
+                                        if pending:
+                                            thinking_details = f"Sıradaki {len(pending)} adım bekleniyor"
+                                    else:
+                                        thinking_msg = f"📋 {len(todos)} adımlık plan hazırlandı"
+                                    
                                     for todo in todos:
                                         _log(f"      - [{todo.get('status', '?')}] {todo.get('content', '')}")
+                                        
+                                elif tool_name == "think_tool":
+                                    reflection = tool_args.get("reflection", "")
+                                    _log(f"   💭 REFLECTION: {reflection[:100]}...")
+                                    thinking_msg = "🤔 Sonuçlar değerlendiriliyor"
+                                    
+                                elif tool_name == "read_blackboard_dynamic":
+                                    _log(f"   📋 Reading blackboard")
+                                    thinking_msg = "📖 Bulgular inceleniyor"
+                                    
+                                elif tool_name == "read_finding_dynamic":
+                                    step = tool_args.get("step_name", "")
+                                    _log(f"   📄 Reading finding: {step}")
+                                    thinking_msg = "📄 Detaylar inceleniyor"
+                                    
+                                elif tool_name == "add_source_dynamic":
+                                    value = tool_args.get("value", "")
+                                    source_type = tool_args.get("source_type", "")
+                                    _log(f"   📎 Adding source: {source_type}={value}")
+                                    if source_type == "document":
+                                        thinking_msg = f"📎 Kaynak belge ekleniyor: {value[:40]}..." if len(value) > 40 else f"📎 Kaynak belge: {value}"
+                                    else:
+                                        thinking_msg = f"🖼️ Sayfa görseli ekleniyor"
+                                        
+                                elif tool_name == "get_guide":
+                                    topic = tool_args.get("topic", "")
+                                    _log(f"   📚 Loading guide: {topic}")
+                                    guide_names = {
+                                        "KESIF": "Arama stratejisi",
+                                        "ICERIK": "İçerik arama stratejisi", 
+                                        "METADATA": "Veri sorgulama stratejisi",
+                                        "FALSE_POSITIVE": "Doğrulama stratejisi",
+                                        "CYPHER_RULES": "Sorgu kuralları"
+                                    }
+                                    thinking_msg = f"📚 {guide_names.get(topic.upper(), topic)} yükleniyor..."
+                                    
                                 else:
                                     _log(f"   Args: {tool_args}")
                                 
                                 step_info["tool_name"] = tool_name
+                                
+                                # Kullanıcıya thinking_step stream et (teknik detay YOK!)
+                                if thinking_msg:
+                                    yield {
+                                        "type": "thinking_step",
+                                        "message": thinking_msg,
+                                        "details": thinking_details,
+                                        "tool_name": tool_name,
+                                        "session_id": session_id,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
                         
                         # Token usage
                         usage = self._extract_token_usage(message)
@@ -2885,6 +2566,17 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                         if hasattr(message, "content") and message.content and msg_type == "AIMessage":
                             new_content = self._extract_text_from_reasoning_content(message.content)
                             if new_content and new_content != response_text:
+                                # Tool çağrısı yoksa bu final cevap demek - thinking mesajı gönder (1 kez)
+                                has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
+                                if not has_tool_calls and not final_step_sent:
+                                    final_step_sent = True
+                                    yield {
+                                        "type": "thinking_step",
+                                        "message": "✨ Son adım: Elde edilen bilgiler hazırlanıp özet haline getiriliyor",
+                                        "session_id": session_id,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
+                                
                                 # Yeni içerik varsa stream et
                                 delta = new_content[len(response_text):] if len(new_content) > len(response_text) else new_content
                                 response_text = new_content

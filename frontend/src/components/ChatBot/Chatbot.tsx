@@ -130,6 +130,9 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const [activeChat, setActiveChat] = useState<Messages | null>(null);
   const [multiModelMetrics, setMultiModelMetrics] = useState<multimodelmetric[]>([]);
   const [isStreamingEnabled, setIsStreamingEnabled] = useState<boolean>(false);
+  
+  // Thinking steps for streaming - düşünce süreçlerini göstermek için
+  const [thinkingSteps, setThinkingSteps] = useState<string[]>([]);
 
   // ⚠️ FIX: Session ID değişikliklerini dinle (clear chat'ten sonra güncellenmesi için)
   useEffect(() => {
@@ -299,7 +302,15 @@ const Chatbot: FC<ChatbotProps> = (props) => {
             // Status mesajlarını handle et (başlangıç durumları vs.)
             // eslint-disable-next-line no-console
             console.log('Status:', message.message);
+          } else if (message.type === 'thinking_step') {
+            // Düşünce adımını ekle - kullanıcıya göster
+            const thinkingMessage = message.message || '';
+            if (thinkingMessage) {
+              setThinkingSteps((prev) => [...prev, thinkingMessage]);
+            }
           } else if (message.type === 'message_chunk' && (message.content || message.full_message)) {
+            // Son mesaj gelmeye başladı - thinking steps'i temizle
+            setThinkingSteps([]);
             // Kelime kelime streaming - full_message varsa onu kullan, yoksa content'i ekle
             setListMessages((prev) =>
               prev.map((msg) => {
@@ -345,6 +356,9 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               }, 100);
             }
           } else if (message.type === 'complete') {
+            // Final response - thinking steps'i temizle
+            setThinkingSteps([]);
+            
             // Final response ile tüm bilgileri güncelle - message direkt seviyede gelir
             const responseMode: ResponseMode = {
               message: message.message || '',
@@ -773,23 +787,38 @@ const Chatbot: FC<ChatbotProps> = (props) => {
                       chat.user === 'chatbot' ? 'n-bg-palette-neutral-bg-strong' : 'n-bg-palette-primary-bg-weak'
                     }`}
                   >
-                    <div
-                      className={`${
-                        chat.isLoading && index === listMessages.length - 1 && chat.user === 'chatbot' ? 'loader' : ''
-                      }`}
-                    >
-                      <div
-                        className={
-                          !isFullScreen
-                            ? 'max-w-[250px] prose prose-sm sm:prose lg:prose-lg xl:prose-xl'
-                            : 'prose prose-sm sm:prose lg:prose-lg xl:prose-xl max-w-none'
-                        }
-                      >
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw] as any}>
-                          {chat.modes[chat.currentMode]?.message || ''}
-                        </ReactMarkdown>
-                      </div>
-                    </div>
+                                    <div>
+                                      {/* Thinking Steps - sadece son mesaj yüklenirken ve mesaj boşken göster */}
+                                      {chat.isLoading && index === listMessages.length - 1 && chat.user === 'chatbot' && thinkingSteps.length > 0 && !chat.modes[chat.currentMode]?.message && (
+                                        <div className="thinking-container">
+                                          {/* Son thinking step'i göster */}
+                                          <div className="flex items-center gap-2 text-sm py-2">
+                                            <span className="thinking-dots">
+                                              <span className="dot">.</span>
+                                              <span className="dot">.</span>
+                                              <span className="dot">.</span>
+                                            </span>
+                                            <span className="opacity-80">{thinkingSteps[thinkingSteps.length - 1]}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {/* Loader - mesaj boşken ve thinking yokken */}
+                                      {chat.isLoading && index === listMessages.length - 1 && chat.user === 'chatbot' && thinkingSteps.length === 0 && !chat.modes[chat.currentMode]?.message && (
+                                        <div className="loader"></div>
+                                      )}
+                                      {/* Mesaj içeriği */}
+                                      <div
+                                        className={
+                                          !isFullScreen
+                                            ? 'max-w-[250px] prose prose-sm sm:prose lg:prose-lg xl:prose-xl'
+                                            : 'prose prose-sm sm:prose lg:prose-lg xl:prose-xl max-w-none'
+                                        }
+                                      >
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw] as any}>
+                                          {chat.modes[chat.currentMode]?.message || ''}
+                                        </ReactMarkdown>
+                                      </div>
+                                    </div>
                     <div>
                       <div>
                         <Typography variant='body-small' className='pt-2 font-bold'>

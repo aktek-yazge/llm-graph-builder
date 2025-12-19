@@ -2,7 +2,7 @@
 import { url } from '../utils/Utils';
 
 export interface ChatStreamMessage {
-  type: 'status' | 'message_chunk' | 'complete' | 'error';
+  type: 'status' | 'message_chunk' | 'complete' | 'error' | 'thinking_step';
   message?: string;
   content?: string;
   full_message?: string;
@@ -16,6 +16,9 @@ export interface ChatStreamMessage {
   timestamp?: string;
   session_id?: string;
   user?: string;
+  details?: string;  // thinking_step detayları
+  result_type?: string;  // thinking_step sonuç tipi (success, warning, error)
+  tool_name?: string;  // thinking_step tool adı (debug için)
   info?: {
     sources?: any[];
     model?: string;
