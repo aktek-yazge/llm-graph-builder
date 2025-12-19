@@ -124,7 +124,7 @@ const LoginPage = () => {
               title='Error'
               description={displayError}
               className='mb-6'
-              closeable
+              isCloseable
               onClose={() => {
                 clearError();
                 setValidationError(null);
@@ -136,13 +136,13 @@ const LoginPage = () => {
             <div>
               <label className='block text-sm font-medium text-gray-200 mb-2'>Email</label>
               <TextInput
-                type='email'
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder='you@example.com'
-                fluid
-                disabled={isLoading}
+                isFluid
+                isDisabled={isLoading}
                 className='bg-white/5 border-white/10 text-white placeholder-gray-500'
+                htmlAttributes={{ type: 'email' }}
               />
             </div>
 
@@ -150,12 +150,11 @@ const LoginPage = () => {
               <div>
                 <label className='block text-sm font-medium text-gray-200 mb-2'>Username</label>
                 <TextInput
-                  type='text'
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder='johndoe'
-                  fluid
-                  disabled={isLoading}
+                  isFluid
+                  isDisabled={isLoading}
                   className='bg-white/5 border-white/10 text-white placeholder-gray-500'
                 />
               </div>
@@ -164,13 +163,13 @@ const LoginPage = () => {
             <div>
               <label className='block text-sm font-medium text-gray-200 mb-2'>Password</label>
               <TextInput
-                type='password'
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder='••••••••'
-                fluid
-                disabled={isLoading}
+                isFluid
+                isDisabled={isLoading}
                 className='bg-white/5 border-white/10 text-white placeholder-gray-500'
+                htmlAttributes={{ type: 'password' }}
               />
             </div>
 
@@ -178,13 +177,13 @@ const LoginPage = () => {
               <div>
                 <label className='block text-sm font-medium text-gray-200 mb-2'>Confirm Password</label>
                 <TextInput
-                  type='password'
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder='••••••••'
-                  fluid
-                  disabled={isLoading}
+                  isFluid
+                  isDisabled={isLoading}
                   className='bg-white/5 border-white/10 text-white placeholder-gray-500'
+                  htmlAttributes={{ type: 'password' }}
                 />
               </div>
             )}
@@ -192,33 +191,21 @@ const LoginPage = () => {
             <Button
               type='submit'
               size='large'
-              loading={isLoading}
-              disabled={isLoading}
+              isLoading={isLoading}
+              isDisabled={isLoading}
               className='w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 border-0 shadow-lg shadow-purple-500/25'
             >
               {mode === 'login' ? 'Sign In' : 'Create Account'}
             </Button>
           </form>
 
-          <div className='mt-6 text-center'>
-            <Typography variant='body-small' className='text-gray-400'>
-              {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-              <button
-                type='button'
-                onClick={toggleMode}
-                className='text-purple-400 hover:text-purple-300 font-medium transition-colors'
-                disabled={isLoading}
-              >
-                {mode === 'login' ? 'Sign up' : 'Sign in'}
-              </button>
-            </Typography>
-          </div>
+         
         </div>
 
         {/* Footer */}
         <div className='mt-8 text-center'>
           <Typography variant='body-small' className='text-gray-500'>
-            Powered by Neo4j & LLM Technology
+            
           </Typography>
         </div>
       </div>
