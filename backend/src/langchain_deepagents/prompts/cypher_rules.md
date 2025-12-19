@@ -2,6 +2,24 @@
 
 Cypher sorgusu yazarken uyulması gereken kritik kurallar.
 
+## 🔧 WORKER TOOL SEÇİM TABLOSU
+
+| Görev Tipi | Tool | Zorunlu Parametre |
+|------------|------|-------------------|
+| **KEŞİF** | `execute_cypher_query` | cypher, step_name |
+| **METADATA** | `execute_cypher_query` | cypher, step_name |
+| **İÇERİK (embedding)** | `execute_embedding_query` | query_text, cypher_query, step_name |
+| **İÇERİK (text fallback)** | `execute_cypher_query` | cypher, step_name |
+
+### ⛔ TOOL KARIŞTIRMA YASAK!
+```
+❌ execute_embedding_query + CONTAINS sorgusu → MCP Server hata verir!
+❌ execute_cypher_query + $embedding_vector → Parametre bulunamaz!
+
+✅ Embedding → execute_embedding_query + $embedding_vector + gds.similarity.cosine
+✅ CONTAINS → execute_cypher_query + toLower(...) CONTAINS
+```
+
 ## 🚨 İLİŞKİ YÖNÜ - EN KRİTİK KURAL!
 
 ```cypher
@@ -126,6 +144,28 @@ MATCH (n)-[:HAS_START_DATE]->(d:Date) WHERE d.year = 2024
 MATCH (n)-[:HAS_END_DATE]->(d:Date) WHERE d.year = 2024
 ```
 
+## 📊 AGGREGATE KURALLARI
+
+Toplam, ortalama, sayı gibi sorularda Cypher aggregate fonksiyonları kullan:
+
+| Soru Tipi | Cypher Fonksiyonu | Örnek |
+|-----------|-------------------|-------|
+| Toplam | `SUM(n.field)` | `RETURN SUM(p.amount) AS toplam` |
+| Ortalama | `AVG(n.field)` | `RETURN AVG(p.price) AS ortalama` |
+| Sayı | `COUNT(n)` | `RETURN COUNT(DISTINCT c) AS adet` |
+| Minimum | `MIN(n.field)` | `RETURN MIN(d.date) AS en_eski` |
+| Maksimum | `MAX(n.field)` | `RETURN MAX(d.date) AS en_yeni` |
+
+```cypher
+-- ✅ DOĞRU: Aggregate fonksiyon kullan
+MATCH (p:Policy)-[:HAS_AMOUNT]->(a:Amount)
+RETURN SUM(a.value) AS toplam_tutar
+
+-- ❌ YANLIŞ: Her kaydı döndürüp manuel toplama bekleme
+MATCH (p:Policy)-[:HAS_AMOUNT]->(a:Amount)
+RETURN a.value  -- Orchestrator tek tek toplasın ← YASAK!
+```
+
 ## 🚫 YAPMA
 
 ❌ Şemada olmayan ilişki adı yazma
@@ -134,4 +174,5 @@ MATCH (n)-[:HAS_END_DATE]->(d:Date) WHERE d.year = 2024
 ❌ toLower() kullanmadan string karşılaştırma
 ❌ LIMIT olmadan çok büyük sonuç döndürme
 ❌ Aynı sorguyu tekrar çalıştırma
+❌ Aggregate soru için her kaydı ayrı döndürme
 

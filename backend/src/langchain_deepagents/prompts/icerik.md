@@ -95,4 +95,37 @@ spawn_worker(queries="""
 - "[aranan konu]"
 ```
 
+## 🔄 EMBEDDING FALLBACK AKIŞI
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. execute_embedding_query → score > 0.85                   │
+│    ↓                                                         │
+│ ┌─────────────────┐     ┌─────────────────────────────────┐ │
+│ │ Sonuç 0 ise     │ →   │ TEXT CONTAINS fallback          │ │
+│ │                 │     │ (execute_cypher_query ile)      │ │
+│ └─────────────────┘     └─────────────────────────────────┘ │
+│    ↓                                                         │
+│ ┌─────────────────┐     ┌─────────────────────────────────┐ │
+│ │ Sonuç N ise     │ →   │ DOĞRULAMA: Aranan terim         │ │
+│ │                 │     │ chunk.text'te VAR mı?           │ │
+│ └─────────────────┘     └─────────────────────────────────┘ │
+│                              ↓                               │
+│                    ┌─────────┴─────────┐                    │
+│                    │                   │                    │
+│               VAR → Devam        YOK → FALSE POSITIVE       │
+│                                        Text fallback dene    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Text Fallback Örneği:**
+```cypher
+-- Embedding 0 sonuç döndü, text araması:
+MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
+WHERE n.name IN ['varyasyon1', 'varyasyon2']
+AND (toLower(c.text) CONTAINS 'türkçe_terim' 
+     OR toLower(c.text) CONTAINS 'english_term')
+RETURN c.text, n.name AS source
+LIMIT 10
+```
 

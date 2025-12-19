@@ -6,6 +6,7 @@ Entity keşfi ve varyasyon bulma stratejileri.
 Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
 ⛔ **CHUNK HARİÇ!** (Chunk → İÇERİK görevinde aranır)
 
+<search_term_rules>
 ## 🚨 ARAMA TERİMLERİ OLUŞTURURKEN
 
 - Tam ifadeyi ekle: "XYZ Company"
@@ -20,9 +21,11 @@ Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
 ❌ YANLIŞ: "Microsoft" → "Micro" 
 ✅ DOĞRU: "Microsoft" → "microsoft"
 ```
+</search_term_rules>
 
 
 
+<task_format>
 ## 📋 GÖREV FORMATI
 
 ```
@@ -66,7 +69,9 @@ Worker, verilen TÜM node'larda paralel arama yapmalı:
 - step_name: "[step_adı]_[node_label]"
 """)
 ```
+</task_format>
 
+<post_discovery_evaluation>
 ## 🔄 KEŞİF SONRASI DEĞERLENDİRME
 
 KEŞİF tamamlandığında:
@@ -121,4 +126,5 @@ Değerlendirme: ✅ Aranan entity ile eşleşiyor
   - İlişki yolu: NodeA-[:REL1]->NodeB-[:REL2]->NodeC-[:PART_OF]->Chunk
   - EMBEDDING QUERY: "aranan konu" (sadece konu - varyasyonlar DEĞİL!)
 ```
+</post_discovery_evaluation>
 

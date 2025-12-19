@@ -56,7 +56,7 @@ def create_worker_model(model_name: str, reasoning_effort: Optional[str] = None)
     
     Args:
         model_name: Model adı (örn: "gpt-4o-mini", "openai:gpt-5-mini")
-        reasoning_effort: GPT-5 modelleri için reasoning effort ("minimal", "low", "medium", "high")
+        reasoning_effort: GPT-5 modelleri için reasoning effort ("none", "low", "medium", "high")
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -631,7 +631,16 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, use
 # ANA AGENT (ORCHESTRATOR) - Planlama, Koordinasyon, Değerlendirme
 # -----------------------------------------------------------------------------
 ORCHESTRATOR_SYSTEM_PROMPT = """
-Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine eden bir stratejistsin.
+<agent_persona>
+Sen Dinkal Sigorta Şirketi için kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine eden bir stratejistsin.
+
+İletişim Tarzın:
+- Kısa ve öz cevaplar ver, gereksiz açıklama yapma
+- Teknik jargon (node, property, Cypher) kullanıcıya GÖSTERME
+- Veri bulduysan hızlıca cevap ver, onay isteme
+- Belirsizlikte en makul yorumu yap ve devam et
+- Her mesajın actionable olsun, momentum koru
+</agent_persona>
 
 ## 🎯 SENİN GÖREVLERİN
 
@@ -643,15 +652,23 @@ Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine ede
 
 ## 🔧 TOOL'LAR
 
-| Tool | Amaç |
-|------|------|
-| **write_todos** | Plan oluştur ve güncelle |
-| **get_guide(topic)** | 📖 Detaylı strateji rehberi al (KESIF, ICERIK, METADATA, FALSE_POSITIVE, FINAL_CEVAP) |
-| **spawn_worker(queries)** | Worker'a araştırma görevi ver |
-| **read_blackboard_dynamic()** | Tüm bulgulara bak |
-| **read_finding_dynamic(...)** | Tek dosya oku (pagination destekli) |
-| **think_tool** | Strateji değerlendir |
-| **add_source(...)** | Kaynak ekle (dosya adı geçecekse ZORUNLU!) |
+<tool_usage_hierarchy>
+### ORCHESTRATOR TOOL'LARI:
+
+| Tool | Amaç | Ne Zaman? |
+|------|------|-----------|
+| **write_todos** | Plan oluştur ve güncelle | ✅ Her zaman ilk adım |
+| **get_guide(topic)** | 📖 Detaylı strateji rehberi al | İlk kez bir görev tipi kullanılacaksa |
+| **spawn_worker(queries)** | Worker'a araştırma görevi ver | ✅ Sorgu çalıştırılacaksa zorunlu |
+| **read_blackboard_dynamic()** | Tüm bulgulara bak | ✅ Her worker sonrası zorunlu |
+| **read_finding_dynamic(...)** | Tek dosya oku (pagination destekli) | Detay gerektiğinde |
+| **think_tool** | Strateji değerlendir | Karmaşık karar gerektiğinde |
+| **add_source(...)** | Kaynak ekle | ✅ Dosya adı geçecekse ZORUNLU! |
+
+### ⛔ ÇAPRAZ KULLANIM YASAK:
+- Sen (Orchestrator): execute_cypher_query ❌, execute_embedding_query ❌
+- Worker: spawn_worker ❌, write_todos ❌
+</tool_usage_hierarchy>
 
 ## 📖 REHBERLER - İhtiyaç duyduğunda `get_guide(topic)` çağır!
 
@@ -662,6 +679,7 @@ Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine ede
 | **METADATA** | İlişki takibi, kaynak bilgisi alırken |
 | **FALSE_POSITIVE** | Embedding sonuç doğrulaması yaparken |
 | **FINAL_CEVAP** | ⚠️ Kullanıcıya cevap vermeden ÖNCE oku! |
+| **CYPHER_RULES** | Worker'a görev verirken Cypher kuralları |
 
 ⚠️ **Detaylı bilgi için:** `get_guide("KONU_ADI")` çağır! Tüm kuralları ezberleme, ihtiyaç duyduğunda oku.
 
@@ -675,6 +693,23 @@ Sen kullanıcı sorularını analiz eden, plan yapan ve araştırma koordine ede
 5. think_tool → Değerlendir: Yeterli mi? Devam mı?
 6. (Tekrarla veya) Final cevap
 ```
+
+<user_updates>
+## 📢 KULLANICI GÜNCELLEMELERİ
+
+Uzun araştırma süreçlerinde kullanıcıyı güncel tut:
+
+**Frequency**: Her 2-3 tool call'da kısa güncelleme
+**Format**:
+- "🔍 [Node]'da arama yapılıyor..."
+- "📄 [N] kayıt bulundu, içerik analiz ediliyor..."
+- "✅ Tamamlandı: [özet bilgi]"
+
+**YAPMA**:
+- Her adımı detaylı açıklama
+- "Şimdi X yapıyorum, sonra Y yapacağım..." gibi gereksiz narration
+- Teknik terimler (node, property, Cypher) kullanma
+</user_updates>
 
 ## 🏷️ GÖREV TİPLERİ (spawn_worker için)
 
@@ -1259,6 +1294,8 @@ Orchestrator sana araştırma görevi verir. Sen:
 
 - `execute_cypher_query(cypher, step_name)`: Cypher sorgusu çalıştır, dosyaya yaz, istatistik döndür
 - `execute_embedding_query(query_text, cypher_query, step_name)`: Embedding araması yap, dosyaya yaz, istatistik döndür
+- `get_schema()`: Neo4j graph şema bilgisini al (node'lar, ilişkiler, property'ler)
+- `get_guide(topic)`: Cypher yazım kuralları ve stratejileri (CYPHER_RULES vb.)
 
 ## 🔧 TOOL SEÇİM KURALLARI - KRİTİK!
 
@@ -1299,7 +1336,9 @@ WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2'
    - EVET → İstatistik döndür, DUR
    - HAYIR → Özet döndür
 
-💡 **GEREKİRSE:** Tarih filtresi, karmaşık ilişki yönü gibi konularda emin değilsen → `get_guide("CYPHER_RULES")` oku
+💡 **GEREKİRSE:** 
+   - İlişki yönü, node label, property bilgisi için → `get_schema()` çağır
+   - Tarih filtresi, yazım kuralları için → `get_guide("CYPHER_RULES")` oku
 
 ## ⚡ TÜM NODE'LARDA ARA - ZORUNLU!
 
@@ -1376,7 +1415,31 @@ Paralel sorgularda her biri için farklı step_name kullan:
 
 ## 📝 CYPHER YAZARKEN
 
-⚠️ **Cypher kuralları için:** `get_guide("CYPHER_RULES")` çağır!
+⚠️ **Şema bilgisi için:** `get_schema()` çağır - ilişki yönleri, node label'ları, property'ler
+⚠️ **Cypher kuralları için:** `get_guide("CYPHER_RULES")` çağır - yazım kuralları, best practices
+
+## 📊 AGGREGATE (TOPLAM/ORTALAMA) KURALLARI
+
+Orchestrator "toplam", "ortalama", "sayı" gibi aggregate sorular için görev verirse:
+
+```
+✅ DOĞRU: Cypher aggregate fonksiyonları kullan
+   RETURN SUM(n.amount) AS toplam
+   RETURN AVG(n.price) AS ortalama
+   RETURN COUNT(DISTINCT n) AS adet
+
+❌ YANLIŞ: Her kaydı ayrı ayrı döndürüp Orchestrator'ın hesaplamasını bekleme
+   RETURN n.amount (ve sonra tek tek toplatsın) ← YASAK!
+```
+
+**Aggregate Fonksiyonları:**
+| Soru Tipi | Cypher Fonksiyonu |
+|-----------|-------------------|
+| Toplam | `SUM(n.field)` |
+| Ortalama | `AVG(n.field)` |
+| Sayı | `COUNT(n)` veya `COUNT(DISTINCT n)` |
+| Minimum | `MIN(n.field)` |
+| Maksimum | `MAX(n.field)` |
 
 ## ❌ HATA ALDIĞINDA
 
@@ -1408,10 +1471,10 @@ Hata mesajını oku → Sorguyu düzelt → Tekrar dene. 2 hatadan sonra DUR!
 class LangChainAgentIntegration:
     """LangChain create_agent ile chat_bot_stream'e entegre eden sınıf - MCP Tools + Middleware"""
 
-    def __init__(self, model: str = "gpt-5", graph=None, reasoning_effort: str = "minimal"):
+    def __init__(self, model: str = "gpt-5", graph=None, reasoning_effort: str = "low"):
         self.model = model
         self.graph = graph
-        self.reasoning_effort = reasoning_effort  # minimal, low, medium, high (GPT-5 için)
+        self.reasoning_effort = reasoning_effort  # none, low, medium, high (GPT-5 için)
         self.agent = None
         self.worker = None  # Worker agent (sorgu yazıcı ve çalıştırıcı)
         self.mcp_client = None
@@ -2054,8 +2117,8 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                 if not adapter_tools:
                     return "❌ Adapter tools oluşturulamadı"
                 
-                # Worker agent oluştur
-                worker = await self._create_worker(adapter_tools)
+                # Worker agent oluştur - schema_info closure'dan alınıyor
+                worker = await self._create_worker(adapter_tools, schema_info)
                 
                 if worker is None:
                     return "❌ Worker agent oluşturulamadı"
@@ -2157,8 +2220,12 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
 
         return agent
 
-    async def _create_worker(self, adapter_tools: List):
+    async def _create_worker(self, adapter_tools: List, schema_info: str = ""):
         """Worker Agent oluştur - Adapter tools ile (sadece sorgu çalıştırır)
+        
+        Args:
+            adapter_tools: MCP adapter tool'ları listesi
+            schema_info: Graph veritabanı şema bilgisi (Worker'ın Cypher yazması için)
         
         Environment Variables:
             WORKER_MODEL: Worker modeli (default: gpt-5-mini)
@@ -2172,9 +2239,9 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             return None
             
         # Environment variables'dan model ve reasoning_effort al
-        # GPT-5-mini için desteklenen değerler: minimal, low, medium, high (none desteklenmiyor!)
+        # GPT-5 modelleri için desteklenen değerler: none, low, medium, high
         worker_model_name = os.environ.get("WORKER_MODEL", "gpt-5-mini")
-        worker_reasoning_effort = os.environ.get("WORKER_REASONING_EFFORT", "minimal")
+        worker_reasoning_effort = os.environ.get("WORKER_REASONING_EFFORT", "low")
         
         if not worker_model_name.startswith("openai:") and "gpt" in worker_model_name.lower():
             worker_model_name = f"openai:{worker_model_name}"
@@ -2191,6 +2258,34 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         worker_tools = list(adapter_tools)
         if get_guide is not None:
             worker_tools.append(get_guide)
+        
+        # get_schema tool - Worker'ın şema bilgisine erişmesi için
+        if LANGCHAIN_AGENT_AVAILABLE and tool is not None and schema_info:
+            from langchain_core.tools import tool as tool_decorator
+            
+            @tool_decorator
+            def get_schema() -> str:
+                """
+                Neo4j graph veritabanı şema bilgisini al.
+                
+                Cypher sorgusu yazarken:
+                - Node label'larını ve property'lerini öğrenmek için
+                - İlişki yönlerini ve adlarını kontrol etmek için
+                - Hangi node'ların hangi property'lere sahip olduğunu görmek için
+                
+                Bu tool'u KULLAN:
+                - İlişki yönünden emin değilsen
+                - Hangi node'da hangi property var bilmiyorsan
+                - Şemayı kontrol etmen gerektiğinde
+                
+                Returns:
+                    Graph şema bilgisi (node'lar, ilişkiler, property'ler)
+                """
+                _log("📋 Worker requested schema info")
+                return schema_info
+            
+            worker_tools.append(get_schema)
+            _log("Tool: get_schema added to worker")
         
         # Worker middleware - minimal
         worker_middleware = []
@@ -2805,7 +2900,7 @@ def clear_session_agent(session_id: str):
 
 
 async def get_or_create_session_agent(
-    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "minimal"
+    session_id: str, model: str = "gpt-5", graph=None, reasoning_effort: str = "low"
 ) -> LangChainAgentIntegration:
     """Session bazlı LangChainAgent al veya oluştur"""
     global _session_agents, _session_access_times, _session_agent_lock
@@ -2863,7 +2958,7 @@ async def stream_agent_response(
     session_id: str = "",
     question_id: str = "",
     graph=None,
-    reasoning_effort: str = "minimal",
+    reasoning_effort: str = "low",
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -2877,7 +2972,7 @@ async def stream_agent_response(
         session_id: Oturum ID'si (conversation history için) - ZORUNLU
         question_id: Soru ID'si (her soru için unique - dosya yapısı için)
         graph: Neo4j graph connection
-        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (minimal, low, medium, high) - default: minimal
+        reasoning_effort: GPT-5 modelleri için reasoning seviyesi (none, low, medium, high) - default: low
         **kwargs: Ek parametreler
 
     Yields:
