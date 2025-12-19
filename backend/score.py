@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+# pyright: reportAttributeAccessIssue=false, reportAssignmentType=false, reportArgumentType=false, reportGeneralTypeIssues=false, reportOptionalMemberAccess=false, reportCallIssue=false
+# NOTE: Above pyright pragmas disable type checking for SQLAlchemy ORM operations.
+# SQLAlchemy Column attributes return actual Python types at runtime, but pyright sees them as Column[T].
+# This is a known limitation with SQLAlchemy's dynamic type system.
 import os
 import sys
 import logging
@@ -16,7 +20,7 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer)
 
-from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +51,7 @@ from src.qa_based_entity_extractor import (
 )
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
+from src.shared.constants import QUERY_TO_GET_CHUNKS
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 from src.shared.context import set_request_context, clear_request_context
 import uvicorn
@@ -84,6 +89,7 @@ from src.celery_client import celery_app, revoke_celery_task, revoke_celery_task
 from src.models.file_queue_models import get_file_queue_db
 from src.otel_tracing_setup import initialize_tracing, instrument_fastapi, get_tracer, add_span_attribute
 from src.otel_logging_setup import initialize_otel_logging
+from src.auth import auth_router, get_current_user, get_current_user_optional, TokenData
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -91,7 +97,8 @@ try:
 
     GEMINI_AVAILABLE = True
 except ImportError:
-    genai = None
+    genai_sdk = None  # type: ignore
+    GEMINI_AVAILABLE = False
 from src.device_utils import (
     get_optimal_device,
     print_device_info,
@@ -190,6 +197,7 @@ try:
 
     DOCLING_AVAILABLE = True
 except ImportError:
+    DocumentConverter = None  # type: ignore
     DOCLING_AVAILABLE = False
 
 # docling_core is only needed for document processing, which is done in celery_worker
@@ -265,7 +273,7 @@ def _sync_status_to_neo4j(neo4j_uri: str, neo4j_database: str, filename: str,
     )
 
 
-def _cleanup_neo4j_for_file(neo4j_uri: str, neo4j_database: str, filename: str, original_name: str) -> str:
+def _cleanup_neo4j_for_file(neo4j_uri: str, neo4j_database: str, filename: str, original_name: str) -> Optional[str]:
     """
     Neo4j'den dosyaya ait chunk, entity ve document node'larını siler.
     Bu fonksiyon SENKRON çalışır - asyncio.to_thread ile çağrılmalı.
@@ -664,12 +672,16 @@ def convert_to_pdf(file_path: str, filename: str) -> str:
 
 
 def get_pdf_page_count(pdf_path: str) -> int:
+    if PdfReader is None:
+        raise RuntimeError("PyPDF2 is not installed. PDF processing is only available in celery_worker.")
     reader = PdfReader(pdf_path)
     return len(reader.pages)
 
 
 def pdf_to_images(pdf_path: str, output_base_name: str) -> list[str]:
     """PDF sayfalarını PNG'e çevirir"""
+    if convert_from_path is None:
+        raise RuntimeError("pdf2image is not installed. PDF processing is only available in celery_worker.")
     images = convert_from_path(
         pdf_path,
         dpi=200,
@@ -971,7 +983,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(SessionMiddleware, secret_key=os.urandom(24))
+app.add_middleware(SessionMiddleware, secret_key=os.urandom(24).hex())
 
 # S3 configuration for file serving
 S3_BACKUP_BUCKET = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
@@ -987,6 +999,9 @@ is_gemini_enabled = os.environ.get("GEMINI_ENABLED", "False").lower() in (
 #     add_routes(app, ChatVertexAI(), path="/vertexai")
 
 app.add_api_route("/health", health([healthy_condition, healthy]))
+
+# Auth routes - JWT authentication
+app.include_router(auth_router, prefix="/api")
 
 
 @app.get("/system/stats")
@@ -1248,13 +1263,10 @@ async def create_source_knowledge_graph_url(
     access_token=Form(None),
     email=Form(None),
 ):
+    source = source_url if source_url is not None else wiki_query  # Initialize before try block
 
     try:
         start = time.time()
-        if source_url is not None:
-            source = source_url
-        else:
-            source = wiki_query
 
         graph = create_graph_database_connection(uri, userName, password, database)
         if source_type == "s3 bucket" and aws_access_key_id and aws_secret_access_key:
@@ -2067,43 +2079,44 @@ async def convert_to_markdown(file: UploadFile = File(...)):
         # Dosya içeriğini oku
         content = await file.read()
         file_size = len(content)
+        filename = file.filename or "unnamed_file"
 
         # Önce cache'i kontrol et
-        cached_markdown = get_cached_markdown(file.filename, file_size)
+        cached_markdown = get_cached_markdown(filename, file_size)
         if cached_markdown:
-            logging.info(f"Markdown cache'den alındı: {file.filename}")
+            logging.info(f"Markdown cache'den alındı: {filename}")
             return {
                 "status": "success",
                 "markdown": cached_markdown,
-                "filename": file.filename,
+                "filename": filename,
                 "original_size": file_size,
                 "markdown_size": len(cached_markdown),
                 "from_cache": True,
             }
 
         # Cache'de yok, Docling ile dönüştür
-        logging.info(f"Docling ile markdown'a çevriliyor: {file.filename}")
+        logging.info(f"Docling ile markdown'a çevriliyor: {filename}")
 
         # Geçici dosya oluştur
         with tempfile.NamedTemporaryFile(
-            delete=False, suffix=Path(file.filename).suffix
+            delete=False, suffix=Path(filename).suffix
         ) as tmp_file:
             tmp_file.write(content)
             tmp_file_path = tmp_file.name
 
         try:
             # docling is only available in celery_worker
-            if DEFAULT_EXPORT_LABELS is None or DocItemLabel is None:
+            if DEFAULT_EXPORT_LABELS is None or DocItemLabel is None or DocumentConverter is None:
                 raise HTTPException(
                     status_code=501,
                     detail="Docling processing is only available in celery_worker. Use V2 endpoints for document processing."
                 )
             
-            labels = [
+            labels = {
                 label
                 for label in DEFAULT_EXPORT_LABELS
                 if label not in (DocItemLabel.PICTURE, DocItemLabel.PAGE_FOOTER)
-            ]
+            }
 
             # Docling ile dosyayı işle
             converter = DocumentConverter()
@@ -2113,12 +2126,12 @@ async def convert_to_markdown(file: UploadFile = File(...)):
             markdown_content = result.document.export_to_markdown(labels=labels)
 
             # Cache'e kaydet
-            save_markdown_to_cache(file.filename, file_size, markdown_content)
+            save_markdown_to_cache(filename, file_size, markdown_content)
 
             return {
                 "status": "success",
                 "markdown": markdown_content,
-                "filename": file.filename,
+                "filename": filename,
                 "original_size": file_size,
                 "markdown_size": len(markdown_content),
                 "from_cache": False,
@@ -3452,6 +3465,8 @@ async def connect(
             "email": email,
         }
         logger.log_struct(json_obj, "INFO")
+        if result is None:
+            result = {}
         result["elapsed_api_time"] = f"{elapsed_time:.2f}"
         result["gcs_file_cache"] = gcs_file_cache
         return create_api_response("Success", data=result)
@@ -3555,14 +3570,17 @@ async def upload_large_file_into_chunks(
             # Create record in Queue DB and trigger Celery Task
             try:
                 queue_db = get_file_queue_db()
+                # Ensure result is a dict (upload_file returns dict on success)
+                if not isinstance(result, dict):
+                    raise ValueError(f"Unexpected result type: {type(result)}")
                 # Use S3 key if available, otherwise fallback to local path
-                file_path_for_db = result.get("s3_key") if result.get("s3_key") else os.path.join(MERGED_DIR, result["file_name"])
+                file_path_for_db = result.get("s3_key") if result.get("s3_key") else os.path.join(MERGED_DIR, str(result["file_name"]))
                 
                 file_record = queue_db.add_file(
-                    filename=result["file_name"],
-                    original_name=originalname,
-                    file_path=file_path_for_db,
-                    file_size=result["file_size"],
+                    filename=str(result["file_name"]),
+                    original_name=str(originalname) if originalname else "",
+                    file_path=str(file_path_for_db),
+                    file_size=int(result["file_size"]),
                     neo4j_uri=uri,
                     neo4j_database=database,
                     model=model,
@@ -3688,10 +3706,10 @@ def encode_password(pwd):
 async def update_extract_status(
     request: Request,
     file_name: str,
-    uri: str = None,
-    userName: str = None,
-    password: str = None,
-    database: str = None,
+    uri: Optional[str] = None,
+    userName: Optional[str] = None,
+    password: Optional[str] = None,
+    database: Optional[str] = None,
 ):
     # URL decode the file name and normalize Unicode characters
     try:
@@ -4634,16 +4652,25 @@ async def calculate_additional_metrics(
         result = await get_additional_metrics(
             question, context_list, answer_list, reference, model
         )
-        if result is None or "error" in result:
+        if result is None:
             return create_api_response(
                 "Failed",
                 message="Failed to calculate evaluation metrics.",
-                error=result.get("error", "Ragas evaluation returned null"),
+                error="Ragas evaluation returned null",
             )
-        data = {
-            mode: {metric: result[i][metric] for metric in result[i]}
-            for i, mode in enumerate(mode_list)
-        }
+        if isinstance(result, dict) and "error" in result:
+            return create_api_response(
+                "Failed",
+                message="Failed to calculate evaluation metrics.",
+                error=result.get("error", "Unknown error"),
+            )
+        if isinstance(result, list):
+            data = {
+                mode: {metric: result[i][metric] for metric in result[i]}
+                for i, mode in enumerate(mode_list)
+            }
+        else:
+            data = result
         return create_api_response("Success", data=data)
     except Exception as e:
         logging.exception(f"Error while calculating evaluation metrics: {e}")
@@ -4721,6 +4748,8 @@ async def backend_connection_configuration():
                 result = graphDb_data_Access.connection_check_and_get_vector_dimensions(
                     database
                 )
+                if result is None:
+                    result = {}
                 result["gcs_file_cache"] = gcs_file_cache
                 result["uri"] = uri
                 logging.info(f"🔍 Backend connection config - Returning URI: {result.get('uri')}")
@@ -5020,10 +5049,13 @@ async def upload_file_to_queue(
     file: UploadFile = File(...),
     originalname: str = Form(None),
     auto_process: str = Form("false"),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """
     V2 Upload: Saves file to output structure + Image Extraction + S3 Upload
     Creates output/document_name/ structure with PDF, images, and uploads to S3
+    
+    🔒 Requires JWT authentication
     """
     from concurrent.futures import ThreadPoolExecutor
     import json
@@ -5034,7 +5066,7 @@ async def upload_file_to_queue(
 
         # Normalize filename
         normalized_filename = (
-            normalize_file_name(originalname) if originalname else file.filename
+            normalize_file_name(originalname) if originalname else (file.filename or "unnamed_file")
         )
         logging.info(
             f"📤 V2 Upload API - File: {originalname} -> {normalized_filename}"
@@ -5182,7 +5214,7 @@ async def upload_file_to_queue(
         # Add new file to queue
         uploaded_file = db.add_file(
             filename=normalized_filename,
-            original_name=originalname or file.filename,
+            original_name=originalname or file.filename or "unnamed_file",
             file_path=str(file_path),
             file_size=file_size,
             auto_process=auto_process_bool,
@@ -5300,10 +5332,16 @@ async def upload_file_to_queue(
 
 
 @app.get("/api/v2/files/list")
-async def list_queued_files(detail_limit: int = 100, detail_offset: int = 0):
+async def list_queued_files(
+    detail_limit: int = 100, 
+    detail_offset: int = 0,
+    current_user: TokenData = Depends(get_current_user)
+):
     """Get list of all files with optimized two-stage query:
     - Stage 1: Get summary (id + status) for ALL files (fast SQL query)
     - Stage 2: Get full details only for visible page (detail_offset to detail_offset+detail_limit)
+    
+    🔒 Requires JWT authentication
     """
     try:
         db = get_file_queue_db()
@@ -5367,13 +5405,19 @@ async def list_queued_files(detail_limit: int = 100, detail_offset: int = 0):
 
 
 @app.post("/api/v2/files/details-by-ids")
-async def get_files_details_by_ids(request: Request):
-    """Get full details for specific file IDs (for filtered views)"""
+async def get_files_details_by_ids(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Get full details for specific file IDs (for filtered views)
+    
+    🔒 Requires JWT authentication
+    """
     try:
         form_data = await request.form()
         ids_str = form_data.get("ids", "")
         
-        if not ids_str:
+        if not ids_str or not isinstance(ids_str, str):
             return create_api_response("Success", data={"files": []})
         
         # Parse comma-separated IDs
@@ -5416,11 +5460,16 @@ async def get_files_details_by_ids(request: Request):
 
 
 @app.post("/api/v2/files/{file_id}/chunk")
-async def start_chunking(file_id: str):
+async def start_chunking(
+    file_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
     """Start chunking process for a file, multiple files, or all files (OCR + Image Extraction + Markdown)
 
     - If file_id is "all", processes all files with chunking_status="ready"
     - If file_id is comma-separated IDs (e.g., "1,2,3"), processes those specific files in batches
+    
+    🔒 Requires JWT authentication
     - Otherwise, processes single file
     """
     try:
@@ -5621,8 +5670,15 @@ async def start_chunking(file_id: str):
 
 
 @app.get("/api/v2/files/{file_id}/status")
-async def get_file_status(file_id: int):
-    """Get status of a single V2 file (for polling)"""
+async def get_file_status(
+    file_id: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Get status of a single V2 file (for polling)
+    
+    🔒 Requires JWT authentication
+    """
+    db_session = None
     try:
         db = get_file_queue_db()
         db_session = db.get_db_session()
@@ -5651,12 +5707,14 @@ async def get_file_status(file_id: int):
             "Failed", message="Failed to get file status", error=error_message
         )
     finally:
-        db_session.close()
+        if db_session is not None:
+            db_session.close()
 
 
 @app.post("/api/v2/files/endorsements/graph-create")
 async def start_endorsement_graph_creation(
     file_id: str = Form("all"),
+    current_user: TokenData = Depends(get_current_user),  # 🔒 JWT Auth
     model: str = Form("openai_gpt_4o_mini"),
     generate_embedding: bool = Form(False),
 ):
@@ -5851,6 +5909,7 @@ async def start_endorsement_graph_creation(
 @app.post("/api/v2/files/{file_id}/graph-create")
 async def start_graph_creation(
     file_id: str,
+    current_user: TokenData = Depends(get_current_user),  # 🔒 JWT Auth
     model: str = Form("openai_gpt_4o_mini"),
     generate_embedding: bool = Form(False),
 ):
@@ -6172,11 +6231,16 @@ async def start_graph_creation(
 
 
 @app.post("/api/v2/files/{file_id}/create-embeddings")
-async def create_embeddings_for_file(file_id: str):
+async def create_embeddings_for_file(
+    file_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
     """Create embeddings for chunks of a completed file or all files
     
     - If file_id is "all", processes all files with chunking_status="chunked" and embedding_status="pending"
     - If file_id is comma-separated IDs (e.g., "1,2,3"), processes those specific files
+    
+    🔒 Requires JWT authentication
     - Otherwise, processes single file
     """
     db_session = None
@@ -6329,13 +6393,21 @@ async def create_embeddings_for_file(file_id: str):
 
 
 @app.post("/api/v2/files/{file_id}/reset")
-async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markdown: bool = False):
+async def reset_file_stage(
+    file_id: str, 
+    stage: str = "invalidate", 
+    delete_markdown: bool = False,
+    current_user: TokenData = Depends(get_current_user),
+):
     """Reset file to a specific stage (cascading: upload→chunking→graph)
 
     If file_id is "all", resets all files based on the stage parameter.
     If stage is "invalidate", intelligently resets a SINGLE file based on its stuck/failed status.
     If delete_markdown is True, markdown files will be deleted AND images will be re-extracted from PDF.
+    
+    🔒 Requires JWT authentication
     """
+    db_session = None
     try:
         if stage not in ["upload", "chunking", "graph", "invalidate"]:
             return create_api_response("Failed", message="Invalid stage parameter")
@@ -7108,12 +7180,20 @@ async def reset_file_stage(file_id: str, stage: str = "invalidate", delete_markd
             "Failed", message="Failed to reset file", error=error_message
         )
     finally:
-        db_session.close()
+        if db_session is not None:
+            db_session.close()
 
 
 @app.post("/api/v2/files/{file_id}/process")
-async def queue_file_for_processing(file_id: int, request: ProcessFileRequest):
-    """Queue a file for background processing"""
+async def queue_file_for_processing(
+    file_id: int, 
+    request: ProcessFileRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue a file for background processing
+    
+    🔒 Requires JWT authentication
+    """
     try:
         db = get_file_queue_db()
 
@@ -7173,8 +7253,13 @@ async def queue_file_for_processing(file_id: int, request: ProcessFileRequest):
 
 
 @app.get("/api/v2/files/status")
-async def get_queue_status():
-    """Get current queue statistics"""
+async def get_queue_status(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Get current queue statistics
+    
+    🔒 Requires JWT authentication
+    """
     try:
         db = get_file_queue_db()
         stats = db.get_queue_stats()
@@ -7459,8 +7544,14 @@ async def delete_file_background_task(
 
 
 @app.delete("/api/v2/files/{file_id}")
-async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
+async def delete_queued_file(
+    file_id: str, 
+    background_tasks: BackgroundTasks,
+    current_user: TokenData = Depends(get_current_user),
+):
     """Delete a file or all files from queue, filesystem, and Neo4j database
+    
+    🔒 Requires JWT authentication
     
     Silme işlemi SENKRON olarak backend'de yapılır:
     1. Celery task'ları iptal edilir (RabbitMQ'dan çıkar)
@@ -7713,8 +7804,13 @@ async def delete_queued_file(file_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/v2/processing/start")
-async def start_background_processing():
-    """Reset stuck processing files (celery worker runs independently)"""
+async def start_background_processing(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Reset stuck processing files (celery worker runs independently)
+    
+    🔒 Requires JWT authentication
+    """
     try:
         from src.models.file_queue_models import get_file_queue_db, UploadedFile
         from sqlalchemy import or_, and_
@@ -7819,8 +7915,13 @@ async def start_background_processing():
 
 
 @app.get("/api/v2/queue/stats")
-async def get_queue_statistics():
-    """Get RabbitMQ queue statistics"""
+async def get_queue_statistics(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Get RabbitMQ queue statistics
+    
+    🔒 Requires JWT authentication
+    """
     try:
         stats = get_queue_stats()
         return create_api_response(
@@ -7836,8 +7937,13 @@ async def get_queue_statistics():
 
 
 @app.post("/api/v2/queue/purge")
-async def purge_queue():
-    """Purge all pending tasks from RabbitMQ queues"""
+async def purge_queue(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Purge all pending tasks from RabbitMQ queues
+    
+    🔒 Requires JWT authentication
+    """
     try:
         result = purge_all_queues()
         return create_api_response(
@@ -7853,8 +7959,13 @@ async def purge_queue():
 
 
 @app.post("/api/v2/processing/stop")
-async def stop_background_processing():
-    """Stop background file processing (deprecated - celery worker runs independently)"""
+async def stop_background_processing(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Stop background file processing (deprecated - celery worker runs independently)
+    
+    🔒 Requires JWT authentication
+    """
     # Celery worker runs independently - this endpoint is kept for backward compatibility
     return create_api_response(
         "Success",
@@ -7864,8 +7975,14 @@ async def stop_background_processing():
 
 
 @app.post("/api/v2/files/{file_id}/cancel")
-async def cancel_file_processing(file_id: int):
-    """Cancel processing for a specific V2 file and revoke any active Celery task"""
+async def cancel_file_processing(
+    file_id: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Cancel processing for a specific V2 file and revoke any active Celery task
+    
+    🔒 Requires JWT authentication
+    """
     db_session = None
     celery_task_revoked = False
     try:
@@ -7941,8 +8058,13 @@ async def cancel_file_processing(file_id: int):
 
 
 @app.get("/api/v2/processing/status")
-async def get_processing_status():
-    """Get processing status (celery worker runs independently)"""
+async def get_processing_status(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Get processing status (celery worker runs independently)
+    
+    🔒 Requires JWT authentication
+    """
     # Celery worker status can be checked via flower or celery inspect
     return create_api_response(
         "Success",

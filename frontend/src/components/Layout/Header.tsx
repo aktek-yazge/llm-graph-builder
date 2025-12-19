@@ -25,7 +25,6 @@ import ChatModeToggle from '../ChatBot/ChatModeToggle';
 import { HeaderProp } from '../../types';
 import { downloadClickHandler, getIsLoading } from '../../utils/Utils';
 import Profile from '../User/Profile';
-import { useAuth0 } from '@auth0/auth0-react';
 
 const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnection, showBackButton }) => {
   const { colorMode, toggleColorMode } = useContext(ThemeWrapperContext);
@@ -35,7 +34,11 @@ const Header: React.FC<HeaderProp> = ({ chatOnly, deleteOnClick, setOpenConnecti
     window.open(url, '_blank');
   }, []);
   const downloadLinkRef = useRef<HTMLAnchorElement>(null);
-  const { loginWithRedirect } = useAuth0();
+  
+  // JWT login redirect function
+  const loginWithRedirect = useCallback(() => {
+    navigate('/login');
+  }, [navigate]);
   const firstTourTarget = useRef<HTMLDivElement>(null);
   const { connectionStatus, watchProcessingMode, setWatchProcessingMode } = useCredentials();
   const chatAnchor = useRef<HTMLDivElement>(null);

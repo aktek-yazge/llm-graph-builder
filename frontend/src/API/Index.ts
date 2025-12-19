@@ -2,11 +2,39 @@ import axios from 'axios';
 import { url } from '../utils/Utils';
 import { UserCredentials } from '../types';
 import { normalizeFileName } from '../utils/utf8';
+import { getStoredToken, clearAuthData } from '../services/AuthAPI';
 
 const api = axios.create({
   baseURL: url(),
   data: {},
 });
+
+// Add JWT token to all requests
+api.interceptors.request.use(
+  (config) => {
+    const token = getStoredToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// Handle 401 responses (unauthorized)
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      clearAuthData();
+      // Redirect to login if not already there
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 export const createDefaultFormData = (userCredentials: UserCredentials) => {
   const formData = new FormData();

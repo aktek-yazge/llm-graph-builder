@@ -1,16 +1,37 @@
 import { Route, Routes } from 'react-router-dom';
 import ChatOnlyComponent from './components/ChatBot/ChatOnlyComponent';
-import { AuthenticationGuard } from './components/Auth/Auth';
+import ProtectedRoute from './components/Auth/ProtectedRoute';
+import LoginPage from './components/Auth/LoginPage';
 import Home from './Home';
 import { SKIP_AUTH } from './utils/Constants.ts';
 
 const App = () => {
   return (
     <Routes>
-      <Route path='/' element={SKIP_AUTH ? <Home /> : <AuthenticationGuard component={Home} />}></Route>
-      <Route path='/readonly' element={<Home />}></Route>
-      <Route path='/chat-only' element={<ChatOnlyComponent />}></Route>
+      {/* Login route - always accessible */}
+      <Route path='/login' element={<LoginPage />} />
+
+      {/* Main route - protected or open based on SKIP_AUTH */}
+      <Route
+        path='/'
+        element={
+          SKIP_AUTH ? (
+            <Home />
+          ) : (
+            <ProtectedRoute>
+              <Home />
+            </ProtectedRoute>
+          )
+        }
+      />
+
+      {/* Readonly mode - always accessible */}
+      <Route path='/readonly' element={<Home />} />
+
+      {/* Chat only - always accessible */}
+      <Route path='/chat-only' element={<ChatOnlyComponent />} />
     </Routes>
   );
 };
+
 export default App;

@@ -426,7 +426,8 @@ export const metricsinfo: Record<string, string> = {
   context_entity_recall: 'Oluşturulan cevap ve alınan bağlamlarda bulunan varlıkların geri çağırma oranını belirler',
 };
 export const EXPIRATION_DAYS = 3;
-export const SKIP_AUTH = (process.env.VITE_SKIP_AUTH ?? 'true') == 'true';
+// Set to 'false' to enable JWT authentication, 'true' to skip
+export const SKIP_AUTH = (process.env.VITE_SKIP_AUTH ?? 'false') == 'true';
 
 export const sourceOptions: PatternOption[] = [{ label: 'Person', value: 'Person' }];
 export const typeOptions: PatternOption[] = [{ label: 'WORKS_FOR', value: 'WORKS_FOR' }];

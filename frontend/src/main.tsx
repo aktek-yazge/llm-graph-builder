@@ -1,7 +1,7 @@
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import { BrowserRouter } from 'react-router-dom';
-import Auth0ProviderWithHistory from './components/Auth/Auth.tsx';
+import { AuthProvider } from './context/AuthContext.tsx';
 import App from './App.tsx';
 import { SKIP_AUTH } from './utils/Constants.ts';
 
@@ -10,9 +10,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     {SKIP_AUTH ? (
       <App />
     ) : (
-      <Auth0ProviderWithHistory>
+      <AuthProvider>
         <App />
-      </Auth0ProviderWithHistory>
+      </AuthProvider>
     )}
   </BrowserRouter>
 );
