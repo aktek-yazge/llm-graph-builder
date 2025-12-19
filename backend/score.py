@@ -2155,9 +2155,12 @@ async def get_source_list(
     password=Form(None),
     database=Form(None),
     email=Form(None),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """
     Calls 'get_source_list_from_graph' which returns list of sources which already exist in databse
+    
+    🔒 Requires JWT authentication
     """
     try:
         start = time.time()
@@ -3493,6 +3496,7 @@ async def upload_large_file_into_chunks(
     database=Form(None),
     email=Form(None),
     generateEmbedding=Form(None),
+    current_user: TokenData = Depends(get_current_user),  # 🔒 JWT Auth
 ):
     try:
         start = time.time()
@@ -3786,7 +3790,9 @@ async def delete_document_and_entities(
     source_types=Form(),
     deleteEntities=Form(),
     email=Form(None),
+    current_user: TokenData = Depends(get_current_user),
 ):
+    """🔒 Requires JWT authentication"""
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -3960,7 +3966,9 @@ async def get_unconnected_nodes_list(
     password=Form(None),
     database=Form(None),
     email=Form(None),
+    current_user: TokenData = Depends(get_current_user),
 ):
+    """🔒 Requires JWT authentication"""
     try:
         start = time.time()
         graph = create_graph_database_connection(uri, userName, password, database)
@@ -3996,6 +4004,7 @@ async def delete_orphan_nodes(
     uri=Form(None),
     userName=Form(None),
     password=Form(None),
+    current_user: TokenData = Depends(get_current_user),  # 🔒 JWT Auth
     database=Form(None),
     unconnected_entities_list=Form(),
     email=Form(None),
@@ -4828,6 +4837,7 @@ async def document_analytics(
     uri=Form(None),
     userName=Form(None),
     password=Form(None),
+    current_user: TokenData = Depends(get_current_user),  # 🔒 JWT Auth
     database=Form(None),
     analysis_type=Form("overview"),
 ):
@@ -4940,9 +4950,14 @@ async def search_person_documents_endpoint(
 
 @app.delete("/delete_similar_relationships")
 async def delete_similar_relationships(
-    uri=Form(None), userName=Form(None), password=Form(None), database=Form(None)
+    uri=Form(None), 
+    userName=Form(None), 
+    password=Form(None), 
+    database=Form(None),
+    current_user: TokenData = Depends(get_current_user),
 ):
-    """
+    """🔒 Requires JWT authentication
+    
     Tüm SIMILAR ilişkilerini veritabanından siler
     """
     try:
