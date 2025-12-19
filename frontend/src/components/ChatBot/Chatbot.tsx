@@ -309,8 +309,11 @@ const Chatbot: FC<ChatbotProps> = (props) => {
               setThinkingSteps((prev) => [...prev, thinkingMessage]);
             }
           } else if (message.type === 'message_chunk' && (message.content || message.full_message)) {
-            // Son mesaj gelmeye başladı - thinking steps'i temizle
-            setThinkingSteps([]);
+            // Sadece is_final_answer true ise thinking steps'i temizle
+            // Böylece tool çağrıları sırasındaki ara mesajlar thinking steps'i bozmaz
+            if (message.is_final_answer) {
+              setThinkingSteps([]);
+            }
             // Kelime kelime streaming - full_message varsa onu kullan, yoksa content'i ekle
             setListMessages((prev) =>
               prev.map((msg) => {

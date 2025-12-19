@@ -16,19 +16,11 @@ spawn_worker(queries="""
 ## 🏷️ GÖREV TİPİ: METADATA
 ## 🎯 GÖREV: [Entity]'nin [ilişkili entity]'lerini listele
 
-## 📌 DARALTMA: ENTITY (ÖNCEKİ ADIMLARDAN MİRAS!)
-| n.name (Veritabanındaki EXACT değer) | Node Tipi |
-|--------------------------------------|-----------|
-| [Önceki adımda bulunan varyasyon 1]  | [Node]    |
-| [Önceki adımda bulunan varyasyon 2]  | [Node]    |
+## 📌 FİLTRE (ÖNCEKİ ADIMDAN MİRAS!)
+⚠️ `<result>` DEĞİL, `<query>` bloğundaki filtreyi kullan!
 
-⛔ **EXACT DEĞERLERİ KULLAN - TAHMİN ETME!**
-- `read_finding_dynamic` ile KEŞİF sonuçlarını OKU
-- Veritabanından dönen **HAM** değerleri KOPYALA-YAPIŞTIR
-- Kendi yorumunu ekleme, kısaltma!
-
-❌ YANLIŞ: "ABC Ltd" (kısaltma/tahmin)
-✅ DOĞRU: "ABC LİMİTED ŞİRKETİ" (veritabanından dönen EXACT değer)
+Önceki adımdaki filtre: [property] alanında '[terim]' içerenleri ara
+Bu filtreyi aynen bu sorguda da kullan!
 
 ## 🔎 ŞEMA BİLGİSİ:
 - Kaynak node: [NodeA], property'ler: [prop1, prop2]
@@ -51,25 +43,61 @@ Sen (Orchestrator) Cypher kodu yazmayacaksın! Sadece:
 - Entity varyasyonları
 - Görev tanımı
 
-**Worker** Cypher kodunu yazacak. 
+**Worker** Cypher kodunu yazacak.
+
+## 📅 TARİH FİLTRESİ KURALLARI
+
+| Kullanıcı İfadesi | Hangi Date? |
+|-------------------|-------------|
+| "düzenlenen", "başlayan", "yapılan" | → START DATE |
+| "biten", "sona eren" | → END DATE |
+| "düzenlenen veya biten", "geçerli olan" | → START DATE veya END DATE |
+
+```
+❌ "start veya end Date'e bak" (belirsiz!)
+✅ "START DATE'i 2024 olan" (net!)
+``` 
 
 <filter_inheritance>
-## 🔗 ARDIŞIK GÖREVLERDE FİLTRE MİRASI (ÇOK KRİTİK!)
+## ⛔ FİLTRE MİRASI (ÇOK KRİTİK!)
 
-**KEŞİF → İÇERİK → METADATA** zincirinde:
-- KEŞİF'te bulunan entity varyasyonları TÜM sonraki adımlarda kullanılmalı!
-- İÇERİK'te entity filtresi kullandıysan, METADATA'da da AYNI filtreyi kullan!
+`<result>` bloğundaki uzun değerleri **KESİNLİKLE YAZMA!**
 
-**NEDEN?** Aksi halde:
-- İÇERİK: "X entity'sinin Y konusu" → 2 chunk bulundu ✅
-- METADATA: "Y konusu içeren chunk'ların ilişkili node'ları" → TÜM veritabanı tarandı ❌
-
-**DOĞRU YAKLAŞIM:**
 ```
-METADATA görevinde:
-## 📌 ÖNCEKİ ADIMLARDAN MİRAS:
-- Entity filtreleri: e.name IN ['KEŞİF varyasyonları...']
-- İçerik filtresi: c.text CONTAINS 'aranan_terim'
-→ HER İKİSİNİ DE KULLAN!
+❌ YASAK: <result>'taki uzun değerleri kopyalama!
+
+✅ SADECE: <query>'deki filtreleme koşullarını kelime ile aktar
 ```
+
+**Worker'a:** Önceki sorguda bu veriye nasıl ulaşıldıysa, aynı filtreleme koşullarını kullanmasını söyle.
 </filter_inheritance>
+
+<multi_role_entity>
+## 🎭 ROL BAZLI AYRIM
+
+KEŞİF'te aynı entity **birden fazla node tipinde** bulunduysa → sonuçları **rol bazında ayır!**
+
+```
+❌ "Toplam: 100"
+✅ "RolA: 50, RolB: 30, RolC: 20"
+```
+
+Worker'a: Her rol için ayrı satır döndürmesini söyle.
+</multi_role_entity>
+
+<aggregation_rules>
+## 📊 AGGREGATION KURALLARI
+
+Toplam/ortalama hesaplarken **kaynak dağılımını da göster!**
+
+```
+❌ Sadece toplam: "Toplam: 142M TRY"
+
+✅ Kaynak dağılımı ile:
+   - Toplam: 142M TRY
+   - Kaynak: X belge, Y kayıt
+   - Belge bazında: [belge1: N kayıt, belge2: M kayıt]
+```
+
+Worker'a: Aggregation yaparken kaynak dosya/belge bilgisini de döndürmesini söyle.
+</aggregation_rules>

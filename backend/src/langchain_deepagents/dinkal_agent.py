@@ -679,7 +679,7 @@ Sen Dinkal Sigorta Şirketi için kullanıcı sorularını analiz eden, plan yap
 | **METADATA** | İlişki takibi, kaynak bilgisi alırken |
 | **FALSE_POSITIVE** | Embedding sonuç doğrulaması yaparken |
 | **FINAL_CEVAP** | ⚠️ Kullanıcıya cevap vermeden ÖNCE oku! |
-| **CYPHER_RULES** | Worker'a görev verirken Cypher kuralları |
+| **CYPHER_RULES** | ⚠️ SADECE Worker 0 sonuç veya hata döndüğünde oku! Başarılı sonuçlarda ÇAĞIRMA! |
 
 ⚠️ **Detaylı bilgi için:** `get_guide("KONU_ADI")` çağır! Tüm kuralları ezberleme, ihtiyaç duyduğunda oku.
 
@@ -724,14 +724,17 @@ Uzun araştırma süreçlerinde kullanıcıyı güncel tut:
 ## ⚠️ EN KRİTİK KURALLAR
 
 1. **İlişki yönü** → Şemadan AYNEN kopyala (ters yazarsan çalışmaz!)
-2. **Varyasyonları miras al** → KEŞİF→İÇERİK→METADATA zincirinde filtreleri aktar
-3. **Embedding doğrula** → Yüksek skor ≠ doğru sonuç (get_guide("FALSE_POSITIVE"))
+2. **⛔ FİLTRE MİRASI** → `<result>` bloğundaki uzun değerleri KESİNLİKLE YAZMA!
+   - ❌ `<result>` içindeki uzun değerleri ASLA kopyalama!
+   - ✅ `<query>`'deki filtreleme koşullarını kelime ile aktar
+3. **📅 TARİH** → "düzenlenen"=SADECE START DATE, "biten"=END, "geçerli"=her ikisi
+   - ❌ "start veya end Date'e bak" (belirsiz!)
+   - ✅ "START DATE'i 2024 olan" (net!)
 4. **Kaynak ekle** → Dosya adı geçecekse ÖNCE add_source çağır!
 5. **Soru sorma** → "Devam edeyim mi?" YAPMA, veriyi bulduysan CEVAP VER!
-6. **Hesaplama yapma** → Toplam/ortalama sorularında kayıtları okuyup KENDİN hesaplama yapma! Worker'a Cypher aggregate (SUM, AVG, COUNT) kullandır
-7. **Tarih filtresi belirleme** → "Start veya End" gibi yorumlama yapma, kullanıcının orijinal ifadesini aynen Worker'a aktar!
-8. **⛔ CYPHER KODU YAZMA!** → Sadece şema bilgisi, entity varyasyonları ve görev tanımı ver. Cypher'ı Worker yazacak!
-9. **Hata durumunda yönlendir** → Worker 0 sonuç veya hata dönerse, şemayı kontrol et ve yeni görevde doğru ilişki yönü/adını vurgula (Cypher yazmadan!)
+6. **Hesaplama yapma** → Worker'a Cypher aggregate (SUM, AVG, COUNT) kullandır
+7. **⛔ CYPHER KODU YAZMA!** → Sadece görev tanımı ver, Cypher'ı Worker yazacak!
+8. **Hata durumunda** → Worker 0 sonuç dönerse `get_guide("CYPHER_RULES")` oku
 
 ## 📎 FİNAL CEVAP
 
@@ -1338,7 +1341,7 @@ WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2'
 
 💡 **GEREKİRSE:** 
    - İlişki yönü, node label, property bilgisi için → `get_schema()` çağır
-   - Tarih filtresi, yazım kuralları için → `get_guide("CYPHER_RULES")` oku
+   - Cypher yazım kuralları, hata çözümü için → `get_guide("CYPHER_RULES")` çağır
 
 ## ⚡ TÜM NODE'LARDA ARA - ZORUNLU!
 
@@ -1416,7 +1419,12 @@ Paralel sorgularda her biri için farklı step_name kullan:
 ## 📝 CYPHER YAZARKEN
 
 ⚠️ **Şema bilgisi için:** `get_schema()` çağır - ilişki yönleri, node label'ları, property'ler
-⚠️ **Cypher kuralları için:** `get_guide("CYPHER_RULES")` çağır - yazım kuralları, best practices
+
+### 🔧 HATA ALDIĞINDA VEYA EMİN DEĞİLSEN:
+```
+get_guide("CYPHER_RULES") → Cypher yazım kuralları, best practices, hata çözümü
+```
+İlk sorguda hata aldıysan veya karmaşık bir sorgu yazacaksan bu rehberi oku!
 
 ## 📊 AGGREGATE (TOPLAM/ORTALAMA) KURALLARI
 
@@ -2250,9 +2258,18 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         # GPT-5 modelleri için reasoning_effort parametresi geç
         worker_model = create_worker_model(worker_model_name, reasoning_effort=worker_reasoning_effort)
         
-        # Worker system prompt
+        # Worker system prompt - şema bilgisi dahil
         today = datetime.now().strftime("%Y-%m-%d")
-        worker_prompt = WORKER_AGENT_PROMPT.format(date=today)
+        base_worker_prompt = WORKER_AGENT_PROMPT.format(date=today)
+        
+        # Şema bilgisini Worker prompt'una ekle (get_schema tool çağrısına gerek kalmaz)
+        if schema_info:
+            worker_prompt = f"""## 📊 VERİTABANI ŞEMASI:
+{schema_info}
+
+{base_worker_prompt}"""
+        else:
+            worker_prompt = base_worker_prompt
         
         # Worker tools - adapter tools + get_guide (cypher kurallarına erişim için)
         worker_tools = list(adapter_tools)
@@ -2329,11 +2346,10 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
         total_start = time.time()
         
         try:
-            # Başlangıç durumu
+            # Başlangıç durumu - thinking_step olarak göster
             yield {
-                "type": "status",
-                "message": "🧠 Agent ile sorgunuz işleniyor...",
-                "status": "processing",
+                "type": "thinking_step",
+                "message": "🚀 Sorgunuz alındı, hazırlıklar yapılıyor...",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -2354,9 +2370,8 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                 return
 
             yield {
-                "type": "status",
-                "message": "✅ Veritabanı şema bilgisi hazır, MCP tools yükleniyor...",
-                "status": "processing",
+                "type": "thinking_step",
+                "message": "📊 Veritabanı yapısı yüklendi",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -2391,11 +2406,10 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             _log(f"Messages: {len(messages)}")
             _log(f"Last message: {messages[-1].get('content', '')}")
 
-            # Agent'ı çalıştır
+            # Agent'ı çalıştır - thinking_step olarak göster
             yield {
-                "type": "status",
-                "message": "🔍 Agent araştırma yapıyor...",
-                "status": "agent_working",
+                "type": "thinking_step",
+                "message": "🧠 Soru analiz ediliyor, plan hazırlanıyor...",
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -2681,6 +2695,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                                         "type": "message_chunk",
                                         "content": delta,
                                         "full_message": response_text,
+                                        "is_final_answer": not has_tool_calls,  # Tool çağrısı yoksa final cevap
                                         "session_id": session_id,
                                         "timestamp": datetime.now().isoformat(),
                                     }
@@ -2715,6 +2730,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                     "type": "message_chunk",
                     "content": file_links_markdown,
                     "full_message": final_response,
+                    "is_final_answer": True,  # Final cevabın parçası
                     "session_id": session_id,
                     "timestamp": datetime.now().isoformat(),
                 }
@@ -2729,6 +2745,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                     "type": "message_chunk",
                     "content": page_links_markdown,
                     "full_message": final_response,
+                    "is_final_answer": True,  # Final cevabın parçası
                     "session_id": session_id,
                     "timestamp": datetime.now().isoformat(),
                 }

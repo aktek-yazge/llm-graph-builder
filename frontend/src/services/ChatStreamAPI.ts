@@ -10,6 +10,7 @@ export interface ChatStreamMessage {
   data?: any;
   error?: string;
   is_complete?: boolean;
+  is_final_answer?: boolean;  // Tool çağrıları bittikten sonra final cevap mı?
   word_index?: number;
   total_words?: number;
   elapsed_time?: string;

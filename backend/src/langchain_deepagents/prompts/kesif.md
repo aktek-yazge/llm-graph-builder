@@ -6,6 +6,20 @@ Entity keşfi ve varyasyon bulma stratejileri.
 Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
 ⛔ **CHUNK HARİÇ!** (Chunk → İÇERİK görevinde aranır)
 
+## 📊 ŞEMADAN NODE TİPLERİNİ BELİRLE (KRİTİK!)
+
+KEŞİF görevi vermeden ÖNCE şemayı incele:
+1. Aranan entity hangi node tiplerinde olabilir?
+2. Aynı entity FARKLI node tiplerinde farklı ROLLER ile bulunabilir
+3. **TÜM potansiyel node tiplerini Worker'a ver!**
+
+```
+❌ YANLIŞ: Sadece 1 node tipinde ara
+✅ DOĞRU: Şemadaki TÜM ilgili node tiplerinde ara
+```
+
+Aynı entity farklı rollerde → farklı node tipleri → HEPSİNDE ara!
+
 <search_term_rules>
 ## 🚨 ARAMA TERİMLERİ OLUŞTURURKEN
 
@@ -109,22 +123,12 @@ KEŞİF tamamlandığında:
    - Varyasyonların ANLAMLI ortak kısmını bul (sadece baş harf değil!)
    - Farklı sektör/tip içeriyorsa → FARKLI entity'ler, ayır!
 
-5. **İÇERİK görevinde varyasyonları kullan:**
-   - TÜM varyasyonları filtre olarak geç
-   - Hangi node tipinde bulunduklarını belirt
-   - İlişki yolunu şemadan çıkar
-   - query_text = Sadece aranan KONU (varyasyonlar ayrı!)
-
-**Örnek:**
-```
-KEŞİF sonucu: "XYZ" → ["XYZ Corp", "XYZ CORP", "X.Y.Z."] (NodeA'da bulundu)
-Değerlendirme: ✅ Aranan entity ile eşleşiyor
-İÇERİK görevi:
-  - DARALTMA: ENTITY
-  - Varyasyonlar: ["XYZ Corp", "XYZ CORP", "X.Y.Z."]
-  - Node tipi: NodeA
-  - İlişki yolu: NodeA-[:REL1]->NodeB-[:REL2]->NodeC-[:PART_OF]->Chunk
-  - EMBEDDING QUERY: "aranan konu" (sadece konu - varyasyonlar DEĞİL!)
-```
+5. **⛔ `<result>` bloğundaki uzun değerleri KESİNLİKLE YAZMA!**
+   
+   ```
+   ❌ YASAK: <result>'taki uzun değerleri ASLA kopyalama!
+   
+   ✅ SADECE: <query>'deki filtreleme koşullarını kelime ile aktar
+   ```
 </post_discovery_evaluation>
 
