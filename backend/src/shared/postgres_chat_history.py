@@ -158,7 +158,7 @@ class PostgresChatMessageHistory(BaseChatMessageHistory):
                 """, (self.session_id,))
     
     @property
-    def messages(self) -> List[BaseMessage]:
+    def messages(self) -> List[BaseMessage]:  # type: ignore[override]
         """
         Retrieve messages from PostgreSQL.
         Returns the last `window * 2` messages.
