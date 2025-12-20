@@ -2663,7 +2663,7 @@ async def chat_bot_stream(
                 async for chunk in stream_agent_response(
                     question=question,
                     graph=graph,
-                    model="gpt-5.1",
+                    model="gpt-5",
                     session_id=session_id,
                     question_id=question_id,
                     reasoning_effort="low",
@@ -3380,8 +3380,9 @@ async def clear_chat_bot(
                     # Graph connection ile yeni agent oluştur
                     new_agent = await get_or_create_session_agent(
                         session_id=new_session_id,
-                        model=model or "gpt-5.1",
-                        graph=graph
+                        model=model or "gpt-5",
+                        graph=graph,
+                        reasoning_effort="low"
                     )
                     new_agent_result = f"deep_agent_created_for_session: {new_session_id}"
                     logging.info(

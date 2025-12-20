@@ -8,14 +8,14 @@ Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
 
 ## 📊 ŞEMADAN NODE TİPLERİNİ BELİRLE (KRİTİK!)
 
-KEŞİF görevi vermeden ÖNCE şemayı incele:
+KEŞİF görevi vermeden ÖNCE yukardaki neo4j şemasını incele:
 1. Aranan entity hangi node tiplerinde olabilir?
 2. Aynı entity FARKLI node tiplerinde farklı ROLLER ile bulunabilir
 3. **TÜM potansiyel node tiplerini Worker'a ver!**
 
 ```
 ❌ YANLIŞ: Sadece 1 node tipinde ara
-✅ DOĞRU: Şemadaki TÜM ilgili node tiplerinde ara
+✅ DOĞRU: yukardaki neo4j şemasını TÜM ilgili node tiplerinde ara
 ```
 
 Aynı entity farklı rollerde → farklı node tipleri → HEPSİNDE ara!

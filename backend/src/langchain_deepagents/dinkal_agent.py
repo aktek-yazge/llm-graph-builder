@@ -360,7 +360,7 @@ if LANGCHAIN_AGENT_AVAILABLE and tool is not None:
         with open(guide_path, "r", encoding="utf-8") as f:
             content = f.read()
         
-        _log(f"📖 Guide loaded: {topic} ({filename})")
+        _log(f"📖 get_guide executed")
         return content
 
     # Global isimlere ata
@@ -505,14 +505,13 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, use
             # Blackboard'a dosya yolunu yaz
             _append_to_blackboard(step_name, file_path, record_count, success)
             
-            # Detaylı istatistik döndür (HAM DATA YOK - kayıt içerikleri yok!)
+            # Minimal istatistik döndür
             return f"""{{
   "success": {str(success).lower()},
   "record_count": {record_count},
   "step_name": "{step_name}",
-  "result_type": "{suffix}",
   "file_path": "{file_path}",
-  "query_type": "cypher"
+  "blackboard": "{blackboard_path}"
 }}"""
             
         except Exception as e:
@@ -526,9 +525,8 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, use
   "success": false,
   "record_count": 0,
   "step_name": "{step_name}",
-  "result_type": "error",
   "file_path": "{file_path}",
-  "query_type": "cypher",
+  "blackboard": "{blackboard_path}",
   "error": "{str(e)}"
 }}"""
     
@@ -592,15 +590,13 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, use
             # Blackboard'a dosya yolunu yaz
             _append_to_blackboard(step_name, file_path, record_count, success)
             
-            # Detaylı istatistik döndür (HAM DATA YOK - kayıt içerikleri yok!)
+            # Minimal istatistik döndür
             return f"""{{
   "success": {str(success).lower()},
   "record_count": {record_count},
   "step_name": "{step_name}",
-  "result_type": "{suffix}",
   "file_path": "{file_path}",
-  "query_type": "embedding",
-  "search_term": "{query_text}"
+  "blackboard": "{blackboard_path}"
 }}"""
             
         except Exception as e:
@@ -613,10 +609,8 @@ def create_adapter_tools(mcp_tools: List, session_id: str, question_id: str, use
   "success": false,
   "record_count": 0,
   "step_name": "{step_name}",
-  "result_type": "error",
   "file_path": "{file_path}",
-  "query_type": "embedding",
-  "search_term": "{query_text}",
+  "blackboard": "{blackboard_path}",
   "error": "{str(e)}"
 }}"""
     
@@ -1335,9 +1329,9 @@ WHERE toLower(c.text) CONTAINS 'terim1' OR toLower(c.text) CONTAINS 'terim2'
 1. **Görevi OKU** - Orchestrator'ın verdiği görevi anla
 2. **Sorgu YAZ** - Cypher sorgusunu yaz
 3. **PARALEL Çalıştır** - Birden fazla node varsa TÜM sorguları AYNI ANDA çalıştır!
-4. **Sonuç VAR mı?**
-   - EVET → İstatistik döndür, DUR
-   - HAYIR → Özet döndür
+4. **İşlem BİTTİ mi?**
+   - EVET → Sadece "Done" de, DUR
+   - HAYIR → Sadece "Done" de, DUR
 
 💡 **GEREKİRSE:** 
    - İlişki yönü, node label, property bilgisi için → `get_schema()` çağır
@@ -1397,7 +1391,7 @@ Orchestrator'ın verdiği FİLTRELERİ MUTLAKA KULLAN:
    Tool #2: NodeA'da ara (AYNI!) → 4 sonuç ← YASAK!
 
 ✅ Tool #1: NodeA'da ara → 4 sonuç
-   → İstatistik döndür, DUR!
+   → "Done" de, DUR!
 ```
 
 ### 2. SONUÇ BULUNCA DUR!
@@ -1405,7 +1399,7 @@ Orchestrator'ın verdiği FİLTRELERİ MUTLAKA KULLAN:
 Tool çağrısından dönen istatistikte:
   "success": true, "record_count": 4
 
-→ HEMEN özet döndür, başka sorgu YAPMA!
+→ Sadece "Done" de, başka sorgu YAPMA!
 ```
 
 ### 3. STEP NAME'LERİ FARKLILAŞTIR
@@ -1455,20 +1449,19 @@ Hata mesajını oku → Sorguyu düzelt → Tekrar dene. 2 hatadan sonra DUR!
 
 ## 📤 ÖZET FORMATI
 
+⚠️ **MİNİMAL ÇIKTI:** Sadece "Done" de ve DUR. Açıklama, sorgu detayı, sample değer YAZMA!
+
 **Başarılı:**
 ```
-✅ Bulundu: [N] kayıt
-- Node: [Label]
-- Sample: [ilk birkaç değer]
-- Dosya: [file_path]
+Done
 ```
 
 **Başarısız:**
 ```
-❌ Bulunamadı
-- Denenen: [node listesi]
-- Sorgu sayısı: [N]
+Done
 ```
+
+Orchestrator blackboard'dan sonuçları okuyacak. Sen sadece işlemin tamamlandığını bildir.
 """
 
 
@@ -1967,7 +1960,7 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
             
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            _log(f"📖 Finding read: {file_path} (records {start_record}-{end_record if end_record > 0 else 'all'})")
+            _log(f"📖 read_finding_dynamic executed")
             
             output_parts = []
             

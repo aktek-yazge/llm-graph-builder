@@ -39,7 +39,7 @@ Bu filtreyi aynen bu sorguda da kullan!
 ## ⛔ CYPHER KODU YAZMA!
 
 Sen (Orchestrator) Cypher kodu yazmayacaksın! Sadece:
-- Şema bilgisi (node'lar, ilişkiler)
+- neo4j Şema bilgisi (node'lar, ilişkiler)
 - Entity varyasyonları
 - Görev tanımı
 
