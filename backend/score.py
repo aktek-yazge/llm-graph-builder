@@ -44,7 +44,13 @@ from src.main import (
 from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
-from src.langchain_deepagents import stream_agent_response, LANGCHAIN_AGENT_AVAILABLE
+from src.langchain_deepagents import (
+    stream_agent_response, 
+    LANGCHAIN_AGENT_AVAILABLE,
+    # ReAct Agent (Prompt Caching optimizasyonlu)
+    stream_react_agent_response,
+    REACT_LANGCHAIN_AVAILABLE,
+)
 from src.qa_based_entity_extractor import (
     QABasedEntityExtractor,
     create_domain_specific_questions,
@@ -2657,29 +2663,51 @@ async def chat_bot_stream(
             total_tokens = 0
 
             if agent_type == "deep_agent" and LANGCHAIN_AGENT_AVAILABLE:
-                # 🧠 LangChain Agent kullanarak streaming
-                yield f"data: {json.dumps({'type': 'status', 'message': '🧠 LangChain Agent ile işleniyor...', 'status': 'agent_processing'}, ensure_ascii=False)}\n\n"
+                # 🧠 Agent seçimi: USE_REACT_AGENT=true ise ReAct, değilse Orchestrator-Worker
+                use_react = os.environ.get("USE_REACT_AGENT", "true").lower() == "true"
+                
+                if use_react and REACT_LANGCHAIN_AVAILABLE:
+                    # 🚀 ReAct Agent (Prompt Caching optimizasyonlu)
+                    yield f"data: {json.dumps({'type': 'status', 'message': '🚀 ReAct Agent ile işleniyor...', 'status': 'react_agent_processing'}, ensure_ascii=False)}\n\n"
+                    
+                    async for chunk in stream_react_agent_response(
+                        question=question,
+                        graph=graph,
+                        model=os.environ.get("REACT_MODEL", "gpt-5"),
+                        session_id=session_id,
+                        question_id=question_id,
+                        reasoning_effort=os.environ.get("REACT_REASONING_EFFORT", "low"),
+                    ):
+                        if await request.is_disconnected():
+                            logging.info("SSE Client disconnected during ReAct agent streaming")
+                            break
+                        
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        
+                        if chunk.get("type") in ["complete", "final_response"]:
+                            final_result = chunk
+                            total_tokens = chunk.get("metrics", {}).get("total_tokens", 0)
+                else:
+                    # 🧠 Orchestrator-Worker Agent (mevcut)
+                    yield f"data: {json.dumps({'type': 'status', 'message': '🧠 LangChain Agent ile işleniyor...', 'status': 'agent_processing'}, ensure_ascii=False)}\n\n"
 
-                async for chunk in stream_agent_response(
-                    question=question,
-                    graph=graph,
-                    model="gpt-5.1",
-                    session_id=session_id,
-                    question_id=question_id,
-                    reasoning_effort="low",
-                ):
-                    # Client disconnect kontrolü
-                    if await request.is_disconnected():
-                        logging.info("SSE Client disconnected during agent streaming")
-                        break
+                    async for chunk in stream_agent_response(
+                        question=question,
+                        graph=graph,
+                        model="gpt-5.1",
+                        session_id=session_id,
+                        question_id=question_id,
+                        reasoning_effort="low",
+                    ):
+                        if await request.is_disconnected():
+                            logging.info("SSE Client disconnected during agent streaming")
+                            break
 
-                    # Chunk'ı client'a gönder
-                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-                    # Final result'ı sakla
-                    if chunk.get("type") == "complete":
-                        final_result = chunk
-                        total_tokens = chunk.get("info", {}).get("total_tokens", 0)
+                        if chunk.get("type") == "complete":
+                            final_result = chunk
+                            total_tokens = chunk.get("info", {}).get("total_tokens", 0)
 
             elif agent_type == "fast_agent" or (agent_type == "deep_agent" and not LANGCHAIN_AGENT_AVAILABLE):
                 # FastAgent kullanarak streaming (fallback veya explicit)
