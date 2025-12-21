@@ -5,7 +5,7 @@ Bu modül, OpenAI Prompt Caching özelliğinden faydalanarak optimize edilmiş
 tek bir ReAct agent implementasyonu sağlar.
 
 Mimari:
-- Tek agent (Orchestrator-Worker yerine)
+- Tek ReAct agent
 - Cache-optimized prompt yapısı (sabit prefix, dinamik suffix)
 - Paralel tool çağrıları
 - Streaming response
@@ -448,11 +448,11 @@ Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
 KEŞİF görevi vermeden ÖNCE şemayı incele:
 1. Aranan entity hangi node tiplerinde olabilir?
 2. Aynı entity FARKLI node tiplerinde farklı ROLLER ile bulunabilir
-3. **TÜM potansiyel node tiplerini Worker'a ver!**
+
 
 ```
 ❌ YANLIŞ: Sadece 1 node tipinde ara
-✅ DOĞRU: Şemadaki TÜM ilgili node tiplerinde ara
+✅ DOĞRU: Şemadaki TÜM olası node tiplerinde ara
 ```
 
 <search_term_rules>
@@ -474,6 +474,12 @@ KEŞİF görevi vermeden ÖNCE şemayı incele:
 ❌ YANLIŞ: "Microsoft" → "Micro" 
 ✅ DOĞRU: "Microsoft" → "microsoft"
 ```
+
+⛔ **AYNI ALANDA ÇOKLU CONTAINS KULLANMA!**
+```
+❌ WHERE name CONTAINS 'x' AND name CONTAINS 'y'
+✅ WHERE name CONTAINS 'x'  (sadece ana/ilk kelime)
+```
 </search_term_rules>
 
 
@@ -488,13 +494,20 @@ Soruyu analiz et:
 - **ŞEMADA** bu bilgi nerede? Hangi node'larda aranmalı?
 - Metadata mı (sayı, tarih, liste) yoksa içerik mi (belge detayı)?
 
-⚠️ **Soruda isim varsa (kişi, kurum, şirket) → ÖNCE keşfet, varyasyonlarını bul!**
+### ⚠️ İSİM KEŞFİ ÖNCELİKLİ!
+Soruda isim varsa (kişi, kurum, şirket, ürün) → **DİĞER HER ŞEYDEN ÖNCE** keşfet!
+```
+1. İsmi şemadaki ilgili node'larda ara (CONTAINS ile)
+2. Şemaya göre olası varyasonları da araştır. Bulunan TÜM doğru varyasyonları not al
+3. Alakasız sonuçları filtrele
+4. SONRA diğer aramalara geç (varyasyonları kullanarak)
+```
 
 ### 2️⃣ EYLEM (Action)
 Uygun tool'u çağır:
 - `execute_cypher_query`: Metadata, keşif, listeleme için
 - `execute_embedding_query`: Belge içeriği araması için
-- Birden fazla node varsa → PARALEL tool çağrısı yap!
+- Aynı terim farklı node'larda olabiliyorsa → PARALEL tool çağrısı yap!
 
 ### 3️⃣ GÖZLEM (Observation)
 Tool sonucunu değerlendir:
@@ -502,6 +515,13 @@ Tool sonucunu değerlendir:
 - False positive kontrolü (embedding sonuçlarında)
 - Eksik bilgi var mı?
 - Tool çağrılarından elde edilen bilgiler kullanıcı sorusunu karşılıyor mu?
+
+⚠️ **KEŞİF SONRASI KONTROL:**
+```
+Keşiften dönen TÜM sonuçları incele!
+→ Doğru varyasyonları LİSTELE (alakasız olanları çıkar)
+→ Sonraki sorguda TÜM varyasyonları WHERE...IN ile kullan!
+```
 
 ### 4️⃣ TEKRARLA veya CEVAPLA
 - Eksik varsa → Farklı strateji dene
@@ -531,7 +551,20 @@ Tool sonucunu değerlendir:
 ✅ WHERE name = 'X'  → Tek sonuç varsa
 ✅ WHERE name IN ['X Var1', 'X Var2', ...]  → Çoklu varyasyon varsa
 ```
-⚠️ Alakasız sonuçları filtrele! (farklı entity, yanlış eşleşme)
+
+⛔ **TÜM VARYASYONLARI KULLAN! (KRİTİK)**
+```
+ADIM 1: Tool sonuçlarından TÜM doğru varyasyonları listele
+   Keşif 1 (NodeA) → ['Var1', 'Var2']
+   Keşif 2 (NodeB) → ['Var3', 'Var4', 'Var5']
+   
+ADIM 2: Alakasız olanları ÇIKAR (farklı entity, yanlış eşleşme)
+   
+ADIM 3: KALAN TÜM varyasyonları ANA SORGUDA kullan!
+   WHERE name IN ['Var1','Var2','Var3','Var4','Var5']
+```
+❌ YANLIŞ: Sadece bir varyasyonu kullanmak!
+✅ DOĞRU: TÜM varyasyonları WHERE...IN ile kullanmak!
 
 ### ⚠️ SONUÇ DOĞRULAMA
 
@@ -540,6 +573,16 @@ Aranan: "X Y"
 Bulunan: "X-Z Y" veya "X Z Y" → FAZLADAN kelime var → TAM EŞLEŞMEDEĞİL!
 → Belge içeriğinde (Chunk) de ara!
 ```
+
+### 🔍 İÇERİK ARAMASINDA İKİ KAYNAK!
+
+İçerik ararken (konu, terim, detay) → **HEM node'larda HEM Chunk'larda ara!**
+```
+1. Node'larda ara (yapılandırılmış veri - hızlı)
+2. Chunk'larda ara (belge içeriği - detaylı)
+   → Önce embedding, sonuç yoksa text fallback
+```
+⚠️ Node'da bulsan bile Chunk'ta da doğrula!
 
 ---
 
@@ -644,11 +687,15 @@ read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 ❌ MATCH (b:B)-[:REL]->(a:A)  -- Ters yön ÇALIŞMAZ!
 ```
 
-### Paralel Sorgular - Birden fazla node varsa TEK SEFERDE çağır
+### Paralel Sorgular - AYNI TERİM farklı node'larda ise
 ```
-Tool Call 1: execute_cypher_query(NodeA sorgusu, "step_1_nodeA")
-Tool Call 2: execute_cypher_query(NodeB sorgusu, "step_1_nodeB")
-→ Hepsi PARALEL çalışır!
+✅ PARALEL: Aynı terim, farklı node'lar
+   Tool Call 1: "terim1" → NodeA'da ara
+   Tool Call 2: "terim1" → NodeB'de ara
+
+❌ PARALEL DEĞİL: Farklı terimler
+   İlk: "terim1" keşfet → tüm doğru sonuçları al
+   Sonra: tüm doğru sonuçlar ile akışa devam et
 ```
 
 ### Aggregate Fonksiyonları
@@ -666,7 +713,7 @@ Tool Call 2: execute_cypher_query(NodeB sorgusu, "step_1_nodeB")
 2. ⛔ **Tüm Chunk'larda arama YASAK** → Her zaman filtrelenmiş sorgu!
 3. ⛔ **Kullanıcıdan onay İSTEME** → Veri varsa direkt CEVAPLA
 4. ⛔ **Teknik terim kullanıcıya GÖSTERME** → Node, property, Cypher yok!
-5. ✅ **Paralel tool çağrıları KULLAN** → Hız için kritik
+5. ✅ **Paralel tool çağrıları KULLAN** → Sadece AYNI TERİM farklı node'larda ise!
 6. ✅ **Embedding sonuçlarını DOĞRULA** → False positive kontrolü
 7. ✅ **KAYNAK EKLE** → Sonuçta fileName/page_link varsa add_source ÇAĞIR!
 
@@ -1165,7 +1212,7 @@ class ReactAgent:
     OpenAI Prompt Caching optimizasyonlu ReAct Agent
     
     Özellikler:
-    - Tek agent (Orchestrator-Worker yerine)
+    - Tek agent 
     - Cache-optimized prompt (sabit prefix + dinamik suffix)
     - Paralel tool çağrıları
     - Streaming response
