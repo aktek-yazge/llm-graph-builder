@@ -6538,15 +6538,22 @@ async def reset_file_stage(
                                 else:
                                     file_record.chunking_status = "pending"
                                 
-                                file_record.graph_status = "pending"
+                                # 🔄 Entity'ler korunduğu için graph_status'u akıllıca yönet
+                                # Completed ise koru (entity'ler var), processing/failed ise reset et
+                                if file_record.graph_status in ["processing", "failed"]:
+                                    file_record.graph_status = "pending"
+                                    file_record.graph_started_at = None
+                                    file_record.graph_completed_at = None
+                                # Completed kalırsa graph_started/completed_at değişmez
+                                
+                                # Yeni chunk'lar embedding'siz, her zaman reset et
                                 file_record.embedding_status = "pending"
+                                file_record.embedding_started_at = None
+                                file_record.embedding_completed_at = None
+                                
                                 file_record.status = "uploaded"
                                 file_record.chunking_started_at = None
                                 file_record.chunking_completed_at = None
-                                file_record.graph_started_at = None
-                                file_record.graph_completed_at = None
-                                file_record.embedding_started_at = None
-                                file_record.embedding_completed_at = None
                                 
                                 # Markdown handling
                                 if delete_markdown and file_record.markdown_path:
@@ -6697,15 +6704,22 @@ async def reset_file_stage(
                     else:
                         # Image extraction not completed yet, set to "pending"
                         file_record.chunking_status = "pending"
-                    file_record.graph_status = "pending"
-                    file_record.embedding_status = "pending"  # Reset embedding too
+                    # 🔄 Entity'ler korunduğu için graph_status'u akıllıca yönet
+                    # Completed ise koru (entity'ler var), processing/failed ise reset et
+                    if file_record.graph_status in ["processing", "failed"]:
+                        file_record.graph_status = "pending"
+                        file_record.graph_started_at = None
+                        file_record.graph_completed_at = None
+                    # Completed kalırsa graph_started/completed_at değişmez
+                    
+                    # Yeni chunk'lar embedding'siz, her zaman reset et
+                    file_record.embedding_status = "pending"
+                    file_record.embedding_started_at = None
+                    file_record.embedding_completed_at = None
+                    
                     file_record.status = "uploaded"  # Reset status
                     file_record.chunking_started_at = None
                     file_record.chunking_completed_at = None
-                    file_record.graph_started_at = None
-                    file_record.graph_completed_at = None
-                    file_record.embedding_started_at = None
-                    file_record.embedding_completed_at = None
                     
                     # Delete markdown file only if delete_markdown=True
                     if delete_markdown:
@@ -6964,15 +6978,23 @@ async def reset_file_stage(
             else:
                 # Image extraction not completed yet, set to "pending"
                 file_record.chunking_status = "pending"
-            file_record.graph_status = "pending"
-            file_record.embedding_status = "pending"  # Reset embedding too
+            
+            # 🔄 Entity'ler korunduğu için graph_status'u akıllıca yönet
+            # Completed ise koru (entity'ler var), processing/failed ise reset et
+            if file_record.graph_status in ["processing", "failed"]:
+                file_record.graph_status = "pending"
+                file_record.graph_started_at = None
+                file_record.graph_completed_at = None
+            # Completed kalırsa graph_started/completed_at değişmez
+            
+            # Yeni chunk'lar embedding'siz, her zaman reset et
+            file_record.embedding_status = "pending"
+            file_record.embedding_started_at = None
+            file_record.embedding_completed_at = None
+            
             file_record.status = "uploaded"  # Reset status
             file_record.chunking_started_at = None
             file_record.chunking_completed_at = None
-            file_record.graph_started_at = None
-            file_record.graph_completed_at = None
-            file_record.embedding_started_at = None
-            file_record.embedding_completed_at = None
             
             # Delete markdown file only if delete_markdown=True
             if delete_markdown:
