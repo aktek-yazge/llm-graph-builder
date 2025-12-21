@@ -953,10 +953,51 @@ class FileProcessor:
                     f"📖 V2: Starting chunking for: {file_record.original_name} (ID: {file_record.id})"
                 )
 
+                # 🔧 FIX: S3'ten markdown dosyasını indir (eğer local'de yoksa)
+                local_markdown_path = file_record.markdown_path
+                if file_record.markdown_path and not os.path.exists(file_record.markdown_path):
+                    # Local'de yok, S3'ten indirmeyi dene
+                    s3_bucket = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
+                    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+                    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+                    
+                    if s3_bucket and aws_access_key_id and aws_secret_access_key:
+                        from src.utf8_utils import normalize_file_name
+                        doc_name = Path(normalize_file_name(file_record.original_name)).stem
+                        
+                        # S3 key: documents/{doc_name}/md/{doc_name}.md
+                        s3_markdown_key = f"documents/{doc_name}/md/{doc_name}.md"
+                        
+                        # Local path oluştur
+                        document_dir = f"output/{doc_name}"
+                        os.makedirs(document_dir, exist_ok=True)
+                        local_markdown_path = os.path.join(document_dir, f"{doc_name}.md")
+                        
+                        try:
+                            import boto3
+                            from botocore.config import Config
+                            config = Config(signature_version="s3v4", region_name="us-east-1")
+                            s3_client = boto3.client(
+                                "s3",
+                                aws_access_key_id=aws_access_key_id,
+                                aws_secret_access_key=aws_secret_access_key,
+                                config=config,
+                            )
+                            
+                            logging.info(f"📥 Downloading markdown from S3: s3://{s3_bucket}/{s3_markdown_key}")
+                            s3_client.download_file(s3_bucket, s3_markdown_key, local_markdown_path)
+                            logging.info(f"✅ Markdown downloaded from S3: {local_markdown_path}")
+                        except Exception as s3_error:
+                            logging.warning(f"⚠️ Could not download markdown from S3: {s3_error}")
+                            local_markdown_path = None
+                    else:
+                        logging.warning("⚠️ S3 credentials not configured, cannot download markdown")
+                        local_markdown_path = None
+
                 # Check if markdown already exists
-                if file_record.markdown_path and os.path.exists(file_record.markdown_path):
+                if local_markdown_path and os.path.exists(local_markdown_path):
                     # Markdown exists - read it and create Neo4j nodes
-                    logging.info(f"📝 Markdown file exists, reading and creating Neo4j nodes: {file_record.markdown_path}")
+                    logging.info(f"📝 Markdown file exists, reading and creating Neo4j nodes: {local_markdown_path}")
                     
                     from concurrent.futures import ThreadPoolExecutor
                     from src.utf8_utils import normalize_file_name
@@ -965,7 +1006,7 @@ class FileProcessor:
                     normalized_filename = normalize_file_name(file_record.original_name)
                     
                     # Markdown dosyasını oku
-                    with open(file_record.markdown_path, "r", encoding="utf-8") as md_file:
+                    with open(local_markdown_path, "r", encoding="utf-8") as md_file:
                         markdown_text = md_file.read()
                     
                     # page_images'ı al
@@ -1000,29 +1041,35 @@ class FileProcessor:
                             # <CHUNK> tag'lerini temizle (markdown'da kalmış olabilir)
                             import re
                             chunk_tag_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
-                            # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
-                            chunk_matches = chunk_tag_pattern.findall(markdown_text)
-                            if chunk_matches:
-                                # Tag'li markdown - tag'lerin içini al
-                                current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
-                                logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
-                            else:
-                                # Tag'siz markdown - orijinal text'i kullan
-                                current_text = markdown_text
                             
-                            for sep in separators:
-                                if sep in current_text:
-                                    parts = current_text.split(sep)
-                                    for i, part in enumerate(parts):
-                                        if part.strip():
-                                            if i > 0 and sep == "## ":
-                                                raw_chunks.append({"text": sep + part.strip(), "page": 1})
-                                            else:
-                                                raw_chunks.append({"text": part.strip(), "page": 1})
-                                    break
-                            else:
-                                if current_text.strip():
-                                    raw_chunks.append({"text": current_text.strip(), "page": 1})
+                            # 🔧 FIX: Önce [PAGE BREAK] ile sayfalara böl, sonra her sayfayı işle
+                            page_sections = markdown_text.split('[PAGE BREAK]')
+                            
+                            for page_idx, page_section in enumerate(page_sections, start=1):
+                                # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
+                                chunk_matches = chunk_tag_pattern.findall(page_section)
+                                if chunk_matches:
+                                    # Tag'li markdown - tag'lerin içini al
+                                    current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
+                                    if page_idx == 1:
+                                        logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
+                                else:
+                                    # Tag'siz markdown - orijinal text'i kullan
+                                    current_text = page_section
+                                
+                                for sep in separators:
+                                    if sep in current_text:
+                                        parts = current_text.split(sep)
+                                        for i, part in enumerate(parts):
+                                            if part.strip():
+                                                if i > 0 and sep == "## ":
+                                                    raw_chunks.append({"text": sep + part.strip(), "page": page_idx})
+                                                else:
+                                                    raw_chunks.append({"text": part.strip(), "page": page_idx})
+                                        break
+                                else:
+                                    if current_text.strip():
+                                        raw_chunks.append({"text": current_text.strip(), "page": page_idx})
                             
                             # Küçük chunk'ları birleştir
                             merged_chunks = []
@@ -1403,31 +1450,37 @@ class FileProcessor:
                             # <CHUNK> tag'lerini temizle (markdown'da kalmış olabilir)
                             import re
                             chunk_tag_pattern = re.compile(r'<CHUNK>(.*?)</CHUNK>', re.DOTALL)
-                            # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
-                            chunk_matches = chunk_tag_pattern.findall(markdown_text)
-                            if chunk_matches:
-                                # Tag'li markdown - tag'lerin içini al
-                                current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
-                                logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
-                            else:
-                                # Tag'siz markdown - orijinal text'i kullan
-                                current_text = markdown_text
                             
-                            for sep in separators:
-                                if sep in current_text:
-                                    parts = current_text.split(sep)
-                                    for i, part in enumerate(parts):
-                                        if part.strip():
-                                            # İlk parça değilse separator'ı başına ekle
-                                            if i > 0 and sep == "## ":
-                                                raw_chunks.append({"text": sep + part.strip(), "page": 1})
-                                            else:
-                                                raw_chunks.append({"text": part.strip(), "page": 1})
-                                    break
-                            else:
-                                # Hiçbir separator bulunamadıysa tüm metni tek chunk yap
-                                if current_text.strip():
-                                    raw_chunks.append({"text": current_text.strip(), "page": 1})
+                            # 🔧 FIX: Önce [PAGE BREAK] ile sayfalara böl, sonra her sayfayı işle
+                            page_sections = markdown_text.split('[PAGE BREAK]')
+                            
+                            for page_idx, page_section in enumerate(page_sections, start=1):
+                                # Önce tag'lerin içindeki içeriği al, tag'ler yoksa orijinal text'i kullan
+                                chunk_matches = chunk_tag_pattern.findall(page_section)
+                                if chunk_matches:
+                                    # Tag'li markdown - tag'lerin içini al
+                                    current_text = "\n\n".join(match.strip() for match in chunk_matches if match.strip())
+                                    if page_idx == 1:
+                                        logging.info(f"🧹 Cleaned {len(chunk_matches)} <CHUNK> tags from markdown")
+                                else:
+                                    # Tag'siz markdown - orijinal text'i kullan
+                                    current_text = page_section
+                                
+                                for sep in separators:
+                                    if sep in current_text:
+                                        parts = current_text.split(sep)
+                                        for i, part in enumerate(parts):
+                                            if part.strip():
+                                                # İlk parça değilse separator'ı başına ekle
+                                                if i > 0 and sep == "## ":
+                                                    raw_chunks.append({"text": sep + part.strip(), "page": page_idx})
+                                                else:
+                                                    raw_chunks.append({"text": part.strip(), "page": page_idx})
+                                        break
+                                else:
+                                    # Hiçbir separator bulunamadıysa tüm metni tek chunk yap
+                                    if current_text.strip():
+                                        raw_chunks.append({"text": current_text.strip(), "page": page_idx})
                             
                             # Küçük chunk'ları birleştir
                             merged_chunks = []

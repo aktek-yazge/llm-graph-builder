@@ -281,8 +281,12 @@ def _sync_status_to_neo4j(neo4j_uri: str, neo4j_database: str, filename: str,
 
 def _cleanup_neo4j_for_file(neo4j_uri: str, neo4j_database: str, filename: str, original_name: str) -> Optional[str]:
     """
-    Neo4j'den dosyaya ait chunk, entity ve document node'larını siler.
+    Neo4j'den dosyaya ait SADECE chunk node'larını siler.
+    Document, Policy, Customer ve diğer entity node'ları KORUNUR.
     Bu fonksiyon SENKRON çalışır - asyncio.to_thread ile çağrılmalı.
+    
+    ⚠️ NOT: Bu fonksiyon chunking reset için kullanılır.
+    Entity'leri de silmek için ayrı bir fonksiyon kullanılmalı.
     """
     from src.shared.common_fn import create_graph_database_connection
     
@@ -294,74 +298,30 @@ def _cleanup_neo4j_for_file(neo4j_uri: str, neo4j_database: str, filename: str, 
             neo4j_database,
         )
         
-        # Step 1: Delete chunks and their direct relationships
+        # SADECE Chunk node'larını sil - Document ve Entity'ler korunsun!
+        # FIRST_CHUNK ilişkisi olan chunk'ı da sil
         delete_chunks_query = """
-        MATCH (d:Document {fileName: $fileName})<-[:PART_OF]-(c:Chunk)
-        DETACH DELETE c
-        RETURN count(c) as deletedChunks
+        MATCH (d:Document {fileName: $fileName})
+        OPTIONAL MATCH (d)-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+        WITH d, collect(c) as chunks
+        FOREACH (chunk IN chunks | DETACH DELETE chunk)
+        RETURN size(chunks) as deletedChunks
         """
         chunk_result = graph_connection.query(delete_chunks_query, {"fileName": filename})
         deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
         
-        # Step 2: Delete document-related entities (Policy and connected nodes)
-        delete_entities_query = """
-        MATCH (d:Document {fileName: $fileName})
+        # Document node'unu GÜNCELLE (silme, sadece status reset)
+        if deleted_chunks > 0:
+            update_doc_query = """
+            MATCH (d:Document {fileName: $fileName})
+            SET d.status = 'Processing',
+                d.chunkCount = 0
+            RETURN d.fileName as fileName
+            """
+            graph_connection.query(update_doc_query, {"fileName": filename})
         
-        // Find Policy nodes connected via DOCUMENTED_IN
-        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-        
-        // Find all nodes connected to Policy (1-2 hops)
-        OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
-        WHERE relatedNode IS NOT NULL
-          AND NOT relatedNode:Document 
-          AND NOT relatedNode:Chunk
-          AND NOT relatedNode:`__Community__`
-        
-        // Safety check: only delete if not connected to other documents
-        WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
-        WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
-            AND NOT EXISTS {
-                MATCH (node)-[*1..3]-(otherDoc:Document)
-                WHERE otherDoc.fileName <> $fileName
-            }] AS safeNodes
-        
-        // Delete safe nodes and policy
-        FOREACH (node IN safeNodes | DETACH DELETE node)
-        WITH d, p, size(safeNodes) as deletedRelated
-        
-        // Delete policy if exists
-        DETACH DELETE p
-        
-        RETURN deletedRelated
-        """
-        entity_result = graph_connection.query(delete_entities_query, {"fileName": filename})
-        deleted_entities = entity_result[0]["deletedRelated"] if entity_result and entity_result[0]["deletedRelated"] else 0
-        
-        # Step 3: Clean up orphan nodes (nodes with no relationships)
-        cleanup_orphans_query = """
-        MATCH (n)
-        WHERE NOT n:Document 
-          AND NOT n:Chunk 
-          AND NOT n:`__Community__`
-          AND NOT EXISTS { (n)--() }
-        DETACH DELETE n
-        RETURN count(n) as deletedOrphans
-        """
-        orphan_result = graph_connection.query(cleanup_orphans_query)
-        deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
-        
-        # Step 4: Delete the Document node itself
-        delete_document_query = """
-        MATCH (d:Document {fileName: $fileName})
-        DETACH DELETE d
-        RETURN count(d) as deletedDocuments
-        """
-        doc_result = graph_connection.query(delete_document_query, {"fileName": filename})
-        deleted_documents = doc_result[0]["deletedDocuments"] if doc_result else 0
-        
-        total_deleted = deleted_chunks + deleted_entities + deleted_orphans + deleted_documents
-        if total_deleted > 0:
-            return f"{deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans, {deleted_documents} document"
+        if deleted_chunks > 0:
+            return f"{deleted_chunks} chunks deleted (Document & entities preserved)"
         return None
         
     except Exception as e:
