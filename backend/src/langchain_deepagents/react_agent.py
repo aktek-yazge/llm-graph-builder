@@ -32,6 +32,7 @@ import os
 import re
 from typing import AsyncGenerator, Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
+from dataclasses import dataclass, field
 
 # Global Schema Cache import
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
@@ -57,6 +58,208 @@ def _log(msg: str, level: str = "info"):
         logging.error(msg)
     else:
         logging.info(msg)
+
+
+# ============================================================================
+# TOKEN TRACKING
+# ============================================================================
+
+@dataclass
+class StepStats:
+    """Tek bir aşamanın istatistikleri"""
+    step_name: str
+    step_type: str  # "llm_call", "tool_call", "tool_result"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    tool_name: Optional[str] = None
+    tool_params: Optional[Dict[str, Any]] = None
+    tool_result_preview: Optional[str] = None
+    duration_ms: float = 0
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class TokenTracker:
+    """Token kullanımını takip eder"""
+    steps: List[StepStats] = field(default_factory=list)
+    
+    # Kümülatif sayaçlar
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cached_tokens: int = 0
+    total_llm_calls: int = 0
+    total_tool_calls: int = 0
+    
+    def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
+                     cached_tokens: int = 0, duration_ms: float = 0, session_id: str = ""):
+        """LLM çağrısı istatistiği ekle"""
+        step = StepStats(
+            step_name=step_name,
+            step_type="llm_call",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            duration_ms=duration_ms
+        )
+        self.steps.append(step)
+        
+        # Kümülatif güncelle
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+        self.total_cached_tokens += cached_tokens
+        self.total_llm_calls += 1
+        
+        # Cache durumu analizi
+        cache_pct = round(cached_tokens / max(input_tokens, 1) * 100, 1)
+        if cached_tokens > 0:
+            cache_status = f"🟢 CACHE HIT {cache_pct}%"
+        else:
+            cache_status = "🔴 CACHE MISS"
+        
+        # Log - Session ID ile birlikte
+        session_info = f"[Session: {session_id[:8]}]" if session_id else ""
+        _log(f"📊 [TOKEN] {session_info} {step_name}")
+        _log(f"   ├─ Input: {input_tokens:,} tokens")
+        _log(f"   ├─ Output: {output_tokens:,} tokens")
+        _log(f"   ├─ Cached: {cached_tokens:,} tokens ({cache_status})")
+        _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cached={self.total_cached_tokens:,}")
+    
+    def add_tool_call(self, tool_name: str, params: Dict[str, Any]):
+        """Tool çağrısı ekle"""
+        # Parametreleri kısalt (çok uzun olabilir)
+        params_preview = {}
+        for k, v in params.items():
+            if isinstance(v, str) and len(v) > 100:
+                params_preview[k] = v[:100] + "..."
+            else:
+                params_preview[k] = v
+        
+        step = StepStats(
+            step_name=f"tool_{tool_name}",
+            step_type="tool_call",
+            tool_name=tool_name,
+            tool_params=params_preview
+        )
+        self.steps.append(step)
+        self.total_tool_calls += 1
+        
+        # Log
+        _log(f"🔧 [TOOL CALL] {tool_name}")
+        for k, v in params_preview.items():
+            _log(f"   ├─ {k}: {v}")
+    
+    def add_tool_result(self, tool_name: str, result: str, success: bool = True):
+        """Tool sonucu ekle"""
+        # Sonucu kısalt
+        result_preview = result[:500] + "..." if len(result) > 500 else result
+        
+        step = StepStats(
+            step_name=f"tool_{tool_name}_result",
+            step_type="tool_result",
+            tool_name=tool_name,
+            tool_result_preview=result_preview
+        )
+        self.steps.append(step)
+        
+        # Log
+        status = "✅" if success else "❌"
+        _log(f"📥 [TOOL RESULT] {status} {tool_name}")
+        # Sonucu satır satır göster (max 5 satır)
+        lines = result_preview.split('\n')[:5]
+        for line in lines:
+            if line.strip():
+                _log(f"   │ {line[:120]}")
+        if len(result_preview.split('\n')) > 5:
+            _log(f"   │ ... ({len(result_preview.split(chr(10)))} satır)")
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """İstatistik özeti döndür"""
+        return {
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_cached_tokens": self.total_cached_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "cache_hit_rate": round(self.total_cached_tokens / max(self.total_input_tokens, 1) * 100, 1),
+            "total_llm_calls": self.total_llm_calls,
+            "total_tool_calls": self.total_tool_calls,
+            "steps": len(self.steps),
+            "estimated_cost_usd": self._estimate_cost()
+        }
+    
+    def _estimate_cost(self, model: str = "gpt-5") -> float:
+        """Tahmini maliyet hesapla (OpenAI Standard tier fiyatları)
+        
+        Fiyatlar: https://platform.openai.com/docs/pricing
+        
+        GPT-5 Standard (per 1M tokens):
+        - Input: $1.25
+        - Cached Input: $0.125 (10x cheaper!)
+        - Output: $10.00
+        
+        GPT-4o Standard (per 1M tokens):
+        - Input: $2.50
+        - Cached Input: $1.25
+        - Output: $10.00
+        """
+        if "gpt-5" in model.lower():
+            input_price = 1.25
+            cached_price = 0.125
+            output_price = 10.00
+        else:  # gpt-4o, etc.
+            input_price = 2.50
+            cached_price = 1.25
+            output_price = 10.00
+        
+        uncached_input = self.total_input_tokens - self.total_cached_tokens
+        input_cost = uncached_input * input_price / 1_000_000
+        cached_cost = self.total_cached_tokens * cached_price / 1_000_000
+        output_cost = self.total_output_tokens * output_price / 1_000_000
+        
+        return round(input_cost + cached_cost + output_cost, 6)
+    
+    def print_summary(self, session_id: str = ""):
+        """Özeti logla"""
+        summary = self.get_summary()
+        _log("\n" + "=" * 70)
+        _log("📈 [REACT AGENT İSTATİSTİKLERİ]")
+        if session_id:
+            _log(f"   Session ID: {session_id[:8]}")
+        _log("=" * 70)
+        _log(f"   LLM Çağrıları: {summary['total_llm_calls']}")
+        _log(f"   Tool Çağrıları: {summary['total_tool_calls']}")
+        _log(f"   Toplam Adım: {summary['steps']}")
+        _log("-" * 70)
+        _log(f"   Input Token: {summary['total_input_tokens']:,}")
+        _log(f"   Output Token: {summary['total_output_tokens']:,}")
+        _log(f"   Cached Token: {summary['total_cached_tokens']:,}")
+        
+        # Cache durumu açıklaması
+        cache_rate = summary['cache_hit_rate']
+        if cache_rate >= 70:
+            cache_emoji = "🟢"
+            cache_note = "Mükemmel! Prompt Caching çalışıyor."
+        elif cache_rate >= 30:
+            cache_emoji = "🟡"
+            cache_note = "Kısmi cache hit. Prefix değişkenlik gösteriyor."
+        else:
+            cache_emoji = "🔴"
+            cache_note = "Cache miss! Session/prefix değişmiş olabilir."
+        
+        _log(f"   Cache Hit Rate: {cache_rate}% {cache_emoji}")
+        _log(f"   └─ Not: {cache_note}")
+        _log("-" * 70)
+        _log(f"   Toplam Token: {summary['total_tokens']:,}")
+        _log(f"   Tahmini Maliyet: ${summary['estimated_cost_usd']:.6f}")
+        _log("=" * 70)
+        
+        # OpenAI Prompt Caching bilgisi
+        _log("ℹ️  OpenAI Prompt Caching Bilgisi:")
+        _log("   • Cache SESSION ID'ye bağlı DEĞİL - aynı org/proje içinde çalışır")
+        _log("   • Aynı prefix (system prompt + schema) = cache hit")
+        _log("   • Cache TTL: ~5-10 dakika (OpenAI tarafı)")
+        _log("   • Minimum prefix: 1024 token")
+        _log("")
 
 
 # ============================================================================
@@ -139,6 +342,67 @@ def _clear_session_sources(question_id: str):
         del _session_sources[question_id]
 
 
+def _generate_file_links_markdown(file_names: set) -> str:
+    """fileName'lerden markdown formatında dosya linkleri oluşturur"""
+    import urllib.parse
+    
+    if not file_names:
+        return ""
+    
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    markdown_section = "\n\n## 📎 Kaynak Belgeler\n\n"
+    
+    for file_name in sorted(file_names):
+        try:
+            encoded_file_name = urllib.parse.quote(file_name, safe="", encoding="utf-8")
+            file_url = f"{base_url}/files/{encoded_file_name}"
+            
+            # Dosya adını kısalt (çok uzunsa)
+            display_name = file_name
+            if len(display_name) > 60:
+                display_name = display_name[:57] + "..."
+            
+            # Markdown link
+            markdown_section += f"- 📄 [{display_name}]({file_url})\n"
+        except Exception as e:
+            _log(f"❌ fileName markdown hatası: {e}", "error")
+            continue
+    
+    return markdown_section
+
+
+def _generate_page_links_markdown(page_links: set) -> str:
+    """Page link'lerden markdown formatında görsel linkler oluşturur"""
+    import urllib.parse
+    
+    if not page_links:
+        return ""
+    
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    markdown_section = "\n\n## 📄 İlgili Sayfa Görselleri\n\n"
+    
+    for page_link in sorted(page_links):
+        try:
+            encoded_page_link = urllib.parse.quote(page_link, safe="", encoding="utf-8")
+            image_url = f"{base_url}/images/{encoded_page_link}"
+            
+            page_info = "Sayfa Görseli"
+            if "_page_" in page_link:
+                try:
+                    page_num = page_link.split("_page_")[1].split(".")[0]
+                    page_info = f"Sayfa {page_num}"
+                except:
+                    pass
+            
+            # Markdown image
+            markdown_section += f"![{page_info}]({image_url})\n\n"
+        except Exception as e:
+            _log(f"❌ page_link markdown hatası: {e}", "error")
+            continue
+    
+    return markdown_section
+
+
 # ============================================================================
 # CACHE-OPTIMIZED PROMPT - SABİT PREFIX (OpenAI Prompt Caching için)
 # ============================================================================
@@ -149,7 +413,70 @@ def _clear_session_sources(question_id: str):
 CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
 
 Sen Dinkal Sigorta için Neo4j graph veritabanı sorgulayan bir AI agent'sın.
-Kullanıcı sorularını analiz eder, uygun Cypher sorguları yazarsın.
+
+## ⚠️ ÖNEMLİ: SEN CEVABI BİLMİYORSUN!
+
+Sen kullanıcının sorusunun cevabını **bilmiyorsun**. Cevabı bulmak için:
+
+1. **ŞEMAYI İNCELE** - Aşağıdaki "VERİTABANI ŞEMASI" bölümünü oku
+2. **PLANLA** - Cevaba ulaşmak için hangi node'lar ve ilişkiler gerekli?
+3. **KEŞİF YAP** - Entity hangi node/nodelar'da?
+4. **DOĞRU SORGULA** - Şemadaki ilişkileri TAKİP ederek veriyi bul
+
+⛔ **YAPMA:**
+- Şemaya bakmadan sorgu yazma
+- İlişki/node adlarını tahmin etme
+- Aynı hatayı tekrarlama
+
+✅ **YAP:**
+- Her adımda şemayı kontrol et
+- Bulamadığında farklı node'larda ara
+- Contains text aramalarında sonuç bulamazsan Türkçe/İngilizce switch yapıp arama yap (belgeler İngilizce olabilir!)
+
+---
+
+# 🔍 KEŞİF REHBERİ
+
+Entity keşfi ve varyasyon bulma stratejileri.
+
+## 🎯 AMAÇ
+Veritabanındaki entity'lerin yazım varyasyonlarını bulmak.
+⛔ **CHUNK HARİÇ!** (Chunk → İÇERİK görevinde aranır)
+
+## 📊 ŞEMADAN NODE TİPLERİNİ BELİRLE (KRİTİK!)
+
+KEŞİF görevi vermeden ÖNCE şemayı incele:
+1. Aranan entity hangi node tiplerinde olabilir?
+2. Aynı entity FARKLI node tiplerinde farklı ROLLER ile bulunabilir
+3. **TÜM potansiyel node tiplerini Worker'a ver!**
+
+```
+❌ YANLIŞ: Sadece 1 node tipinde ara
+✅ DOĞRU: Şemadaki TÜM ilgili node tiplerinde ara
+```
+
+<search_term_rules>
+## 🚨 ARAMA TERİMLERİ OLUŞTURURKEN
+
+
+- **MARKA/ŞİRKET ADININ TAM HALİNİ EKLE:** "XYZ" ← lowercase versiyonu
+- Ünvan ek bilgi ile aramana gerek yok.
+- **Aranan node isimleri ilk kelime veya ilk iki kelime ili birlikte aramalısın.** Örnek: "ABC Ticaret Gayrimenkul Anonim şirketi" ise -> "ABC" veya "ABC Ticaret"
+- Aranan içerik Sokak Lambası ise -> "Sokak Lambası", "Sokak" Asla "Sokak lamb" değil
+⛔ **KELİMEYİ BÖLME!**
+```
+❌ YANLIŞ: "Akenerji" → "Aken" (anlamsız yarım kelime!)
+✅ DOĞRU: "Akenerji" → "akenerji" (lowercase tam kelime)
+
+❌ YANLIŞ: "Akiş Gyo" → "gyo" (anlamsız kelime!)
+✅ DOĞRU: "Akiş Gyo" → "akis" (lowercase tam kelime)
+
+❌ YANLIŞ: "Microsoft" → "Micro" 
+✅ DOĞRU: "Microsoft" → "microsoft"
+```
+</search_term_rules>
+
+
 
 ## 🔄 ReAct DÖNGÜSÜ
 
@@ -157,9 +484,11 @@ Her soru için şu adımları takip et:
 
 ### 1️⃣ DÜŞÜN (Thought)
 Soruyu analiz et:
-- Ne soruluyor? Hangi entity'ler var?
-- Şemada bu bilgi nerede? Hangi node'larda aranmalı?
+- Ne soruluyor? Hangi entity'ler var? 
+- **ŞEMADA** bu bilgi nerede? Hangi node'larda aranmalı?
 - Metadata mı (sayı, tarih, liste) yoksa içerik mi (belge detayı)?
+
+⚠️ **Soruda isim varsa (kişi, kurum, şirket) → ÖNCE keşfet, varyasyonlarını bul!**
 
 ### 2️⃣ EYLEM (Action)
 Uygun tool'u çağır:
@@ -172,10 +501,45 @@ Tool sonucunu değerlendir:
 - Yeterli veri var mı?
 - False positive kontrolü (embedding sonuçlarında)
 - Eksik bilgi var mı?
+- Tool çağrılarından elde edilen bilgiler kullanıcı sorusunu karşılıyor mu?
 
 ### 4️⃣ TEKRARLA veya CEVAPLA
 - Eksik varsa → Farklı strateji dene
-- Yeterli varsa → Kullanıcıya kısa ve net cevap ver
+- Yeterli varsa → **ÖNCE** add_source çağır (fileName/page_link varsa), **SONRA** kullanıcıya cevap ver
+
+---
+
+## 🎯 2 AŞAMALI ARAMA (KRİTİK!)
+
+**Birden fazla entity içeren sorgularda ÖNCE her entity'yi ayrı ayrı keşfet!**
+
+```
+⛔ YANLIŞ: Tek sorguda çoklu CONTAINS
+   WHERE name CONTAINS 'X' AND type CONTAINS 'Y'  → Yanlış eşleşmeler!
+
+✅ DOĞRU: Önce keşif, sonra EXACT değerlerle sorgu
+   1. KEŞİF: X'i bul → EXACT değer: "X Tam Adı"
+   2. KEŞİF: Y'yi bul → EXACT değer: "Y Tam Adı"  
+   3. ANA SORGU: WHERE name = 'X Tam Adı' AND type = 'Y Tam Adı'
+```
+
+**KURAL:** Metin araması gerektiren HER ALAN için önce KEŞİF yap, EXACT değer bul!
+
+⛔ **KEŞİF'ten sonra CONTAINS EKLEME!** Bulunan değerleri kullan:
+```
+❌ WHERE name = 'X' OR name CONTAINS 'x'  → Gereksiz CONTAINS!
+✅ WHERE name = 'X'  → Tek sonuç varsa
+✅ WHERE name IN ['X Var1', 'X Var2', ...]  → Çoklu varyasyon varsa
+```
+⚠️ Alakasız sonuçları filtrele! (farklı entity, yanlış eşleşme)
+
+### ⚠️ SONUÇ DOĞRULAMA
+
+```
+Aranan: "X Y"
+Bulunan: "X-Z Y" veya "X Z Y" → FAZLADAN kelime var → TAM EŞLEŞMEDEĞİL!
+→ Belge içeriğinde (Chunk) de ara!
+```
 
 ---
 
@@ -185,57 +549,92 @@ Tool sonucunu değerlendir:
 **NE ZAMAN:** Metadata sorguları, entity keşfi, ilişki takibi, sayısal bilgiler
 
 ```cypher
--- KEŞİF örneği:
-MATCH (n:Customer) 
-WHERE toLower(n.name) CONTAINS 'akenerji'
-RETURN DISTINCT n.name, n.fullName LIMIT 10
+-- KEŞİF: Şemadaki node'larda arama (node label'ı ŞEMADAN al!)
+MATCH (n:NodeLabel) 
+WHERE apoc.text.clean(n.propertyName) CONTAINS apoc.text.clean('arama_terimi')
+RETURN DISTINCT n.propertyName LIMIT 10
 
--- METADATA örneği:
-MATCH (c:Customer)-[:HAS_POLICY]->(p:Policy)
-WHERE toLower(c.name) CONTAINS 'akenerji'
-RETURN p.policyNumber, p.startDate LIMIT 20
+-- METADATA: KEŞİF'ten bulunan EXACT değerle sorgula
+MATCH (a:NodeA)-[:RELATIONSHIP]->(b:NodeB)
+WHERE a.name = 'Keşifte Bulunan Exact Değer'
+RETURN b.property1, b.property2 LIMIT 20
 ```
 
 ### execute_embedding_query(query_text, cypher_query, step_name)
 **NE ZAMAN:** Belge içeriği araması, semantic arama
 
 ⚠️ **KRİTİK:** 
-- `query_text`: Sadece KONU (örn: "taksit ödeme planı")
+- `query_text`: Sadece KONU (örn: "ödeme planı", "teminat detayları")
 - `cypher_query`: MUTLAKA `$embedding_vector` + `gds.similarity.cosine > 0.85` içermeli
 - MUTLAKA filtrelenmiş sorgu kullan (tüm Chunk'larda arama YASAK!)
+- **⚠️ RETURN'de MUTLAKA `page_link` ve `fileName` ekle!** (kaynak için gerekli)
 
 ```cypher
--- DOĞRU:
-MATCH (c:Customer)<-[:BELONGS_TO]-(p:Policy)-[:HAS_DOCUMENT]->(d:Document)-[:PART_OF]->(chunk:Chunk)
-WHERE toLower(c.name) CONTAINS 'akenerji'
+-- Chunk araması (KEŞİF'ten bulunan EXACT değerle filtrele!)
+MATCH (entity:EntityNode)-[:REL1]->(doc:Document)-[:FIRST_CHUNK|PART_OF*]->(chunk:Chunk)
+WHERE apoc.text.clean(entity.name) CONTAINS apoc.text.clean('filtre_terimi')
 AND chunk.embedding IS NOT NULL
 AND gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.85
-RETURN chunk.text, d.fileName, gds.similarity.cosine(chunk.embedding, $embedding_vector) as score
+RETURN chunk.text, chunk.page_link, doc.fileName, 
+       gds.similarity.cosine(chunk.embedding, $embedding_vector) as score
 ORDER BY score DESC LIMIT 10
 ```
 
-### get_guide(topic)
-Strateji rehberleri için:
-- `KESIF`: Entity varyasyon bulma stratejisi
-- `ICERIK`: Chunk/embedding arama stratejisi  
-- `METADATA`: İlişki takibi stratejisi
-- `CYPHER_RULES`: Sorgu yazım kuralları
-- `FALSE_POSITIVE`: Embedding doğrulama stratejisi
+⚠️ **RETURN ZORUNLU ALANLAR:**
+- `chunk.text` → İçerik
+- `chunk.page_link` → Sayfa görseli için (add_source)
+- `doc.fileName` → Belge adı için (add_source)
+- `score` → Sıralama için
 
-### add_source(question_id, source_type, value)
-Cevaba kaynak eklemek için:
-- `source_type="document"`: PDF dosya adı
-- `source_type="page"`: Sayfa görseli
+### add_source(source_type, value) - KAYNAK EKLEME
+Cevaba kaynak eklemek için - **ZORUNLU KURALLAR:**
+
+⚠️ **NE ZAMAN ÇAĞIRMALISIN?**
+- Sorgu sonucunda `fileName` veya `file` varsa → `add_source("document", fileName)` çağır!
+- Sorgu sonucunda `page_link` varsa → `add_source("page", page_link)` çağır!
+- Cevabında PDF dosya adı geçecekse → ÖNCE add_source çağır!
+
+```
+source_type="document" → PDF dosya adı (örn: "Rapor_2024.pdf")
+source_type="page"     → Sayfa görseli (örn: "Rapor_2024_page_001.png")
+```
+
+⛔ **KURAL:** add_source çağırmadan dosya adı/page_link YAZMA!
+✅ **ÖNCE** add_source çağır, **SONRA** cevabında dosya adını kullan!
+
+### read_finding(step_name, start_record, end_record) - PAGINATION
+Sorgu sonuçlarının devamını görmek için:
+
+⚠️ **NE ZAMAN KULLAN?**
+- execute_cypher_query veya execute_embedding_query ilk 10 kaydı gösterir
+- "Toplam: 150 kayıt, Gösterilen: 0-10" görürsen daha fazlası var demektir
+- Doğru cevabın 10. kayıttan sonra olabileceğini düşünüyorsan bu tool'u kullan
+
+```
+Örnekler:
+read_finding("step_1_search", start_record=10, end_record=20)  → 10-20 arası
+read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
+```
 
 ---
 
 ## 📋 CYPHER KURALLARI
 
-### String Normalizasyonu - HER ZAMAN toLower() kullan
+### ⚠️ ŞEMA-TABANLI SORGULAMA (EN ÖNEMLİ!)
+```
+1. Node label'larını ŞEMADAN al → Tahmin ETME!
+2. İlişki adlarını ŞEMADAN al → Uydurma!
+3. Property isimlerini ŞEMADAN al → Varsayma!
+4. İlişki yönlerini ŞEMADAN al → Ters yazma!
+```
+
+### String Araması - apoc.text.clean() kullan
 ```cypher
-✅ WHERE toLower(n.name) CONTAINS 'term'
-❌ WHERE n.name = 'Term'
-❌ WHERE apoc.text.clean(n.name) CONTAINS 'term'  -- Yanlış eşleşme!
+-- KEŞİF: apoc.text.clean() ile ara
+✅ WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('terim')
+
+-- ANA SORGU: KEŞİF'ten bulunan EXACT değeri kullan
+✅ WHERE n.name = 'Keşifte Bulunan Tam Değer'
 ```
 
 ### İlişki Yönü - ŞEMADAN AYNEN KOPYALA
@@ -245,67 +644,90 @@ Cevaba kaynak eklemek için:
 ❌ MATCH (b:B)-[:REL]->(a:A)  -- Ters yön ÇALIŞMAZ!
 ```
 
-### İlişki Adları - BİREBİR KOPYALA
-```cypher
--- Şemada: HAS_POLICY varsa
-✅ [:HAS_POLICY]
-❌ [:HAS_POLICIES]  -- Farklı ilişki!
-```
-
 ### Paralel Sorgular - Birden fazla node varsa TEK SEFERDE çağır
 ```
 Tool Call 1: execute_cypher_query(NodeA sorgusu, "step_1_nodeA")
 Tool Call 2: execute_cypher_query(NodeB sorgusu, "step_1_nodeB")
-Tool Call 3: execute_cypher_query(NodeC sorgusu, "step_1_nodeC")
 → Hepsi PARALEL çalışır!
 ```
 
 ### Aggregate Fonksiyonları
-| Soru | Fonksiyon | Örnek |
-|------|-----------|-------|
-| Toplam | SUM() | `RETURN SUM(a.value) AS toplam` |
-| Ortalama | AVG() | `RETURN AVG(a.value) AS ortalama` |
-| Sayı | COUNT() | `RETURN COUNT(DISTINCT p) AS adet` |
-
-### Tarih Filtreleme
-| Kullanıcı İfadesi | Hangi Tarih? |
-|-------------------|--------------|
-| "düzenlenen", "başlayan" | → START DATE |
-| "biten", "sona eren" | → END DATE |
+| Soru | Fonksiyon |
+|------|-----------|
+| Toplam | `SUM(n.field)` |
+| Ortalama | `AVG(n.field)` |
+| Sayı | `COUNT(DISTINCT n)` |
 
 ---
 
 ## ⚠️ KRİTİK KURALLAR
 
-1. ⛔ **Tüm Chunk'larda arama YASAK** → Her zaman filtrelenmiş sorgu!
-2. ⛔ **Şemada olmayan ilişki/node YAZMA** → Şemayı kontrol et
+1. ⛔ **Şemada olmayan node/ilişki/property YAZMA** → ŞEMAYI KONTROL ET!
+2. ⛔ **Tüm Chunk'larda arama YASAK** → Her zaman filtrelenmiş sorgu!
 3. ⛔ **Kullanıcıdan onay İSTEME** → Veri varsa direkt CEVAPLA
 4. ⛔ **Teknik terim kullanıcıya GÖSTERME** → Node, property, Cypher yok!
 5. ✅ **Paralel tool çağrıları KULLAN** → Hız için kritik
-6. ✅ **Kaynak dosya adı geçecekse add_source ÇAĞIR**
-7. ✅ **Embedding sonuçlarını DOĞRULA** → False positive kontrolü
+6. ✅ **Embedding sonuçlarını DOĞRULA** → False positive kontrolü
+7. ✅ **KAYNAK EKLE** → Sonuçta fileName/page_link varsa add_source ÇAĞIR!
 
 ---
 
-## 📝 CEVAP FORMATI
+## 🔄 EMBEDDING FALLBACK STRATEJİSİ
 
-### Sayısal Soru
-```
-Toplam tutar: 250.000 TRY
+### Embedding 0 Sonuç Döndürürse → TEXT CONTAINS Fallback
+
+⚠️ **Embedding araması 0 sonuç döndürdüğünde, `execute_cypher_query` ile c.text CONTAINS ara!**
+
+```cypher
+-- Embedding başarısız oldu, text-based arama dene:
+-- ⚠️ chunk.text için toLower() kullan (boşlukları korur!)
+MATCH (entity:EntityNode)-[:REL1]->(doc:Document)-[:PART_OF]->(c:Chunk)
+WHERE entity.name = 'Keşifte Bulunan Exact Değer'
+AND (toLower(c.text) CONTAINS 'türkçe terim' 
+     OR toLower(c.text) CONTAINS 'english term')
+RETURN c.text, c.page_link, doc.fileName
+LIMIT 10
 ```
 
-### Liste Sorusu
+### Embedding Sonuç Döndü ama FALSE POSITIVE Riski
+
+⚠️ **Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
+
+Embedding alan benzerliği yakalar ama kavramsal farklılığı yakalayamaz.
+
+**DOĞRULAMA ADIMLARI:**
+1. Dönen `chunk.text` içinde aranan terim GEÇİYOR MU?
+2. GEÇMİYORSA → FALSE POSITIVE! Text CONTAINS ile tekrar ara
+3. GEÇİYORSA → Doğru sonuç, devam et
+
+**FALSE POSITIVE Örneği:**
 ```
-3 poliçe bulundu:
-1. POL-001 - Yangın Sigortası
-2. POL-002 - Kasko
-3. POL-003 - Sağlık
+Arama: "kira kaybı"
+Embedding sonucu: "deprem hasarı teminatı" (score: 0.87)
+Kontrol: "kira kaybı" chunk.text'te geçiyor mu? → HAYIR
+Karar: ❌ FALSE POSITIVE! Text CONTAINS ile "kira kaybı" ara
 ```
 
-### Bulunamadı
+### Chunk İlişki Yolu - ÖNEMLİ!
+
+⚠️ **FIRST_CHUNK vs PART_OF farkı:**
+- `FIRST_CHUNK`: Sadece belgenin İLK chunk'ını getirir (genellikle başlık)
+- `PART_OF`: Belgenin TÜM chunk'larını getirir (içerik araması için)
+
+```cypher
+-- İçerik araması için PART_OF kullan:
+MATCH (entity)-[:REL]->(doc:Document)<-[:PART_OF]-(c:Chunk)
+-- VEYA şemada varsa:
+MATCH (entity)-[:REL]->(doc:Document)-[:PART_OF]->(c:Chunk)
 ```
-[Aranan konu] ile ilgili kayıt bulunamadı.
-```
+
+### ÇOK DİLLİ ARAMA - KRİTİK!
+
+⚠️ **Belgeler farklı dillerde olabilir!**
+- Hem Türkçe hem İngilizce karşılığı ile ara
+- Örnek: "kira kaybı" VE "loss of rent" birlikte dene
+
+---
 
 ⚠️ **YASAK:** Node isimleri, Cypher sorguları, teknik açıklamalar
 
@@ -381,6 +803,35 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             _log(f"⚠️ Blackboard append error: {e}")
     
     # =========================================================================
+    # PAGINATION CONFIG
+    # =========================================================================
+    DEFAULT_RECORDS_PER_PAGE = 10  # İlk gösterilecek kayıt sayısı
+    
+    def _parse_records(result_str: str) -> List[str]:
+        """Sonuç string'inden kayıtları parse et - (R:N){...} formatı"""
+        import re
+        # Her kayıt (R:N){ ile başlıyor
+        record_pattern = r'\(R:\d+\)\{[^}]*(?:\{[^}]*\}[^}]*)*\}'
+        records = re.findall(record_pattern, result_str, re.DOTALL)
+        return records
+    
+    def _format_paginated_result(records: List[str], total_count: int, start: int, end: int, step_name: str) -> str:
+        """Pagination bilgisi ile sonuç formatla"""
+        shown_records = records[start:end]
+        shown_count = len(shown_records)
+        
+        result_lines = "\n".join(shown_records)
+        
+        pagination_info = f"📊 Gösterilen: {start}-{start + shown_count} / Toplam: {total_count} kayıt"
+        
+        if end < total_count:
+            more_info = f"\n\n💡 Daha fazla görmek için: read_more_results(\"{step_name}\", start_record={end}, end_record={min(end + DEFAULT_RECORDS_PER_PAGE, total_count)})"
+        else:
+            more_info = ""
+        
+        return f"{pagination_info}\n\n{result_lines}{more_info}"
+    
+    # =========================================================================
     # EXECUTE CYPHER QUERY TOOL
     # =========================================================================
     @tool
@@ -398,7 +849,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             step_name: Adım adı (örn: step_1_customer_search)
         
         Returns:
-            Sorgu sonucu veya hata mesajı
+            İlk 10 kayıt + pagination bilgisi. Daha fazla için read_more_results kullan.
         """
         mcp_read = mcp_tool_map.get("read_neo4j_cypher")
         if not mcp_read:
@@ -411,16 +862,19 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             # Hata kontrolü
             is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
             
-            # Kayıt sayısı
-            records = []
-            if result_str and not is_error:
+            # Kayıtları parse et
+            records = _parse_records(result_str)
+            record_count = len(records)
+            
+            # Eğer parse edilemezse eski yönteme fallback
+            if record_count == 0 and result_str and not is_error:
                 lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
                 records = lines
+                record_count = len(records)
             
-            record_count = len(records)
             success = record_count > 0 and not is_error
             
-            # Dosyaya kaydet
+            # Dosyaya TÜM sonucu kaydet (pagination için)
             suffix = "success" if success else "failed"
             file_path = os.path.join(findings_base, f"{step_name}_{suffix}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
@@ -430,11 +884,12 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             _log(f"📁 Cypher: {step_name} → {record_count} records")
             _append_to_blackboard(step_name, record_count, success)
             
-            # Sonuç döndür - tool'un çıktısı modele gider
+            # Sonuç döndür - PAGINATION ile ilk N kayıt
             if success:
-                return f"""✅ {record_count} kayıt bulundu.
-
-{result_str[:3000]}{"..." if len(result_str) > 3000 else ""}"""
+                # İlk N kaydı göster
+                end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
+                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
+                return f"✅ {record_count} kayıt bulundu.\n\n{paginated_result}"
             else:
                 return f"""❌ Sonuç bulunamadı veya hata oluştu.
 
@@ -460,10 +915,11 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         - query_text: Sadece KONU (örn: "taksit planı"), varyasyon DEĞİL!
         - cypher_query: MUTLAKA $embedding_vector ve gds.similarity.cosine içermeli
         - MUTLAKA filtrelenmiş sorgu kullan!
+        - RETURN'de MUTLAKA chunk.page_link ve doc.fileName ekle! (kaynak için)
         
         Args:
             query_text: Aranacak konu (semantic search için)
-            cypher_query: Cypher sorgusu ($embedding_vector içermeli)
+            cypher_query: Cypher sorgusu ($embedding_vector + page_link + fileName içermeli)
             step_name: Adım adı
         
         Returns:
@@ -503,9 +959,19 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             _append_to_blackboard(step_name, record_count, success)
             
             if success:
+                # Kayıtları parse et
+                parsed_records = _parse_records(result_str)
+                if len(parsed_records) == 0:
+                    # Parse edilemezse eski yönteme fallback
+                    parsed_records = records
+                
+                # İlk N kaydı göster
+                end_idx = min(DEFAULT_RECORDS_PER_PAGE, len(parsed_records))
+                paginated_result = _format_paginated_result(parsed_records, len(parsed_records), 0, end_idx, step_name)
+                
                 return f"""✅ {record_count} içerik bulundu.
 
-{result_str[:4000]}{"..." if len(result_str) > 4000 else ""}
+{paginated_result}
 
 ⚠️ FALSE POSITIVE KONTROLÜ: Dönen chunk.text'lerde "{query_text}" geçiyor mu kontrol et!"""
             else:
@@ -523,57 +989,57 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     # =========================================================================
     # GET GUIDE TOOL
     # =========================================================================
-    @tool
-    def get_guide(topic: str) -> str:
-        """
-        Strateji rehberi al.
+    # @tool
+    # def get_guide(topic: str) -> str:
+    #     """
+    #     Strateji rehberi al.
         
-        Topics:
-        - KESIF: Entity varyasyon bulma
-        - ICERIK: Chunk/embedding arama
-        - METADATA: İlişki takibi
-        - CYPHER_RULES: Sorgu yazım kuralları
-        - FALSE_POSITIVE: Embedding doğrulama
+    #     Topics:
+    #     - KESIF: Entity varyasyon bulma
+    #     - ICERIK: Chunk/embedding arama
+    #     - METADATA: İlişki takibi
+    #     - CYPHER_RULES: Sorgu yazım kuralları
+    #     - FALSE_POSITIVE: Embedding doğrulama
         
-        Args:
-            topic: Rehber konusu
+    #     Args:
+    #         topic: Rehber konusu
         
-        Returns:
-            Rehber içeriği
-        """
-        prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
+    #     Returns:
+    #         Rehber içeriği
+    #     """
+    #     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
         
-        topic_lower = topic.lower().replace("_", "")
-        topic_map = {
-            "kesif": "kesif.md",
-            "keşif": "kesif.md",
-            "icerik": "icerik.md",
-            "içerik": "icerik.md",
-            "metadata": "metadata.md",
-            "falsepositive": "false_positive.md",
-            "false_positive": "false_positive.md",
-            "cypherrules": "cypher_rules.md",
-            "cypher_rules": "cypher_rules.md",
-            "cypher": "cypher_rules.md",
-            "finalcevap": "final_cevap.md",
-            "final_cevap": "final_cevap.md",
-            "cevap": "final_cevap.md",
-        }
+    #     topic_lower = topic.lower().replace("_", "")
+    #     topic_map = {
+    #         "kesif": "kesif.md",
+    #         "keşif": "kesif.md",
+    #         "icerik": "icerik.md",
+    #         "içerik": "icerik.md",
+    #         "metadata": "metadata.md",
+    #         "falsepositive": "false_positive.md",
+    #         "false_positive": "false_positive.md",
+    #         "cypherrules": "cypher_rules.md",
+    #         "cypher_rules": "cypher_rules.md",
+    #         "cypher": "cypher_rules.md",
+    #         "finalcevap": "final_cevap.md",
+    #         "final_cevap": "final_cevap.md",
+    #         "cevap": "final_cevap.md",
+    #     }
         
-        filename = topic_map.get(topic_lower)
-        if not filename:
-            available = ", ".join(["KESIF", "ICERIK", "METADATA", "FALSE_POSITIVE", "CYPHER_RULES"])
-            return f"❌ Bilinmeyen rehber: {topic}. Mevcut: {available}"
+    #     filename = topic_map.get(topic_lower)
+    #     if not filename:
+    #         available = ", ".join(["KESIF", "ICERIK", "METADATA", "FALSE_POSITIVE", "CYPHER_RULES"])
+    #         return f"❌ Bilinmeyen rehber: {topic}. Mevcut: {available}"
         
-        guide_path = os.path.join(prompts_dir, filename)
-        if not os.path.exists(guide_path):
-            return f"❌ Rehber bulunamadı: {guide_path}"
+    #     guide_path = os.path.join(prompts_dir, filename)
+    #     if not os.path.exists(guide_path):
+    #         return f"❌ Rehber bulunamadı: {guide_path}"
         
-        with open(guide_path, "r", encoding="utf-8") as f:
-            content = f.read()
+    #     with open(guide_path, "r", encoding="utf-8") as f:
+    #         content = f.read()
         
-        _log(f"📖 Guide loaded: {topic}")
-        return content
+    #     _log(f"📖 Guide loaded: {topic}")
+    #     return content
     
     # =========================================================================
     # ADD SOURCE TOOL
@@ -603,7 +1069,91 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         else:
             return f"❌ Geçersiz source_type. 'document' veya 'page' olmalı."
     
-    return [execute_cypher_query, execute_embedding_query, get_guide, add_source]
+    # =========================================================================
+    # READ FINDING TOOL - Pagination destekli sonuç okuma
+    # =========================================================================
+    @tool
+    def read_finding(
+        step_name: str,
+        result_type: str = "success",
+        start_record: int = 0,
+        end_record: int = 0
+    ) -> str:
+        """
+        Daha önce kaydedilen sorgu sonuçlarını oku - PAGINATION destekli!
+        
+        İlk sorgu sonucunda 10/150 kayıt gösterilir. Daha fazla görmek için bu tool'u kullan.
+        
+        Args:
+            step_name: Adım adı (örn: step_1_customer_search)
+            result_type: "success" veya "failed"
+            start_record: Başlangıç kayıt numarası (0'dan başlar)
+            end_record: Bitiş kayıt numarası (0 = tümü)
+        
+        Örnekler:
+            İlk 10 kayıt: start_record=0, end_record=10
+            10-20 arası:  start_record=10, end_record=20
+            20-50 arası:  start_record=20, end_record=50
+        
+        Returns:
+            İstenen aralıktaki kayıtlar
+        """
+        import re
+        
+        file_path = os.path.join(findings_base, f"{step_name}_{result_type}.txt")
+        
+        if not os.path.exists(file_path):
+            return f"❌ Dosya bulunamadı: {step_name}_{result_type}.txt"
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Result kısmını ayıkla
+        result_match = content.find("<result>")
+        result_end = content.find("</result>")
+        
+        if result_match == -1 or result_end == -1:
+            return f"❌ Sonuç formatı geçersiz"
+        
+        result_content = content[result_match + 8:result_end]
+        
+        # Kayıtları parse et
+        records = _parse_records(result_content)
+        total_records = len(records)
+        
+        if total_records == 0:
+            # Parse edilemezse eski yönteme fallback
+            lines = [l.strip() for l in result_content.split('\n') if l.strip() and l.strip().startswith('(')]
+            records = lines
+            total_records = len(records)
+        
+        if total_records == 0:
+            return f"❌ Kayıt bulunamadı"
+        
+        # Pagination uygula
+        effective_end = end_record if end_record > 0 else total_records
+        effective_end = min(effective_end, total_records)
+        
+        if start_record >= total_records:
+            return f"❌ Başlangıç kayıt numarası ({start_record}) toplam kayıt sayısından ({total_records}) büyük"
+        
+        selected_records = records[start_record:effective_end]
+        
+        result_lines = "\n".join(selected_records)
+        
+        pagination_info = f"📊 Gösterilen: {start_record}-{effective_end} / Toplam: {total_records} kayıt"
+        
+        if effective_end < total_records:
+            next_end = min(effective_end + DEFAULT_RECORDS_PER_PAGE, total_records)
+            more_info = f"\n\n💡 Sonraki sayfa: read_finding(\"{step_name}\", start_record={effective_end}, end_record={next_end})"
+        else:
+            more_info = "\n\n✅ Tüm kayıtlar gösterildi."
+        
+        _log(f"📖 read_finding: {step_name} [{start_record}-{effective_end}/{total_records}]")
+        
+        return f"{pagination_info}\n\n{result_lines}{more_info}"
+    
+    return [execute_cypher_query, execute_embedding_query, add_source, read_finding]
 
 
 # ============================================================================
@@ -658,35 +1208,51 @@ class ReactAgent:
     
     def _get_conversation_history(self, session_id: str) -> List[Dict[str, str]]:
         """PostgreSQL'den conversation history al"""
+        if not session_id:
+            return []
+        
         try:
-            import importlib
-            postgres_module = importlib.import_module("src.shared.postgres_chat_history")
-            PostgresChatHistory = getattr(postgres_module, "PostgresChatHistory")
+            from src.shared.postgres_chat_history import create_postgres_chat_message_history
             
-            pg_history = PostgresChatHistory()
-            messages = pg_history.get_messages(session_id, limit=10)
+            conversation_history = create_postgres_chat_message_history(
+                session_id=session_id, write_access=True
+            )
             
-            history: List[Dict[str, str]] = []
-            for msg in messages:
-                role = "user" if msg.get("role") == "Human" else "assistant"
-                content = msg.get("content", "")
-                if content:
-                    history.append({"role": role, "content": content})
-            
-            return history
+            if conversation_history and hasattr(conversation_history, "messages"):
+                messages: List[Dict[str, str]] = []
+                recent_messages = conversation_history.messages[-20:] if len(conversation_history.messages) > 20 else conversation_history.messages
+                
+                for msg in recent_messages:
+                    if hasattr(msg, "content"):
+                        role = "user" if (hasattr(msg, "type") and msg.type == "human") else "assistant"
+                        content = str(msg.content) if msg.content else ""
+                        messages.append({"role": role, "content": content})
+                
+                _log(f"History: {len(messages)} msgs")
+                return messages
         except Exception as e:
             _log(f"⚠️ History fetch error: {e}", "warning")
-            return []
+        
+        return []
     
     def _save_to_history(self, session_id: str, role: str, content: str) -> None:
         """PostgreSQL'e mesaj kaydet"""
+        if not session_id:
+            return
+        
         try:
-            import importlib
-            postgres_module = importlib.import_module("src.shared.postgres_chat_history")
-            PostgresChatHistory = getattr(postgres_module, "PostgresChatHistory")
+            from src.shared.postgres_chat_history import create_postgres_chat_message_history
+            from langchain_core.messages import HumanMessage, AIMessage
             
-            pg_history = PostgresChatHistory()
-            pg_history.add_message(session_id, role, content)
+            conversation_history = create_postgres_chat_message_history(
+                session_id=session_id, write_access=True
+            )
+            
+            if conversation_history:
+                if role == "Human":
+                    conversation_history.add_message(HumanMessage(content=content))
+                else:
+                    conversation_history.add_message(AIMessage(content=content))
         except Exception as e:
             _log(f"⚠️ History save error: {e}", "warning")
     
@@ -733,19 +1299,15 @@ class ReactAgent:
             raise ImportError("LangChain not available")
         
         # MCP client başlat
+        # langchain-mcp-adapters 0.1.0+ API: context manager kullanılmıyor
         if self.mcp_client is None:
             if MultiServerMCPClient is None:
                 raise ImportError("MCP Adapters not available")
             config = get_mcp_server_config()
             _log(f"📡 MCP connecting to: {config}")
             self.mcp_client = MultiServerMCPClient(config)
-            await self.mcp_client.__aenter__()
-            tools = self.mcp_client.get_tools()
-            # get_tools() might be async in some versions
-            if asyncio.iscoroutine(tools):
-                self.mcp_tools = await tools
-            else:
-                self.mcp_tools = tools
+            # Yeni API: doğrudan get_tools() çağır (async)
+            self.mcp_tools = await self.mcp_client.get_tools()
             tool_count = len(self.mcp_tools) if self.mcp_tools else 0
             _log(f"✅ MCP connected, {tool_count} tools available")
         
@@ -827,8 +1389,16 @@ class ReactAgent:
         # Session sources temizle
         _clear_session_sources(question_id)
         
+        # Token tracking başlat
+        token_tracker = TokenTracker()
+        _log(f"\n{'='*60}")
+        _log(f"🚀 [REACT] Yeni sorgu: {question[:80]}...")
+        _log(f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {question_id}")
+        _log(f"{'='*60}")
+        
         # Timing
         total_start = time.time()
+        llm_step_count = 0
         
         try:
             # Başlangıç
@@ -922,6 +1492,7 @@ class ReactAgent:
             response_text = ""
             tool_call_count = 0
             logged_msg_ids: set[Any] = set()
+            pending_tool_names: Dict[str, str] = {}  # tool_call_id -> tool_name
             
             async for chunk in agent.astream(agent_input, stream_mode="updates"):  # type: ignore[arg-type]
                 if not isinstance(chunk, dict):
@@ -940,25 +1511,90 @@ class ReactAgent:
                         
                         msg_type = type(message).__name__
                         
+                        # AIMessage'dan token kullanımı çıkar
+                        if msg_type == "AIMessage":
+                            usage_metadata = getattr(message, "usage_metadata", None)
+                            response_metadata = getattr(message, "response_metadata", None)
+                            
+                            input_tokens = 0
+                            output_tokens = 0
+                            cached_tokens = 0
+                            
+                            # DEBUG: usage_metadata yapısını logla
+                            if usage_metadata:
+                                _log(f"🔍 [DEBUG] usage_metadata: {usage_metadata}")
+                            if response_metadata:
+                                # Sadece token ile ilgili kısımları logla
+                                token_related = {k: v for k, v in response_metadata.items() 
+                                               if 'token' in k.lower() or 'usage' in k.lower() or 'cache' in k.lower()}
+                                if token_related:
+                                    _log(f"🔍 [DEBUG] response_metadata (token): {token_related}")
+                            
+                            # usage_metadata varsa (LangChain 0.3+)
+                            if usage_metadata:
+                                input_tokens = usage_metadata.get("input_tokens", 0)
+                                output_tokens = usage_metadata.get("output_tokens", 0)
+                                
+                                # OpenAI cached tokens - input_token_details içinde
+                                input_details = usage_metadata.get("input_token_details", {})
+                                if input_details and isinstance(input_details, dict):
+                                    # OpenAI GPT-5 format: cache_read (not cached_tokens!)
+                                    cached_tokens = input_details.get("cache_read", 0)
+                                    # Fallback: eski format
+                                    if cached_tokens == 0:
+                                        cached_tokens = input_details.get("cached_tokens", 0)
+                                
+                                # Anthropic format
+                                if cached_tokens == 0:
+                                    cached_tokens = usage_metadata.get("cache_read_input_tokens", 0)
+                            
+                            # response_metadata'dan da bakılabilir
+                            if (input_tokens == 0 or cached_tokens == 0) and response_metadata:
+                                token_usage = response_metadata.get("token_usage", {})
+                                if token_usage:
+                                    if input_tokens == 0:
+                                        input_tokens = token_usage.get("prompt_tokens", 0)
+                                    if output_tokens == 0:
+                                        output_tokens = token_usage.get("completion_tokens", 0)
+                                    
+                                    # OpenAI API format: prompt_tokens_details.cached_tokens
+                                    prompt_details = token_usage.get("prompt_tokens_details", {})
+                                    if prompt_details and isinstance(prompt_details, dict):
+                                        cached_tokens = prompt_details.get("cached_tokens", 0)
+                            
+                            if input_tokens > 0 or output_tokens > 0:
+                                llm_step_count += 1
+                                token_tracker.add_llm_step(
+                                    step_name=f"llm_step_{llm_step_count}",
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    cached_tokens=cached_tokens,
+                                    session_id=session_id
+                                )
+                        
                         # Tool calls
                         if hasattr(message, "tool_calls") and message.tool_calls:
                             for tc in message.tool_calls:
                                 tool_call_count += 1
                                 tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
                                 tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                tool_call_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
                                 
-                                _log(f"[REACT] Tool #{tool_call_count}: {tool_name}")
+                                # Token tracker'a ekle
+                                token_tracker.add_tool_call(tool_name, tool_args)
+                                
+                                # Tool call ID'yi sakla (result için)
+                                if tool_call_id:
+                                    pending_tool_names[tool_call_id] = tool_name
                                 
                                 # Kullanıcıya göster
                                 thinking_msg = None
                                 if tool_name == "execute_cypher_query":
-                                    thinking_msg = "🔍 Veritabanında arama yapılıyor..."
+                                    cypher = tool_args.get("cypher", "")[:60]
+                                    thinking_msg = f"🔍 Veritabanında arama: {cypher}..."
                                 elif tool_name == "execute_embedding_query":
                                     query_text = tool_args.get("query_text", "")
                                     thinking_msg = f"📄 İçerik araması: {query_text[:40]}..."
-                                elif tool_name == "get_guide":
-                                    topic = tool_args.get("topic", "")
-                                    thinking_msg = f"📚 {topic} rehberi yükleniyor..."
                                 elif tool_name == "add_source":
                                     thinking_msg = "📎 Kaynak ekleniyor..."
                                 
@@ -972,6 +1608,15 @@ class ReactAgent:
                         # Tool results
                         if msg_type == "ToolMessage":
                             tool_content = getattr(message, "content", "")
+                            tool_call_id = getattr(message, "tool_call_id", "")
+                            tool_name = pending_tool_names.get(tool_call_id, "unknown")
+                            
+                            # Başarı kontrolü
+                            success = "✅" in tool_content or "kayıt" in tool_content.lower()
+                            
+                            # Token tracker'a ekle
+                            token_tracker.add_tool_result(tool_name, str(tool_content), success)
+                            
                             if "✅" in tool_content and "kayıt" in tool_content:
                                 match = re.search(r'(\d+)\s*kayıt', tool_content)
                                 if match:
@@ -1009,16 +1654,51 @@ class ReactAgent:
             
             # Final mesaj
             if response_text:
-                self._save_to_history(session_id, "AI", response_text)
-                
                 # Kaynakları al
                 sources = _get_session_sources(question_id)
                 
+                # Markdown formatında kaynakları cevaba ekle
+                final_response = response_text
+                
+                # Dosya linkleri ekle
+                if sources["documents"]:
+                    file_markdown = _generate_file_links_markdown(sources["documents"])
+                    final_response += file_markdown
+                    _log(f"📎 {len(sources['documents'])} belge kaynağı eklendi")
+                
+                # Sayfa görselleri ekle
+                if sources["pages"]:
+                    page_markdown = _generate_page_links_markdown(sources["pages"])
+                    final_response += page_markdown
+                    _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi")
+                
+                # Markdown kaynakları stream et (message_chunk olarak)
+                source_markdown = ""
+                if sources["documents"]:
+                    source_markdown += _generate_file_links_markdown(sources["documents"])
+                if sources["pages"]:
+                    source_markdown += _generate_page_links_markdown(sources["pages"])
+                
+                if source_markdown:
+                    yield {
+                        "type": "message_chunk",
+                        "content": source_markdown,
+                        "full_message": final_response,
+                        "is_final_answer": True,
+                        "session_id": session_id,
+                    }
+                
+                self._save_to_history(session_id, "AI", final_response)
+                
                 total_time = time.time() - total_start
+                
+                # İstatistik özetini logla
+                token_tracker.print_summary(session_id=session_id)
+                token_stats = token_tracker.get_summary()
                 
                 yield {
                     "type": "final_response",
-                    "content": response_text,
+                    "content": final_response,
                     "sources": {
                         "documents": list(sources["documents"]),
                         "pages": list(sources["pages"]),
@@ -1026,11 +1706,20 @@ class ReactAgent:
                     "metrics": {
                         "total_time": round(total_time, 2),
                         "tool_calls": tool_call_count,
+                        "llm_calls": token_stats["total_llm_calls"],
+                        "input_tokens": token_stats["total_input_tokens"],
+                        "output_tokens": token_stats["total_output_tokens"],
+                        "cached_tokens": token_stats["total_cached_tokens"],
+                        "total_tokens": token_stats["total_tokens"],
+                        "cache_hit_rate": token_stats["cache_hit_rate"],
+                        "estimated_cost_usd": token_stats["estimated_cost_usd"],
                     },
                     "session_id": session_id,
                     "timestamp": datetime.now().isoformat(),
                 }
             else:
+                # Cevap oluşturulamadı - yine de istatistikleri göster
+                token_tracker.print_summary(session_id=session_id)
                 yield {
                     "type": "error",
                     "message": "Cevap oluşturulamadı.",
@@ -1041,6 +1730,10 @@ class ReactAgent:
             _log(f"❌ Stream error: {e}", "error")
             import traceback
             traceback.print_exc()
+            
+            # Hata durumunda da istatistikleri göster
+            token_tracker.print_summary(session_id=session_id)
+            
             yield {
                 "type": "error",
                 "message": f"Bir hata oluştu: {str(e)}",
@@ -1049,13 +1742,10 @@ class ReactAgent:
     
     async def close(self):
         """Kaynakları temizle"""
-        if self.mcp_client:
-            try:
-                await self.mcp_client.__aexit__(None, None, None)
-            except:
-                pass
-            self.mcp_client = None
-            self.mcp_tools = None
+        # langchain-mcp-adapters 0.1.0+ artık context manager kullanmıyor
+        # Sadece referansları temizle
+        self.mcp_client = None
+        self.mcp_tools = None
 
 
 # ============================================================================
