@@ -816,11 +816,6 @@ async def lifespan(app: FastAPI):
     except Exception as otel_error:
         logging.warning(f"⚠️ Server Startup: OpenTelemetry Tracing başlatılamadı: {otel_error}")
 
-    # V2 background processor manuel başlatmaya ayarlı (otomatik başlatma devre dışı)
-    # Background processor'ı başlatmak için /api/v2/processing/start endpoint'ini kullanın
-    logging.info(
-        "ℹ️ V2 Background processor manuel başlatmaya ayarlı. Başlatmak için /api/v2/processing/start endpoint'ini kullanın."
-    )
 
     # 🚀 SERVER STARTUP: PostgreSQL Chat History tablolarını oluştur
     try:
@@ -9806,10 +9801,10 @@ async def relationship_normalization_preview(
             neo4j_database,
         )
         
-        # LLM - gpt-4o-mini kullan (hızlı ve ucuz)
+        # LLM - gpt-5 kullan
         from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             temperature=0
         )
         

@@ -34,6 +34,9 @@ from typing import AsyncGenerator, Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass, field
 
+# Context for logging (Grafana/Loki)
+from src.shared.context import set_request_context, clear_request_context
+
 # Global Schema Cache import
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
 
@@ -162,8 +165,13 @@ class TokenTracker:
         )
         self.steps.append(step)
         
-        # Log
-        status = "✅" if success else "❌"
+        # Log - 3 durum: success (✅), empty (⚪), failed (❌)
+        if "⚪" in result:
+            status = "⚪"
+        elif success:
+            status = "✅"
+        else:
+            status = "❌"
         _log(f"📥 [TOOL RESULT] {status} {tool_name}")
         # Sonucu satır satır göster (max 5 satır)
         lines = result_preview.split('\n')[:5]
@@ -412,7 +420,8 @@ def _generate_page_links_markdown(page_links: set) -> str:
 
 CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
 
-Sen Dinkal Sigorta için Neo4j graph veritabanı sorgulayan bir AI agent'sın.
+Sen Dinkal Sigorta için **Neo4j graph veritabanı** sorgulayan bir AI agent'sın.
+⚠️ **CYPHER QUERY LANGUAGE** kullanıyorsun - SQL DEĞİL!
 
 ## ⚠️ ÖNEMLİ: SEN CEVABI BİLMİYORSUN!
 
@@ -490,9 +499,24 @@ Her soru için şu adımları takip et:
 
 ### 1️⃣ DÜŞÜN (Thought)
 Soruyu analiz et:
-- Ne soruluyor? Hangi entity'ler var? 
-- **ŞEMADA** bu bilgi nerede? Hangi node'larda aranmalı?
-- Metadata mı (sayı, tarih, liste) yoksa içerik mi (belge detayı)?
+- Ne soruluyor? Hangi entity'ler var?
+- **METADATA mı, İÇERİK mi?** (aşağıya bak)
+
+### 📊 METADATA vs 📄 İÇERİK (KRİTİK!)
+
+| Tip | Nerede? | Örnekler | Tool |
+|-----|---------|----------|------|
+| **METADATA** | Node properties | sayı, tarih, liste, isim, ilişki | `execute_cypher_query` |
+| **İÇERİK** | Chunk.text | detay, açıklama, madde, kloz | `execute_embedding_query` |
+
+**⚡ STRATEJİ:**
+```
+1. Entity keşfet (isim, kurum) → GRAPH
+2. Detay/içerik araması → EMBEDDING (entity FİLTRELİ!)
+```
+
+⛔ **YASAK:** Detay/içerik için önce graph'ta genel arama! (çok fazla sonuç!)
+✅ **YAP:** Entity bulduktan sonra, o entity'nin CHUNK'larında embedding ara!
 
 ### ⚠️ İSİM KEŞFİ ÖNCELİKLİ!
 Soruda isim varsa (kişi, kurum, şirket, ürün) → **DİĞER HER ŞEYDEN ÖNCE** keşfet!
@@ -574,22 +598,22 @@ Bulunan: "X-Z Y" veya "X Z Y" → FAZLADAN kelime var → TAM EŞLEŞMEDEĞİL!
 → Belge içeriğinde (Chunk) de ara!
 ```
 
-### 🔍 İÇERİK ARAMASINDA İKİ KAYNAK!
+### 🔍 İÇERİK ARAMASI STRATEJİSİ
 
-İçerik ararken (konu, terim, detay) → **HEM node'larda HEM Chunk'larda ara!**
+İçerik (detay, açıklama, kloz, madde) araması:
 ```
-1. Node'larda ara (yapılandırılmış veri - hızlı)
-2. Chunk'larda ara (belge içeriği - detaylı)
-   → Önce embedding, sonuç yoksa text fallback
+1. Entity keşfet → Şemadaki ilgili node'da bul
+2. ⚡ EMBEDDING → Entity FİLTRELİ chunk araması
+3. Empty → TEXT CONTAINS fallback
 ```
-⚠️ Node'da bulsan bile Chunk'ta da doğrula!
 
 ---
 
-## 🔧 ARAÇLAR
+## 🔧 ARAÇLAR (Neo4j Cypher)
 
 ### execute_cypher_query(cypher, step_name)
 **NE ZAMAN:** Metadata sorguları, entity keşfi, ilişki takibi, sayısal bilgiler
+⚠️ `cypher` parametresi **Neo4j Cypher** syntax'ı olmalı!
 
 ```cypher
 -- KEŞİF: Şemadaki node'larda arama (node label'ı ŞEMADAN al!)
@@ -614,10 +638,11 @@ RETURN b.property1, b.property2 LIMIT 20
 
 ```cypher
 -- Chunk araması (KEŞİF'ten bulunan EXACT değerle filtrele!)
-MATCH (entity:EntityNode)-[:REL1]->(doc:Document)-[:FIRST_CHUNK|PART_OF*]->(chunk:Chunk)
-WHERE apoc.text.clean(entity.name) CONTAINS apoc.text.clean('filtre_terimi')
-AND chunk.embedding IS NOT NULL
-AND gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.85
+-- ⚠️ WITH ile önce null filtrele, SONRA similarity hesapla!
+MATCH (entity:EntityNode)-[:REL1]->(doc:Document)<-[:PART_OF]-(chunk:Chunk)
+WHERE entity.name IN ['Keşifte Bulunan Değer'] AND chunk.embedding IS NOT NULL
+WITH entity, doc, chunk
+WHERE gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.85
 RETURN chunk.text, chunk.page_link, doc.fileName, 
        gds.similarity.cosine(chunk.embedding, $embedding_vector) as score
 ORDER BY score DESC LIMIT 10
@@ -643,7 +668,7 @@ source_type="page"     → Sayfa görseli (örn: "Rapor_2024_page_001.png")
 ```
 
 ⛔ **KURAL:** add_source çağırmadan dosya adı/page_link YAZMA!
-✅ **ÖNCE** add_source çağır, **SONRA** cevabında dosya adını kullan!
+✅ **SADECE** add_source çağır, cevabında dosya adı/kaynak YAZMA! (Link otomatik eklenir)
 
 ### read_finding(step_name, start_record, end_record) - PAGINATION
 Sorgu sonuçlarının devamını görmek için:
@@ -669,6 +694,24 @@ read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 2. İlişki adlarını ŞEMADAN al → Uydurma!
 3. Property isimlerini ŞEMADAN al → Varsayma!
 4. İlişki yönlerini ŞEMADAN al → Ters yazma!
+```
+
+### 🚨 NEO4J 5.x SYNTAX (KRİTİK!)
+```
+❌ [:REL1, :REL2] veya [r:REL1:REL2]  →  ✅ [:REL1|REL2]
+❌ WITH x, x as y (aynı isim)         →  ✅ WITH x, x as z
+❌ [:REL*1:5]                         →  ✅ [:REL*1..5]
+❌ UNION + WITH [...] AS ...          →  ✅ Ayrı sorgular veya WHERE...IN
+❌ exists(n.prop)                     →  ✅ n.prop IS NOT NULL
+❌ WHERE ... AND gds.similarity...    →  ✅ WITH ... WHERE embedding IS NOT NULL → sonra similarity
+```
+
+### 📊 SONUÇTA BAĞLAM GÖSTER
+```
+✅ Eşleşen entity'leri RETURN'e ekle (hangi varyasyon?)
+✅ Belge varsa fileName ekle (kaynak?)
+✅ Şemada tarih/yıl node/property varsa sorguya ekle ve RETURN'de göster
+✅ Son cevapta bu bağlam bilgilerini kullan
 ```
 
 ### String Araması - apoc.text.clean() kullan
@@ -707,8 +750,9 @@ read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 
 ---
 
-## ⚠️ KRİTİK KURALLAR
+## ⚠️ KRİTİK KURALLAR (NEO4J CYPHER!)
 
+0. ⚠️ **Neo4j Cypher syntax kullan** → SQL DEĞİL! Yukarıdaki "NEO4J 5.x SYNTAX" kurallarına uy!
 1. ⛔ **Şemada olmayan node/ilişki/property YAZMA** → ŞEMAYI KONTROL ET!
 2. ⛔ **Tüm Chunk'larda arama YASAK** → Her zaman filtrelenmiş sorgu!
 3. ⛔ **Kullanıcıdan onay İSTEME** → Veri varsa direkt CEVAPLA
@@ -716,10 +760,23 @@ read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 5. ✅ **Paralel tool çağrıları KULLAN** → Sadece AYNI TERİM farklı node'larda ise!
 6. ✅ **Embedding sonuçlarını DOĞRULA** → False positive kontrolü
 7. ✅ **KAYNAK EKLE** → Sonuçta fileName/page_link varsa add_source ÇAĞIR!
+8. ✅ **PARALEL KAYNAK** → Birden fazla kaynak ekleyeceksen TEK ADIMDA hepsini paralel çağır!
 
 ---
 
-## 🔄 EMBEDDING FALLBACK STRATEJİSİ
+## 🔄 HIZLI FALLBACK STRATEJİSİ
+
+### ⚡ 2 BOŞ GRAPH SORGUSU → EMBEDDING → TEXT FALLBACK
+
+⚠️ **KURAL:** 2 boş graph sorgusu sonrası daha fazla graph deneme, embedding'e geç!
+
+```
+1. Keşif → Varyasyonları bul
+2. Graph 1 → empty
+3. Graph 2 → empty  
+4. ⚡ EMBEDDING (daha fazla graph deneme!)
+5. Embedding empty → TEXT CONTAINS fallback
+```
 
 ### Embedding 0 Sonuç Döndürürse → TEXT CONTAINS Fallback
 
@@ -828,6 +885,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     
     def _init_blackboard():
         if os.path.exists(blackboard_path):
+            _log(f"📋 Blackboard: {blackboard_path}")
             return
         try:
             with open(blackboard_path, "w", encoding="utf-8") as f:
@@ -836,6 +894,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 if user_question:
                     f.write(f"## 💬 SORU\n{user_question}\n\n")
                 f.write(f"## 📊 SONUÇLAR\n")
+            _log(f"📋 Blackboard: {blackboard_path}")
         except Exception as e:
             _log(f"⚠️ Blackboard init error: {e}")
     
@@ -919,26 +978,32 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 records = lines
                 record_count = len(records)
             
-            success = record_count > 0 and not is_error
+            # 3 durum: success (kayıt var), empty (kayıt yok), failed (hata var)
+            if is_error:
+                status = "failed"
+            elif record_count > 0:
+                status = "success"
+            else:
+                status = "empty"
             
             # Dosyaya TÜM sonucu kaydet (pagination için)
-            suffix = "success" if success else "failed"
-            file_path = os.path.join(findings_base, f"{step_name}_{suffix}.txt")
+            file_path = os.path.join(findings_base, f"{step_name}_{status}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query>\n{cypher}\n</query>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
             
-            _log(f"📁 Cypher: {step_name} → {record_count} records")
-            _append_to_blackboard(step_name, record_count, success)
+            _log(f"📁 Cypher: {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(step_name, record_count, status == "success")
             
-            # Sonuç döndür - PAGINATION ile ilk N kayıt
-            if success:
-                # İlk N kaydı göster
+            # Sonuç döndür
+            if status == "success":
                 end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
                 paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
                 return f"✅ {record_count} kayıt bulundu.\n\n{paginated_result}"
+            elif status == "empty":
+                return f"⚪ Sonuç bulunamadı (0 kayıt). Farklı bir strateji dene."
             else:
-                return f"""❌ Sonuç bulunamadı veya hata oluştu.
+                return f"""❌ Hata oluştu.
 
 {result_str[:1000]}"""
                 
@@ -993,26 +1058,30 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 records = [l for l in lines if 'score' in l.lower() or l.startswith('(')]
             
             record_count = len(records)
-            success = record_count > 0 and not is_error
+            
+            # 3 durum: success (kayıt var), empty (kayıt yok), failed (hata var)
+            if is_error:
+                status = "failed"
+            elif record_count > 0:
+                status = "success"
+            else:
+                status = "empty"
             
             # Dosyaya kaydet
-            suffix = "success" if success else "failed"
-            file_path = os.path.join(findings_base, f"{step_name}_{suffix}.txt")
+            file_path = os.path.join(findings_base, f"{step_name}_{status}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query>\nSEARCH: {query_text}\n{cypher_query}\n</query>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
             
-            _log(f"📁 Embedding: {step_name} → {record_count} records")
-            _append_to_blackboard(step_name, record_count, success)
+            _log(f"📁 Embedding: {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(step_name, record_count, status == "success")
             
-            if success:
+            if status == "success":
                 # Kayıtları parse et
                 parsed_records = _parse_records(result_str)
                 if len(parsed_records) == 0:
-                    # Parse edilemezse eski yönteme fallback
                     parsed_records = records
                 
-                # İlk N kaydı göster
                 end_idx = min(DEFAULT_RECORDS_PER_PAGE, len(parsed_records))
                 paginated_result = _format_paginated_result(parsed_records, len(parsed_records), 0, end_idx, step_name)
                 
@@ -1021,13 +1090,17 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
 {paginated_result}
 
 ⚠️ FALSE POSITIVE KONTROLÜ: Dönen chunk.text'lerde "{query_text}" geçiyor mu kontrol et!"""
-            else:
-                return f"""❌ İçerik bulunamadı.
+            elif status == "empty":
+                return f"""⚪ İçerik bulunamadı (0 sonuç).
 
 Öneriler:
 1. Text CONTAINS ile fallback dene: execute_cypher_query ile toLower(c.text) CONTAINS 'terim'
 2. Farklı terimler dene (Türkçe/İngilizce)
 3. İlişki yolunu kontrol et (PART_OF mu FIRST_CHUNK mu?)"""
+            else:
+                return f"""❌ Hata oluştu.
+
+{result_str[:1000]}"""
                 
         except Exception as e:
             _log(f"❌ Embedding error: {e}", "error")
@@ -1362,6 +1435,15 @@ class ReactAgent:
         system_prompt = self._build_system_prompt(schema_info)
         _log(f"📜 System prompt: {len(system_prompt)} chars")
         
+        # Debug: Tam prompt'u dosyaya yaz
+        prompt_log_path = os.path.join(os.getcwd(), "agent_findings", "react", "_system_prompt.txt")
+        try:
+            with open(prompt_log_path, "w", encoding="utf-8") as f:
+                f.write(system_prompt)
+            _log(f"📝 System prompt saved: {prompt_log_path}")
+        except Exception as e:
+            _log(f"⚠️ Prompt save error: {e}", "warning")
+        
         # Model oluştur
         model = self._create_model()
         
@@ -1427,20 +1509,23 @@ class ReactAgent:
         import time
         import uuid
         
-        # Question ID
+        # Question ID - tam ID log için, kısa ID dosya path'leri için
+        original_question_id = question_id
         if not question_id:
-            question_id = str(uuid.uuid4())[:8]
-        else:
-            question_id = question_id[:8]
+            original_question_id = str(uuid.uuid4())
+        short_question_id = original_question_id[:8]
         
-        # Session sources temizle
-        _clear_session_sources(question_id)
+        # Logging context'i set et (Grafana/Loki için) - TAM ID
+        set_request_context(session_id=session_id, question_id=original_question_id)
+        
+        # Session sources temizle - kısa ID
+        _clear_session_sources(short_question_id)
         
         # Token tracking başlat
         token_tracker = TokenTracker()
         _log(f"\n{'='*60}")
         _log(f"🚀 [REACT] Yeni sorgu: {question[:80]}...")
-        _log(f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {question_id}")
+        _log(f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {short_question_id}")
         _log(f"{'='*60}")
         
         # Timing
@@ -1494,7 +1579,7 @@ class ReactAgent:
             react_tools = create_react_tools(
                 self.mcp_tools,
                 session_id[:8] if session_id else "default",
-                question_id,
+                short_question_id,
                 user_question=question
             )
             
@@ -1658,11 +1743,16 @@ class ReactAgent:
                             tool_call_id = getattr(message, "tool_call_id", "")
                             tool_name = pending_tool_names.get(tool_call_id, "unknown")
                             
-                            # Başarı kontrolü
-                            success = "✅" in tool_content or "kayıt" in tool_content.lower()
+                            # Durum kontrolü: success (✅), empty (⚪), failed (❌)
+                            if "✅" in tool_content:
+                                result_status = "success"
+                            elif "⚪" in tool_content:
+                                result_status = "empty"
+                            else:
+                                result_status = "failed"
                             
                             # Token tracker'a ekle
-                            token_tracker.add_tool_result(tool_name, str(tool_content), success)
+                            token_tracker.add_tool_result(tool_name, str(tool_content), result_status == "success")
                             
                             if "✅" in tool_content and "kayıt" in tool_content:
                                 match = re.search(r'(\d+)\s*kayıt', tool_content)
@@ -1702,7 +1792,7 @@ class ReactAgent:
             # Final mesaj
             if response_text:
                 # Kaynakları al
-                sources = _get_session_sources(question_id)
+                sources = _get_session_sources(short_question_id)
                 
                 # Markdown formatında kaynakları cevaba ekle
                 final_response = response_text
@@ -1786,6 +1876,9 @@ class ReactAgent:
                 "message": f"Bir hata oluştu: {str(e)}",
                 "session_id": session_id,
             }
+        finally:
+            # Logging context'i temizle
+            clear_request_context()
     
     async def close(self):
         """Kaynakları temizle"""

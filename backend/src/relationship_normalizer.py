@@ -126,70 +126,61 @@ def analyze_with_llm(relationship_types: List[Dict], llm) -> List[NormalizationG
     type_names = [rt["type"] for rt in policy_types]
     type_counts = {rt["type"]: rt["count"] for rt in policy_types}
     
-    prompt = f"""Neo4j veritabanındaki relationship type'ları aşağıda. 
-Bunların çoğu AYNI ŞEYİ ifade ediyor ama farklı yazılmış (OCR hataları, Türkçe karakter bozulmaları, farklı yazımlar).
+    prompt = f"""Analyze these Neo4j relationship types and GROUP SEMANTICALLY EQUIVALENT ones.
 
-ÖNEMLİ ÖRNEKLER - bunlar AYNI gruba girmeli:
-- IS_YACHT_POLICY, IS_YAT_POLICY, IS_YAT_SIGORTA_POLICY, IS_YAT_SIGORTASI_POLICY → hepsi "YAT" sigortası
-- IS_KONUT_POLICY, IS_KONUT_SIGORTASI_POLICY, IS_KONUT_PAKET_POLICY → hepsi "KONUT" sigortası
-- IS_TEKNE_POLICY, IS_TEKNE_YAT_SIGORTA_POLICY, IS_TEKNE_YAT_S_GORTA_POL__ES__POLICY → hepsi "TEKNE" sigortası
-- IS_INSAAT_POLICY, IS_INSAAT_ALL_RISKS_POLICY, IS__N_AAT_B_T_N_R_SKLER_S_GORTA_POL__ES__POLICY → hepsi "INSAAT" sigortası
+## GROUPING PRINCIPLES (Domain-Agnostic)
 
-OCR BOZUKLUKLARINI ÇÖZME REHBERİ:
-- S_GORTA, S__GORTA, S_GORTA_ → SİGORTA
-- POL__ES__, POL_CES__, POLI_ESI → POLİÇESİ (kaldır, sadece POLICY kullan)
-- ___ (çift/üçlü alt çizgi) → tek alt çizgi veya kaldır
-- ARA_LAR → ARAÇLAR (Ç karakteri kayıp)
-- __YER_M_ → İŞYERİ (İŞ karakterleri kayıp)
-- TIBB__K_T__ → TIBBİ KÖTÜ
-- EMT_A → EMTİA
-- NAKL_YAT → NAKLİYAT
-- FAAL_YET → FAALİYET
-- MAL__SORUMLULUK → MALİ SORUMLULUK
+### 1. SEMANTIC EQUIVALENCE
+Group types that refer to THE SAME CONCEPT, even if written differently:
+- Abbreviations vs full words (e.g., AUTO vs AUTOMOBILE, VEH vs VEHICLE)
+- Prefixed vs unprefixed (e.g., ITEM vs PRODUCT_ITEM vs MAIN_ITEM)
+- With/without qualifiers (e.g., BASIC_X vs X vs STANDARD_X)
+- Singular vs compound (e.g., CAR vs CAR_VEHICLE vs MOTOR_CAR)
 
-AĞIR OCR BOZUKLUKLARI İÇİN ÖRNEKLER:
-- IS_MOTORLU_ARA_LAR_MESLEK__FAAL_YET_S_GORTA_POL__ES__POLICY → IS_MOTORLU_ARACLAR_MESLEKI_SORUMLULUK_POLICY
-- IS___YER_M_S_GORTA_POL__ES__POLICY → IS_ISYERI_POLICY
-- IS_TIBB__K_T__UYGULAMAYA__L__K_N_ZORUNLU_MAL__SORUMLULUK_S_GORTA_POL_CES__POLICY → IS_TIBBI_MALPRAKTIS_ZORUNLU_MALI_SORUMLULUK_POLICY
-- IS_EMT_A_NAKL_YAT_S_GORTA_POL__ES__POLICY → IS_EMTIA_NAKLIYAT_POLICY veya IS_NAKLIYAT_EMTEA_POLICY grubuna ekle
+### 2. LANGUAGE VARIATIONS
+- English ↔ Local language equivalents (same meaning = same group)
+- Transliterations and alternative spellings
+- Mixed-language terms
 
-Görevin:
-1. SADECE "IS_*_POLICY" formatındaki relationship type'larını analiz et
-2. Aynı sigorta türünü ifade eden IS_*_POLICY type'larını grupla
-3. Her grup için EN KISA ve EN TEMİZ ismi seç (örn: IS_YAT_POLICY)
-4. OCR bozukluklarını çöz ve benzer olanlarla grupla
+### 3. OCR/TEXT EXTRACTION ERRORS
+- Missing characters: _ replacing special chars (ş→s, ç→c, ö→o, ü→u, ı→i, ğ→g)
+- Double/triple underscores: __, ___ → single _ or remove
+- Corrupted suffixes: S_GORTA, POL__ES__, etc. → clean forms
+- Character swaps and typos
 
-⚠️ DOKUNMA - Bu relationship type'larını ASLA gruplama/değiştirme:
-- PART_OF, NEXT_CHUNK, FIRST_CHUNK (Chunk ilişkileri)
-- HAS_CLAUSE, HAS_COVERAGE, HAS_PREMIUM, HAS_GUARANTEE (Policy detayları)
-- HAS_POLICYHOLDER, HAS_INSURED_PERSON, HAS_INSURED_PROPERTY (Sigortalı bilgileri)
-- HAS_ADDRESS, HAS_PAYMENT, HAS_START_DATE, HAS_END_DATE (Tarih/Adres/Ödeme)
-- ISSUED_BY, DOCUMENTED_IN, APPLIED_TO (Bağlantı ilişkileri)
-- FIRST_ENDORSEMENT, NEXT_ENDORSEMENT (Zeyilname ilişkileri)
-- HAS_POLICY (Genel policy bağlantısı)
+### 4. REDUNDANT SUFFIXES
+Remove redundant words that don't add meaning distinction:
+- SIGORTASI, SIGORTA, INSURANCE, POLICY (already in format)
+- POLICESI, POLICE, CONTRACT
+- Keep only the CORE concept
 
-Kurallar:
-- SADECE "IS_" ile başlayan ve "_POLICY" ile biten type'ları grupla
-- Standart isim: IS_{{KONU}}_POLICY formatında olmalı
-- Türkçe karakterler ASCII: ş→s, ö→o, ü→u, ı→i, ğ→g, ç→c, İ→I
-- OCR bozuklukları düzelt: S_GORTA→SIGORTA, POL__ES__→POLICESI, __→_, vb.
-- YACHT = YAT, INSURANCE = SIGORTA gibi eşleştirmeler yap
+### 5. NORMALIZATION RULES
+For suggested_name, use:
+- Format: IS_{{CORE_CONCEPT}}_POLICY
+- SHORTEST clear name representing the concept
+- ASCII only (no special characters)
+- Single underscores only
 
-Relationship type'ları:
+## PROTECTED TYPES (DO NOT GROUP)
+{json.dumps(list(SYSTEM_RELATIONSHIPS), ensure_ascii=False)}
+
+## INPUT TYPES
 {json.dumps(type_names, indent=2, ensure_ascii=False)}
 
-JSON formatında yanıt ver:
+## OUTPUT FORMAT
+Return ONLY valid JSON:
 {{
   "groups": [
     {{
-      "suggested_name": "IS_YAT_POLICY",
-      "original_types": ["IS_YACHT_POLICY", "IS_YAT_POLICY", "IS_YAT_SIGORTA_POLICY", ...]
-    }},
-    ...
+      "suggested_name": "IS_CONCEPT_POLICY",
+      "original_types": ["IS_CONCEPT_POLICY", "IS_CONCEPT_SIGORTASI_POLICY", ...]
+    }}
   ]
 }}
 
-Sadece JSON döndür, açıklama yapma. Mümkün olduğunca çok birleştirme yap!"""
+IMPORTANT: Be AGGRESSIVE in grouping. If two types COULD mean the same thing, group them. 
+Prefer FALSE POSITIVES (over-grouping) over FALSE NEGATIVES (under-grouping).
+Return ONLY JSON, no explanation."""
 
     try:
         response = llm.invoke(prompt)

@@ -3,6 +3,7 @@ import os
 import time
 import re
 import difflib
+from typing import Optional
 from neo4j.exceptions import TransientError, ServiceUnavailable, SessionExpired
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import (
@@ -64,7 +65,9 @@ def neo4j_retry(func):
         
         # All retries exhausted
         logging.error(f"❌ Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts")
-        raise last_exception
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError(f"Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts")
     
     return wrapper
 
@@ -116,7 +119,9 @@ def execute_neo4j_query_with_retry(graph, query, params=None, max_retries=NEO4J_
                 raise
     
     logging.error(f"❌ Neo4j query failed after {max_retries} attempts")
-    raise last_exception
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError(f"Neo4j query failed after {max_retries} attempts")
 
 
 # Neo4j notification loglarını kapat
@@ -195,7 +200,7 @@ class graphDBdataAccess:
         self,
         obj_source_node_or_filename,
         document_type: str = "auto",
-        text_content: str = None,
+        text_content: Optional[str] = None,
         model: str = "openai_gpt_4o_mini",
         skip_entity_extraction: bool = False,
     ):
@@ -387,7 +392,7 @@ class graphDBdataAccess:
         self,
         file_name: str,
         document_type: str = "auto",
-        text_content: str = None,
+        text_content: Optional[str] = None,
         model: str = "openai_gpt_4o_mini",
     ):
         """
@@ -496,9 +501,11 @@ class graphDBdataAccess:
                 obj_source_node.processing_time is not None
                 and obj_source_node.processing_time != 0
             ):
-                params["processingTime"] = round(
-                    obj_source_node.processing_time.total_seconds(), 2
-                )
+                processing_time = obj_source_node.processing_time
+                if hasattr(processing_time, 'total_seconds'):
+                    params["processingTime"] = round(processing_time.total_seconds(), 2)  # type: ignore[union-attr]
+                else:
+                    params["processingTime"] = round(float(processing_time), 2)
 
             if obj_source_node.model is not None and obj_source_node.model != "":
                 params["model"] = obj_source_node.model
@@ -529,7 +536,8 @@ class graphDBdataAccess:
             )
         except Exception as e:
             error_message = str(e)
-            self.update_exception_db(self, self.file_name, error_message)
+            file_name = getattr(self, 'file_name', 'unknown')
+            self.update_exception_db(self, file_name, error_message)
             raise Exception(error_message)
 
     def get_source_list(self):
@@ -673,7 +681,7 @@ class graphDBdataAccess:
             session_params={"database": self.graph._database},
         )
 
-        embedding_model = os.getenv("EMBEDDING_MODEL")
+        embedding_model = os.getenv("EMBEDDING_MODEL", "openai")
         embeddings, application_dimension = load_embedding_model(embedding_model)
         logging.info(
             f"embedding model:{embeddings} and dimesion:{application_dimension}"
@@ -722,7 +730,7 @@ class graphDBdataAccess:
                         "write_access": write_access,
                     }
 
-    def execute_query(self, query, param=None, max_retries=3, delay=2):
+    def execute_query(self, query, param: Optional[dict] = None, max_retries=3, delay=2):
         """
         Neo4j query'sini timeout ve connection hatalarına karşı retry mekanizması ile çalıştırır
         """
@@ -730,10 +738,11 @@ class graphDBdataAccess:
         from neo4j.exceptions import SessionExpired, ServiceUnavailable, TransientError
 
         retries = 0
+        query_param = param if param is not None else {}
         while retries < max_retries:
             try:
                 return self.graph.query(
-                    query, param, session_params={"database": self.graph._database}
+                    query, query_param, session_params={"database": self.graph._database}
                 )
             except (SessionExpired, ServiceUnavailable) as e:
                 retries += 1
@@ -1287,8 +1296,8 @@ class graphDBdataAccess:
         return result
 
     def get_duplicate_nodes_list(self):
-        score_value = float(os.environ.get("DUPLICATE_SCORE_VALUE"))
-        text_distance = int(os.environ.get("DUPLICATE_TEXT_DISTANCE"))
+        score_value = float(os.environ.get("DUPLICATE_SCORE_VALUE", "0.95"))
+        text_distance = int(os.environ.get("DUPLICATE_TEXT_DISTANCE", "3"))
         query_duplicate_nodes = """
                 MATCH (n:!Chunk&!Session&!Document&!`__Community__`) with n 
                 WHERE n.embedding is not null and n.id is not null // and size(toString(n.id)) > 3
@@ -1369,7 +1378,7 @@ class graphDBdataAccess:
         """
         drop and create the vector index when vector index dimesion are different.
         """
-        embedding_model = os.getenv("EMBEDDING_MODEL")
+        embedding_model = os.getenv("EMBEDDING_MODEL", "openai")
         embeddings, dimension = load_embedding_model(embedding_model)
 
         if isVectorIndexExist == "true":
@@ -1748,7 +1757,7 @@ class graphDBdataAccess:
 
         Args:
             node_types: Embedding oluşturulacak node türleri listesi
-                      (örn: ["Customer", "Policy", "CoverageType", "all"])
+                      (örn: ["Customer", "Policy", "Coverage", "all"])
 
         Returns:
             dict: İşlem sonuç raporu
@@ -2378,7 +2387,7 @@ class graphDBdataAccess:
         - Premium (Prim)
         - Date (Başlangıç/Bitiş tarihleri)
         - Coverage (Teminat)
-        - CoverageType (Teminat Türü)
+        - Coverage (Teminat Türü)
         - Endorsement (Zeyilname)
         - Guarantee (Garanti)
         - Clause (Hüküm/Kloz)
@@ -2500,7 +2509,7 @@ Belge İçeriği:
 
 9. COVERAGE_TYPES (Teminat Türleri - liste):
    - name: Teminat türü ("Deprem", "Yangın", "Sorumluluk", "Sağlık", vb.)
-   - NOT: CoverageType kategorik teminat türlerini tutar (Deprem, Yangın, vb.). Coverage ile ayrı node'lardır.
+   - NOT: Coverage kategorik teminat türlerini tutar (Deprem, Yangın, vb.). Coverage ile ayrı node'lardır.
 
 10. GUARANTEE (Garantiler - liste):
    - name: Garanti adı ("Ömür boyu yenileme", "Hasarsızlık indirimi", vb.)
@@ -2821,8 +2830,8 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 llm, _ = get_llm(model)
                 
                 # LLM'den yanıt al
-                response = llm.invoke(prompt)
-                response_text = response.content.strip()
+                response = llm.invoke(prompt)  # type: ignore[union-attr]
+                response_text = response.content.strip() if hasattr(response, 'content') and response.content else ""  # type: ignore[union-attr]
 
             # JSON parse et
             try:
@@ -3040,7 +3049,8 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                 temperature=0.1
             )
             
-            customer_name = response.choices[0].message.content.strip()
+            message_content = response.choices[0].message.content
+            customer_name = message_content.strip() if message_content else ""
             
             # Boş veya çok kısa cevapları reddet
             if customer_name and len(customer_name) > 2 and customer_name.lower() not in ["yok", "bulunamadı", "none", ""]:
@@ -3471,7 +3481,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
 
     def merge_existing_duplicate_coverage_types(self):
         """
-        Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate CoverageType node'larını birleştirir
+        Sistemde mevcut olan text similarity ve normalize edilmiş isme göre duplicate Coverage node'larını birleştirir
 
         Similarity kriterleri:
         1. Normalize edilmiş isimler tamamen eşit
@@ -3481,7 +3491,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
         """
         try:
             logging.info(
-                "🔍 Mevcut duplicate CoverageType node'ları text similarity ile kontrol ediliyor..."
+                "🔍 Mevcut duplicate Coverage node'ları text similarity ile kontrol ediliyor..."
             )
 
             # Text similarity parametreleri - coverage type için SIKI kriterler
@@ -3510,7 +3520,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
 
             # Duplicate coverage type'ları text similarity ile bul
             find_duplicates_query = """
-                MATCH (ct1:CoverageType), (ct2:CoverageType)
+                MATCH (ct1:Coverage), (ct2:Coverage)
                 WHERE elementId(ct1) < elementId(ct2)
                 WITH ct1, ct2,
                      // Turkish character normalization için advanced cleaning
@@ -3588,7 +3598,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
 
             if not duplicates_result:
                 logging.info(
-                    "✅ SIKI kriterlerle duplicate CoverageType node'u bulunamadı"
+                    "✅ SIKI kriterlerle duplicate Coverage node'u bulunamadı"
                 )
                 return 0
 
@@ -3630,14 +3640,14 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                     and similarity_info["common_words"] < 2
                 ):
                     logging.warning(
-                        f"  ⚠️ Şüpheli CoverageType merge - atlaniyor: '{duplicate['name']}' -> '{master['name']}'"
+                        f"  ⚠️ Şüpheli Coverage merge - atlaniyor: '{duplicate['name']}' -> '{master['name']}'"
                     )
                     logging.warning(
                         f"     Jaro={similarity_info['jaro_similarity']:.3f}, Edit={similarity_info['edit_distance']}, Common={similarity_info['common_words']}"
                     )
                     continue
 
-                logging.info(f"🔧 SIKI Kriterlerle CoverageType Merge:")
+                logging.info(f"🔧 SIKI Kriterlerle Coverage Merge:")
                 logging.info(
                     f"   Master: '{master['name']}' (Policy: {master['policy_count']})"
                 )
@@ -3681,7 +3691,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                     logging.warning(f"  ⚠️ Merge işlemi başarısız: {duplicate['name']}")
 
             logging.info(
-                f"🎉 SIKI kriterlerle toplam {total_merged} duplicate CoverageType node birleştirildi"
+                f"🎉 SIKI kriterlerle toplam {total_merged} duplicate Coverage node birleştirildi"
             )
             logging.info(f"   (Şüpheli merge'ler engellendi - daha güvenli sonuç)")
             return total_merged
@@ -3690,7 +3700,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             logging.error(f"❌ Duplicate coverage type merge hatası: {e}")
             return 0
 
-    def merge_duplicate_entities_selective(self, node_types: list = None):
+    def merge_duplicate_entities_selective(self, node_types: Optional[list] = None):
         """
         Seçilen node türlerine göre duplicate merge işlemi yapar.
 
@@ -3873,12 +3883,12 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             if coverage_data is None:
                 coverage_data = {}
             if coverage_data:
-                self._create_coverage_node(coverage_data, policy_id)
+                self._create_coverage_limit_node(coverage_data, policy_id)
 
-            # 7. CoverageType Node'larını oluştur
+            # 7. Coverage Node'larını oluştur
             coverage_types = entities_data.get("coverage_types", [])
             if coverage_types:
-                self._create_coverage_type_nodes(coverage_types, policy_id)
+                self._create_coverage_nodes(coverage_types, policy_id)
 
             # 8. Guarantee Node'larını oluştur
             guarantees = entities_data.get("guarantees", [])
@@ -4153,8 +4163,8 @@ KRİTİK:
                 # Fallback: Diğer LLM
                 from src.llm import get_llm
                 llm, _ = get_llm(model)
-                response = llm.invoke(prompt)
-                response_text = response.content.strip()
+                response = llm.invoke(prompt)  # type: ignore[union-attr]
+                response_text = response.content.strip() if hasattr(response, 'content') and response.content else ""  # type: ignore[union-attr]
             
             # JSON parse et
             try:
@@ -4263,12 +4273,12 @@ KRİTİK:
             # 3. Coverage Node'u oluştur
             coverage_data = entities_data.get("coverage", {})
             if coverage_data:
-                self._create_coverage_node(coverage_data, endorsement_id)
+                self._create_coverage_limit_node(coverage_data, endorsement_id)
 
-            # 4. CoverageType Node'larını oluştur
+            # 4. Coverage Node'larını oluştur
             coverage_types = entities_data.get("coverage_types", [])
             if coverage_types:
-                self._create_coverage_type_nodes_for_endorsement(
+                self._create_coverage_nodes_for_endorsement(
                     coverage_types, endorsement_id
                 )
 
@@ -4359,14 +4369,15 @@ KRİTİK:
 
             # Gelişmiş 3-aşamalı policy eşleştirmeyi kullan
             match_result = self._link_endorsement_to_main_policy(file_name, policy_info)
-            if match_result.get("success", False):
+            # match_result can be dict or False (on exception)
+            if isinstance(match_result, dict) and match_result.get("success", False):
                 logging.info(f"✅ Ana poliçe eşleştirmesi başarılı: {file_name}")
 
                 # Kronolojik zinciri kur (FIRST_ENDORSEMENT/NEXT_ENDORSEMENT) - bulunan policy bilgilerini kullan
                 found_policy_number = match_result.get("policy_number", "")
                 found_policy_id = match_result.get("policy_id", "")
 
-                if found_policy_id:
+                if found_policy_id and isinstance(found_policy_id, str):
                     logging.info(
                         f"🔗 Kronolojik endorsement zinciri kuruluyor: {endorsement_id} -> Policy ID: {found_policy_id}"
                     )
@@ -4764,10 +4775,10 @@ KRİTİK:
         except Exception as e:
             logging.error(f"Kronolojik endorsement zincirlemesi hatası: {e}")
 
-    def _create_coverage_type_nodes_for_endorsement(
+    def _create_coverage_nodes_for_endorsement(
         self, coverage_types: list, endorsement_id: str
     ):
-        """CoverageType node'larını Endorsement'a bağlar"""
+        """Coverage node'larını Endorsement'a bağlar"""
         try:
             for coverage_type in coverage_types:
                 name = coverage_type.get("name", "").strip()
@@ -4776,14 +4787,14 @@ KRİTİK:
 
                 normalized_name = normalize_unicode_text(name)
                 query = """
-                    MERGE (ct:CoverageType {name: $name})
+                    MERGE (ct:Coverage {name: $name})
                     ON CREATE SET 
                         ct.createdAt = datetime()
                     ON MATCH SET 
                         ct.updatedAt = datetime()
                     WITH ct
                     MATCH (e:Endorsement {id: $endorsement_id})
-                    MERGE (ct)-[r:APPLIED_TO]->(e)
+                    MERGE (e)-[r:HAS_COVERAGE]->(ct)
                     SET r.created_at = datetime(),
                         r.source = 'llm_extraction'
                     RETURN ct.name as type_name
@@ -4795,10 +4806,10 @@ KRİTİK:
                     session_params={"database": self.graph._database},
                 )
 
-                logging.info(f"✅ CoverageType → Endorsement: {normalized_name}")
+                logging.info(f"✅ Coverage → Endorsement: {normalized_name}")
 
         except Exception as e:
-            logging.error(f"CoverageType nodes oluşturma hatası: {e}")
+            logging.error(f"Coverage nodes oluşturma hatası: {e}")
 
     def _create_date_nodes_for_endorsement(self, dates_data: dict, endorsement_id: str):
         """Endorsement'ın başlangıç ve bitiş tarihlerini oluşturur"""
@@ -5285,15 +5296,15 @@ KRİTİK:
         except Exception as e:
             logging.error(f"Premium node oluşturma hatası: {e}")
 
-    def _create_coverage_node(self, coverage_data: dict, policy_id: str):
-        """Coverage node'u oluşturur"""
+    def _create_coverage_limit_node(self, coverage_data: dict, policy_id: str):
+        """CoverageLimit node'u oluşturur (sayısal limitler)"""
         try:
             if not coverage_data:
                 return
 
             coverage_id = f"coverage_{policy_id}"
             query = """
-                MERGE (cv:Coverage {id: $coverage_id})
+                MERGE (cv:CoverageLimit {id: $coverage_id})
                 ON CREATE SET 
                     cv.limit_value = $limit_value,
                     cv.limit_unit = $limit_unit,
@@ -5308,7 +5319,7 @@ KRİTİK:
                     cv.scope = $scope
                 WITH cv
                 MATCH (p:Policy {id: $policy_id})
-                MERGE (p)-[r:HAS_COVERAGE]->(cv)
+                MERGE (p)-[r:HAS_COVERAGE_LIMIT]->(cv)
                 SET r.created_at = datetime(),
                     r.source = 'llm_extraction'
                 RETURN cv.id as coverage_id
@@ -5335,8 +5346,8 @@ KRİTİK:
         except Exception as e:
             logging.error(f"Coverage node oluşturma hatası: {e}")
 
-    def _create_coverage_type_nodes(self, coverage_types: list, policy_id: str):
-        """CoverageType node'larını oluşturur"""
+    def _create_coverage_nodes(self, coverage_types: list, policy_id: str):
+        """Coverage node'larını oluşturur"""
         try:
             # Eğer coverage_types None ise veya boş liste ise, erken çık
             if not coverage_types:
@@ -5346,7 +5357,7 @@ KRİTİK:
                 # Eğer coverage_type bir liste ise (nested list durumu), düzleştir
                 if isinstance(coverage_type, list):
                     # Nested list'i düzleştir ve her item için tekrar çağır
-                    self._create_coverage_type_nodes(coverage_type, policy_id)
+                    self._create_coverage_nodes(coverage_type, policy_id)
                     continue
                 
                 # Eğer coverage_type bir string ise, dict'e dönüştür
@@ -5365,14 +5376,14 @@ KRİTİK:
                 # Normalize name for ID
                 normalized_name = normalize_unicode_text(name)
                 query = """
-                    MERGE (ct:CoverageType {name: $name})
+                    MERGE (ct:Coverage {name: $name})
                     ON CREATE SET 
                         ct.createdAt = datetime()
                     ON MATCH SET 
                         ct.updatedAt = datetime()
                     WITH ct
                     MATCH (p:Policy {id: $policy_id})
-                    MERGE (ct)-[r:APPLIED_TO]->(p)
+                    MERGE (p)-[r:HAS_COVERAGE]->(ct)
                     SET r.created_at = datetime(),
                         r.source = 'llm_extraction'
                     RETURN ct.name as type_name
@@ -5384,10 +5395,10 @@ KRİTİK:
                     session_params={"database": self.graph._database},
                 )
 
-                logging.info(f"✅ CoverageType node oluşturuldu: {normalized_name}")
+                logging.info(f"✅ Coverage node oluşturuldu: {normalized_name}")
 
         except Exception as e:
-            logging.error(f"CoverageType nodes oluşturma hatası: {e}")
+            logging.error(f"Coverage nodes oluşturma hatası: {e}")
 
     def _create_guarantee_nodes(self, guarantees: list, policy_id: str):
         """Guarantee node'larını oluşturur"""
@@ -6133,8 +6144,8 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                 try:
                     from src.llm import get_llm
                     llm, _ = get_llm(model)
-                    response = llm.invoke(summary_prompt)
-                    summary_text = response.content.strip() if response.content else None
+                    response = llm.invoke(summary_prompt)  # type: ignore[union-attr]
+                    summary_text = response.content.strip() if response.content else None  # type: ignore[union-attr]
                     
                     if summary_text:
                         summary_text = summary_text.strip('"').strip("'").strip()
@@ -6317,7 +6328,7 @@ SADECE özet metnini döndür, başka açıklama ekleme:
             if final_insurance_value is not None:
                 coverage_id = f"coverage_{policy_id}"
                 coverage_query = """
-                    MERGE (cv:Coverage {id: $coverage_id})
+                    MERGE (cv:CoverageLimit {id: $coverage_id})
                     ON CREATE SET 
                         cv.limit_value = $limit_value,
                         cv.limit_unit = $currency,
@@ -6330,7 +6341,7 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                         cv.updatedAt = datetime()
                     WITH cv
                     MATCH (n:%s {id: $policy_id})
-                    MERGE (n)-[r:HAS_COVERAGE]->(cv)
+                    MERGE (n)-[r:HAS_COVERAGE_LIMIT]->(cv)
                     SET r.created_at = datetime(),
                         r.source = 'llm_extraction'
                     RETURN cv.id as coverage_id
@@ -6431,8 +6442,8 @@ SADECE özet metnini döndür, başka açıklama ekleme:
         policy_id: str,
         relationship_type: str,
         policy_type: str = "",
-        policy_details: dict = None,
-        deductible_info: dict = None,
+        policy_details: Optional[dict] = None,
+        deductible_info: Optional[dict] = None,
     ):
         """
         LLM'den gelen ilişki tipi ile Customer-Policy arasında dinamik ilişki kurar.
