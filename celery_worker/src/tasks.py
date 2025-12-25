@@ -7,6 +7,9 @@ from src.celery_app import app
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.processing_utils import GeminiOCRException, GeminiRateLimitException
 
+# Langfuse LLM Observability
+from src.shared.langfuse_client import trace_document_processing, flush_langfuse
+
 # Schema version cache - artık belge yüklenince version artırılıyor
 from src.shared.schema_cache import increment_schema_version
 
@@ -165,6 +168,14 @@ def chunk_file_task(self, file_id: int):
 
         logging.info(f"📦 Starting chunking for file {file_id}")
         
+        # 📊 Langfuse: Chunking başladı
+        trace_document_processing(
+            file_id=file_id,
+            file_name=str(file_record.original_name) if file_record else "unknown",
+            step="chunking",
+            status="started",
+        )
+        
         # ✅ Async DB write - status update via queue
         enqueue_chunking_update(file_id, "chunking")
 
@@ -192,6 +203,15 @@ def chunk_file_task(self, file_id: int):
         
         # Final check after processing
         raise_if_cancelled(self, file_id, db_session, "after_chunking_complete")
+        
+        # 📊 Langfuse: Chunking tamamlandı
+        trace_document_processing(
+            file_id=file_id,
+            file_name=str(file_record.original_name) if file_record else "unknown",
+            step="chunking",
+            status="completed",
+        )
+        flush_langfuse()
         
         return file_id
 
@@ -264,6 +284,14 @@ def create_graph_task(self, file_id: int):
 
         logging.info(f"🕸️ Starting graph creation for file {file_id}")
         
+        # 📊 Langfuse: Graph creation başladı
+        trace_document_processing(
+            file_id=file_id,
+            file_name=str(file_record.original_name) if file_record else "unknown",
+            step="graph_creation",
+            status="started",
+        )
+        
         # Check if chunking is completed before starting graph creation
         if file_record.chunking_status == "failed":
             logging.warning(f"⚠️ Graph creation skipped: Chunking failed for file {file_id}")
@@ -329,6 +357,28 @@ def create_graph_task(self, file_id: int):
         except Exception as schema_error:
             # Schema version artırma başarısız olsa bile işleme devam et
             logging.warning(f"⚠️ Schema version artırılamadı (file {file_id}): {schema_error}")
+        
+        # 📊 Langfuse: Graph creation tamamlandı
+        trace_document_processing(
+            file_id=file_id,
+            file_name=str(file_record.original_name) if file_record else "unknown",
+            step="graph_creation",
+            status="completed",
+        )
+        flush_langfuse()
+        
+        # 🔬 Entity Resolution - Graph creation sonrası otomatik çalıştır (async)
+        try:
+            from src.entity_resolver import ENTITY_RESOLUTION_ENABLED
+            if ENTITY_RESOLUTION_ENABLED:
+                # Entity resolution'ı ayrı task olarak başlat (non-blocking)
+                entity_resolution_task.apply_async(
+                    args=[file_id, neo4j_uri],
+                    countdown=5,  # 5 saniye bekle (graph commit tamamlansın)
+                )
+                logging.info(f"🔬 Entity resolution task queued for file {file_id}")
+        except Exception as er_error:
+            logging.warning(f"⚠️ Could not queue entity resolution: {er_error}")
         
         return file_id
 
@@ -844,3 +894,242 @@ def delete_files_task(self, file_ids: list):
         import traceback
         logging.error(f"Traceback: {traceback.format_exc()}")
         raise self.retry(exc=e, countdown=60, max_retries=3)
+
+
+# ============================================================================
+# LAYER 3: ENTITY RESOLUTION TASK
+# ============================================================================
+
+@app.task(bind=True, name="tasks.entity_resolution_task", max_retries=2)
+def entity_resolution_task(self, file_id: int = None, neo4j_uri: str = None):
+    """
+    Entity resolution pipeline'ı çalıştırır.
+    Graph creation sonrası benzer entity'leri tespit ve merge eder.
+    
+    Args:
+        file_id: Processed file ID (optional, for logging)
+        neo4j_uri: Neo4j connection URI
+    
+    Returns:
+        Pipeline sonuçları
+    """
+    from src.shared.common_fn import create_graph_database_connection
+    from src.entity_resolver import run_entity_resolution_pipeline, ENTITY_RESOLUTION_ENABLED
+    
+    if not ENTITY_RESOLUTION_ENABLED:
+        logging.info("⏭️ Entity resolution disabled")
+        return {"status": "disabled"}
+    
+    logging.info(f"🔬 Entity Resolution Task started (file_id: {file_id})")
+    
+    # Get file info if file_id provided
+    file_name = None
+    if file_id:
+        try:
+            db_session = get_file_queue_db()
+            file_record = db_session.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+            if file_record:
+                file_name = str(file_record.original_name)
+                neo4j_uri = neo4j_uri or str(file_record.neo4j_uri)
+            db_session.close()
+        except Exception as e:
+            logging.warning(f"⚠️ Could not fetch file info: {e}")
+    
+    # Use default Neo4j URI if not provided
+    neo4j_uri = neo4j_uri or os.environ.get("NEO4J_URI")
+    
+    if not neo4j_uri:
+        logging.error("❌ No Neo4j URI provided")
+        return {"status": "error", "error": "No Neo4j URI"}
+    
+    try:
+        # Create Neo4j connection
+        graph = create_graph_database_connection(neo4j_uri)
+        
+        if not graph:
+            logging.error("❌ Could not connect to Neo4j")
+            return {"status": "error", "error": "Neo4j connection failed"}
+        
+        # Run pipeline
+        result = run_entity_resolution_pipeline(
+            graph=graph,
+            file_id=file_id,
+            file_name=file_name,
+        )
+        
+        # Close connection
+        if hasattr(graph, 'close'):
+            graph.close()
+        
+        logging.info(f"✅ Entity Resolution Task completed: {result.get('summary', {})}")
+        
+        # Flush Langfuse
+        flush_langfuse()
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"❌ Entity Resolution Task error: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        raise self.retry(exc=e, countdown=60, max_retries=2)
+
+
+# ============================================================================
+# LAYER 6: COMMUNITY DETECTION TASK
+# ============================================================================
+
+@app.task(bind=True, name="tasks.community_detection_task", max_retries=2)
+def community_detection_task(
+    self,
+    neo4j_uri: str = None,
+    neo4j_username: str = None,
+    neo4j_password: str = None,
+    neo4j_database: str = None,
+    model: str = "openai_gpt_4o",
+):
+    """
+    Community detection pipeline çalıştırır.
+    Neo4j GDS Leiden algoritması ile entity'leri gruplar.
+    
+    Args:
+        neo4j_uri: Neo4j connection URI
+        neo4j_username: Neo4j username
+        neo4j_password: Neo4j password
+        neo4j_database: Neo4j database
+        model: LLM model for summary generation
+    
+    Returns:
+        Pipeline sonuçları
+    """
+    logging.info("🎯 Community Detection Task started")
+    
+    # Get Neo4j credentials from environment if not provided
+    neo4j_uri = neo4j_uri or os.environ.get("NEO4J_URI")
+    neo4j_username = neo4j_username or os.environ.get("NEO4J_USERNAME")
+    neo4j_password = neo4j_password or os.environ.get("NEO4J_PASSWORD")
+    neo4j_database = neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+    
+    if not neo4j_uri:
+        logging.error("❌ No Neo4j URI provided")
+        return {"status": "error", "error": "No Neo4j URI"}
+    
+    try:
+        # Import communities module (may not be available in all workers)
+        try:
+            from src.communities import create_communities, COMMUNITY_DETECTION_ENABLED
+        except ImportError:
+            # Try backend path
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
+            from src.communities import create_communities, COMMUNITY_DETECTION_ENABLED
+        
+        if not COMMUNITY_DETECTION_ENABLED:
+            logging.info("⏭️ Community detection disabled")
+            return {"status": "disabled"}
+        
+        # Run community detection
+        result = create_communities(
+            uri=neo4j_uri,
+            username=neo4j_username,
+            password=neo4j_password,
+            database=neo4j_database,
+            model=model,
+        )
+        
+        logging.info(f"✅ Community Detection Task completed: {result.get('stats', {})}")
+        
+        # Flush Langfuse
+        flush_langfuse()
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"❌ Community Detection Task error: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        raise self.retry(exc=e, countdown=120, max_retries=2)
+
+
+@app.task(bind=True, name="tasks.batch_entity_resolution_task", max_retries=1)
+def batch_entity_resolution_task(self, neo4j_uri: str = None):
+    """
+    Tüm entity'ler için toplu resolution çalıştırır.
+    Periyodik olarak veya manuel olarak çağrılabilir.
+    
+    Args:
+        neo4j_uri: Neo4j connection URI
+    
+    Returns:
+        Batch sonuçları
+    """
+    from src.shared.common_fn import create_graph_database_connection
+    from src.entity_resolver import entity_resolver, ENTITY_RESOLUTION_ENABLED
+    
+    if not ENTITY_RESOLUTION_ENABLED:
+        logging.info("⏭️ Entity resolution disabled")
+        return {"status": "disabled"}
+    
+    neo4j_uri = neo4j_uri or os.environ.get("NEO4J_URI")
+    
+    if not neo4j_uri:
+        logging.error("❌ No Neo4j URI provided")
+        return {"status": "error", "error": "No Neo4j URI"}
+    
+    logging.info(f"🔬 Batch Entity Resolution started...")
+    
+    try:
+        graph = create_graph_database_connection(neo4j_uri)
+        
+        if not graph:
+            return {"status": "error", "error": "Neo4j connection failed"}
+        
+        results = {
+            "entity_types": [],
+            "total_merged": 0,
+        }
+        
+        # Run resolution for different entity types
+        entity_types = ["__Entity__", "Customer", "Insurer", "PolicyType"]
+        
+        for entity_type in entity_types:
+            logging.info(f"📊 Processing {entity_type}...")
+            
+            try:
+                clustering = entity_resolver.run_gds_similarity_clustering(graph, entity_type)
+                merge = entity_resolver.auto_merge_clusters(graph)
+                
+                type_result = {
+                    "type": entity_type,
+                    "clustered": clustering.get("node_count", 0),
+                    "communities": clustering.get("community_count", 0),
+                    "merged": merge.get("merged_count", 0),
+                }
+                
+                results["entity_types"].append(type_result)
+                results["total_merged"] += merge.get("merged_count", 0)
+                
+            except Exception as e:
+                logging.warning(f"⚠️ Failed for {entity_type}: {e}")
+                results["entity_types"].append({
+                    "type": entity_type,
+                    "error": str(e),
+                })
+        
+        # Get final stats
+        results["final_stats"] = entity_resolver.get_resolution_stats(graph)
+        
+        if hasattr(graph, 'close'):
+            graph.close()
+        
+        logging.info(f"✅ Batch Entity Resolution completed: {results['total_merged']} total merged")
+        
+        flush_langfuse()
+        
+        return results
+        
+    except Exception as e:
+        logging.error(f"❌ Batch Entity Resolution error: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        raise self.retry(exc=e, countdown=120, max_retries=1)

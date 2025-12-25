@@ -96,6 +96,14 @@ from src.models.file_queue_models import get_file_queue_db
 from src.otel_tracing_setup import initialize_tracing, instrument_fastapi, get_tracer, add_span_attribute
 from src.otel_logging_setup import initialize_otel_logging
 from src.auth import auth_router, get_current_user, get_current_user_optional, TokenData
+from src.shared.langfuse_client import (
+    create_dataset,
+    get_dataset,
+    add_dataset_item,
+    add_trace_to_dataset,
+    get_dataset_items,
+    is_langfuse_enabled,
+)
 
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
@@ -815,6 +823,16 @@ async def lifespan(app: FastAPI):
         logging.info("✅ Server Startup: OpenTelemetry Tracing aktif")
     except Exception as otel_error:
         logging.warning(f"⚠️ Server Startup: OpenTelemetry Tracing başlatılamadı: {otel_error}")
+    
+    # 🚦 Rate Limiting durumunu logla (middleware zaten app tanımından sonra eklendi)
+    try:
+        from src.shared.rate_limiter import RATE_LIMIT_ENABLED
+        if RATE_LIMIT_ENABLED:
+            logging.info("✅ Server Startup: Rate Limiting aktif (middleware app başlangıcında eklendi)")
+        else:
+            logging.info("⏭️ Server Startup: Rate Limiting devre dışı")
+    except Exception as rate_error:
+        logging.warning(f"⚠️ Server Startup: Rate Limiting durumu okunamadı: {rate_error}")
 
 
     # 🚀 SERVER STARTUP: PostgreSQL Chat History tablolarını oluştur
@@ -901,6 +919,24 @@ app = FastAPI(
     redoc_url=None,     # ReDoc devre dışı
     openapi_url=None,   # OpenAPI schema devre dışı
 )
+
+# 🚦 Rate Limiting Middleware (app başlamadan ÖNCE eklenmeli - startup event değil!)
+try:
+    from src.shared.rate_limiter import limiter, rate_limit_exceeded_handler, RATE_LIMIT_ENABLED
+    if RATE_LIMIT_ENABLED and limiter is not None:
+        from slowapi.errors import RateLimitExceeded
+        from slowapi.middleware import SlowAPIMiddleware
+        
+        app.state.limiter = limiter
+        app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+        app.add_middleware(SlowAPIMiddleware)
+        logging.info("✅ Rate limiting middleware installed (pre-startup)")
+    else:
+        logging.info("⏭️ Rate limiting disabled")
+except ImportError as e:
+    logging.warning(f"⚠️ Rate limiting dependencies not available: {e}")
+except Exception as e:
+    logging.warning(f"⚠️ Rate limiting setup error: {e}")
 
 # 🔍 FastAPI Instrumentation - tüm HTTP endpoint'lerini otomatik trace et
 instrument_fastapi(app)
@@ -2632,6 +2668,7 @@ async def chat_bot_stream(
                         session_id=session_id,
                         question_id=question_id,
                         reasoning_effort=os.environ.get("REACT_REASONING_EFFORT", "low"),
+                        user_id=email,  # Langfuse User Tracking için
                     ):
                         if await request.is_disconnected():
                             logging.info("SSE Client disconnected during ReAct agent streaming")
@@ -9923,6 +9960,205 @@ async def get_relationship_types(
             "Failed",
             message=f"Failed to get types: {str(e)}"
         )
+
+
+# =============================================================================
+# LANGFUSE DATASET API - Test Cases & Experiments
+# =============================================================================
+
+@app.post("/api/v2/datasets")
+async def api_create_dataset(
+    request: Request,
+):
+    """
+    Yeni bir test dataset oluşturur.
+    
+    Request body:
+        name: Dataset adı (benzersiz)
+        description: Açıklama (opsiyonel)
+        metadata: Ek bilgiler (opsiyonel)
+    """
+    try:
+        body = await request.json()
+        name = body.get("name")
+        description = body.get("description")
+        metadata = body.get("metadata", {})
+        
+        if not name:
+            return create_api_response("Failed", message="Dataset name is required")
+        
+        if not is_langfuse_enabled():
+            return create_api_response("Failed", message="Langfuse is not enabled")
+        
+        dataset = create_dataset(name=name, description=description, metadata=metadata)
+        
+        if dataset:
+            return create_api_response(
+                "Success",
+                data={"name": name, "id": getattr(dataset, 'id', None)},
+                message=f"Dataset '{name}' created successfully"
+            )
+        else:
+            return create_api_response("Failed", message="Failed to create dataset")
+            
+    except Exception as e:
+        logging.error(f"❌ Create dataset error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.get("/api/v2/datasets/{dataset_name}")
+async def api_get_dataset(
+    dataset_name: str,
+    limit: int = 100,
+):
+    """
+    Dataset detaylarını ve item'larını getirir.
+    """
+    try:
+        if not is_langfuse_enabled():
+            return create_api_response("Failed", message="Langfuse is not enabled")
+        
+        dataset = get_dataset(dataset_name)
+        if not dataset:
+            return create_api_response("Failed", message=f"Dataset '{dataset_name}' not found")
+        
+        items = get_dataset_items(dataset_name, limit=limit)
+        
+        return create_api_response(
+            "Success",
+            data={
+                "name": dataset_name,
+                "id": getattr(dataset, 'id', None),
+                "description": getattr(dataset, 'description', None),
+                "metadata": getattr(dataset, 'metadata', {}),
+                "item_count": len(items),
+                "items": items,
+            },
+            message=f"Dataset '{dataset_name}' fetched successfully"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Get dataset error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.post("/api/v2/datasets/{dataset_name}/items")
+async def api_add_dataset_item(
+    dataset_name: str,
+    request: Request,
+):
+    """
+    Dataset'e yeni bir test case ekler.
+    
+    Request body:
+        input: Test input'u (soru, context vb.)
+        expected_output: Beklenen çıktı (opsiyonel)
+        metadata: Ek bilgiler (opsiyonel)
+    """
+    try:
+        body = await request.json()
+        input_data = body.get("input")
+        expected_output = body.get("expected_output")
+        metadata = body.get("metadata", {})
+        
+        if not input_data:
+            return create_api_response("Failed", message="Input data is required")
+        
+        if not is_langfuse_enabled():
+            return create_api_response("Failed", message="Langfuse is not enabled")
+        
+        item = add_dataset_item(
+            dataset_name=dataset_name,
+            input_data=input_data,
+            expected_output=expected_output,
+            metadata=metadata,
+        )
+        
+        if item:
+            return create_api_response(
+                "Success",
+                data={"id": getattr(item, 'id', None), "dataset": dataset_name},
+                message="Dataset item added successfully"
+            )
+        else:
+            return create_api_response("Failed", message="Failed to add dataset item")
+            
+    except Exception as e:
+        logging.error(f"❌ Add dataset item error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.post("/api/v2/datasets/{dataset_name}/from-trace")
+async def api_add_trace_to_dataset(
+    dataset_name: str,
+    request: Request,
+):
+    """
+    Production trace'i dataset'e test case olarak ekler.
+    
+    Request body:
+        trace_id: Langfuse trace ID
+        expected_output: Düzeltilmiş/beklenen çıktı
+        observation_id: Spesifik observation ID (opsiyonel)
+        metadata: Ek bilgiler (opsiyonel)
+    """
+    try:
+        body = await request.json()
+        trace_id = body.get("trace_id")
+        expected_output = body.get("expected_output")
+        observation_id = body.get("observation_id")
+        metadata = body.get("metadata", {})
+        
+        if not trace_id:
+            return create_api_response("Failed", message="trace_id is required")
+        
+        if not is_langfuse_enabled():
+            return create_api_response("Failed", message="Langfuse is not enabled")
+        
+        item = add_trace_to_dataset(
+            trace_id=trace_id,
+            dataset_name=dataset_name,
+            expected_output=expected_output,
+            observation_id=observation_id,
+            metadata=metadata,
+        )
+        
+        if item:
+            return create_api_response(
+                "Success",
+                data={"id": getattr(item, 'id', None), "trace_id": trace_id, "dataset": dataset_name},
+                message="Trace added to dataset successfully"
+            )
+        else:
+            return create_api_response("Failed", message="Failed to add trace to dataset")
+            
+    except Exception as e:
+        logging.error(f"❌ Add trace to dataset error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.get("/api/v2/langfuse/status")
+async def api_langfuse_status():
+    """
+    Langfuse bağlantı durumunu kontrol eder.
+    """
+    try:
+        enabled = is_langfuse_enabled()
+        
+        return create_api_response(
+            "Success",
+            data={
+                "enabled": enabled,
+                "host": os.environ.get("LANGFUSE_HOST", "not set"),
+                "public_key_set": bool(os.environ.get("LANGFUSE_PUBLIC_KEY")),
+                "secret_key_set": bool(os.environ.get("LANGFUSE_SECRET_KEY")),
+            },
+            message="Langfuse status retrieved"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Langfuse status error: {e}")
+        return create_api_response("Failed", message=str(e))
 
 
 if __name__ == "__main__":

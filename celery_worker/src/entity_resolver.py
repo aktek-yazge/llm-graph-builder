@@ -3,6 +3,13 @@ Entity Resolution ve Deduplication modülü
 Benzer entity'leri tespit eder ve birleştirir
 
 load_embedding_model üzerinden OpenAI Embeddings kullanır
+
+LAYER 3: Entity Resolution Features:
+- Embedding-based similarity detection
+- Neo4j GDS clustering (Louvain/Leiden)
+- Automatic merge pipeline
+- Confidence scoring
+- Langfuse metrics tracking
 """
 
 import logging
@@ -11,8 +18,21 @@ from typing import List, Dict, Tuple, Optional
 import time
 import difflib
 import re
+import os
 
 from src.shared.common_fn import load_embedding_model
+
+# Langfuse LLM Observability
+try:
+    from src.shared.langfuse_client import log_llm_usage, trace_document_processing
+    LANGFUSE_AVAILABLE = True
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+
+# Entity resolution configuration
+ENTITY_RESOLUTION_ENABLED = os.getenv("ENTITY_RESOLUTION_ENABLED", "true").lower() in ("true", "1", "yes")
+ENTITY_RESOLUTION_THRESHOLD = float(os.getenv("ENTITY_RESOLUTION_THRESHOLD", "0.85"))
+ENTITY_RESOLUTION_MIN_CLUSTER_SIZE = int(os.getenv("ENTITY_RESOLUTION_MIN_CLUSTER_SIZE", "2"))
 
 
 class EntityResolver:
@@ -32,6 +52,14 @@ class EntityResolver:
         """
         self.similarity_threshold = similarity_threshold
         self.name_similarity_threshold = name_similarity_threshold
+        
+        # Cache metrics
+        self._cache_hits = 0
+        self._cache_misses = 0
+        
+        # Resolution metrics
+        self._total_resolutions = 0
+        self._successful_merges = 0
         
         # Merkezi embedding model (OpenAI with batch+cache)
         self._embeddings, self._dimension = load_embedding_model("openai")
@@ -579,6 +607,272 @@ class EntityResolver:
             
         except Exception as e:
             logging.error(f"❌ Relationship recreation hatası: {e}")
+    
+    # =========================================================================
+    # NEO4J GDS CLUSTERING - LAYER 3 ENHANCEMENTS
+    # =========================================================================
+    
+    def run_gds_similarity_clustering(self, graph, entity_type: str = "__Entity__") -> Dict:
+        """
+        Neo4j GDS ile entity similarity clustering yapar.
+        Embedding vektörleri kullanarak benzer entity'leri gruplar.
+        
+        Args:
+            graph: Neo4j graph connection
+            entity_type: Entity label (default: __Entity__)
+        
+        Returns:
+            Clustering sonuçları
+        """
+        start_time = time.time()
+        logging.info(f"🔬 GDS Similarity Clustering başlıyor: {entity_type}")
+        
+        try:
+            # 1. Check if GDS is available
+            gds_check = graph.query("RETURN gds.version() as version")
+            if not gds_check:
+                logging.warning("⚠️ Neo4j GDS not available, skipping clustering")
+                return {"status": "skipped", "reason": "GDS not available"}
+            
+            gds_version = gds_check[0].get("version", "unknown")
+            logging.info(f"✅ Neo4j GDS version: {gds_version}")
+            
+            # 2. Create in-memory graph projection for entities with embeddings
+            projection_name = f"entity_similarity_{entity_type.replace('__', '')}_{int(time.time())}"
+            
+            # Drop existing projection if exists
+            try:
+                graph.query(f"CALL gds.graph.drop('{projection_name}', false)")
+            except:
+                pass
+            
+            # Create projection with node embeddings
+            projection_query = f"""
+            CALL gds.graph.project(
+                '{projection_name}',
+                {{
+                    {entity_type}: {{
+                        properties: ['embedding']
+                    }}
+                }},
+                '*'
+            )
+            YIELD graphName, nodeCount, relationshipCount
+            RETURN graphName, nodeCount, relationshipCount
+            """
+            
+            projection_result = graph.query(projection_query)
+            if not projection_result:
+                logging.warning("⚠️ Graph projection failed")
+                return {"status": "failed", "reason": "Projection failed"}
+            
+            node_count = projection_result[0].get("nodeCount", 0)
+            logging.info(f"📊 Graph projection created: {node_count} nodes")
+            
+            if node_count < 2:
+                logging.info("ℹ️ Not enough nodes for clustering")
+                graph.query(f"CALL gds.graph.drop('{projection_name}', false)")
+                return {"status": "skipped", "reason": "Not enough nodes"}
+            
+            # 3. Run K-Nearest Neighbors (KNN) to find similar entities
+            knn_query = f"""
+            CALL gds.knn.write('{projection_name}', {{
+                nodeProperties: ['embedding'],
+                topK: 5,
+                similarityCutoff: {ENTITY_RESOLUTION_THRESHOLD},
+                writeRelationshipType: 'SIMILAR_TO',
+                writeProperty: 'similarity'
+            }})
+            YIELD nodesCompared, relationshipsWritten, similarityDistribution
+            RETURN nodesCompared, relationshipsWritten, similarityDistribution
+            """
+            
+            knn_result = graph.query(knn_query)
+            relationships_written = knn_result[0].get("relationshipsWritten", 0) if knn_result else 0
+            
+            logging.info(f"🔗 KNN completed: {relationships_written} similarity relationships created")
+            
+            # 4. Run Louvain community detection on similar entities
+            louvain_query = f"""
+            CALL gds.louvain.write('{projection_name}', {{
+                relationshipTypes: ['SIMILAR_TO'],
+                writeProperty: 'entityCluster'
+            }})
+            YIELD communityCount, modularity, postProcessingMillis
+            RETURN communityCount, modularity, postProcessingMillis
+            """
+            
+            louvain_result = graph.query(louvain_query)
+            community_count = louvain_result[0].get("communityCount", 0) if louvain_result else 0
+            modularity = louvain_result[0].get("modularity", 0) if louvain_result else 0
+            
+            logging.info(f"🎯 Louvain clustering: {community_count} communities, modularity: {modularity:.3f}")
+            
+            # 5. Clean up projection
+            graph.query(f"CALL gds.graph.drop('{projection_name}', false)")
+            
+            duration = time.time() - start_time
+            
+            result = {
+                "status": "success",
+                "entity_type": entity_type,
+                "node_count": node_count,
+                "similarity_relationships": relationships_written,
+                "community_count": community_count,
+                "modularity": modularity,
+                "duration_seconds": round(duration, 2),
+            }
+            
+            # Log to Langfuse
+            if LANGFUSE_AVAILABLE:
+                try:
+                    log_llm_usage(
+                        session_id="entity_resolution",
+                        model="neo4j_gds",
+                        input_tokens=node_count,
+                        output_tokens=community_count,
+                        step_name="gds_similarity_clustering",
+                        metadata=result
+                    )
+                except:
+                    pass
+            
+            logging.info(f"✅ GDS Clustering completed in {duration:.2f}s")
+            return result
+            
+        except Exception as e:
+            logging.error(f"❌ GDS Clustering error: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    def auto_merge_clusters(self, graph, min_cluster_size: int = None) -> Dict:
+        """
+        Clustering sonuçlarına göre entity'leri otomatik merge eder.
+        
+        Args:
+            graph: Neo4j graph connection
+            min_cluster_size: Minimum cluster size for merge (default: 2)
+        
+        Returns:
+            Merge sonuçları
+        """
+        min_size = min_cluster_size or ENTITY_RESOLUTION_MIN_CLUSTER_SIZE
+        start_time = time.time()
+        logging.info(f"🔄 Auto-merge başlıyor (min cluster size: {min_size})")
+        
+        try:
+            # Find clusters with multiple entities
+            cluster_query = """
+            MATCH (e:__Entity__)
+            WHERE e.entityCluster IS NOT NULL
+            WITH e.entityCluster as cluster, collect(e) as entities, count(e) as size
+            WHERE size >= $min_size
+            RETURN cluster, size, 
+                   [e IN entities | {id: e.id, name: e.name, elementId: elementId(e)}] as entity_list
+            ORDER BY size DESC
+            """
+            
+            clusters = graph.query(cluster_query, {"min_size": min_size})
+            
+            if not clusters:
+                logging.info("ℹ️ No clusters found for merging")
+                return {"status": "success", "merged_count": 0, "clusters_processed": 0}
+            
+            merged_count = 0
+            clusters_processed = 0
+            
+            for cluster in clusters:
+                cluster_id = cluster.get("cluster")
+                entities = cluster.get("entity_list", [])
+                
+                if len(entities) < 2:
+                    continue
+                
+                # Sort by name length (keep the most descriptive one)
+                entities.sort(key=lambda x: len(x.get("name", "")), reverse=True)
+                
+                primary = entities[0]
+                duplicates = entities[1:]
+                
+                logging.info(f"📦 Cluster {cluster_id}: merging {len(duplicates)} entities into '{primary.get('name')}'")
+                
+                for dup in duplicates:
+                    try:
+                        success = self.merge_entities(graph, primary["elementId"], dup["elementId"])
+                        if success:
+                            merged_count += 1
+                    except Exception as e:
+                        logging.warning(f"⚠️ Merge failed for {dup.get('id')}: {e}")
+                
+                clusters_processed += 1
+            
+            duration = time.time() - start_time
+            
+            result = {
+                "status": "success",
+                "clusters_processed": clusters_processed,
+                "merged_count": merged_count,
+                "duration_seconds": round(duration, 2),
+            }
+            
+            # Log to Langfuse
+            if LANGFUSE_AVAILABLE:
+                try:
+                    log_llm_usage(
+                        session_id="entity_resolution",
+                        model="entity_merge",
+                        input_tokens=clusters_processed,
+                        output_tokens=merged_count,
+                        step_name="auto_merge_clusters",
+                        metadata=result
+                    )
+                except:
+                    pass
+            
+            logging.info(f"✅ Auto-merge completed: {merged_count} entities merged from {clusters_processed} clusters in {duration:.2f}s")
+            return result
+            
+        except Exception as e:
+            logging.error(f"❌ Auto-merge error: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    def get_resolution_stats(self, graph) -> Dict:
+        """
+        Entity resolution istatistiklerini döndürür.
+        
+        Returns:
+            Resolution stats dict
+        """
+        try:
+            stats_query = """
+            MATCH (e:__Entity__)
+            WITH count(e) as total_entities,
+                 count(CASE WHEN e.merged_from IS NOT NULL THEN 1 END) as merged_entities,
+                 count(CASE WHEN e.entityCluster IS NOT NULL THEN 1 END) as clustered_entities
+            OPTIONAL MATCH (e:__Entity__)-[r:SIMILAR_TO]-()
+            WITH total_entities, merged_entities, clustered_entities, count(DISTINCT r) as similarity_relations
+            OPTIONAL MATCH (e:__Entity__)
+            WHERE e.entityCluster IS NOT NULL
+            WITH total_entities, merged_entities, clustered_entities, similarity_relations,
+                 count(DISTINCT e.entityCluster) as cluster_count
+            RETURN total_entities, merged_entities, clustered_entities, similarity_relations, cluster_count
+            """
+            
+            result = graph.query(stats_query)
+            
+            if result:
+                return {
+                    "total_entities": result[0].get("total_entities", 0),
+                    "merged_entities": result[0].get("merged_entities", 0),
+                    "clustered_entities": result[0].get("clustered_entities", 0),
+                    "similarity_relations": result[0].get("similarity_relations", 0),
+                    "cluster_count": result[0].get("cluster_count", 0),
+                    "cache_stats": self.get_cache_stats(),
+                }
+            
+            return {"error": "No stats available"}
+            
+        except Exception as e:
+            return {"error": str(e)}
 
 
 # Global entity resolver instance
@@ -643,3 +937,116 @@ def resolve_entity_before_creation(new_entity: Dict, graph, entity_type: str = "
     except Exception as e:
         logging.error(f"❌ Entity resolution kontrolü hatası: {e}")
         return None
+
+
+# ============================================================================
+# LAYER 3: POST-PROCESSING PIPELINE
+# ============================================================================
+
+def run_entity_resolution_pipeline(graph, file_id: int = None, file_name: str = None) -> Dict:
+    """
+    Graph creation sonrası entity resolution pipeline'ı çalıştırır.
+    
+    Bu fonksiyon şu adımları gerçekleştirir:
+    1. GDS ile similarity clustering
+    2. Benzer entity'leri otomatik merge
+    3. Resolution istatistiklerini döndür
+    
+    Args:
+        graph: Neo4j graph connection
+        file_id: Processed file ID (for logging)
+        file_name: Processed file name (for logging)
+    
+    Returns:
+        Pipeline sonuçları
+    """
+    if not ENTITY_RESOLUTION_ENABLED:
+        logging.info("⏭️ Entity resolution disabled (ENTITY_RESOLUTION_ENABLED=false)")
+        return {"status": "disabled"}
+    
+    start_time = time.time()
+    logging.info(f"🔬 Entity Resolution Pipeline başlıyor...")
+    
+    if file_id:
+        logging.info(f"   📄 File: {file_name or file_id}")
+    
+    results = {
+        "status": "running",
+        "file_id": file_id,
+        "file_name": file_name,
+        "steps": {},
+    }
+    
+    try:
+        # Step 1: GDS Similarity Clustering
+        logging.info("📊 Step 1: GDS Similarity Clustering...")
+        clustering_result = entity_resolver.run_gds_similarity_clustering(graph)
+        results["steps"]["clustering"] = clustering_result
+        
+        if clustering_result.get("status") == "error":
+            results["status"] = "partial"
+            logging.warning(f"⚠️ Clustering failed: {clustering_result.get('error')}")
+        
+        # Step 2: Auto-merge clusters
+        if clustering_result.get("community_count", 0) > 0:
+            logging.info("🔄 Step 2: Auto-merge clusters...")
+            merge_result = entity_resolver.auto_merge_clusters(graph)
+            results["steps"]["merge"] = merge_result
+        else:
+            results["steps"]["merge"] = {"status": "skipped", "reason": "No clusters found"}
+        
+        # Step 3: Get final stats
+        logging.info("📈 Step 3: Getting resolution stats...")
+        stats = entity_resolver.get_resolution_stats(graph)
+        results["steps"]["stats"] = stats
+        
+        # Final result
+        total_duration = time.time() - start_time
+        results["status"] = "success"
+        results["duration_seconds"] = round(total_duration, 2)
+        results["summary"] = {
+            "entities_clustered": clustering_result.get("node_count", 0),
+            "communities_found": clustering_result.get("community_count", 0),
+            "entities_merged": results["steps"].get("merge", {}).get("merged_count", 0),
+        }
+        
+        # Log to Langfuse
+        if LANGFUSE_AVAILABLE and file_id:
+            try:
+                trace_document_processing(
+                    file_id=file_id,
+                    file_name=file_name or "unknown",
+                    step="entity_resolution",
+                    status="completed",
+                    metadata=results["summary"]
+                )
+            except:
+                pass
+        
+        logging.info(f"✅ Entity Resolution Pipeline completed in {total_duration:.2f}s")
+        logging.info(f"   📊 Clustered: {results['summary']['entities_clustered']}, "
+                    f"Communities: {results['summary']['communities_found']}, "
+                    f"Merged: {results['summary']['entities_merged']}")
+        
+        return results
+        
+    except Exception as e:
+        logging.error(f"❌ Entity Resolution Pipeline error: {e}")
+        results["status"] = "error"
+        results["error"] = str(e)
+        return results
+
+
+def get_entity_resolution_metrics() -> Dict:
+    """
+    Entity resolution metrikleri için global getter.
+    
+    Returns:
+        Metrics dict
+    """
+    return {
+        "enabled": ENTITY_RESOLUTION_ENABLED,
+        "threshold": ENTITY_RESOLUTION_THRESHOLD,
+        "min_cluster_size": ENTITY_RESOLUTION_MIN_CLUSTER_SIZE,
+        "cache_stats": entity_resolver.get_cache_stats() if entity_resolver else {},
+    }

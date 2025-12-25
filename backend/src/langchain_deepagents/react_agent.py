@@ -40,6 +40,29 @@ from src.shared.context import set_request_context, clear_request_context
 # Global Schema Cache import
 from src.shared.schema_cache import get_cached_schema, get_schema_cache
 
+# Langfuse LLM Observability + Prompt Management + Sessions
+from src.shared.langfuse_client import (
+    get_langfuse,
+    get_langfuse_callback_handler,
+    trace_llm_call,
+    log_llm_usage,
+    flush_langfuse,
+    get_prompt,
+    create_prompt,
+    langfuse_session,  # Session grouping for all traces
+)
+
+# Query-level Semantic Cache
+from src.shared.query_cache import get_query_cache, get_cache_metrics
+
+# Guardrails - LLM output validation
+from src.shared.guardrails import (
+    validate_cypher_query,
+    validate_output,
+    validate_user_input,
+    GUARDRAILS_ENABLED,
+)
+
 # Logging ayarları
 logger = logging.getLogger(__name__)
 
@@ -95,7 +118,8 @@ class TokenTracker:
     total_tool_calls: int = 0
     
     def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
-                     cached_tokens: int = 0, duration_ms: float = 0, session_id: str = ""):
+                     cached_tokens: int = 0, duration_ms: float = 0, session_id: str = "",
+                     model: str = "gpt-5"):
         """LLM çağrısı istatistiği ekle"""
         step = StepStats(
             step_name=step_name,
@@ -127,6 +151,26 @@ class TokenTracker:
         _log(f"   ├─ Output: {output_tokens:,} tokens")
         _log(f"   ├─ Cached: {cached_tokens:,} tokens ({cache_status})")
         _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cached={self.total_cached_tokens:,}")
+        
+        # 📊 Langfuse'a gönder
+        try:
+            log_llm_usage(
+                session_id=session_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                cost_usd=self._estimate_cost(model),
+                latency_ms=duration_ms,
+                step_name=step_name,
+                metadata={
+                    "cache_hit_rate": cache_pct,
+                    "cumulative_input": self.total_input_tokens,
+                    "cumulative_output": self.total_output_tokens,
+                }
+            )
+        except Exception as e:
+            _log(f"⚠️ Langfuse logging failed: {e}", "warning")
     
     def add_tool_call(self, tool_name: str, params: Dict[str, Any]):
         """Tool çağrısı ekle"""
@@ -151,6 +195,26 @@ class TokenTracker:
         _log(f"🔧 [TOOL CALL] {tool_name}")
         for k, v in params_preview.items():
             _log(f"   ├─ {k}: {v}")
+        
+        # Langfuse span başlat (tool çağrısı için)
+        try:
+            from src.shared.langfuse_client import get_langfuse
+            langfuse = get_langfuse()
+            if langfuse:
+                span = langfuse.start_span(
+                    name=f"tool:{tool_name}",
+                    input=params_preview,
+                    metadata={
+                        "tool_name": tool_name,
+                        "step_type": "tool_call",
+                    }
+                )
+                # Span'ı sakla (result'ta kullanmak için)
+                if not hasattr(self, '_tool_spans'):
+                    self._tool_spans = {}
+                self._tool_spans[tool_name] = span
+        except Exception as e:
+            _log(f"⚠️ Langfuse tool span failed: {e}", "warning")
     
     def add_tool_result(self, tool_name: str, result: str, success: bool = True):
         """Tool sonucu ekle"""
@@ -173,6 +237,19 @@ class TokenTracker:
         else:
             status = "❌"
         _log(f"📥 [TOOL RESULT] {status} {tool_name}")
+        
+        # Langfuse span'ı bitir
+        try:
+            if hasattr(self, '_tool_spans') and tool_name in self._tool_spans:
+                span = self._tool_spans[tool_name]
+                try:
+                    span.update(output=result_preview)
+                except Exception:
+                    pass
+                span.end()
+                del self._tool_spans[tool_name]
+        except Exception as e:
+            _log(f"⚠️ Langfuse tool span end failed: {e}", "warning")
         # Sonucu satır satır göster (max 5 satır)
         lines = result_preview.split('\n')[:5]
         for line in lines:
@@ -412,11 +489,24 @@ def _generate_page_links_markdown(page_links: set) -> str:
 
 
 # ============================================================================
+# LANGFUSE PROMPT MANAGEMENT
+# ============================================================================
+
+# Prompt Names - Langfuse'da tanımlı olmalı
+LANGFUSE_PROMPT_NAME = "react-agent-system"
+LANGFUSE_PROMPT_TYPE = "text"
+LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
+
+# ============================================================================
 # CACHE-OPTIMIZED PROMPT - SABİT PREFIX (OpenAI Prompt Caching için)
 # ============================================================================
 
 # Bu prefix ~4000-5000 token olmalı ve session boyunca DEĞİŞMEMELİ
 # Prompt Caching bu prefix'i cache'leyerek %50 token indirimi sağlar
+#
+# NOT: Bu prompt FALLBACK olarak kullanılır.
+# Öncelik Langfuse Prompt Management'dadır.
+# Langfuse'da "react-agent-system" adlı prompt oluşturulmalı.
 
 CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
 
@@ -1027,6 +1117,14 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             return '{"error": "MCP read_neo4j_cypher tool not found"}'
         
         try:
+            # 🛡️ Guardrails: Cypher injection validation
+            if GUARDRAILS_ENABLED:
+                is_safe, sanitized_cypher, violations = validate_cypher_query(cypher)
+                if not is_safe:
+                    _log(f"⚠️ Cypher blocked: {violations}", "warning")
+                    return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
+                cypher = sanitized_cypher
+            
             result = await mcp_read.ainvoke({"query": cypher})
             result_str = str(result) if result else ""
             
@@ -1441,17 +1539,86 @@ class ReactAgent:
         except Exception as e:
             _log(f"⚠️ History save error: {e}", "warning")
     
-    def _build_system_prompt(self, schema_info: str) -> str:
+    def _build_system_prompt(self, schema_info: str, session_id: str = "") -> str:
         """
         Cache-optimized system prompt oluştur.
         
         Prompt Caching için:
         - Sabit prefix (instructions + schema) → Cache'lenir
         - Dinamik suffix ayrı tutulur
+        
+        Langfuse Prompt Management:
+        - Önce Langfuse'dan "react-agent-system" prompt'u çekilir
+        - Langfuse erişilemezse CACHED_SYSTEM_PREFIX fallback olarak kullanılır
+        - Prompt'ta {{schema_info}} placeholder'ı değişken olarak compile edilir
         """
-        # Şema bilgisini prefix'e ekle
+        # 1. Langfuse'dan prompt al
+        langfuse_prompt = get_prompt(
+            name=LANGFUSE_PROMPT_NAME,
+            prompt_type=LANGFUSE_PROMPT_TYPE,
+            label=LANGFUSE_PROMPT_LABEL,
+            fallback=CACHED_SYSTEM_PREFIX,  # Fallback: kod içindeki prompt
+        )
+        
+        if langfuse_prompt:
+            try:
+                # Langfuse prompt'u compile et - {{schema_info}} → gerçek şema
+                compiled_prompt = langfuse_prompt.compile(schema_info=schema_info)
+                
+                # Version bilgisini logla
+                version = getattr(langfuse_prompt, 'version', 'unknown')
+                labels = getattr(langfuse_prompt, 'labels', [])
+                _log(f"📋 Langfuse prompt loaded: {LANGFUSE_PROMPT_NAME} v{version} {labels}")
+                
+                return compiled_prompt
+                
+            except Exception as e:
+                _log(f"⚠️ Langfuse prompt compile failed: {e}, using fallback", "warning")
+        
+        # 2. Fallback: Kod içindeki prompt
+        _log(f"📋 Using fallback prompt (Langfuse unavailable)")
         full_prefix = CACHED_SYSTEM_PREFIX + schema_info
         return full_prefix
+    
+    def _ensure_prompt_in_langfuse(self) -> bool:
+        """
+        Langfuse'da prompt yoksa oluştur (migration/bootstrap için).
+        
+        Bu metod sadece ilk kurulumda veya migration sırasında çağrılmalı.
+        Normal kullanımda Langfuse UI tercih edilir.
+        """
+        # Önce prompt var mı kontrol et
+        existing = get_prompt(
+            name=LANGFUSE_PROMPT_NAME,
+            prompt_type=LANGFUSE_PROMPT_TYPE,
+            label=LANGFUSE_PROMPT_LABEL,
+        )
+        
+        if existing:
+            _log(f"📋 Langfuse prompt already exists: {LANGFUSE_PROMPT_NAME}")
+            return True
+        
+        # Prompt yok, oluştur
+        # NOT: {{schema_info}} placeholder olarak kalmalı
+        prompt_with_placeholder = CACHED_SYSTEM_PREFIX + "{{schema_info}}"
+        
+        success = create_prompt(
+            name=LANGFUSE_PROMPT_NAME,
+            prompt=prompt_with_placeholder,
+            prompt_type=LANGFUSE_PROMPT_TYPE,
+            labels=[LANGFUSE_PROMPT_LABEL],
+            config={
+                "model": self.model_name,
+                "description": "ReAct Agent system prompt for Neo4j graph queries",
+            },
+        )
+        
+        if success:
+            _log(f"✅ Langfuse prompt created: {LANGFUSE_PROMPT_NAME}")
+        else:
+            _log(f"⚠️ Failed to create Langfuse prompt, will use fallback", "warning")
+        
+        return success
     
     def _build_messages(
         self, 
@@ -1496,8 +1663,8 @@ class ReactAgent:
             tool_count = len(self.mcp_tools) if self.mcp_tools else 0
             _log(f"✅ MCP connected, {tool_count} tools available")
         
-        # System prompt oluştur (cache-optimized)
-        system_prompt = self._build_system_prompt(schema_info)
+        # System prompt oluştur (cache-optimized, Langfuse Prompt Management)
+        system_prompt = self._build_system_prompt(schema_info, session_id)
         _log(f"📜 System prompt: {len(system_prompt)} chars")
         
         # Debug: Tam prompt'u dosyaya yaz
@@ -1557,7 +1724,8 @@ class ReactAgent:
         self, 
         question: str, 
         session_id: str = "", 
-        question_id: str = "", 
+        question_id: str = "",
+        user_id: Optional[str] = None,  # Langfuse User Tracking
         **kwargs
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -1567,6 +1735,7 @@ class ReactAgent:
             question: Kullanıcı sorusu
             session_id: Oturum ID'si
             question_id: Soru ID'si
+            user_id: Kullanıcı ID (email) - Langfuse User Tracking için
         
         Yields:
             Streaming response chunks
@@ -1592,6 +1761,103 @@ class ReactAgent:
         _log(f"🚀 [REACT] Yeni sorgu: {question[:80]}...")
         _log(f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {short_question_id}")
         _log(f"{'='*60}")
+        
+        # 📊 Langfuse session & trace başlat
+        # Sessions: Tüm trace'ler aynı session altında gruplanır
+        # See: https://langfuse.com/docs/observability/features/sessions
+        langfuse_trace = None
+        langfuse_session_ctx = None
+        langfuse = get_langfuse()
+        
+        if langfuse:
+            try:
+                # 1. Session context'i başlat - tüm child trace'ler bu session'a bağlanır
+                # user_id: Gerçek kullanıcı email/ID kullanılır (Langfuse User Tracking için)
+                # See: https://langfuse.com/docs/observability/features/users
+                from langfuse import propagate_attributes
+                effective_user_id = user_id or (session_id[:8] if session_id else None)
+                langfuse_session_ctx = propagate_attributes(
+                    session_id=session_id,
+                    user_id=effective_user_id,
+                    metadata={
+                        "question_id": original_question_id,
+                    }
+                )
+                langfuse_session_ctx.__enter__()
+                _log(f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user: {effective_user_id}")
+                
+                # 2. Ana span başlat - bu session'ın root observation'ı
+                langfuse_trace = langfuse.start_span(
+                    name="react_agent_query",
+                    input={"question": question},
+                    metadata={
+                        "model": self.model_name,
+                        "reasoning_effort": self.reasoning_effort,
+                        "question_id": original_question_id,
+                    }
+                )
+                trace_id = getattr(langfuse_trace, 'id', 'unknown')
+                _log(f"📊 Langfuse span started: {trace_id}")
+            except Exception as e:
+                _log(f"⚠️ Langfuse session/trace start failed: {e}", "warning")
+        
+        # 🎯 Query Cache check - benzer sorular için cache'den cevap dön
+        try:
+            query_cache = get_query_cache()
+            cached_response = await query_cache.get_similar(question, session_id)
+            
+            if cached_response:
+                _log(f"🎯 CACHE HIT! Similarity: {cached_response.get('similarity', 0):.3f}")
+                
+                # Cache hit metrikleri
+                cache_metrics = get_cache_metrics()
+                
+                # Langfuse'a cache hit logla
+                if langfuse_trace:
+                    try:
+                        # Langfuse SDK v3+: update() then end()
+                        langfuse_trace.update(
+                            output={"response": cached_response["response"][:500], "cache_hit": True},
+                            metadata={
+                                "cache_hit": True,
+                                "similarity": cached_response.get("similarity", 0),
+                                "cache_hit_rate": cache_metrics.hit_rate,
+                            }
+                        )
+                        langfuse_trace.end()
+                        flush_langfuse()
+                    except:
+                        pass
+                
+                # Cache'den gelen cevabı döndür
+                yield {
+                    "type": "cache_hit",
+                    "content": f"🎯 Cache hit (similarity: {cached_response.get('similarity', 0):.2f})",
+                }
+                
+                yield {
+                    "type": "final_response",
+                    "content": cached_response["response"],
+                    "sources": cached_response.get("sources", {"documents": [], "pages": []}),
+                    "metrics": {
+                        "total_time": 0.1,  # Cache hit çok hızlı
+                        "tool_calls": 0,
+                        "llm_calls": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_tokens": 0,
+                        "total_tokens": 0,
+                        "cache_hit": True,
+                        "cache_similarity": cached_response.get("similarity", 0),
+                        "cache_hit_rate": cache_metrics.hit_rate,
+                    },
+                    "session_id": session_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                return  # Cache hit - agent çalıştırma
+                
+        except Exception as cache_error:
+            _log(f"⚠️ Cache check error: {cache_error}", "warning")
         
         # Timing
         total_start = time.time()
@@ -1859,6 +2125,17 @@ class ReactAgent:
                 # Kaynakları al
                 sources = _get_session_sources(short_question_id)
                 
+                # 🛡️ Guardrails: Output validation (PII masking)
+                if GUARDRAILS_ENABLED:
+                    sanitized_response, validation_info = validate_output(
+                        response_text,
+                        mask_pii_enabled=True,
+                        check_cypher=False,  # Cypher zaten tool'da kontrol edildi
+                    )
+                    if validation_info.get("pii_masked", 0) > 0:
+                        _log(f"🔒 PII masked in response: {validation_info['pii_masked']} items")
+                    response_text = sanitized_response
+                
                 # Markdown formatında kaynakları cevaba ekle
                 final_response = response_text
                 
@@ -1898,6 +2175,47 @@ class ReactAgent:
                 token_tracker.print_summary(session_id=session_id)
                 token_stats = token_tracker.get_summary()
                 
+                # 💾 Query cache'e yaz - sonraki benzer sorular için
+                try:
+                    query_cache = get_query_cache()
+                    await query_cache.set(
+                        question=question,
+                        response=final_response,
+                        session_id=session_id,
+                        sources={
+                            "documents": list(sources["documents"]),
+                            "pages": list(sources["pages"]),
+                        },
+                        metrics=token_stats,
+                    )
+                except Exception as cache_write_error:
+                    _log(f"⚠️ Cache write error: {cache_write_error}", "warning")
+                
+                # 📊 Langfuse trace sonlandır
+                cache_stats = get_cache_metrics().to_dict()
+                if langfuse_trace:
+                    try:
+                        # Langfuse SDK v3+: update() then end()
+                        langfuse_trace.update(
+                            output={"response": final_response[:500]},
+                            metadata={
+                                "total_time_seconds": round(total_time, 2),
+                                "tool_calls": tool_call_count,
+                                "llm_calls": token_stats["total_llm_calls"],
+                                "total_tokens": token_stats["total_tokens"],
+                                "cache_hit_rate": token_stats["cache_hit_rate"],
+                                "estimated_cost_usd": token_stats["estimated_cost_usd"],
+                                "sources_count": len(sources["documents"]) + len(sources["pages"]),
+                                "query_cache_hit_rate": cache_stats.get("hit_rate_percent", 0),
+                            }
+                        )
+                        langfuse_trace.end()
+                        # Langfuse async flush
+                        flush_langfuse()
+                        _log(f"📊 Langfuse span completed")
+                    except Exception as e:
+                        _log(f"⚠️ Langfuse trace update failed: {e}", "warning")
+                
                 yield {
                     "type": "final_response",
                     "content": final_response,
@@ -1936,12 +2254,34 @@ class ReactAgent:
             # Hata durumunda da istatistikleri göster
             token_tracker.print_summary(session_id=session_id)
             
+            # 📊 Langfuse trace hata ile sonlandır
+            if langfuse_trace:
+                try:
+                    # Langfuse SDK v3+: update() then end()
+                    langfuse_trace.update(
+                        level="ERROR",
+                        status_message=str(e)[:500],
+                        output={"error": str(e)},
+                    )
+                    langfuse_trace.end()
+                    flush_langfuse()
+                except Exception as lf_error:
+                    _log(f"⚠️ Langfuse error span failed: {lf_error}", "warning")
+            
             yield {
                 "type": "error",
                 "message": f"Bir hata oluştu: {str(e)}",
                 "session_id": session_id,
             }
         finally:
+            # Langfuse session context'i kapat
+            if langfuse_session_ctx:
+                try:
+                    langfuse_session_ctx.__exit__(None, None, None)
+                    _log(f"📊 Langfuse session ended: {session_id[:8] if session_id else 'N/A'}")
+                except Exception as e:
+                    _log(f"⚠️ Langfuse session end failed: {e}", "warning")
+            
             # Logging context'i temizle
             clear_request_context()
     
@@ -2065,6 +2405,7 @@ async def stream_react_agent_response(
     question_id: str = "",
     graph: Any = None,
     reasoning_effort: Optional[str] = None,
+    user_id: Optional[str] = None,  # Kullanıcı ID (email veya unique ID)
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -2079,6 +2420,7 @@ async def stream_react_agent_response(
         question_id: Soru ID'si
         graph: Neo4j graph connection
         reasoning_effort: GPT-5 için reasoning seviyesi (none, low, medium, high)
+        user_id: Kullanıcı ID (email veya unique identifier) - Langfuse User Tracking için
         **kwargs: Ek parametreler
     
     Yields:
@@ -2113,6 +2455,7 @@ async def stream_react_agent_response(
             question=question,
             session_id=session_id,
             question_id=question_id,
+            user_id=user_id,  # Langfuse User Tracking için
             **kwargs
         ):
             yield chunk

@@ -66,67 +66,67 @@ class UploadedFile(Base):
 
     __tablename__ = "uploaded_files"
 
-    id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String(255), nullable=False, index=True)  # normalized filename
-    original_name = Column(String(255), nullable=False)  # original filename from user
-    file_path = Column(String(500), nullable=False)  # full path to uploaded file
-    upload_date = Column(DateTime, default=datetime.utcnow, nullable=False)
-    file_size = Column(BigInteger, nullable=True)  # file size in bytes
-    file_hash = Column(
+    id: int = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    filename: str = Column(String(255), nullable=False, index=True)  # type: ignore[assignment]  # normalized filename
+    original_name: str = Column(String(255), nullable=False)  # type: ignore[assignment]  # original filename from user
+    file_path: str = Column(String(500), nullable=False)  # type: ignore[assignment]  # full path to uploaded file
+    upload_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)  # type: ignore[assignment]
+    file_size: Optional[int] = Column(BigInteger, nullable=True)  # type: ignore[assignment]  # file size in bytes
+    file_hash: Optional[str] = Column(
         String(64), nullable=True, index=True
-    )  # SHA256 hash for duplicate detection
-    status = Column(String(20), default=FileStatus.UPLOADED, nullable=False, index=True)
+    )  # type: ignore[assignment]  # SHA256 hash for duplicate detection
+    status: str = Column(String(20), default=FileStatus.UPLOADED, nullable=False, index=True)  # type: ignore[assignment]
 
     # V2 Stage-based workflow
-    upload_status = Column(
+    upload_status: str = Column(
         String(20), default="uploading", nullable=False
-    )  # uploading, uploaded, failed
-    chunking_status = Column(
+    )  # type: ignore[assignment]  # uploading, uploaded, failed
+    chunking_status: str = Column(
         String(20), default="pending", nullable=False
-    )  # pending, chunking, chunked, failed
-    graph_status = Column(
+    )  # type: ignore[assignment]  # pending, chunking, chunked, failed
+    graph_status: str = Column(
         String(20), default="pending", nullable=False
-    )  # pending, processing, completed, failed
-    embedding_status = Column(
+    )  # type: ignore[assignment]  # pending, processing, completed, failed
+    embedding_status: str = Column(
         String(20), default="pending", nullable=False
-    )  # pending, processing, completed, failed
+    )  # type: ignore[assignment]  # pending, processing, completed, failed
 
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)  # type: ignore[assignment]
+    updated_at: datetime = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
+    )  # type: ignore[assignment]
 
     # Stage completion timestamps
-    chunking_started_at = Column(DateTime, nullable=True)
-    chunking_completed_at = Column(DateTime, nullable=True)
-    graph_started_at = Column(DateTime, nullable=True)
-    graph_completed_at = Column(DateTime, nullable=True)
-    embedding_started_at = Column(DateTime, nullable=True)
-    embedding_completed_at = Column(DateTime, nullable=True)
+    chunking_started_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    chunking_completed_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    graph_started_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    graph_completed_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    embedding_started_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    embedding_completed_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
 
     # Processing details
-    processing_started_at = Column(DateTime, nullable=True)
-    processing_completed_at = Column(DateTime, nullable=True)
-    processing_error = Column(Text, nullable=True)
-    reason = Column(Text, nullable=True)  # Detailed reason for status (success/failure)
+    processing_started_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    processing_completed_at: Optional[datetime] = Column(DateTime, nullable=True)  # type: ignore[assignment]
+    processing_error: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]
+    reason: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]  # Detailed reason for status (success/failure)
 
     # Neo4j connection details used for processing
-    neo4j_uri = Column(String(255), nullable=True)
-    neo4j_database = Column(String(100), nullable=True)
-    model_used = Column(String(100), nullable=True)
-    generate_embedding = Column(String(10), nullable=True)  # "true"/"false" string
+    neo4j_uri: Optional[str] = Column(String(255), nullable=True)  # type: ignore[assignment]
+    neo4j_database: Optional[str] = Column(String(100), nullable=True)  # type: ignore[assignment]
+    model_used: Optional[str] = Column(String(100), nullable=True)  # type: ignore[assignment]
+    generate_embedding: Optional[str] = Column(String(10), nullable=True)  # type: ignore[assignment]  # "true"/"false" string
 
     # Chunking metadata (V2)
-    doc_link = Column(String(500), nullable=True)  # S3 document link (filename only)
-    page_images = Column(Text, nullable=True)  # JSON string of page image filenames
-    markdown_path = Column(String(500), nullable=True)  # Local markdown file path
-    auto_process = Column(
+    doc_link: Optional[str] = Column(String(500), nullable=True)  # type: ignore[assignment]  # S3 document link (filename only)
+    page_images: Optional[str] = Column(Text, nullable=True)  # type: ignore[assignment]  # JSON string of page image filenames
+    markdown_path: Optional[str] = Column(String(500), nullable=True)  # type: ignore[assignment]  # Local markdown file path
+    auto_process: bool = Column(
         Boolean, default=False, nullable=False
-    )  # Auto start chunking and graph creation after image extraction
+    )  # type: ignore[assignment]  # Auto start chunking and graph creation after image extraction
     
     # Celery task tracking for cancellation/reset
-    celery_task_id = Column(String(100), nullable=True, index=True)  # Current active Celery task ID
+    celery_task_id: Optional[str] = Column(String(100), nullable=True, index=True)  # type: ignore[assignment]  # Current active Celery task ID
 
     # Add composite indexes for common queries
     __table_args__ = (

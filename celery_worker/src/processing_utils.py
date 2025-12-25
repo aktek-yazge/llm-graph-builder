@@ -21,6 +21,14 @@ from src.shared.common_fn import  create_graph_database_connection
 # Async DB writes via RabbitMQ queue - ensures data persistence even if worker crashes
 from src.db_writer import enqueue_db_write
 
+# Langfuse LLM Observability
+from src.shared.langfuse_client import (
+    trace_llm_call,
+    trace_document_processing,
+    log_llm_usage,
+    flush_langfuse,
+)
+
 # Gemini API for markdown extraction (New SDK: google-genai 1.48.0+)
 try:
     from google import genai as genai_sdk
@@ -53,7 +61,7 @@ def _create_gemini_retry_decorator():
         wait=wait_exponential(multiplier=1, min=GEMINI_RETRY_WAIT_MIN, max=GEMINI_RETRY_WAIT_MAX),
         retry=retry_if_exception_type((Exception,)),
         before_sleep=lambda retry_state: logging.warning(
-            f"🔄 Gemini API call failed, retrying in {retry_state.next_action.sleep} seconds... "
+            f"🔄 Gemini API call failed, retrying in {getattr(retry_state.next_action, 'sleep', 0) if retry_state.next_action else 0} seconds... "
             f"(attempt {retry_state.attempt_number}/{GEMINI_RETRY_ATTEMPTS})"
         ),
         reraise=True
@@ -222,7 +230,7 @@ SADECE <CHUNK> etiketleriyle markdown içeriğini döndür, başka hiçbir şey 
         return ""
 
 
-def process_gemini_ocr(image_list: list, image_source: str = "generated"):
+def process_gemini_ocr(image_list: list, image_source: str = "generated", file_id: Optional[int] = None):
     """
     Gemini 2.0 Flash ile image'ları markdown'a çevirme ve belge tipini tespit etme (sync function for executor)
     Copied from backend/score.py
@@ -232,6 +240,7 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
     Args:
         image_list: Image path'leri veya filename'leri
         image_source: "local" (filename) veya "generated" (full path)
+        file_id: File ID for Langfuse tracing
 
     Returns:
         dict: {
@@ -242,6 +251,10 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
             "markdown": "Markdown content with [PAGE BREAK] separators"
         }
     """
+    # 📊 Langfuse trace başlat
+    ocr_start_time = time.time()
+    session_id = f"file_{file_id}" if file_id else None
+    
     result = {
         "metadata": {
             "docType": "MAIN_POLICY"  # Default value
@@ -260,6 +273,9 @@ def process_gemini_ocr(image_list: list, image_source: str = "generated"):
             return result
 
         # Create client with new google-genai SDK
+        if genai_sdk is None:
+            logging.warning("❌ google.genai SDK is not available")
+            return result
         client = genai_sdk.Client(api_key=api_key)
         logging.info("✅ Gemini client initialized successfully")
 
@@ -521,9 +537,29 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
         result["markdown"] = markdown_text
 
         if markdown_text:
+            ocr_duration = time.time() - ocr_start_time
             logging.info(
                 f"✅ Gemini 2.0 Flash generated {len(markdown_text)} characters of markdown from {len(image_list)} images"
             )
+            
+            # 📊 Langfuse: OCR başarılı
+            if session_id:
+                try:
+                    log_llm_usage(
+                        session_id=session_id,
+                        model="gemini-2.0-flash",
+                        input_tokens=len(image_list) * 1000,  # Tahmini: sayfa başına ~1000 token
+                        output_tokens=len(markdown_text) // 4,  # Tahmini: 4 karakter = 1 token
+                        latency_ms=ocr_duration * 1000,
+                        step_name="gemini_ocr",
+                        metadata={
+                            "pages": len(image_list),
+                            "output_chars": len(markdown_text),
+                            "doc_type": result["metadata"].get("docType", "UNKNOWN"),
+                        }
+                    )
+                except Exception as lf_error:
+                    logging.warning(f"⚠️ Langfuse OCR logging failed: {lf_error}")
         else:
             # Empty markdown is a failure - raise exception
             error_msg = f"Gemini OCR failed: No markdown generated from {len(image_list)} images"
@@ -531,6 +567,18 @@ Return ONLY the markdown content with <CHUNK> tags, nothing else."""
             raise GeminiOCRException(error_msg)
 
     except (GeminiOCRException, GeminiRateLimitException):
+        # 📊 Langfuse: OCR hata
+        if session_id:
+            try:
+                trace_document_processing(
+                    file_id=file_id or 0,
+                    file_name="unknown",
+                    step="ocr",
+                    status="failed",
+                    metadata={"error_type": "gemini_exception"}
+                )
+            except:
+                pass
         # Re-raise Gemini exceptions to caller
         raise
     except Exception as e:
@@ -778,7 +826,10 @@ async def processing_source_v2(
             uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
             logging.error(f"❌ Policy entity extraction başarısız: {last_error}")
             await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
-            raise last_error
+            if last_error is not None:
+                raise last_error
+            else:
+                raise RuntimeError("Policy entity extraction failed with unknown error")
         
         # Status'u Completed olarak güncelle
         end_time = datetime.now()
@@ -787,7 +838,7 @@ async def processing_source_v2(
         obj_source_node = sourceNode()
         obj_source_node.file_name = normalize_file_name(file_name)
         obj_source_node.status = "Completed"
-        obj_source_node.processing_time = processed_time
+        obj_source_node.processing_time = processed_time.total_seconds()
         obj_source_node.updated_at = end_time
         
         # Final status update - async
@@ -820,7 +871,7 @@ async def processing_source_v2(
             obj_source_node = sourceNode()
             obj_source_node.file_name = normalize_file_name(file_name)
             obj_source_node.status = "Failed"
-            obj_source_node.processing_error = str(e)[:500]
+            obj_source_node.error_message = str(e)[:500]
             await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
         except:
             pass
@@ -865,9 +916,45 @@ class FileProcessor:
             os.environ.get("V2_UPLOAD_WAIT_TIME", "10")
         )  # seconds
         self.last_upload_check_time = None
+        self._stop_requested = False
 
+    async def start_background_processing(self):
+        """Start background processing loop for files in queue"""
+        logging.info("🚀 Starting background processing loop")
+        self.is_processing = True
+        self._stop_requested = False
+        
+        while not self._stop_requested:
+            try:
+                # Get files ready for processing
+                db_session = self.db.get_db_session()
+                try:
+                    files = (
+                        db_session.query(UploadedFile)
+                        .filter(UploadedFile.status == "queued")  # type: ignore[arg-type]
+                        .limit(self.batch_size)
+                        .all()
+                    )
+                    
+                    if files:
+                        logging.info(f"📦 Found {len(files)} files to process")
+                        await self.process_v2_chunking_batch(files)
+                    else:
+                        # Wait before checking again
+                        await asyncio.sleep(5)
+                finally:
+                    db_session.close()
+            except Exception as e:
+                logging.error(f"❌ Error in background processing loop: {e}")
+                await asyncio.sleep(10)
+        
+        self.is_processing = False
+        logging.info("🛑 Background processing loop stopped")
 
-
+    def stop_background_processing(self):
+        """Stop the background processing loop"""
+        logging.info("🛑 Requesting background processing stop")
+        self._stop_requested = True
 
 
     async def process_v2_chunking_batch(self, files: list):
@@ -899,8 +986,8 @@ class FileProcessor:
 
                 stuck_files = (
                     db_session.query(UploadedFile)
-                    .filter(UploadedFile.id.in_(failed_file_ids))
-                    .filter(UploadedFile.chunking_status == "chunking")
+                    .filter(UploadedFile.id.in_(failed_file_ids))  # type: ignore[union-attr]
+                    .filter(UploadedFile.chunking_status == "chunking")  # type: ignore[arg-type]
                     .all()
                 )
 
@@ -1599,16 +1686,19 @@ class FileProcessor:
                     )
 
             except Exception as chunk_error:
+                file_name_for_log = file_record.original_name if file_record else "unknown"
+                file_id_for_log = file_record.id if file_record else "unknown"
                 logging.error(
-                    f"❌ V2: Chunking failed for {file_record.original_name}: {str(chunk_error)}"
+                    f"❌ V2: Chunking failed for {file_name_for_log}: {str(chunk_error)}"
                 )
                 import traceback
 
                 logging.error(f"Traceback: {traceback.format_exc()}")
                 # Mark as failed
-                file_record = (
-                    db_session.query(UploadedFile).filter_by(id=file_record.id).first()
-                )
+                if file_record:
+                    file_record = (
+                        db_session.query(UploadedFile).filter_by(id=file_record.id).first()
+                    )
                 if file_record:
                     file_record.chunking_status = "failed"
                     file_record.status = "failed"  # Ana status da failed olmalı
@@ -1622,8 +1712,9 @@ class FileProcessor:
                 db_session.close()
 
         except Exception as e:
+            file_id_for_log = file_record.id if file_record else "unknown"
             logging.error(
-                f"❌ V2: Error processing chunking for file {file_record.id}: {str(e)}"
+                f"❌ V2: Error processing chunking for file {file_id_for_log}: {str(e)}"
             )
             import traceback
 
@@ -1642,7 +1733,7 @@ class FileProcessor:
     async def process_v2_graph_creation(
         self,
         file_record: UploadedFile,
-        model: str = None,
+        model: Optional[str] = None,
         generate_embedding: bool = False,
     ):
         """
@@ -1676,11 +1767,12 @@ class FileProcessor:
                 return
 
             db_session = self.db.get_db_session()
+            original_file_id = file_record.id
             file_record = (
-                db_session.query(UploadedFile).filter_by(id=file_record.id).first()
+                db_session.query(UploadedFile).filter_by(id=original_file_id).first()
             )
             if not file_record:
-                logging.error(f"❌ File record not found for ID: {file_record.id}")
+                logging.error(f"❌ File record not found for ID: {original_file_id}")
                 return
 
             logging.info(f"🎨 Starting V2 graph creation for: {file_record.original_name}")
@@ -2012,8 +2104,11 @@ class FileProcessor:
                 if backend_path not in sys.path:
                     sys.path.insert(0, backend_path)
                 from src.shared.schema_cache import increment_schema_version
-                database_url = uri  # Neo4j connection URL
-                new_version = increment_schema_version(database_url)
+                database_url = uri or ""  # Neo4j connection URL
+                if database_url:
+                    new_version = increment_schema_version(database_url)
+                else:
+                    new_version = 0
                 logging.info(
                     f"📈 Schema version artırıldı: {database_url} → v{new_version}"
                 )
@@ -2027,8 +2122,9 @@ class FileProcessor:
             )
 
         except Exception as e:
+            file_id_for_log = file_record.id if file_record else "unknown"
             logging.error(
-                f"❌ process_v2_graph_creation failed for file {file_record.id}: {str(e)}"
+                f"❌ process_v2_graph_creation failed for file {file_id_for_log}: {str(e)}"
             )
             import traceback
             logging.error(f"Traceback: {traceback.format_exc()}")
@@ -2277,7 +2373,7 @@ class FileProcessor:
                 # Process graph creation asynchronously (await edilerek eş zamanlı çalışması sağlanıyor)
                 # Model ve generate_embedding parametrelerini geç
                 await self.process_v2_graph_creation(
-                    file_record, model=model, generate_embedding=generate_embedding
+                    file_record, model=model, generate_embedding=bool(generate_embedding)
                 )
 
                 logging.info(
@@ -2285,16 +2381,19 @@ class FileProcessor:
                 )
 
             except Exception as graph_error:
+                file_name_for_log = file_record.original_name if file_record else "unknown"
+                file_id_for_log = file_record.id if file_record else "unknown"
                 logging.error(
-                    f"❌ V2: Graph creation failed for {file_record.original_name}: {str(graph_error)}"
+                    f"❌ V2: Graph creation failed for {file_name_for_log}: {str(graph_error)}"
                 )
                 import traceback
 
                 logging.error(f"Traceback: {traceback.format_exc()}")
                 # Mark as failed
-                file_record = (
-                    db_session.query(UploadedFile).filter_by(id=file_record.id).first()
-                )
+                if file_record:
+                    file_record = (
+                        db_session.query(UploadedFile).filter_by(id=file_record.id).first()
+                    )
                 if file_record:
                     file_record.graph_status = "failed"
                     file_record.status = "failed"  # Ana status da failed olmalı
@@ -2308,8 +2407,9 @@ class FileProcessor:
                 db_session.close()
 
         except Exception as e:
+            file_id_for_log = file_record.id if file_record else "unknown"
             logging.error(
-                f"❌ V2: Error processing graph creation for file {file_record.id}: {str(e)}"
+                f"❌ V2: Error processing graph creation for file {file_id_for_log}: {str(e)}"
             )
             import traceback
 

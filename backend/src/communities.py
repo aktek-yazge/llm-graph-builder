@@ -1,7 +1,8 @@
 import logging
+import time
 # graphdatascience is only needed for graph analytics, which is done in celery_worker
 try:
-    from graphdatascience import GraphDataScience
+    from graphdatascience import GraphDataScience  # type: ignore[import-not-found]
 except (ImportError, ModuleNotFoundError):
     GraphDataScience = None  # Graph analytics is in celery_worker
 from src.llm import get_llm
@@ -10,6 +11,18 @@ from langchain_core.output_parsers import StrOutputParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from src.shared.common_fn import load_embedding_model
+
+# Langfuse LLM Observability
+try:
+    from src.shared.langfuse_client import log_llm_usage, trace_llm_call
+    LANGFUSE_AVAILABLE = True
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+    log_llm_usage = None  # type: ignore[assignment]
+    trace_llm_call = None  # type: ignore[assignment]
+
+# Community Detection Configuration
+COMMUNITY_DETECTION_ENABLED = os.getenv("COMMUNITY_DETECTION_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 COMMUNITY_PROJECTION_NAME = "communities"
@@ -201,6 +214,9 @@ def get_gds_driver(uri, username, password, database):
             username= os.getenv('NEO4J_USERNAME')
             database= os.getenv('NEO4J_DATABASE')
             password= os.getenv('NEO4J_PASSWORD')
+        
+        if GraphDataScience is None:
+            raise ImportError("graphdatascience package is not installed")
             
         gds = GraphDataScience(
             endpoint=uri,
@@ -267,7 +283,7 @@ def get_community_chain(model, is_parent=False,community_template=COMMUNITY_TEMP
             ]
         )
 
-        community_chain = community_prompt | llm | StrOutputParser()
+        community_chain = community_prompt | llm | StrOutputParser()  # type: ignore[operator]
         return community_chain
     except Exception as e:
         logging.error(f"Failed to create community chain: {e}")
@@ -356,7 +372,7 @@ def create_community_summaries(gds, model):
 
 def create_community_embeddings(gds):
     try:
-        embedding_model = os.getenv('EMBEDDING_MODEL')
+        embedding_model = os.getenv('EMBEDDING_MODEL') or "openai"
         embeddings, dimension = load_embedding_model(embedding_model)
         logging.info(f"Embedding model '{embedding_model}' loaded successfully.")
         
@@ -503,17 +519,138 @@ def clear_communities(gds):
 
 
 def create_communities(uri, username, password, database,model=COMMUNITY_CREATION_DEFAULT_MODEL):
+    """
+    Create communities using Neo4j GDS Leiden algorithm.
+    
+    LAYER 6 Features:
+    - Leiden community detection
+    - Hierarchical community levels (MAX_COMMUNITY_LEVELS)
+    - LLM-based community summary generation
+    - Community embeddings and vector index
+    - Langfuse metrics tracking
+    """
+    if not COMMUNITY_DETECTION_ENABLED:
+        logging.info("⏭️ Community detection disabled (COMMUNITY_DETECTION_ENABLED=false)")
+        return {"status": "disabled"}
+    
+    start_time = time.time()
+    result = {
+        "status": "running",
+        "steps": {},
+    }
+    
+    try:
+        logging.info("🎯 Starting community detection pipeline...")
+        
+        gds = get_gds_driver(uri, username, password, database)
+        
+        # Step 1: Clear existing communities
+        logging.info("🗑️ Step 1: Clearing existing communities...")
+        clear_communities(gds)
+        result["steps"]["clear"] = {"status": "success"}
+        
+        # Step 2: Create graph projection
+        logging.info("📊 Step 2: Creating graph projection...")
+        graph_project = create_community_graph_projection(gds)
+        result["steps"]["projection"] = {"status": "success"}
+        
+        # Step 3: Run Leiden algorithm
+        logging.info("🔬 Step 3: Running Leiden community detection...")
+        write_communities_success = write_communities(gds, graph_project)
+        result["steps"]["leiden"] = {"status": "success" if write_communities_success else "failed"}
+        
+        if write_communities_success:
+            # Step 4: Create community properties and summaries
+            logging.info("📝 Step 4: Creating community properties and summaries...")
+            create_community_properties(gds, model)
+            result["steps"]["properties"] = {"status": "success"}
+            
+            # Get community stats
+            stats_query = """
+            MATCH (c:__Community__)
+            WITH count(c) as total_communities,
+                 max(c.level) as max_level,
+                 avg(c.weight) as avg_weight
+            RETURN total_communities, max_level, avg_weight
+            """
+            stats = gds.run_cypher(stats_query)
+            if not stats.empty:
+                result["stats"] = {
+                    "total_communities": int(stats.iloc[0]["total_communities"]),
+                    "max_level": int(stats.iloc[0]["max_level"]) if stats.iloc[0]["max_level"] else 0,
+                    "avg_weight": float(stats.iloc[0]["avg_weight"]) if stats.iloc[0]["avg_weight"] else 0,
+                }
+            
+            result["status"] = "success"
+            logging.info("✅ Community detection completed successfully.")
+        else:
+            result["status"] = "partial"
+            logging.warning("⚠️ Failed to write communities. Constraint was not applied.")
+        
+        # Log duration and metrics
+        duration = time.time() - start_time
+        result["duration_seconds"] = round(duration, 2)
+        
+        # Log to Langfuse
+        if LANGFUSE_AVAILABLE and log_llm_usage is not None:
+            try:
+                log_llm_usage(
+                    session_id="community_detection",
+                    model=model,
+                    input_tokens=result.get("stats", {}).get("total_communities", 0),
+                    output_tokens=0,
+                    latency_ms=duration * 1000,
+                    step_name="create_communities",
+                    metadata=result
+                )
+            except:
+                pass
+        
+        logging.info(f"📊 Community detection completed in {duration:.2f}s")
+        return result
+        
+    except Exception as e:
+        logging.error(f"❌ Failed to create communities: {e}")
+        result["status"] = "error"
+        result["error"] = str(e)
+        return result
+
+
+def get_community_stats(uri, username, password, database) -> dict:
+    """
+    Get community detection statistics.
+    
+    Returns:
+        Community stats dict
+    """
     try:
         gds = get_gds_driver(uri, username, password, database)
-        clear_communities(gds)
-
-        graph_project = create_community_graph_projection(gds)
-        write_communities_sucess = write_communities(gds, graph_project)
-        if write_communities_sucess:
-            logging.info("Starting Community properties creation process.")
-            create_community_properties(gds,model)
-            logging.info("Communities creation process completed successfully.")
-        else:
-            logging.warning("Failed to write communities. Constraint was not applied.")
+        
+        stats_query = """
+        MATCH (c:__Community__)
+        WITH count(c) as total_communities,
+             max(c.level) as max_level,
+             count(CASE WHEN c.summary IS NOT NULL THEN 1 END) as with_summary,
+             count(CASE WHEN c.embedding IS NOT NULL THEN 1 END) as with_embedding
+        OPTIONAL MATCH (e:__Entity__)-[:IN_COMMUNITY]->(c:__Community__)
+        WITH total_communities, max_level, with_summary, with_embedding,
+             count(DISTINCT e) as entities_in_communities
+        RETURN total_communities, max_level, with_summary, with_embedding, entities_in_communities
+        """
+        
+        result = gds.run_cypher(stats_query)
+        
+        if not result.empty:
+            return {
+                "enabled": COMMUNITY_DETECTION_ENABLED,
+                "total_communities": int(result.iloc[0]["total_communities"]),
+                "max_level": int(result.iloc[0]["max_level"]) if result.iloc[0]["max_level"] else 0,
+                "with_summary": int(result.iloc[0]["with_summary"]),
+                "with_embedding": int(result.iloc[0]["with_embedding"]),
+                "entities_in_communities": int(result.iloc[0]["entities_in_communities"]),
+            }
+        
+        return {"enabled": COMMUNITY_DETECTION_ENABLED, "total_communities": 0}
+        
     except Exception as e:
-        logging.error(f"Failed to create communities: {e}")
+        return {"error": str(e)}
