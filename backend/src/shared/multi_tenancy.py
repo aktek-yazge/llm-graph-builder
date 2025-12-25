@@ -167,7 +167,7 @@ def get_tenant_by_id(tenant_id: str) -> Optional[Tenant]:
         db = get_file_queue_db()
         # Tenant table query would go here
         # result = db.query(TenantModel).filter(TenantModel.id == tenant_id).first()
-        db.close()
+        # Note: FileQueueDatabase doesn't have close() method, connection is handled internally
         
         # Placeholder - return None for now
         return None
@@ -192,7 +192,7 @@ def get_tenant_by_api_key(api_key: str) -> Optional[Tenant]:
     return None
 
 
-def get_tenant_neo4j_config(tenant: Tenant = None) -> Dict[str, str]:
+def get_tenant_neo4j_config(tenant: Optional[Tenant] = None) -> Dict[str, str]:
     """
     Get Neo4j configuration for tenant.
     
@@ -228,7 +228,7 @@ def get_tenant_neo4j_config(tenant: Tenant = None) -> Dict[str, str]:
     return base_config
 
 
-def get_tenant_label_filter(tenant: Tenant = None) -> str:
+def get_tenant_label_filter(tenant: Optional[Tenant] = None) -> str:
     """
     Get Cypher label filter for tenant isolation.
     
@@ -289,7 +289,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
             clear_tenant_context()
 
 
-def create_tenant_schema(tenant_id: str, neo4j_config: Dict[str, str] = None) -> bool:
+def create_tenant_schema(tenant_id: str, neo4j_config: Optional[Dict[str, str]] = None) -> bool:
     """
     Create necessary schema for a new tenant.
     

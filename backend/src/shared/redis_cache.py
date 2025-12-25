@@ -33,9 +33,9 @@ REDIS_SIMILARITY_THRESHOLD = float(os.getenv("REDIS_SIMILARITY_THRESHOLD", "0.95
 
 def setup_semantic_cache(
     embeddings=None,
-    redis_url: str = None,
-    ttl: int = None,
-    similarity_threshold: float = None
+    redis_url: Optional[str] = None,
+    ttl: Optional[int] = None,
+    similarity_threshold: Optional[float] = None
 ) -> bool:
     """
     Redis Semantic Cache'i kur ve LangChain'e bağla.
@@ -108,13 +108,13 @@ def setup_semantic_cache(
         logger.info("   Yüklemek için: pip install langchain-redis redis redisvl")
         return False
         
-    except redis.ConnectionError as e:
-        logger.warning(f"⚠️ Redis'e bağlanılamadı: {e}")
-        logger.info(f"   Redis'in çalıştığından emin olun: docker run -d -p 6379:6379 redis")
-        return False
-        
     except Exception as e:
-        logger.error(f"❌ Redis Semantic Cache kurulum hatası: {e}", exc_info=True)
+        # Handles redis.ConnectionError and other errors
+        if "Connection" in str(type(e).__name__) or "connection" in str(e).lower():
+            logger.warning(f"⚠️ Redis'e bağlanılamadı: {e}")
+            logger.info(f"   Redis'in çalıştığından emin olun: docker run -d -p 6379:6379 redis")
+        else:
+            logger.error(f"❌ Redis Semantic Cache kurulum hatası: {e}", exc_info=True)
         return False
 
 
@@ -130,7 +130,7 @@ def _create_embeddings():
             from langchain_openai import OpenAIEmbeddings
             embeddings = OpenAIEmbeddings(
                 model="text-embedding-3-small",  # Daha hızlı ve ucuz
-                openai_api_key=openai_key
+                api_key=openai_key  # type: ignore[arg-type]
             )
             logger.info("✅ OpenAI Embeddings kullanılacak (semantic cache için)")
             return embeddings
@@ -170,7 +170,7 @@ def clear_cache() -> bool:
         redis_client = redis.from_url(REDIS_URL)
         
         # LangChain cache key pattern'ini temizle
-        keys = redis_client.keys("langchain:*")
+        keys = list(redis_client.keys("langchain:*"))  # type: ignore[arg-type]
         if keys:
             redis_client.delete(*keys)
             logger.info(f"🗑️ {len(keys)} cache key silindi")
@@ -199,15 +199,15 @@ def get_cache_stats() -> dict:
         redis_client = redis.from_url(REDIS_URL)
         
         # Key sayısı
-        keys = redis_client.keys("langchain:*")
+        keys = list(redis_client.keys("langchain:*"))  # type: ignore[arg-type]
         
         # Redis info
-        info = redis_client.info("memory")
+        info = redis_client.info("memory")  # type: ignore[union-attr]
         
         return {
             "status": "active",
             "cached_queries": len(keys),
-            "memory_used": info.get("used_memory_human", "unknown"),
+            "memory_used": info.get("used_memory_human", "unknown") if isinstance(info, dict) else "unknown",
             "redis_url": REDIS_URL[:30] + "...",
             "ttl_seconds": REDIS_CACHE_TTL,
             "similarity_threshold": REDIS_SIMILARITY_THRESHOLD

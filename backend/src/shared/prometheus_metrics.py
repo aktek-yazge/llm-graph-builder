@@ -28,7 +28,7 @@ Environment Variables:
 import os
 import time
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from functools import wraps
 from contextlib import contextmanager
 
@@ -40,10 +40,38 @@ PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "9090"))
 
 # Try to import prometheus_client
 try:
-    from prometheus_client import Counter, Histogram, Gauge, Info, start_http_server
+    from prometheus_client import Counter, Histogram, Gauge, Info
+    from prometheus_client import start_http_server  # type: ignore[assignment]
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
+    
+    # Callable placeholder to satisfy type checker when prometheus_client is not installed
+    class _MetricPlaceholder:
+        """Placeholder for prometheus metrics when library not available"""
+        def __call__(self, *args: Any, **kwargs: Any) -> "_MetricPlaceholder":
+            return self
+        def labels(self, *args: Any, **kwargs: Any) -> "_MetricPlaceholder":
+            return self
+        def inc(self, *args: Any, **kwargs: Any) -> None:
+            pass
+        def dec(self, *args: Any, **kwargs: Any) -> None:
+            pass
+        def set(self, *args: Any, **kwargs: Any) -> None:
+            pass
+        def observe(self, *args: Any, **kwargs: Any) -> None:
+            pass
+        def info(self, *args: Any, **kwargs: Any) -> None:
+            pass
+    
+    Counter = _MetricPlaceholder()  # type: ignore[misc, assignment]
+    Histogram = _MetricPlaceholder()  # type: ignore[misc, assignment]
+    Gauge = _MetricPlaceholder()  # type: ignore[misc, assignment]
+    Info = _MetricPlaceholder()  # type: ignore[misc, assignment]
+    
+    def start_http_server(port: int) -> None:  # type: ignore[misc]
+        pass
+    
     logger.warning("⚠️ prometheus_client not installed. Run: pip install prometheus-client")
 
 
@@ -293,7 +321,7 @@ def track_api_request(endpoint: str, method: str, status_code: int, duration: fl
     api_latency_histogram.labels(endpoint=endpoint, method=method).observe(duration)
 
 
-def start_metrics_server(port: int = None):
+def start_metrics_server(port: Optional[int] = None):
     """
     Start Prometheus metrics HTTP server.
     

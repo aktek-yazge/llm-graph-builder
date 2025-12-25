@@ -60,6 +60,12 @@ from src.shared.common_fn import *
 from src.shared.constants import QUERY_TO_GET_CHUNKS
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
 from src.shared.context import set_request_context, clear_request_context
+from src.shared.multi_tenancy import (
+    TenantMiddleware,
+    get_current_tenant,
+    get_tenant_neo4j_config,
+    MULTI_TENANCY_ENABLED,
+)
 import uvicorn
 import asyncio
 import base64
@@ -981,6 +987,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SessionMiddleware, secret_key=os.urandom(24).hex())
+
+# Multi-tenancy middleware (if enabled)
+if MULTI_TENANCY_ENABLED:
+    app.add_middleware(TenantMiddleware)
+    logging.info("✅ Multi-tenancy middleware installed")
+else:
+    logging.info("⏭️ Multi-tenancy disabled (MULTI_TENANCY_ENABLED=false)")
 
 # S3 configuration for file serving
 S3_BACKUP_BUCKET = os.environ.get("S3_BACKUP_BUCKET", "llm-graph-builder-backup")
@@ -2625,23 +2638,37 @@ async def chat_bot_stream(
             # İlk durum mesajı gönder
             yield f"data: {json.dumps({'type': 'status', 'message': 'Gerçek streaming başlatılıyor...', 'status': 'starting'}, ensure_ascii=False)}\n\n"
 
-            # Graph bağlantısını kur - Environment variable varsa onu kullan
-            actual_uri = os.environ.get("NEO4J_URI", uri) if uri else uri
+            # Graph bağlantısını kur - Multi-tenancy veya Environment variable
+            if MULTI_TENANCY_ENABLED:
+                # Tenant-aware Neo4j config
+                tenant = get_current_tenant()
+                tenant_config = get_tenant_neo4j_config(tenant)
+                actual_uri = tenant_config.get("uri") or os.environ.get("NEO4J_URI", uri)
+                actual_username = tenant_config.get("username") or userName
+                actual_password = tenant_config.get("password") or password
+                actual_database = tenant_config.get("database") or database
+                logging.info(f"🏢 Multi-tenant: {tenant.id}, database: {actual_database}")
+            else:
+                actual_uri = os.environ.get("NEO4J_URI", uri) if uri else uri
+                actual_username = userName
+                actual_password = password
+                actual_database = database
+            
             if actual_uri and actual_uri != uri:
                 logging.info(f"URI override: {uri} -> {actual_uri}")
             
             if mode == "graph":
                 graph = Neo4jGraph(
                     url=actual_uri,
-                    username=userName,
-                    password=password,
-                    database=database,
+                    username=actual_username,
+                    password=actual_password,
+                    database=actual_database,
                     sanitize=True,
                     refresh_schema=True,
                 )
             else:
                 graph = create_graph_database_connection(
-                    actual_uri, userName, password, database
+                    actual_uri, actual_username, actual_password, actual_database
                 )
 
             yield f"data: {json.dumps({'type': 'status', 'message': 'Veritabanı bağlantısı kuruldu', 'status': 'connected'}, ensure_ascii=False)}\n\n"
@@ -10158,6 +10185,250 @@ async def api_langfuse_status():
         
     except Exception as e:
         logging.error(f"❌ Langfuse status error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+# =============================================================================
+# USER FEEDBACK API - Langfuse Score Integration
+# =============================================================================
+
+@app.post("/api/v2/feedback")
+async def api_submit_feedback(
+    request: Request,
+):
+    """
+    Kullanıcı feedback'i kaydeder ve Langfuse'a score olarak gönderir.
+    
+    Request Body:
+    {
+        "session_id": "xxx",           # Required: Session ID
+        "question_id": "yyy",          # Required: Question/Trace ID (Langfuse trace_id)
+        "feedback_type": "positive",   # Required: positive, negative, helpful, incorrect, incomplete
+        "score": 1,                    # Optional: -1, 0, 1 (auto-calculated from feedback_type)
+        "comment": "...",              # Optional: User comment
+        "question": "...",             # Optional: Original question
+        "response": "...",             # Optional: AI response
+        "corrected_response": "...",   # Optional: Admin's corrected response
+        "corrected_queries": ["..."],  # Optional: List of correct Cypher queries
+        "correction_note": "..."       # Optional: Why original was wrong
+    }
+    
+    Langfuse'a iki score gönderilir:
+    - user_feedback: Numeric score (-1, 0, 1)
+    - feedback_type: Categorical (positive, negative, etc.)
+    """
+    try:
+        from src.shared.feedback import (
+            record_feedback, 
+            FeedbackType, 
+            FEEDBACK_ENABLED
+        )
+        
+        if not FEEDBACK_ENABLED:
+            return create_api_response(
+                "Failed", 
+                message="Feedback feature is disabled"
+            )
+        
+        body = await request.json()
+        
+        # Required fields
+        session_id = body.get("session_id")
+        question_id = body.get("question_id")
+        feedback_type_str = body.get("feedback_type", "neutral")
+        
+        if not session_id or not question_id:
+            return create_api_response(
+                "Failed",
+                message="session_id and question_id are required"
+            )
+        
+        # Parse feedback type
+        try:
+            feedback_type = FeedbackType(feedback_type_str.lower())
+        except ValueError:
+            valid_types = [t.value for t in FeedbackType]
+            return create_api_response(
+                "Failed",
+                message=f"Invalid feedback_type. Valid types: {valid_types}"
+            )
+        
+        # Calculate score if not provided
+        score = body.get("score")
+        if score is None:
+            if feedback_type in [FeedbackType.POSITIVE, FeedbackType.HELPFUL]:
+                score = 1
+            elif feedback_type in [FeedbackType.NEGATIVE, FeedbackType.INCORRECT, 
+                                   FeedbackType.INCOMPLETE, FeedbackType.NOT_HELPFUL,
+                                   FeedbackType.OFF_TOPIC]:
+                score = -1
+            else:
+                score = 0
+        
+        # Get correction fields
+        corrected_queries = body.get("corrected_queries")
+        correction_note = body.get("correction_note")
+        
+        # Auto-generate corrections with Evaluator LLM if:
+        # - Negative feedback
+        # - Has comment (user feedback like "Yıl filtresini önce uygula")
+        # - No corrected_queries provided
+        # - Has tool_calls (to extract wrong queries)
+        if (score < 0 and 
+            body.get("comment") and 
+            not corrected_queries and 
+            body.get("tool_calls")):
+            try:
+                from src.shared.feedback import generate_correction_with_llm
+                
+                # Extract wrong queries from tool_calls
+                wrong_queries = []
+                for tc in body.get("tool_calls", []):
+                    if tc.get("tool_name") == "execute_cypher_query":
+                        try:
+                            import json
+                            input_data = tc.get("tool_input", "")
+                            if isinstance(input_data, str):
+                                input_data = json.loads(input_data) if input_data.startswith("{") else {"cypher": input_data}
+                            if isinstance(input_data, dict) and "cypher" in input_data:
+                                wrong_queries.append(input_data["cypher"])
+                        except:
+                            pass
+                
+                if wrong_queries:
+                    logging.info(f"🤖 Generating corrections with Evaluator LLM...")
+                    corrected_queries, correction_note = await generate_correction_with_llm(
+                        question=body.get("question", ""),
+                        wrong_queries=wrong_queries,
+                        user_feedback=body.get("comment", ""),
+                    )
+                    logging.info(f"✅ Generated {len(corrected_queries)} corrected queries")
+            except Exception as e:
+                logging.warning(f"⚠️ Auto-correction failed: {e}")
+        
+        # Record feedback
+        feedback = record_feedback(
+            session_id=session_id,
+            question_id=question_id,
+            feedback_type=feedback_type,
+            score=score,
+            comment=body.get("comment"),
+            question=body.get("question", ""),
+            response=body.get("response", ""),
+            user_id=body.get("user_id"),
+            metadata=body.get("metadata"),
+            tool_calls=body.get("tool_calls"),
+            # Correction fields for learning from mistakes
+            corrected_response=body.get("corrected_response"),
+            corrected_queries=corrected_queries,
+            correction_note=correction_note,
+        )
+        
+        if feedback:
+            logging.info(f"✅ Feedback recorded: {feedback_type.value} for {question_id[:8]}...")
+            return create_api_response(
+                "Success",
+                data={
+                    "feedback_id": feedback.id,
+                    "feedback_type": feedback.feedback_type.value,
+                    "score": feedback.score,
+                    "langfuse_synced": True,  # feedback.py handles Langfuse sync
+                },
+                message="Feedback recorded successfully"
+            )
+        else:
+            return create_api_response(
+                "Failed",
+                message="Failed to record feedback"
+            )
+            
+    except Exception as e:
+        logging.error(f"❌ Feedback error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.get("/api/v2/feedback/stats")
+async def api_feedback_stats(
+    session_id: Optional[str] = None,
+):
+    """
+    Feedback istatistiklerini döndürür.
+    
+    Query Parameters:
+    - session_id: Optional - Belirli bir session için stats
+    
+    Returns:
+    {
+        "total": 100,
+        "positive": 75,
+        "negative": 20,
+        "neutral": 5,
+        "positive_rate": 75.0,
+        "by_type": {"helpful": 50, "incorrect": 10, ...}
+    }
+    """
+    try:
+        from src.shared.feedback import get_feedback_stats, FEEDBACK_ENABLED
+        
+        if not FEEDBACK_ENABLED:
+            return create_api_response(
+                "Failed",
+                message="Feedback feature is disabled"
+            )
+        
+        stats = get_feedback_stats(session_id=session_id)
+        
+        return create_api_response(
+            "Success",
+            data=stats,
+            message="Feedback stats retrieved"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Feedback stats error: {e}")
+        return create_api_response("Failed", message=str(e))
+
+
+@app.get("/api/v2/feedback/{session_id}")
+async def api_get_session_feedback(
+    session_id: str,
+):
+    """
+    Belirli bir session'ın tüm feedback'lerini döndürür.
+    """
+    try:
+        from src.shared.feedback import get_session_feedback, FEEDBACK_ENABLED
+        
+        if not FEEDBACK_ENABLED:
+            return create_api_response(
+                "Failed",
+                message="Feedback feature is disabled"
+            )
+        
+        feedbacks = get_session_feedback(session_id)
+        
+        return create_api_response(
+            "Success",
+            data={
+                "session_id": session_id,
+                "count": len(feedbacks),
+                "feedbacks": [
+                    {
+                        "id": f.id,
+                        "question_id": f.question_id,
+                        "feedback_type": f.feedback_type.value,
+                        "score": f.score,
+                        "comment": f.comment,
+                        "created_at": f.created_at.isoformat() if f.created_at else None,
+                    }
+                    for f in feedbacks
+                ]
+            },
+            message=f"Found {len(feedbacks)} feedbacks"
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Get feedback error: {e}")
         return create_api_response("Failed", message=str(e))
 
 

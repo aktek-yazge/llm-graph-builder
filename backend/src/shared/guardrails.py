@@ -156,7 +156,7 @@ def get_config() -> GuardrailsConfig:
 def validate_cypher_query(
     cypher: str,
     allow_write: bool = False,
-    config: GuardrailsConfig = None,
+    config: Optional[GuardrailsConfig] = None,
 ) -> Tuple[bool, str, List[str]]:
     """
     Validate Cypher query for injection attacks.
@@ -250,7 +250,7 @@ def sanitize_cypher_input(value: str) -> str:
 
 def mask_pii(
     text: str,
-    config: GuardrailsConfig = None,
+    config: Optional[GuardrailsConfig] = None,
     replacement: str = "[MASKED]",
 ) -> Tuple[str, int]:
     """
@@ -287,7 +287,7 @@ def mask_pii(
     return masked, mask_count
 
 
-def detect_pii(text: str, config: GuardrailsConfig = None) -> List[Dict[str, Any]]:
+def detect_pii(text: str, config: Optional[GuardrailsConfig] = None) -> List[Dict[str, Any]]:
     """
     Detect PII in text without masking.
     

@@ -365,7 +365,7 @@ def observe(
             # Capture input
             input_data = None
             if capture_input:
-                input_data = {"args": str(args)[:500], "kwargs": str(kwargs)[:500]}
+                input_data = {"args": str(args), "kwargs": str(kwargs)}
             
             with trace_llm_call(
                 name=trace_name,
@@ -375,7 +375,7 @@ def observe(
                 result = func(*args, **kwargs)
                 
                 if capture_output:
-                    output_str = str(result)[:1000] if result else None
+                    output_str = str(result) if result else None
                     span.update(output=output_str)
                 
                 return result
@@ -395,7 +395,7 @@ def observe(
             # Capture input
             input_data = None
             if capture_input:
-                input_data = {"args": str(args)[:500], "kwargs": str(kwargs)[:500]}
+                input_data = {"args": str(args), "kwargs": str(kwargs)}
             
             with trace_llm_call(
                 name=trace_name,
@@ -405,7 +405,7 @@ def observe(
                 result = await func(*args, **kwargs)
                 
                 if capture_output:
-                    output_str = str(result)[:1000] if result else None
+                    output_str = str(result) if result else None
                     span.update(output=output_str)
                 
                 return result

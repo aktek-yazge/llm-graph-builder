@@ -61,7 +61,7 @@ class QueryRewriter:
     - Optimize for graph queries
     """
     
-    def __init__(self, enabled: bool = None):
+    def __init__(self, enabled: Optional[bool] = None):
         self.enabled = enabled if enabled is not None else QUERY_REWRITING_ENABLED
         
         # Common Turkish entity patterns

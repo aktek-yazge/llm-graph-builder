@@ -27,9 +27,11 @@ Prompt Caching Stratejisi:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
+import time
 from typing import AsyncGenerator, Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -60,7 +62,17 @@ from src.shared.guardrails import (
     validate_cypher_query,
     validate_output,
     validate_user_input,
+    check_hallucination,
     GUARDRAILS_ENABLED,
+    GUARDRAILS_HALLUCINATION_CHECK,
+)
+
+# Feedback & Few-shot Learning
+from src.shared.feedback import (
+    get_few_shot_examples,
+    get_corrections_for_fewshot,
+    format_few_shot_prompt,
+    FEEDBACK_FEW_SHOT_ENABLED,
 )
 
 # Logging ayarları
@@ -174,36 +186,31 @@ class TokenTracker:
     
     def add_tool_call(self, tool_name: str, params: Dict[str, Any]):
         """Tool çağrısı ekle"""
-        # Parametreleri kısalt (çok uzun olabilir)
-        params_preview = {}
-        for k, v in params.items():
-            if isinstance(v, str) and len(v) > 100:
-                params_preview[k] = v[:100] + "..."
-            else:
-                params_preview[k] = v
-        
+        # Tam parametreleri sakla (Langfuse için)
         step = StepStats(
             step_name=f"tool_{tool_name}",
             step_type="tool_call",
             tool_name=tool_name,
-            tool_params=params_preview
+            tool_params=params  # Tam parametreler
         )
         self.steps.append(step)
         self.total_tool_calls += 1
         
-        # Log
+        # Log için kısaltılmış preview
         _log(f"🔧 [TOOL CALL] {tool_name}")
-        for k, v in params_preview.items():
-            _log(f"   ├─ {k}: {v}")
+        for k, v in params.items():
+            v_str = str(v)
+            log_val = v_str[:100] + "..." if len(v_str) > 100 else v_str
+            _log(f"   ├─ {k}: {log_val}")
         
-        # Langfuse span başlat (tool çağrısı için)
+        # Langfuse span başlat (tool çağrısı için) - TAM parametrelerle
         try:
             from src.shared.langfuse_client import get_langfuse
             langfuse = get_langfuse()
             if langfuse:
                 span = langfuse.start_span(
                     name=f"tool:{tool_name}",
-                    input=params_preview,
+                    input=params,  # TAM parametreler (limit yok)
                     metadata={
                         "tool_name": tool_name,
                         "step_type": "tool_call",
@@ -218,14 +225,11 @@ class TokenTracker:
     
     def add_tool_result(self, tool_name: str, result: str, success: bool = True):
         """Tool sonucu ekle"""
-        # Sonucu kısalt
-        result_preview = result[:500] + "..." if len(result) > 500 else result
-        
         step = StepStats(
             step_name=f"tool_{tool_name}_result",
             step_type="tool_result",
             tool_name=tool_name,
-            tool_result_preview=result_preview
+            tool_result_preview=result  # TAM sonuç (limit yok)
         )
         self.steps.append(step)
         
@@ -238,25 +242,25 @@ class TokenTracker:
             status = "❌"
         _log(f"📥 [TOOL RESULT] {status} {tool_name}")
         
-        # Langfuse span'ı bitir
+        # Langfuse span'ı bitir - TAM sonuçla
         try:
             if hasattr(self, '_tool_spans') and tool_name in self._tool_spans:
                 span = self._tool_spans[tool_name]
                 try:
-                    span.update(output=result_preview)
+                    span.update(output=result)  # TAM sonuç (limit yok)
                 except Exception:
                     pass
                 span.end()
                 del self._tool_spans[tool_name]
         except Exception as e:
             _log(f"⚠️ Langfuse tool span end failed: {e}", "warning")
-        # Sonucu satır satır göster (max 5 satır)
-        lines = result_preview.split('\n')[:5]
+        # Sonucu satır satır göster (max 5 satır - sadece log için)
+        lines = result.split('\n')[:5]
         for line in lines:
             if line.strip():
                 _log(f"   │ {line[:120]}")
-        if len(result_preview.split('\n')) > 5:
-            _log(f"   │ ... ({len(result_preview.split(chr(10)))} satır)")
+        if len(result.split('\n')) > 5:
+            _log(f"   │ ... ({len(result.split(chr(10)))} satır)")
     
     def get_summary(self) -> Dict[str, Any]:
         """İstatistik özeti döndür"""
@@ -389,6 +393,26 @@ except ImportError as e:
     logging.warning(f"⚠️ MCP Adapters not available: {e}")
     MCP_AVAILABLE = False
     MultiServerMCPClient = None
+
+# Redis LLM Semantic Cache import
+if TYPE_CHECKING:
+    from src.shared.redis_cache import setup_semantic_cache, is_cache_available, get_cache_stats as get_redis_cache_stats
+
+try:
+    from src.shared.redis_cache import (
+        setup_semantic_cache,
+        is_cache_available as is_redis_cache_available,
+        get_cache_stats as get_redis_cache_stats,
+        REDIS_CACHE_ENABLED,
+    )
+    REDIS_CACHE_IMPORTED = True
+except ImportError as e:
+    logging.warning(f"⚠️ Redis cache module not available: {e}")
+    REDIS_CACHE_IMPORTED = False
+    setup_semantic_cache = None  # type: ignore
+    is_redis_cache_available = None  # type: ignore
+    get_redis_cache_stats = None  # type: ignore
+    REDIS_CACHE_ENABLED = False
 
 
 # ============================================================================
@@ -1468,6 +1492,17 @@ class ReactAgent:
         self.mcp_client: Optional[Any] = None
         self.mcp_tools: Optional[List[Any]] = None
         self._schema_cache: Dict[str, str] = {}
+        self.redis_cache_active = False
+        
+        # Redis LLM Semantic Cache kurulumu
+        if REDIS_CACHE_IMPORTED and REDIS_CACHE_ENABLED and setup_semantic_cache:
+            try:
+                cache_ok = setup_semantic_cache()
+                self.redis_cache_active = cache_ok
+                if cache_ok:
+                    logging.info("✅ Redis LLM Semantic Cache aktif (ReactAgent)")
+            except Exception as e:
+                logging.warning(f"⚠️ Redis cache setup failed: {e}")
     
     def _get_schema_for_session(self, session_id: str) -> str:
         """Session için şema bilgisini al (cache'li)"""
@@ -1817,7 +1852,7 @@ class ReactAgent:
                     try:
                         # Langfuse SDK v3+: update() then end()
                         langfuse_trace.update(
-                            output={"response": cached_response["response"][:500], "cache_hit": True},
+                            output={"response": cached_response["response"], "cache_hit": True},
                             metadata={
                                 "cache_hit": True,
                                 "similarity": cached_response.get("similarity", 0),
@@ -1835,9 +1870,19 @@ class ReactAgent:
                     "content": f"🎯 Cache hit (similarity: {cached_response.get('similarity', 0):.2f})",
                 }
                 
+                # Frontend için message_chunk gönder (chat ekranında görünsün)
+                cached_content = cached_response["response"]
+                yield {
+                    "type": "message_chunk",
+                    "content": cached_content,
+                    "full_message": cached_content,
+                    "is_final_answer": True,
+                    "session_id": session_id,
+                }
+                
                 yield {
                     "type": "final_response",
-                    "content": cached_response["response"],
+                    "content": cached_content,
                     "sources": cached_response.get("sources", {"documents": [], "pages": []}),
                     "metrics": {
                         "total_time": 0.1,  # Cache hit çok hızlı
@@ -1923,10 +1968,37 @@ class ReactAgent:
                 }
                 return
             
+            # 📚 Few-shot learning: Başarılı örnekleri system prompt'a ekle
+            few_shot_examples: List[Dict[str, Any]] = []
+            final_system_prompt = agent_config["system_prompt"]
+            if FEEDBACK_FEW_SHOT_ENABLED and question:
+                try:
+                    # Başarılı örnekler
+                    few_shot_examples = get_few_shot_examples(
+                        question=question,
+                        limit=2,  # Max 2 örnek
+                        min_score=1,
+                        similarity_threshold=0.75,
+                    )
+                    
+                    # Düzeltilmiş hatalar (learning from mistakes)
+                    corrections = get_corrections_for_fewshot(
+                        question=question,
+                        limit=2,
+                        similarity_threshold=0.70,
+                    )
+                    
+                    if few_shot_examples or corrections:
+                        few_shot_prompt = format_few_shot_prompt(few_shot_examples, corrections)
+                        final_system_prompt = final_system_prompt + "\n\n" + few_shot_prompt
+                        _log(f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme eklendi")
+                except Exception as e:
+                    _log(f"⚠️ Few-shot examples error: {e}", "warning")
+            
             agent = create_agent(
                 model=agent_config["model"],
                 tools=react_tools,
-                system_prompt=agent_config["system_prompt"],
+                system_prompt=final_system_prompt,
                 middleware=agent_config["middleware"],
                 name="react_agent",
             )
@@ -1956,6 +2028,11 @@ class ReactAgent:
             tool_call_count = 0
             logged_msg_ids: set[Any] = set()
             pending_tool_names: Dict[str, str] = {}  # tool_call_id -> tool_name
+            collected_graph_facts: List[str] = []  # Hallucination check için tool sonuçları
+            
+            # 📚 Tool calls collection for feedback/learning
+            collected_tool_calls: List[Dict[str, Any]] = []
+            pending_tool_inputs: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> {tool_name, tool_input, start_time}
             
             async for chunk in agent.astream(agent_input, stream_mode="updates"):  # type: ignore[arg-type]
                 if not isinstance(chunk, dict):
@@ -2049,6 +2126,12 @@ class ReactAgent:
                                 # Tool call ID'yi sakla (result için)
                                 if tool_call_id:
                                     pending_tool_names[tool_call_id] = tool_name
+                                    # 📚 Feedback için tool input'u sakla
+                                    pending_tool_inputs[tool_call_id] = {
+                                        "tool_name": tool_name,
+                                        "tool_input": json.dumps(tool_args, ensure_ascii=False) if tool_args else "",
+                                        "start_time": time.time(),
+                                    }
                                 
                                 # Kullanıcıya göster
                                 thinking_msg = None
@@ -2077,6 +2160,9 @@ class ReactAgent:
                             # Durum kontrolü: success (✅), empty (⚪), failed (❌)
                             if "✅" in tool_content:
                                 result_status = "success"
+                                # 🔍 Hallucination check için başarılı sonuçları topla
+                                if GUARDRAILS_HALLUCINATION_CHECK and tool_content:
+                                    collected_graph_facts.append(str(tool_content)[:2000])
                             elif "⚪" in tool_content:
                                 result_status = "empty"
                             else:
@@ -2084,6 +2170,18 @@ class ReactAgent:
                             
                             # Token tracker'a ekle
                             token_tracker.add_tool_result(tool_name, str(tool_content), result_status == "success")
+                            
+                            # 📚 Feedback için tool call'ı kaydet
+                            if tool_call_id and tool_call_id in pending_tool_inputs:
+                                pending_info = pending_tool_inputs[tool_call_id]
+                                duration_ms = int((time.time() - pending_info.get("start_time", time.time())) * 1000)
+                                collected_tool_calls.append({
+                                    "tool_name": pending_info.get("tool_name", tool_name),
+                                    "tool_input": pending_info.get("tool_input", ""),
+                                    "tool_output": str(tool_content),
+                                    "duration_ms": duration_ms,
+                                    "success": result_status == "success",
+                                })
                             
                             if "✅" in tool_content and "kayıt" in tool_content:
                                 match = re.search(r'(\d+)\s*kayıt', tool_content)
@@ -2136,6 +2234,40 @@ class ReactAgent:
                         _log(f"🔒 PII masked in response: {validation_info['pii_masked']} items")
                     response_text = sanitized_response
                 
+                # 🔍 Guardrails: Hallucination detection
+                hallucination_warning = ""
+                if GUARDRAILS_HALLUCINATION_CHECK and collected_graph_facts:
+                    try:
+                        # Graph facts'ı dict listesine dönüştür
+                        graph_facts_list = [{"content": fact} for fact in collected_graph_facts]
+                        
+                        is_valid, confidence, issues = check_hallucination(
+                            response=response_text,
+                            graph_facts=graph_facts_list,
+                            threshold=0.7,
+                        )
+                        
+                        if not is_valid:
+                            _log(f"⚠️ Hallucination risk detected! Confidence: {confidence:.2f}, Issues: {issues}", "warning")
+                            
+                            # Kullanıcıya uyarı ekle
+                            hallucination_warning = "\n\n---\n⚠️ **Doğrulama Notu:** Bu cevapta bazı bilgiler veritabanından tam olarak doğrulanamamıştır. Lütfen kritik kararlar için kaynak belgelerden teyit ediniz."
+                            
+                            # Langfuse'a logla
+                            if langfuse_trace:
+                                try:
+                                    langfuse_trace.update(metadata={
+                                        "hallucination_detected": True,
+                                        "hallucination_confidence": confidence,
+                                        "hallucination_issues": issues[:3],
+                                    })
+                                except:
+                                    pass
+                        else:
+                            _log(f"✅ Hallucination check passed (confidence: {confidence:.2f})")
+                    except Exception as hallucination_error:
+                        _log(f"⚠️ Hallucination check error: {hallucination_error}", "warning")
+                
                 # Markdown formatında kaynakları cevaba ekle
                 final_response = response_text
                 
@@ -2151,12 +2283,18 @@ class ReactAgent:
                     final_response += page_markdown
                     _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi")
                 
+                # Hallucination uyarısı ekle
+                if hallucination_warning:
+                    final_response += hallucination_warning
+                
                 # Markdown kaynakları stream et (message_chunk olarak)
                 source_markdown = ""
                 if sources["documents"]:
                     source_markdown += _generate_file_links_markdown(sources["documents"])
                 if sources["pages"]:
                     source_markdown += _generate_page_links_markdown(sources["pages"])
+                if hallucination_warning:
+                    source_markdown += hallucination_warning
                 
                 if source_markdown:
                     yield {
@@ -2197,7 +2335,7 @@ class ReactAgent:
                     try:
                         # Langfuse SDK v3+: update() then end()
                         langfuse_trace.update(
-                            output={"response": final_response[:500]},
+                            output={"response": final_response},
                             metadata={
                                 "total_time_seconds": round(total_time, 2),
                                 "tool_calls": tool_call_count,
@@ -2233,7 +2371,12 @@ class ReactAgent:
                         "total_tokens": token_stats["total_tokens"],
                         "cache_hit_rate": token_stats["cache_hit_rate"],
                         "estimated_cost_usd": token_stats["estimated_cost_usd"],
+                        "hallucination_warning": bool(hallucination_warning),
+                        "redis_cache_active": self.redis_cache_active,
+                        "few_shot_examples_used": len(few_shot_examples) if 'few_shot_examples' in dir() else 0,
                     },
+                    # 📚 Tool calls for feedback learning
+                    "tool_calls_detail": collected_tool_calls,
                     "session_id": session_id,
                     "timestamp": datetime.now().isoformat(),
                 }
