@@ -51,12 +51,36 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_json_parse(value: Any, default: Any = None) -> Any:
+    """
+    Safely parse JSON - handles both string and already-parsed values.
+    PostgreSQL JSONB columns may return already-parsed Python objects.
+    """
+    if value is None:
+        return default
+    if isinstance(value, (list, dict)):
+        # Already parsed by psycopg2
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return default
+    return default
+
+
 # Environment configuration
 FEEDBACK_ENABLED = os.getenv("FEEDBACK_ENABLED", "true").lower() in ("true", "1", "yes")
 FEEDBACK_LANGFUSE_SYNC = os.getenv("FEEDBACK_LANGFUSE_SYNC", "true").lower() in ("true", "1", "yes")
 FEEDBACK_POSTGRES_ENABLED = os.getenv("FEEDBACK_POSTGRES_ENABLED", "true").lower() in ("true", "1", "yes")
 FEEDBACK_FEW_SHOT_ENABLED = os.getenv("FEEDBACK_FEW_SHOT_ENABLED", "true").lower() in ("true", "1", "yes")
 FEEDBACK_MIN_SCORE_FOR_FEWSHOT = int(os.getenv("FEEDBACK_MIN_SCORE_FOR_FEWSHOT", "1"))
+
+# LLM-as-Judge: Cypher sorgularını değerlendirme
+LLM_JUDGE_ENABLED = os.getenv("LLM_JUDGE_ENABLED", "true").lower() in ("true", "1", "yes")
+LLM_JUDGE_MODEL = os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
+LLM_JUDGE_PROMPT_NAME = os.getenv("LLM_JUDGE_PROMPT_NAME", "llm-judge-evaluation")  # Langfuse prompt adı
 
 
 class FeedbackType(Enum):
@@ -163,17 +187,26 @@ def _create_feedback_table():
         return
     
     conn = None
+    pgvector_available = False
+    
     try:
         conn = pool.getconn()
-        with conn.cursor() as cur:
-            # pgvector extension
-            try:
+        
+        # pgvector extension (ayrı transaction'da dene)
+        try:
+            with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                conn.commit()
+                pgvector_available = True
                 logger.info("✅ pgvector extension ready")
-            except Exception as e:
-                logger.warning(f"⚠️ pgvector extension not available: {e}")
+        except Exception as e:
+            conn.rollback()  # Transaction'ı temizle
+            logger.warning(f"⚠️ pgvector extension not available: {e}")
+            logger.info("ℹ️ Continuing without pgvector (Python fallback will be used)")
+        
+        with conn.cursor() as cur:
             
-            # Feedback table with vector column
+            # Feedback table - pgvector olmadan temel tablo
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS feedback (
                     id VARCHAR(255) PRIMARY KEY,
@@ -187,7 +220,6 @@ def _create_feedback_table():
                     user_id VARCHAR(255),
                     tool_calls JSONB,
                     question_embedding JSONB,
-                    embedding vector(1536),
                     metadata JSONB,
                     used_as_example_count INTEGER DEFAULT 0,
                     corrected_response TEXT,
@@ -200,55 +232,65 @@ def _create_feedback_table():
                 CREATE INDEX IF NOT EXISTS idx_feedback_score ON feedback(score);
                 CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at DESC);
             """)
+            conn.commit()
             
             # AUTO-MIGRATION: Add missing columns to existing tables
             migrations = [
-                # pgvector embedding column
-                ("embedding", "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS embedding vector(1536);"),
-                # Correction fields
+                # Correction fields (always available)
                 ("corrected_response", "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS corrected_response TEXT;"),
                 ("corrected_queries", "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS corrected_queries JSONB;"),
                 ("correction_note", "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS correction_note TEXT;"),
-                # Other fields that might be missing
                 ("used_as_example_count", "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS used_as_example_count INTEGER DEFAULT 0;"),
             ]
             
             for column_name, migration_sql in migrations:
                 try:
                     cur.execute(migration_sql)
-                    logger.debug(f"✅ Migration applied: {column_name}")
+                    conn.commit()
                 except Exception as e:
-                    # Column already exists or other non-critical error
+                    conn.rollback()
                     logger.debug(f"Migration skipped for {column_name}: {e}")
             
-            # pgvector HNSW index for fast similarity search
-            try:
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_feedback_embedding 
-                    ON feedback USING hnsw (embedding vector_cosine_ops)
-                    WITH (m = 16, ef_construction = 64);
-                """)
-                logger.info("✅ pgvector HNSW index ready")
-            except Exception as e:
-                logger.warning(f"⚠️ HNSW index creation failed (pgvector may not be installed): {e}")
+            # pgvector column ve index (sadece pgvector varsa)
+            if pgvector_available:
+                try:
+                    cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS embedding vector(1536);")
+                    conn.commit()
+                    logger.info("✅ pgvector embedding column ready")
+                except Exception as e:
+                    conn.rollback()
+                    logger.warning(f"⚠️ pgvector column creation failed: {e}")
+                
+                try:
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_feedback_embedding 
+                        ON feedback USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64);
+                    """)
+                    conn.commit()
+                    logger.info("✅ pgvector HNSW index ready")
+                except Exception as e:
+                    conn.rollback()
+                    logger.warning(f"⚠️ HNSW index creation failed: {e}")
             
-            # Migrate existing embeddings from JSONB to vector format
-            try:
-                cur.execute("""
-                    UPDATE feedback 
-                    SET embedding = question_embedding::text::vector
-                    WHERE embedding IS NULL 
-                      AND question_embedding IS NOT NULL
-                      AND jsonb_array_length(question_embedding) = 1536;
-                """)
-                migrated = cur.rowcount
-                if migrated > 0:
-                    logger.info(f"✅ Migrated {migrated} existing embeddings to pgvector format")
-            except Exception as e:
-                logger.debug(f"Embedding migration skipped: {e}")
+                # Migrate existing embeddings from JSONB to vector format
+                try:
+                    cur.execute("""
+                        UPDATE feedback 
+                        SET embedding = question_embedding::text::vector
+                        WHERE embedding IS NULL 
+                          AND question_embedding IS NOT NULL
+                          AND jsonb_array_length(question_embedding) = 1536;
+                    """)
+                    conn.commit()
+                    migrated = cur.rowcount
+                    if migrated > 0:
+                        logger.info(f"✅ Migrated {migrated} existing embeddings to pgvector format")
+                except Exception as e:
+                    conn.rollback()
+                    logger.debug(f"Embedding migration skipped: {e}")
             
-            conn.commit()
-            logger.info("✅ Feedback table ready with pgvector support")
+            logger.info(f"✅ Feedback table ready (pgvector: {'enabled' if pgvector_available else 'disabled'})")
     except Exception as e:
         logger.error(f"❌ Failed to create/migrate feedback table: {e}")
     finally:
@@ -256,8 +298,29 @@ def _create_feedback_table():
             pool.putconn(conn)
 
 
+def _has_pgvector_column() -> bool:
+    """Check if embedding column (pgvector) exists in feedback table"""
+    pool = _get_pg_pool()
+    if not pool:
+        return False
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'feedback' AND column_name = 'embedding';
+            """)
+            return cur.fetchone() is not None
+    except:
+        return False
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+
 def _save_to_postgres(feedback: Feedback) -> bool:
-    """Save feedback to PostgreSQL with pgvector embedding"""
+    """Save feedback to PostgreSQL with optional pgvector embedding"""
     pool = _get_pg_pool()
     if not pool:
         return False
@@ -278,46 +341,84 @@ def _save_to_postgres(feedback: Feedback) -> bool:
                 for tc in feedback.tool_calls
             ]) if feedback.tool_calls else "[]"
             
-            # Format embedding for pgvector (string format: "[0.1, 0.2, ...]")
-            embedding_str = None
-            if feedback.question_embedding:
-                embedding_str = "[" + ",".join(str(x) for x in feedback.question_embedding) + "]"
+            # Check if pgvector column exists
+            has_embedding = _has_pgvector_column()
             
-            cur.execute("""
-                INSERT INTO feedback (
-                    id, session_id, question_id, question, response,
-                    feedback_type, score, comment, user_id, tool_calls,
-                    question_embedding, embedding, metadata, 
-                    corrected_response, corrected_queries, correction_note,
-                    created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    score = EXCLUDED.score,
-                    feedback_type = EXCLUDED.feedback_type,
-                    comment = EXCLUDED.comment,
-                    corrected_response = EXCLUDED.corrected_response,
-                    corrected_queries = EXCLUDED.corrected_queries,
-                    correction_note = EXCLUDED.correction_note,
-                    embedding = EXCLUDED.embedding
-            """, (
-                feedback.id,
-                feedback.session_id,
-                feedback.question_id,
-                feedback.question,
-                feedback.response,
-                feedback.feedback_type.value,
-                feedback.score,
-                feedback.comment,
-                feedback.user_id,
-                tool_calls_json,
-                json.dumps(feedback.question_embedding) if feedback.question_embedding else None,
-                embedding_str,  # pgvector format
-                json.dumps(feedback.metadata) if feedback.metadata else None,
-                feedback.corrected_response,
-                json.dumps(feedback.corrected_queries) if feedback.corrected_queries else None,
-                feedback.correction_note,
-                feedback.created_at,
-            ))
+            if has_embedding and feedback.question_embedding:
+                # With pgvector
+                embedding_str = "[" + ",".join(str(x) for x in feedback.question_embedding) + "]"
+                
+                cur.execute("""
+                    INSERT INTO feedback (
+                        id, session_id, question_id, question, response,
+                        feedback_type, score, comment, user_id, tool_calls,
+                        question_embedding, embedding, metadata, 
+                        corrected_response, corrected_queries, correction_note,
+                        created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        score = EXCLUDED.score,
+                        feedback_type = EXCLUDED.feedback_type,
+                        comment = EXCLUDED.comment,
+                        corrected_response = EXCLUDED.corrected_response,
+                        corrected_queries = EXCLUDED.corrected_queries,
+                        correction_note = EXCLUDED.correction_note,
+                        embedding = EXCLUDED.embedding
+                """, (
+                    feedback.id,
+                    feedback.session_id,
+                    feedback.question_id,
+                    feedback.question,
+                    feedback.response,
+                    feedback.feedback_type.value,
+                    feedback.score,
+                    feedback.comment,
+                    feedback.user_id,
+                    tool_calls_json,
+                    json.dumps(feedback.question_embedding) if feedback.question_embedding else None,
+                    embedding_str,
+                    json.dumps(feedback.metadata) if feedback.metadata else None,
+                    feedback.corrected_response,
+                    json.dumps(feedback.corrected_queries) if feedback.corrected_queries else None,
+                    feedback.correction_note,
+                    feedback.created_at or datetime.now(timezone.utc),
+                ))
+            else:
+                # Without pgvector
+                cur.execute("""
+                    INSERT INTO feedback (
+                        id, session_id, question_id, question, response,
+                        feedback_type, score, comment, user_id, tool_calls,
+                        question_embedding, metadata, 
+                        corrected_response, corrected_queries, correction_note,
+                        created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        score = EXCLUDED.score,
+                        feedback_type = EXCLUDED.feedback_type,
+                        comment = EXCLUDED.comment,
+                        corrected_response = EXCLUDED.corrected_response,
+                        corrected_queries = EXCLUDED.corrected_queries,
+                        correction_note = EXCLUDED.correction_note
+                """, (
+                    feedback.id,
+                    feedback.session_id,
+                    feedback.question_id,
+                    feedback.question,
+                    feedback.response,
+                    feedback.feedback_type.value,
+                    feedback.score,
+                    feedback.comment,
+                    feedback.user_id,
+                    tool_calls_json,
+                    json.dumps(feedback.question_embedding) if feedback.question_embedding else None,
+                    json.dumps(feedback.metadata) if feedback.metadata else None,
+                    feedback.corrected_response,
+                    json.dumps(feedback.corrected_queries) if feedback.corrected_queries else None,
+                    feedback.correction_note,
+                    feedback.created_at or datetime.now(timezone.utc),
+                ))
+            
             conn.commit()
             return True
             
@@ -362,10 +463,8 @@ def _load_from_postgres(
             
             feedbacks = []
             for row in rows:
-                # Parse tool_calls JSON
-                tool_calls_data = row[9] if row[9] else []
-                if isinstance(tool_calls_data, str):
-                    tool_calls_data = json.loads(tool_calls_data)
+                # Parse tool_calls (psycopg2 may auto-parse JSONB)
+                tool_calls_data = _safe_json_parse(row[9], [])
                 
                 tool_calls = [
                     ToolCall(
@@ -389,8 +488,8 @@ def _load_from_postgres(
                     comment=row[7],
                     user_id=row[8],
                     tool_calls=tool_calls,
-                    question_embedding=json.loads(row[10]) if row[10] else None,
-                    metadata=json.loads(row[11]) if row[11] else None,
+                    question_embedding=_safe_json_parse(row[10]),
+                    metadata=_safe_json_parse(row[11]),
                     created_at=row[13],
                     used_as_example_count=row[12] or 0,
                 ))
@@ -449,6 +548,48 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 # CORE FUNCTIONS
 # ============================================================================
 
+def _check_recent_feedback(question: str, hours: int = 1) -> Optional["Feedback"]:
+    """Check if a similar feedback was recorded recently (within N hours)."""
+    pool = _get_pg_pool()
+    if not pool:
+        return None
+    
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, session_id, question_id, question, response, 
+                       feedback_type, score, comment, created_at
+                FROM feedback
+                WHERE question = %s
+                  AND created_at > NOW() - INTERVAL '%s hours'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (question, hours))
+            
+            row = cur.fetchone()
+            if row:
+                return Feedback(
+                    id=row[0],
+                    session_id=row[1],
+                    question_id=row[2],
+                    question=row[3],
+                    response=row[4],
+                    feedback_type=FeedbackType(row[5]) if row[5] else FeedbackType.NEUTRAL,
+                    score=row[6] or 0,
+                    comment=row[7],
+                    created_at=row[8],
+                )
+        return None
+    except Exception as e:
+        logger.debug(f"Duplicate check failed: {e}")
+        return None
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+
 def record_feedback(
     session_id: str,
     question_id: str,
@@ -490,6 +631,14 @@ def record_feedback(
         return None
     
     try:
+        # Duplicate kontrolü: Aynı soru için son 1 saat içinde kayıt var mı?
+        skip_duplicate = metadata.get("skip_duplicate_check", False) if metadata else False
+        if not skip_duplicate and question and FEEDBACK_POSTGRES_ENABLED:
+            existing = _check_recent_feedback(question, hours=1)
+            if existing:
+                logger.debug(f"⏭️ Duplicate feedback skipped for: {question[:50]}...")
+                return existing  # Mevcut feedback'i döndür
+        
         # Calculate score if not provided
         if score is None:
             if feedback_type in [FeedbackType.POSITIVE, FeedbackType.HELPFUL]:
@@ -569,22 +718,37 @@ def _sync_to_langfuse(feedback: Feedback) -> bool:
         if not langfuse:
             return False
         
-        # Create score in Langfuse
-        langfuse.score(  # type: ignore[union-attr]
-            name="user_feedback",
-            value=feedback.score,
-            trace_id=feedback.question_id,
-            comment=feedback.comment,
-            data_type="NUMERIC",
-        )
-        
-        # Also create categorical score
-        langfuse.score(  # type: ignore[union-attr]
-            name="feedback_type",
-            value=feedback.feedback_type.value,
-            trace_id=feedback.question_id,
-            data_type="CATEGORICAL",
-        )
+        # Create score in Langfuse (v3 API uses create_score)
+        try:
+            # Try v3 API first
+            langfuse.create_score(  # type: ignore[union-attr]
+                name="user_feedback",
+                value=feedback.score,
+                trace_id=feedback.question_id,
+                comment=feedback.comment,
+                data_type="NUMERIC",
+            )
+            langfuse.create_score(  # type: ignore[union-attr]
+                name="feedback_type",
+                value=feedback.feedback_type.value,
+                trace_id=feedback.question_id,
+                data_type="CATEGORICAL",
+            )
+        except AttributeError:
+            # Fallback to v2 API
+            langfuse.score(  # type: ignore[union-attr]
+                name="user_feedback",
+                value=feedback.score,
+                trace_id=feedback.question_id,
+                comment=feedback.comment,
+                data_type="NUMERIC",
+            )
+            langfuse.score(  # type: ignore[union-attr]
+                name="feedback_type",
+                value=feedback.feedback_type.value,
+                trace_id=feedback.question_id,
+                data_type="CATEGORICAL",
+            )
         
         logger.debug(f"📊 Feedback synced to Langfuse: {feedback.question_id}")
         return True
@@ -651,10 +815,8 @@ def _search_similar_with_pgvector(
             
             results = []
             for row in rows:
-                # Parse tool_calls
-                tool_calls_data = row[9] or []
-                if isinstance(tool_calls_data, str):
-                    tool_calls_data = json.loads(tool_calls_data)
+                # Parse tool_calls (psycopg2 may auto-parse JSONB)
+                tool_calls_data = _safe_json_parse(row[9], [])
                 
                 tool_calls = [
                     ToolCall(
@@ -678,12 +840,12 @@ def _search_similar_with_pgvector(
                     comment=row[7],
                     user_id=row[8],
                     tool_calls=tool_calls,
-                    question_embedding=json.loads(row[10]) if row[10] else None,
-                    metadata=json.loads(row[11]) if row[11] else None,
+                    question_embedding=_safe_json_parse(row[10]),
+                    metadata=_safe_json_parse(row[11]),
                     created_at=row[12],
                     used_as_example_count=row[13] or 0,
                     corrected_response=row[14],
-                    corrected_queries=json.loads(row[15]) if row[15] else None,
+                    corrected_queries=_safe_json_parse(row[15]),
                     correction_note=row[16],
                 )
                 
@@ -774,7 +936,9 @@ def get_few_shot_examples(
                         "output": tc.tool_output[:200],  # Truncate for prompt
                     }
                     for tc in fb.tool_calls
-                ],
+                ] if fb.tool_calls else [],
+                # LLM-Judge strateji ve değerlendirmesi
+                "strategy": fb.correction_note if fb.correction_note else None,
             }
             examples.append(example)
             
@@ -829,21 +993,55 @@ def format_few_shot_prompt(examples: List[Dict[str, Any]], corrections: Optional
     
     lines = []
     
-    # Başarılı örnekler
+    # Teknik strateji önerileri
     if examples:
-        lines.append("📚 ÖNCEKİ BAŞARILI SORGU ÖRNEKLERİ:")
-        
-        for i, ex in enumerate(examples, 1):
-            lines.append(f"\n--- Örnek {i} (benzerlik: {ex['similarity']:.2f}) ---")
-            lines.append(f"Soru: {ex['question']}")
-            
-            if ex.get("tool_calls"):
-                lines.append("Kullanılan Cypher sorguları:")
-                for tc in ex["tool_calls"]:
-                    if tc.get("tool") == "execute_cypher_query":
-                        lines.append(f"```cypher\n{tc.get('input', '')}\n```")
-            
-            lines.append(f"Cevap: {ex['response'][:500]}...")
+        for ex in examples:
+            strategy = ex.get("strategy")
+            if strategy:
+                lines.append("📋 BENZERİ SORULAR İÇİN TEKNİK STRATEJİ:")
+                
+                # Strateji JSON formatında olabilir
+                strategy_data = strategy
+                if isinstance(strategy, str):
+                    try:
+                        strategy_data = json.loads(strategy)
+                    except (json.JSONDecodeError, TypeError):
+                        # Eski format (düz string)
+                        lines.append(strategy.strip())
+                        break
+                
+                if isinstance(strategy_data, dict):
+                    # Yeni teknik format
+                    if strategy_data.get("summary"):
+                        lines.append(f"\n🎯 ÖZET: {strategy_data['summary']}")
+                    
+                    if strategy_data.get("recommended_path"):
+                        lines.append("\n📍 ÖNERİLEN YOL:")
+                        for step in strategy_data["recommended_path"]:
+                            lines.append(f"  {step}")
+                    
+                    if strategy_data.get("key_nodes"):
+                        lines.append(f"\n🔵 KULLANILACAK NODE'LAR: {', '.join(strategy_data['key_nodes'])}")
+                    
+                    if strategy_data.get("key_relationships"):
+                        lines.append(f"🔗 KULLANILACAK İLİŞKİLER: {', '.join(strategy_data['key_relationships'])}")
+                    
+                    if strategy_data.get("key_properties"):
+                        lines.append(f"📌 ÖNEMLİ PROPERTY'LER: {', '.join(strategy_data['key_properties'])}")
+                    
+                    if strategy_data.get("pitfalls"):
+                        lines.append("\n⚠️ DİKKAT (YAPMA):")
+                        for pitfall in strategy_data["pitfalls"]:
+                            lines.append(f"  ❌ {pitfall}")
+                    
+                    if strategy_data.get("alternative_approaches"):
+                        lines.append("\n💡 ALTERNATİF YAKLAŞIMLAR:")
+                        for alt in strategy_data["alternative_approaches"]:
+                            lines.append(f"  → {alt}")
+                else:
+                    lines.append(str(strategy_data).strip())
+                
+                break  # Sadece en benzer örneğin stratejisini al
     
     # Düzeltilmiş örnekler (hatalardan öğrenme)
     if corrections:
@@ -958,6 +1156,151 @@ CORRECTION_NOTE:
         return [], f"Auto-correction failed: {str(e)}"
 
 
+async def evaluate_cypher_queries(
+    question: str,
+    tool_calls: List[Dict[str, Any]],
+    response: str = "",
+    schema_info: str = "",
+) -> Dict[str, Any]:
+    """
+    LLM-as-Judge: Evaluate if Cypher queries correctly answer the question.
+    
+    Env: LLM_JUDGE_ENABLED=true/false (default: true)
+    
+    Args:
+        question: User's original question
+        tool_calls: List of tool calls with cypher queries and results
+        response: Agent's final response
+        schema_info: Optional graph schema
+    
+    Returns:
+        Dict with:
+        - score: 0.0-1.0 (1.0 = perfect, 0.0 = completely wrong)
+        - is_correct: bool
+        - issues: List of identified problems
+        - suggested_query: Recommended correct query (if issues found)
+        - explanation: Detailed explanation
+    """
+    # Check if LLM-Judge is enabled
+    if not LLM_JUDGE_ENABLED:
+        return {
+            "score": 1.0,
+            "is_correct": True,
+            "issues": [],
+            "suggested_query": None,
+            "explanation": "LLM-Judge disabled",
+            "skipped": True,
+        }
+    
+    try:
+        from openai import AsyncOpenAI
+        
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Extract Cypher queries from tool_calls
+        queries_info = []
+        for tc in tool_calls:
+            tool_name = tc.get("tool_name", tc.get("tool", ""))
+            if tool_name == "execute_cypher_query":
+                tool_input = tc.get("tool_input", tc.get("input", ""))
+                tool_output = tc.get("tool_output", tc.get("output", ""))
+                
+                # Parse input if JSON string
+                if isinstance(tool_input, str):
+                    try:
+                        import json
+                        parsed = json.loads(tool_input)
+                        cypher = parsed.get("cypher", tool_input)
+                    except:
+                        cypher = tool_input
+                else:
+                    cypher = tool_input.get("cypher", str(tool_input)) if isinstance(tool_input, dict) else str(tool_input)
+                
+                queries_info.append({
+                    "cypher": cypher,
+                    "result": str(tool_output)[:1000],  # Truncate long results
+                })
+        
+        if not queries_info:
+            return {
+                "score": 0.5,
+                "is_correct": True,
+                "issues": ["No Cypher queries found in tool calls"],
+                "suggested_query": None,
+                "explanation": "No queries to evaluate",
+            }
+        
+        # Format queries for prompt
+        queries_text = ""
+        for i, q in enumerate(queries_info, 1):
+            queries_text += f"\n### Sorgu {i}\n```cypher\n{q['cypher']}\n```\n**Sonuç:** {q['result'][:500]}...\n"
+        
+        prompt = f"""Sen bir Cypher sorgu değerlendirme uzmanısın. 
+Görevin: Yapılan Cypher sorgularının kullanıcının sorusuna doğru cevap verip vermediğini değerlendir.
+
+## Kullanıcı Sorusu
+{question}
+
+## Yapılan Cypher Sorguları ve Sonuçları
+{queries_text}
+
+## Agent'ın Final Cevabı
+{response[:1000] if response else "(Cevap yok)"}
+
+{f"## Graph Schema{chr(10)}{schema_info}" if schema_info else ""}
+
+## Değerlendirme Kriterleri
+1. **Filtreleme Sırası**: WHERE koşulları LIMIT'ten önce mi uygulanmış?
+2. **Yıl/Tarih Filtresi**: Soruda yıl belirtilmişse, sorguda doğru filtrelenmiş mi?
+3. **Sıralama**: ORDER BY gerekiyorsa doğru mu?
+4. **İlişkiler**: Doğru node'lar ve relationship'ler kullanılmış mı?
+5. **Sonuç Tutarlılığı**: Sorgu sonucu soruya uygun mu?
+
+## Yanıt Formatı (JSON)
+{{
+    "score": 0.0-1.0,
+    "is_correct": true/false,
+    "issues": ["sorun1", "sorun2"],
+    "suggested_query": "MATCH ... (düzeltilmiş sorgu, sorun varsa)",
+    "explanation": "Kısa açıklama"
+}}
+
+SADECE JSON döndür, başka bir şey yazma."""
+
+        response_obj = await client.chat.completions.create(
+            model=os.getenv("EVALUATOR_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        
+        content = response_obj.choices[0].message.content or "{}"
+        
+        import json
+        result = json.loads(content)
+        
+        # Ensure required fields
+        result.setdefault("score", 0.5)
+        result.setdefault("is_correct", result["score"] >= 0.7)
+        result.setdefault("issues", [])
+        result.setdefault("suggested_query", None)
+        result.setdefault("explanation", "")
+        
+        logger.info(f"🧑‍⚖️ LLM-as-Judge: score={result['score']}, correct={result['is_correct']}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ LLM-as-Judge error: {e}")
+        return {
+            "score": 0.5,
+            "is_correct": True,  # Default to positive on error
+            "issues": [f"Evaluation failed: {str(e)}"],
+            "suggested_query": None,
+            "explanation": f"Error: {str(e)}",
+        }
+
+
 def _search_corrections_with_pgvector(
     embedding: List[float],
     limit: int = 5,
@@ -997,9 +1340,7 @@ def _search_corrections_with_pgvector(
             
             results = []
             for row in rows:
-                tool_calls_data = row[9] or []
-                if isinstance(tool_calls_data, str):
-                    tool_calls_data = json.loads(tool_calls_data)
+                tool_calls_data = _safe_json_parse(row[9], [])
                 
                 tool_calls = [
                     ToolCall(
@@ -1023,12 +1364,12 @@ def _search_corrections_with_pgvector(
                     comment=row[7],
                     user_id=row[8],
                     tool_calls=tool_calls,
-                    question_embedding=json.loads(row[10]) if row[10] else None,
-                    metadata=json.loads(row[11]) if row[11] else None,
+                    question_embedding=_safe_json_parse(row[10]),
+                    metadata=_safe_json_parse(row[11]),
                     created_at=row[12],
                     used_as_example_count=row[13] or 0,
                     corrected_response=row[14],
-                    corrected_queries=json.loads(row[15]) if row[15] else None,
+                    corrected_queries=_safe_json_parse(row[15]),
                     correction_note=row[16],
                 )
                 
@@ -1280,3 +1621,435 @@ try:
         
 except ImportError:
     FeedbackRequest = None  # type: ignore[misc, assignment]
+
+
+# =============================================================================
+# BLACKBOARD-BASED LLM JUDGE EVALUATION
+# =============================================================================
+
+async def evaluate_from_blackboard(
+    blackboard_dir: str,
+    question: str,
+    response: str = "",
+    session_id: str = "",
+    question_id: str = "",
+    similarity_threshold: float = 0.95,
+) -> Dict[str, Any]:
+    """
+    LLM-Judge: Blackboard dosyalarını okuyarak tüm tool çağrılarını değerlendirir.
+    
+    Her sorgu için kısa öneri verir ve genel strateji önerir.
+    %95 benzerlik ile daha önce değerlendirilmiş soruları atlar.
+    
+    Args:
+        blackboard_dir: Blackboard dosyalarının bulunduğu dizin
+        question: Kullanıcının sorusu
+        response: Agent'ın final cevabı
+        session_id: Session ID
+        question_id: Question ID
+        similarity_threshold: Duplicate check threshold (default: 0.95)
+    
+    Returns:
+        Dict with:
+        - evaluated: bool - Değerlendirme yapıldı mı
+        - skipped_duplicate: bool - Duplicate olduğu için atlandı mı
+        - query_evaluations: List[Dict] - Her sorgu için değerlendirme
+        - strategy: str - Genel strateji önerisi
+        - overall_score: float - Genel skor (0-1)
+        - feedback_id: str - Kaydedilen feedback ID
+    """
+    import glob
+    
+    result = {
+        "evaluated": False,
+        "skipped_duplicate": False,
+        "query_evaluations": [],
+        "strategy": "",
+        "overall_score": 0.5,
+        "feedback_id": None,
+    }
+    
+    if not LLM_JUDGE_ENABLED:
+        result["skipped"] = True
+        return result
+    
+    # 1. Benzer feedback var mı kontrol et (update için + önceki stratejiyi al)
+    existing_feedback_id: Optional[str] = None
+    previous_strategy: Optional[str] = None  # Önceki stratejiyi LLM-Judge'a göster
+    try:
+        question_embedding = _get_question_embedding(question)
+        if question_embedding and FEEDBACK_POSTGRES_ENABLED:
+            similar = _search_similar_with_pgvector(
+                embedding=question_embedding,
+                min_score=-999,  # Tüm score'ları kontrol et
+                limit=1,
+                similarity_threshold=similarity_threshold,
+            )
+            if similar:
+                similarity, existing_fb = similar[0]
+                if similarity >= similarity_threshold and existing_fb and existing_fb.id:
+                    existing_feedback_id = existing_fb.id
+                    # Önceki stratejiyi al (correction_note alanında saklanıyor)
+                    if existing_fb.correction_note:
+                        previous_strategy = existing_fb.correction_note
+                        logger.info(f"📝 Previous strategy found: {previous_strategy[:100]}...")
+                    logger.info(f"📝 Similar feedback found (similarity={similarity:.3f}): {existing_fb.id[:8]} - will update")
+    except Exception as e:
+        logger.warning(f"⚠️ Similar feedback check failed: {e}")
+    
+    # 2. Blackboard dosyalarını oku
+    try:
+        import os as os_module
+        
+        # _blackboard.txt ana özet
+        blackboard_file = os_module.path.join(blackboard_dir, "_blackboard.txt")
+        blackboard_content = ""
+        if os_module.path.exists(blackboard_file):
+            with open(blackboard_file, "r", encoding="utf-8") as f:
+                blackboard_content = f.read()
+        
+        # Tüm .txt dosyaları (_blackboard.txt hariç)
+        all_txt_files = sorted(glob.glob(os_module.path.join(blackboard_dir, "*.txt")))
+        step_files = [f for f in all_txt_files if not os_module.path.basename(f).startswith("_")]
+        steps_content = []
+        
+        for step_file in step_files:
+            filename = os_module.path.basename(step_file)
+            with open(step_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            steps_content.append({
+                "filename": filename,
+                "content": content[:3000],  # Truncate very long files
+            })
+        
+        if not steps_content:
+            logger.warning(f"⚠️ No step files found in {blackboard_dir}")
+            return result
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to read blackboard files: {e}")
+        return result
+    
+    # 3. LLM-Judge prompt oluştur
+    steps_text = ""
+    for i, step in enumerate(steps_content, 1):
+        steps_text += f"\n### {step['filename']}\n```\n{step['content']}\n```\n"
+    
+    # Önceki strateji varsa prompt'a ekle
+    previous_strategy_section = ""
+    if previous_strategy:
+        previous_strategy_section = f"""
+## ÖNCEKİ STRATEJİ (Bu soru için daha önce belirlenen strateji)
+{previous_strategy}
+
+⚠️ GÖREV: Agent bu stratejiyi takip etti mi? Stratejiyi güncelle veya onayla.
+"""
+    
+    # 3a. Langfuse'dan agent system prompt'unu al (kuralları görmek için)
+    agent_system_prompt_section = ""
+    try:
+        from .langfuse_client import get_prompt
+        
+        # Agent'ın system prompt'unu çek (react-agent-system gibi)
+        agent_prompt = get_prompt(
+            name="react-agent-system",  # Agent'ın kullandığı prompt
+            prompt_type="text",
+            label="production",
+            cache_enabled=True,
+        )
+        if agent_prompt:
+            raw_prompt = getattr(agent_prompt, 'prompt', str(agent_prompt))
+            agent_system_prompt_section = f"""
+## AGENT KURALLARI (System Prompt)
+Aşağıdaki kurallara uyulup uyulmadığını değerlendir:
+```
+{raw_prompt}
+```
+"""
+            logger.info(f"📋 Agent system prompt loaded from Langfuse for evaluation")
+    except Exception as e:
+        logger.debug(f"Agent system prompt not available from Langfuse: {e}")
+    
+    # 3b. LLM-Judge prompt'unu Langfuse'dan çek veya fallback kullan
+    prompt = None
+    try:
+        from .langfuse_client import get_prompt
+        
+        llm_judge_prompt = get_prompt(
+            name=LLM_JUDGE_PROMPT_NAME,  # env: LLM_JUDGE_PROMPT_NAME
+            prompt_type="text",
+            label="production",
+            cache_enabled=True,
+        )
+        if llm_judge_prompt:
+            # Langfuse prompt'unu compile et (variables ile)
+            prompt = llm_judge_prompt.compile(
+                question=question,
+                blackboard_content=blackboard_content,
+                steps_text=steps_text,
+                response=response[:1500] if response else "(Cevap yok)",
+                previous_strategy_section=previous_strategy_section,
+                agent_system_prompt_section=agent_system_prompt_section,
+                has_previous_strategy="true" if previous_strategy else "false",
+            )
+            logger.info(f"📋 LLM-Judge prompt loaded from Langfuse: {LLM_JUDGE_PROMPT_NAME}")
+    except Exception as e:
+        logger.debug(f"LLM-Judge prompt not available from Langfuse: {e}")
+    
+    # Fallback: Langfuse'dan prompt alınamazsa hardcoded prompt kullan
+    if not prompt:
+        prompt = f"""Sen bir Neo4j Cypher sorgu değerlendirme ve optimizasyon uzmanısın.
+
+## GÖREV
+1. Aşağıdaki soru için yapılan tüm Cypher sorgularını DEĞERLENDİR
+2. Her sorgu için KISA ama TEKNİK değerlendirme yap
+3. ÖNEMLİ: Sonraki sorgular için TEKNİK STRATEJİ öner:
+   - Hangi Node label'ları kullanılmalı
+   - Hangi ilişkiler (relationship types) takip edilmeli  
+   - Hangi property'ler filtrelenmeli
+   - Sorgu sırası nasıl olmalı
+   - Alternatif yaklaşımlar neler
+{f"4. Önceki strateji ile karşılaştır ve uyumluluk değerlendir." if previous_strategy else ""}
+
+{agent_system_prompt_section}
+
+## KULLANICI SORUSU
+{question}
+{previous_strategy_section}
+## BLACKBOARD ÖZETİ
+{blackboard_content}
+
+## TOOL ÇAĞRILARI (STEP DOSYALARI - SIRALI)
+{steps_text}
+
+## AGENT'IN FİNAL CEVABI
+{response[:1500] if response else "(Cevap yok)"}
+
+## YANIT FORMATI (JSON)
+{{
+    "overall_score": 0.0-1.0,
+    "followed_previous_strategy": true|false|null,
+    "followed_system_rules": true|false,
+    "query_evaluations": [
+        {{
+            "step": "01_step_name",
+            "status": "success|empty|error",
+            "verdict": "✅ Doğru|⚠️ Kısmen|❌ Yanlış",
+            "short_note": "Kısa teknik açıklama (max 80 karakter)"
+        }}
+    ],
+    "strategy": {{
+        "summary": "Genel yaklaşım özeti (1-2 cümle)",
+        "recommended_path": [
+            "1. İlk adım: Customer/Policyholder node'larını bul (name CONTAINS veya =~ regex)",
+            "2. İkinci adım: Policy ilişkilerini takip et (-[:HAS_POLICY]->)",
+            "3. Üçüncü adım: Coverage/Teminat bilgilerini al (-[:HAS_COVERAGE]->)"
+        ],
+        "key_nodes": ["Customer", "Policy", "Coverage", "InsuranceCompany"],
+        "key_relationships": ["HAS_POLICY", "HAS_COVERAGE", "INSURED_BY"],
+        "key_properties": ["name", "coverage_type", "premium"],
+        "pitfalls": ["Doğrudan Coverage araması yerine Policy üzerinden git", "LIMIT'i WHERE'den önce kullanma"],
+        "alternative_approaches": ["Embedding search ile metin içeriğinde ara", "Farklı entity varyasyonlarını dene"]
+    }}
+}}
+
+ÖNEMLİ:
+- Strateji bölümü TEKNİK ve SPESİFİK olmalı
+- Şemadaki gerçek node ve relationship isimlerini kullan
+- Gelecek sorgular için somut yol haritası ver
+- SADECE JSON döndür"""
+
+    # 4. LLM çağrısı
+    try:
+        from openai import AsyncOpenAI
+        
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        llm_response = await client.chat.completions.create(
+            model=os.getenv("EVALUATOR_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        
+        content = llm_response.choices[0].message.content or "{}"
+        evaluation = json.loads(content)
+        
+        result["evaluated"] = True
+        result["query_evaluations"] = evaluation.get("query_evaluations", [])
+        result["strategy"] = evaluation.get("strategy", "")
+        result["overall_score"] = evaluation.get("overall_score", 0.5)
+        
+        logger.info(f"🧑‍⚖️ Blackboard evaluation: score={result['overall_score']}, steps={len(result['query_evaluations'])}")
+        
+    except Exception as e:
+        logger.error(f"❌ LLM evaluation failed: {e}")
+        return result
+    
+    # 5. Feedback olarak PostgreSQL'e kaydet
+    try:
+        is_correct = result["overall_score"] >= 0.7
+        feedback_score = 1 if is_correct else -1
+        
+        # Strateji artık bir dictionary - JSON olarak kaydet
+        # correction_note = strateji (tam teknik detaylar)
+        # query_evaluations = metadata'da (ayrı)
+        strategy_data = result.get("strategy", {})
+        if isinstance(strategy_data, dict):
+            # Teknik stratejiyi JSON olarak sakla
+            strategy_only = json.dumps(strategy_data, ensure_ascii=False)
+        else:
+            # Eski format (string) uyumu
+            strategy_only = str(strategy_data)
+        
+        # Eğer benzer feedback varsa update et, yoksa yeni oluştur
+        if existing_feedback_id:
+            # UPDATE mevcut feedback
+            updated = _update_feedback_strategy(
+                feedback_id=existing_feedback_id,
+                new_score=feedback_score,
+                new_strategy=strategy_only,
+                new_evaluations=result["query_evaluations"],
+                new_overall_score=result["overall_score"],
+            )
+            if updated:
+                result["feedback_id"] = existing_feedback_id
+                result["updated_existing"] = True
+                logger.info(f"🔄 Blackboard feedback UPDATED: {existing_feedback_id[:8]}... (score={feedback_score})")
+            else:
+                logger.warning(f"⚠️ Failed to update feedback {existing_feedback_id[:8]}")
+        else:
+            # CREATE yeni feedback
+            feedback = record_feedback(
+                session_id=session_id,
+                question_id=question_id,
+                feedback_type=FeedbackType.POSITIVE if is_correct else FeedbackType.INCORRECT,
+                score=feedback_score,
+                comment=f"LLM-Judge blackboard evaluation (score={result['overall_score']:.2f})",
+                question=question,
+                response=response,
+                user_id="llm-judge-blackboard",
+                tool_calls=None,  # Blackboard zaten tüm detayları içeriyor
+                metadata={
+                    "source": "llm_judge_blackboard",
+                    "blackboard_dir": blackboard_dir,
+                    "overall_score": result["overall_score"],
+                    "query_evaluations": result["query_evaluations"],
+                },
+                correction_note=strategy_only,
+            )
+            
+            if feedback and feedback.id:
+                result["feedback_id"] = feedback.id
+                logger.info(f"📝 Blackboard feedback CREATED: {feedback.id[:8]}... (score={feedback_score})")
+            
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to save blackboard feedback: {e}")
+    
+    return result
+
+
+def get_blackboard_dir(session_id: str, question_id: str) -> str:
+    """
+    Blackboard dizin yolunu döndürür.
+    
+    Args:
+        session_id: Session ID (first 8 chars used)
+        question_id: Question ID (first 8 chars used)
+    
+    Returns:
+        Blackboard directory path
+    """
+    import os as os_module
+    
+    # Backend root'u bul
+    current_dir = os_module.path.dirname(os_module.path.abspath(__file__))
+    backend_root = os_module.path.dirname(os_module.path.dirname(current_dir))
+    
+    # Blackboard path
+    session_short = session_id[:8] if session_id else "unknown"
+    question_short = question_id[:8] if question_id else "unknown"
+    
+    return os_module.path.join(
+        backend_root, 
+        "agent_findings", 
+        "react",
+        session_short,
+        question_short
+    )
+
+
+def _update_feedback_strategy(
+    feedback_id: str,
+    new_score: int,
+    new_strategy: str,
+    new_evaluations: List[Dict[str, Any]],
+    new_overall_score: float,
+) -> bool:
+    """
+    Mevcut feedback'in strateji ve değerlendirmelerini günceller.
+    
+    LLM-Judge her çalıştığında, benzer sorular için mevcut feedback'i
+    günceller böylece strateji sürekli iyileşir.
+    
+    Args:
+        feedback_id: Güncellenecek feedback ID
+        new_score: Yeni score (-1, 0, 1)
+        new_strategy: Yeni strateji metni
+        new_evaluations: Yeni query değerlendirmeleri
+        new_overall_score: Yeni genel skor (0-1)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    pool = _get_pg_pool()
+    if not pool:
+        return False
+    
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            # Mevcut metadata'yı al
+            cur.execute("SELECT metadata FROM feedback WHERE id = %s", (feedback_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                logger.warning(f"⚠️ Feedback not found: {feedback_id}")
+                return False
+            
+            # Metadata güncelle
+            current_metadata = _safe_json_parse(row[0], {})
+            current_metadata["overall_score"] = new_overall_score
+            current_metadata["query_evaluations"] = new_evaluations
+            current_metadata["last_updated"] = datetime.now(timezone.utc).isoformat()
+            current_metadata["update_count"] = current_metadata.get("update_count", 0) + 1
+            
+            # Update query
+            cur.execute("""
+                UPDATE feedback
+                SET score = %s,
+                    correction_note = %s,
+                    metadata = %s,
+                    feedback_type = %s
+                WHERE id = %s
+            """, (
+                new_score,
+                new_strategy,
+                json.dumps(current_metadata),
+                FeedbackType.POSITIVE.value if new_score >= 0 else FeedbackType.INCORRECT.value,
+                feedback_id,
+            ))
+            conn.commit()
+            
+            logger.info(f"🔄 Feedback updated: {feedback_id[:8]}... (update_count={current_metadata['update_count']})")
+            return True
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to update feedback: {e}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if conn:
+            pool.putconn(conn)

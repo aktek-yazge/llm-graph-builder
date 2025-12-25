@@ -61,6 +61,7 @@ async def run_single_question(
     full_answer = ""
     total_tokens = {"input": 0, "output": 0}
     sources = []
+    tool_calls = []
     error = None
     
     try:
@@ -88,11 +89,14 @@ async def run_single_question(
                     chunk_sources = chunk.get("sources", {})
                     if isinstance(chunk_sources, dict):
                         sources = chunk_sources.get("documents", [])
-                    # Metrics içinde token bilgisi olabilir
+                    # Metrics içinde token bilgisi
                     metrics = chunk.get("metrics", {})
                     if metrics:
                         total_tokens["input"] += metrics.get("input_tokens", 0)
                         total_tokens["output"] += metrics.get("output_tokens", 0)
+                    # Tool calls detayları (chunk'ta ayrı alan)
+                    if "tool_calls_detail" in chunk:
+                        tool_calls = chunk.get("tool_calls_detail", [])
                     
                 elif chunk_type == "cache_hit":
                     # Cache'den geldi - logla
@@ -116,6 +120,7 @@ async def run_single_question(
         "answer": full_answer,
         "tokens": total_tokens,
         "sources": sources,
+        "tool_calls": tool_calls,
         "error": error,
     }
 
@@ -269,9 +274,87 @@ async def run_experiment_async(
                 "answer": result["answer"],
                 "tokens": result["tokens"],
                 "sources": result["sources"],
+                "tool_calls": result.get("tool_calls", []),
                 "status": status,
                 "error": result["error"],
             })
+            
+            # 🧑‍⚖️ LLM-as-Judge: Cypher sorgularını değerlendir
+            evaluation = None
+            if status == "success" and result.get("tool_calls"):
+                try:
+                    from src.shared.feedback import evaluate_cypher_queries
+                    
+                    evaluation = await evaluate_cypher_queries(
+                        question=question,
+                        tool_calls=result.get("tool_calls", []),
+                        response=result["answer"],
+                    )
+                    
+                    eval_score = evaluation.get("score", 0.5)
+                    is_correct = evaluation.get("is_correct", True)
+                    
+                    if is_correct:
+                        print(f"   🧑‍⚖️ LLM-Judge: ✅ Doğru (score={eval_score:.2f})")
+                    else:
+                        print(f"   🧑‍⚖️ LLM-Judge: ❌ Hatalı (score={eval_score:.2f})")
+                        if evaluation.get("issues"):
+                            print(f"      Sorunlar: {', '.join(evaluation['issues'][:2])}")
+                        if evaluation.get("suggested_query"):
+                            print(f"      Önerilen: {evaluation['suggested_query'][:100]}...")
+                except Exception as eval_error:
+                    print(f"   ⚠️ LLM-Judge hatası: {eval_error}")
+            
+            # 📝 Feedback kaydet (LLM-Judge sonucuna göre)
+            try:
+                from src.shared.feedback import record_feedback, FeedbackType, FEEDBACK_ENABLED
+                
+                if FEEDBACK_ENABLED:
+                    # LLM-Judge sonucuna göre score belirle
+                    if evaluation:
+                        is_correct = evaluation.get("is_correct", True)
+                        feedback_type = FeedbackType.POSITIVE if is_correct else FeedbackType.NEGATIVE
+                        feedback_score = 1 if is_correct else -1
+                        eval_info = f" [LLM-Judge: {evaluation.get('score', 0.5):.2f}]"
+                    else:
+                        feedback_type = FeedbackType.POSITIVE if status == "success" else FeedbackType.NEGATIVE
+                        feedback_score = 1 if status == "success" else -1
+                        eval_info = ""
+                    
+                    # Eğer hatalıysa ve önerilen sorgu varsa, düzeltme olarak kaydet
+                    corrected_queries = None
+                    correction_note = None
+                    if evaluation and not evaluation.get("is_correct"):
+                        if evaluation.get("suggested_query"):
+                            corrected_queries = [evaluation["suggested_query"]]
+                        if evaluation.get("explanation"):
+                            correction_note = evaluation["explanation"]
+                    
+                    feedback = record_feedback(
+                        session_id=experiment_session_id,
+                        question_id=question_id,
+                        feedback_type=feedback_type,
+                        score=feedback_score,
+                        comment=f"Auto-feedback from experiment: {experiment_name}{eval_info}",
+                        question=question,
+                        response=result["answer"],
+                        user_id=f"experiment-{experiment_session_id[:8]}",
+                        tool_calls=result.get("tool_calls", []),
+                        corrected_queries=corrected_queries,
+                        correction_note=correction_note,
+                        metadata={
+                            "experiment_name": experiment_name,
+                            "model": model,
+                            "dataset": dataset_name,
+                            "item_id": item_id,
+                            "tokens": result["tokens"],
+                            "evaluation": evaluation,
+                        },
+                    )
+                    if feedback and feedback.id:
+                        print(f"   📝 Feedback kaydedildi: {feedback.id[:8]}... (score={feedback_score})")
+            except Exception as fb_error:
+                print(f"   ⚠️ Feedback kaydetme hatası: {fb_error}")
             
         except Exception as e:
             print(f"   ❌ Exception: {e}")
@@ -281,6 +364,7 @@ async def run_experiment_async(
                 "answer": "",
                 "tokens": {"input": 0, "output": 0},
                 "sources": [],
+                "tool_calls": [],
                 "status": "error",
                 "error": str(e),
             })
@@ -308,6 +392,7 @@ async def run_experiment_async(
     print(f"   ❌ Hatalı: {error_count}")
     print(f"   📦 Toplam: {len(results)}")
     print(f"   📊 Tokens: {total_input_tokens} input / {total_output_tokens} output")
+    print(f"   📝 Feedback: {len(results)} kayıt (few-shot için kullanılabilir)")
     
     # Sonuçları JSON olarak kaydet (experiment_logs klasörüne)
     logs_dir = os.path.join(backend_dir, "scripts", "experiment_logs")

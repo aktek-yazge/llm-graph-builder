@@ -72,7 +72,11 @@ from src.shared.feedback import (
     get_few_shot_examples,
     get_corrections_for_fewshot,
     format_few_shot_prompt,
+    evaluate_cypher_queries,
+    evaluate_from_blackboard,
+    get_blackboard_dir,
     FEEDBACK_FEW_SHOT_ENABLED,
+    LLM_JUDGE_ENABLED,
 )
 
 # Logging ayarları
@@ -1059,6 +1063,9 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     findings_base = os.path.join(os.getcwd(), "agent_findings", "react", session_id, question_id)
     os.makedirs(findings_base, exist_ok=True)
     
+    # Tool çağrı sıra numarası (aynı anda çağrılan tool'lar aynı sayıyı alır)
+    tool_call_counter = {"value": 0}  # Mutable container for closure
+    
     # Blackboard dosyası
     blackboard_path = os.path.join(findings_base, "_blackboard.txt")
     
@@ -1079,11 +1086,11 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     
     _init_blackboard()
     
-    def _append_to_blackboard(step_name: str, record_count: int, success: bool):
+    def _append_to_blackboard(step_name: str, record_count: int, success: bool, seq_num: int = 0):
         try:
             status = "✅" if success else "❌"
             with open(blackboard_path, "a", encoding="utf-8") as f:
-                f.write(f"{status} {step_name}: {record_count} kayıt\n")
+                f.write(f"{status} [{seq_num:02d}] {step_name}: {record_count} kayıt\n")
         except Exception as e:
             _log(f"⚠️ Blackboard append error: {e}")
     
@@ -1173,14 +1180,19 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             else:
                 status = "empty"
             
+            # Sıra numarasını artır ve dosya ismine ekle
+            tool_call_counter["value"] += 1
+            seq_num = tool_call_counter["value"]
+            
             # Dosyaya TÜM sonucu kaydet (pagination için)
-            file_path = os.path.join(findings_base, f"{step_name}_{status}.txt")
+            # Format: 01_step_name_status.txt (sıralı görünüm için)
+            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query>\n{cypher}\n</query>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
             
-            _log(f"📁 Cypher: {step_name} → {record_count} records ({status})")
-            _append_to_blackboard(step_name, record_count, status == "success")
+            _log(f"📁 Cypher: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(step_name, record_count, status == "success", seq_num)
             
             # Sonuç döndür
             if status == "success":
@@ -1254,14 +1266,19 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             else:
                 status = "empty"
             
+            # Sıra numarasını artır ve dosya ismine ekle
+            tool_call_counter["value"] += 1
+            seq_num = tool_call_counter["value"]
+            
             # Dosyaya kaydet
-            file_path = os.path.join(findings_base, f"{step_name}_{status}.txt")
+            # Format: 01_step_name_status.txt (sıralı görünüm için)
+            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query>\nSEARCH: {query_text}\n{cypher_query}\n</query>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
             
-            _log(f"📁 Embedding: {step_name} → {record_count} records ({status})")
-            _append_to_blackboard(step_name, record_count, status == "success")
+            _log(f"📁 Embedding: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(step_name, record_count, status == "success", seq_num)
             
             if status == "success":
                 # Kayıtları parse et
@@ -1406,11 +1423,19 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             İstenen aralıktaki kayıtlar
         """
         import re
+        import glob as glob_module
         
-        file_path = os.path.join(findings_base, f"{step_name}_{result_type}.txt")
+        # Sıra numaralı dosya formatını destekle: NN_step_name_status.txt
+        pattern = os.path.join(findings_base, f"*_{step_name}_{result_type}.txt")
+        matching_files = glob_module.glob(pattern)
         
-        if not os.path.exists(file_path):
-            return f"❌ Dosya bulunamadı: {step_name}_{result_type}.txt"
+        if not matching_files:
+            # Eski format da dene (backward compatibility)
+            file_path = os.path.join(findings_base, f"{step_name}_{result_type}.txt")
+            if not os.path.exists(file_path):
+                return f"❌ Dosya bulunamadı: {step_name}_{result_type}.txt"
+        else:
+            file_path = matching_files[0]  # İlk eşleşen dosyayı al
         
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -1725,6 +1750,7 @@ class ReactAgent:
         return {
             "model": model,
             "system_prompt": system_prompt,
+            "original_system_prompt": system_prompt,  # Few-shot cache'lemesini önlemek için
             "middleware": middleware,
             "schema_info": schema_info,
         }
@@ -1821,8 +1847,8 @@ class ReactAgent:
                 langfuse_session_ctx.__enter__()
                 _log(f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user: {effective_user_id}")
                 
-                # 2. Ana span başlat - bu session'ın root observation'ı
-                langfuse_trace = langfuse.start_span(
+                # 2. Ana span başlat (Langfuse v3 SDK)
+                langfuse_trace = langfuse.start_span(  # type: ignore[union-attr]
                     name="react_agent_query",
                     input={"question": question},
                     metadata={
@@ -1859,7 +1885,6 @@ class ReactAgent:
                                 "cache_hit_rate": cache_metrics.hit_rate,
                             }
                         )
-                        langfuse_trace.end()
                         flush_langfuse()
                     except:
                         pass
@@ -1970,7 +1995,11 @@ class ReactAgent:
             
             # 📚 Few-shot learning: Başarılı örnekleri system prompt'a ekle
             few_shot_examples: List[Dict[str, Any]] = []
-            final_system_prompt = agent_config["system_prompt"]
+            # Her soru için orijinal system_prompt kullan (cache'lenmiş few-shot'u önle)
+            # agent_config["system_prompt"] cache'lenmiş olabilir, yeniden oluştur
+            original_system_prompt = agent_config.get("original_system_prompt") or agent_config["system_prompt"]
+            final_system_prompt = original_system_prompt
+            
             if FEEDBACK_FEW_SHOT_ENABLED and question:
                 try:
                     # Başarılı örnekler
@@ -1992,6 +2021,11 @@ class ReactAgent:
                         few_shot_prompt = format_few_shot_prompt(few_shot_examples, corrections)
                         final_system_prompt = final_system_prompt + "\n\n" + few_shot_prompt
                         _log(f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme eklendi")
+                        
+                        # Few-shot içeriğini logla (ilk 1000 karakter)
+                        _log(f"📋 Few-shot strateji: {few_shot_prompt[:1000]}...")
+                    else:
+                        _log(f"📚 Few-shot: 0 örnek bulundu (threshold: 0.75)")
                 except Exception as e:
                     _log(f"⚠️ Few-shot examples error: {e}", "warning")
             
@@ -2329,6 +2363,92 @@ class ReactAgent:
                 except Exception as cache_write_error:
                     _log(f"⚠️ Cache write error: {cache_write_error}", "warning")
                 
+                # 🧑‍⚖️ LLM-as-Judge: Background task olarak çalıştır (kullanıcıyı bekletme)
+                async def _run_llm_judge_background(
+                    bb_dir: str,
+                    q: str,
+                    resp: str,
+                    sess_id: str,
+                    q_id: str,
+                    lf: Any,
+                    lf_trace: Any,
+                ):
+                    """Background'da LLM-Judge değerlendirmesi yapar."""
+                    try:
+                        result = await evaluate_from_blackboard(
+                            blackboard_dir=bb_dir,
+                            question=q,
+                            response=resp,
+                            session_id=sess_id,
+                            question_id=q_id,
+                            similarity_threshold=0.95,
+                        )
+                        
+                        if result.get("skipped_duplicate"):
+                            _log(f"⏭️ [BG] LLM-Judge: Duplicate skipped")
+                        elif result.get("evaluated"):
+                            judge_score = result.get("overall_score", 0.5)
+                            is_correct = judge_score >= 0.7
+                            _log(f"🧑‍⚖️ [BG] LLM-Judge: score={judge_score:.2f}, correct={is_correct}")
+                            
+                            # Her sorgu için kısa değerlendirme
+                            for qe in result.get("query_evaluations", [])[:3]:
+                                _log(f"   {qe.get('verdict', '?')} {qe.get('step', '?')}: {qe.get('short_note', '')}")
+                            
+                            if result.get("strategy"):
+                                strategy = result["strategy"]
+                                # Strateji dict (yeni format) veya string (eski format) olabilir
+                                if isinstance(strategy, dict):
+                                    summary = strategy.get("summary", "")
+                                    _log(f"   📋 Strateji: {summary[:100]}..." if len(summary) > 100 else f"   📋 Strateji: {summary}")
+                                else:
+                                    strategy_str = str(strategy)
+                                    _log(f"   📋 Strateji: {strategy_str[:100]}..." if len(strategy_str) > 100 else f"   📋 Strateji: {strategy_str}")
+                            
+                            if result.get("feedback_id"):
+                                _log(f"   📝 Feedback: {result['feedback_id'][:8]}...")
+                            
+                            # Langfuse'a score kaydet
+                            if lf and lf_trace:
+                                try:
+                                    trace_id = lf_trace.id if hasattr(lf_trace, 'id') else None
+                                    if trace_id:
+                                        try:
+                                            lf.create_score(  # type: ignore[union-attr]
+                                                trace_id=trace_id,
+                                                name="llm_judge_score",
+                                                value=judge_score,
+                                                comment=result.get("strategy", "")[:500],
+                                                data_type="NUMERIC",
+                                            )
+                                        except AttributeError:
+                                            lf.score(  # type: ignore[union-attr]
+                                                trace_id=trace_id,
+                                                name="llm_judge_score",
+                                                value=judge_score,
+                                                comment=result.get("strategy", "")[:500],
+                                            )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        _log(f"⚠️ [BG] LLM-Judge error: {e}", "warning")
+                
+                # Background task başlat (kullanıcıyı bekletmez)
+                if LLM_JUDGE_ENABLED and collected_tool_calls:
+                    blackboard_dir = get_blackboard_dir(session_id, original_question_id)
+                    asyncio.create_task(
+                        _run_llm_judge_background(
+                            bb_dir=blackboard_dir,
+                            q=question,
+                            resp=final_response,
+                            sess_id=session_id,
+                            q_id=original_question_id,
+                            lf=langfuse,
+                            lf_trace=langfuse_trace,
+                        )
+                    )
+                    _log(f"🚀 LLM-Judge started in background")
+                
                 # 📊 Langfuse trace sonlandır
                 cache_stats = get_cache_metrics().to_dict()
                 if langfuse_trace:
@@ -2345,12 +2465,12 @@ class ReactAgent:
                                 "estimated_cost_usd": token_stats["estimated_cost_usd"],
                                 "sources_count": len(sources["documents"]) + len(sources["pages"]),
                                 "query_cache_hit_rate": cache_stats.get("hit_rate_percent", 0),
+                                "llm_judge": "background",  # LLM-Judge runs in background
                             }
                         )
-                        langfuse_trace.end()
-                        # Langfuse async flush
+                        # Langfuse async flush (trace auto-closes)
                         flush_langfuse()
-                        _log(f"📊 Langfuse span completed")
+                        _log(f"📊 Langfuse trace completed")
                     except Exception as e:
                         _log(f"⚠️ Langfuse trace update failed: {e}", "warning")
                 
@@ -2374,6 +2494,7 @@ class ReactAgent:
                         "hallucination_warning": bool(hallucination_warning),
                         "redis_cache_active": self.redis_cache_active,
                         "few_shot_examples_used": len(few_shot_examples) if 'few_shot_examples' in dir() else 0,
+                        "llm_judge": "background",  # LLM-Judge runs in background
                     },
                     # 📚 Tool calls for feedback learning
                     "tool_calls_detail": collected_tool_calls,
@@ -2400,16 +2521,15 @@ class ReactAgent:
             # 📊 Langfuse trace hata ile sonlandır
             if langfuse_trace:
                 try:
-                    # Langfuse SDK v3+: update() then end()
+                    # Langfuse SDK v3+: update() (trace auto-closes)
                     langfuse_trace.update(
                         level="ERROR",
                         status_message=str(e)[:500],
                         output={"error": str(e)},
                     )
-                    langfuse_trace.end()
                     flush_langfuse()
                 except Exception as lf_error:
-                    _log(f"⚠️ Langfuse error span failed: {lf_error}", "warning")
+                    _log(f"⚠️ Langfuse error trace failed: {lf_error}", "warning")
             
             yield {
                 "type": "error",

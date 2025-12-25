@@ -105,9 +105,7 @@ class GuardrailsConfig:
         r'\bCALL\s+apoc\.periodic',
         # Subqueries that could modify
         r'\bFOREACH\b',
-        # Comment injection
-        r'//.*$',
-        r'/\*.*?\*/',
+        # Note: Cypher comments (// and /* */) are allowed and sanitized, not blocked
     ])
     
     # Allowed Cypher patterns (whitelist)
