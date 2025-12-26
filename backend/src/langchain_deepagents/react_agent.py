@@ -36,6 +36,9 @@ from typing import AsyncGenerator, Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Context for logging (Grafana/Loki)
 from src.shared.context import set_request_context, clear_request_context
 
@@ -75,6 +78,7 @@ from src.shared.feedback import (
     evaluate_cypher_queries,
     evaluate_from_blackboard,
     get_blackboard_dir,
+    FEEDBACK_ENABLED,
     FEEDBACK_FEW_SHOT_ENABLED,
     LLM_JUDGE_ENABLED,
 )
@@ -635,6 +639,7 @@ SORGUYU BASİT TUT!
 
 ---
 
+<discovery_guide>
 # 🔍 KEŞİF REHBERİ
 
 Entity keşfi ve varyasyon bulma stratejileri.
@@ -654,6 +659,7 @@ KEŞİF görevi vermeden ÖNCE şemayı incele:
 ❌ YANLIŞ: Sadece 1 node tipinde ara
 ✅ DOĞRU: Şemadaki TÜM olası node tiplerinde ara
 ```
+</discovery_guide>
 
 <search_term_rules>
 ## 🚨 ARAMA TERİMLERİ OLUŞTURURKEN
@@ -682,8 +688,7 @@ KEŞİF görevi vermeden ÖNCE şemayı incele:
 ```
 </search_term_rules>
 
-
-
+<react_loop>
 ## 🔄 ReAct DÖNGÜSÜ
 
 Her soru için şu adımları takip et:
@@ -742,8 +747,6 @@ Keşiften dönen TÜM sonuçları incele!
 - Eksik varsa → Farklı strateji dene
 - Yeterli varsa → **ÖNCE** add_source çağır (fileName/page_link varsa), **SONRA** kullanıcıya cevap ver
 
----
-
 ## 🎯 2 AŞAMALI ARAMA (KRİTİK!)
 
 **Birden fazla entity içeren sorgularda ÖNCE her entity'yi ayrı ayrı keşfet!**
@@ -766,6 +769,7 @@ Keşiften dönen TÜM sonuçları incele!
 ✅ WHERE name = 'X'  → Tek sonuç varsa
 ✅ WHERE name IN ['X Var1', 'X Var2', ...]  → Çoklu varyasyon varsa
 ```
+</react_loop>
 
 <use_all_variations>
 ⚠️ TÜM VARYASYONLARI KULLAN! (KRİTİK)
@@ -785,6 +789,7 @@ ADIM 3: KALAN TÜM varyasyonları ANA SORGUDA kullan!
 ✅ DOĞRU: Alakalı TÜM varyasyonları WHERE...IN ile kullanmak
 </use_all_variations>
 
+<result_validation>
 ### ⚠️ SONUÇ DOĞRULAMA
 
 ```
@@ -792,7 +797,9 @@ Aranan: "X Y"
 Bulunan: "X-Z Y" veya "X Z Y" → FAZLADAN kelime var → TAM EŞLEŞMEDEĞİL!
 → Belge içeriğinde (Chunk) de ara!
 ```
+</result_validation>
 
+<content_search_strategy>
 ### 🔍 İÇERİK ARAMASI STRATEJİSİ
 
 İçerik (detay, açıklama, kloz, madde) araması:
@@ -801,9 +808,11 @@ Bulunan: "X-Z Y" veya "X Z Y" → FAZLADAN kelime var → TAM EŞLEŞMEDEĞİL!
 2. ⚡ EMBEDDING → Entity FİLTRELİ chunk araması
 3. Empty → TEXT CONTAINS fallback
 ```
+</content_search_strategy>
 
 ---
 
+<tools>
 ## 🔧 ARAÇLAR (Neo4j Cypher)
 
 ### execute_cypher_query(cypher, step_name)
@@ -827,7 +836,7 @@ RETURN b.property1, b.property2 LIMIT 20
 
 ⚠️ **KRİTİK:** 
 - `query_text`: Sadece KONU (örn: "ödeme planı", "teminat detayları")
-- `cypher_query`: MUTLAKA `$embedding_vector` + `gds.similarity.cosine > 0.85` içermeli
+- `cypher_query`: MUTLAKA `$embedding_vector` + `gds.similarity.cosine > 0.80` içermeli
 - MUTLAKA filtrelenmiş sorgu kullan (tüm Chunk'larda arama YASAK!)
 - **⚠️ RETURN'de MUTLAKA `page_link` ve `fileName` ekle!** (kaynak için gerekli)
 
@@ -837,7 +846,7 @@ RETURN b.property1, b.property2 LIMIT 20
 MATCH (entity:EntityNode)-[:REL1]->(doc:Document)<-[:PART_OF]-(chunk:Chunk)
 WHERE entity.name IN ['Keşifte Bulunan Değer'] AND chunk.embedding IS NOT NULL
 WITH entity, doc, chunk
-WHERE gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.85
+WHERE gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.80
 RETURN chunk.text, chunk.page_link, doc.fileName, 
        gds.similarity.cosine(chunk.embedding, $embedding_vector) as score
 ORDER BY score DESC LIMIT 10
@@ -878,8 +887,7 @@ Sorgu sonuçlarının devamını görmek için:
 read_finding("step_1_search", start_record=10, end_record=20)  → 10-20 arası
 read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 ```
-
----
+</tools>
 
 <cypher_rules>
 ## ŞEMA-TABANLI SORGULAMA
@@ -931,8 +939,7 @@ WHERE n.name = 'Keşifte Bulunan Tam Değer'
 Toplam: SUM(n.field) | Ortalama: AVG(n.field) | Sayı: COUNT(DISTINCT n)
 </cypher_rules>
 
----
-
+<critical_rules>
 ## ⚠️ KRİTİK KURALLAR (NEO4J CYPHER!)
 
 0. ⚠️ **Neo4j Cypher syntax kullan** → SQL DEĞİL! Yukarıdaki "NEO4J 5.x SYNTAX" kurallarına uy!
@@ -944,9 +951,9 @@ Toplam: SUM(n.field) | Ortalama: AVG(n.field) | Sayı: COUNT(DISTINCT n)
 6. ✅ **Embedding sonuçlarını DOĞRULA** → False positive kontrolü
 7. ✅ **KAYNAK EKLE** → Sonuçta fileName/page_link varsa add_source ÇAĞIR!
 8. ✅ **PARALEL KAYNAK** → Birden fazla kaynak ekleyeceksen TEK ADIMDA hepsini paralel çağır!
+</critical_rules>
 
----
-
+<fallback_strategy>
 ## 🔄 HIZLI FALLBACK STRATEJİSİ
 
 ### ⚡ 2 BOŞ GRAPH SORGUSU → EMBEDDING → TEXT FALLBACK
@@ -978,7 +985,7 @@ LIMIT 10
 
 ### Embedding Sonuç Döndü ama FALSE POSITIVE Riski
 
-⚠️ **Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
+⚠️ **Yüksek embedding skoru (>0.80) ≠ Doğru sonuç!**
 
 Embedding alan benzerliği yakalar ama kavramsal farklılığı yakalayamaz.
 
@@ -1013,10 +1020,11 @@ MATCH (entity)-[:REL]->(doc:Document)-[:PART_OF]->(c:Chunk)
 ⚠️ **Belgeler farklı dillerde olabilir!**
 - Hem Türkçe hem İngilizce karşılığı ile ara
 - Örnek: "kira kaybı" VE "loss of rent" birlikte dene
+</fallback_strategy>
 
----
-
+<output_rules>
 ⚠️ **YASAK:** Node isimleri, Cypher sorguları, teknik açıklamalar
+</output_rules>
 
 ---
 
@@ -2000,7 +2008,7 @@ class ReactAgent:
             original_system_prompt = agent_config.get("original_system_prompt") or agent_config["system_prompt"]
             final_system_prompt = original_system_prompt
             
-            if FEEDBACK_FEW_SHOT_ENABLED and question:
+            if FEEDBACK_ENABLED and FEEDBACK_FEW_SHOT_ENABLED and question:
                 try:
                     # Başarılı örnekler
                     few_shot_examples = get_few_shot_examples(
@@ -2434,7 +2442,7 @@ class ReactAgent:
                         _log(f"⚠️ [BG] LLM-Judge error: {e}", "warning")
                 
                 # Background task başlat (kullanıcıyı bekletmez)
-                if LLM_JUDGE_ENABLED and collected_tool_calls:
+                if FEEDBACK_ENABLED and LLM_JUDGE_ENABLED and collected_tool_calls:
                     blackboard_dir = get_blackboard_dir(session_id, original_question_id)
                     asyncio.create_task(
                         _run_llm_judge_background(

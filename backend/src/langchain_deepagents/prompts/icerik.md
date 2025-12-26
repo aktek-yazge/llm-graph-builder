@@ -61,8 +61,8 @@ spawn_worker(queries="""
 ## 🔧 TOOL HATIRLATMA:
 1. ÖNCELİK: `execute_embedding_query` ile semantic arama yap
    - query_text: sadece konu (yukarıdaki terimler)
-   - cypher_query: $embedding_vector + gds.similarity.cosine > 0.85 içermeli!
-   - ⚠️ Eşik değeri EN AZ 0.85 olmalı (düşük değerler false positive verir)
+   - cypher_query: $embedding_vector + gds.similarity.cosine > 0.80 içermeli!
+   - ⚠️ Eşik değeri EN AZ 0.80 olmalı (düşük değerler false positive verir)
 
 2. **Hata yoksa ve 0 SONUÇ GELİRSE → TEXT FALLBACK ile yeni görev ver!**
    ```
@@ -99,7 +99,7 @@ spawn_worker(queries="""
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. execute_embedding_query → score > 0.85                   │
+│ 1. execute_embedding_query → score > 0.80                   │
 │    ↓                                                         │
 │ ┌─────────────────┐     ┌─────────────────────────────────┐ │
 │ │ Sonuç 0 ise     │ →   │ TEXT CONTAINS fallback          │ │

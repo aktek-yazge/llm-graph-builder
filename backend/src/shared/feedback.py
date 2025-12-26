@@ -1669,7 +1669,7 @@ async def evaluate_from_blackboard(
         "feedback_id": None,
     }
     
-    if not LLM_JUDGE_ENABLED:
+    if not FEEDBACK_ENABLED or not LLM_JUDGE_ENABLED:
         result["skipped"] = True
         return result
     

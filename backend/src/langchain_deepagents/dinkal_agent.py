@@ -948,7 +948,7 @@ Uzun araştırma süreçlerinde kullanıcıyı güncel tut:
 # MATCH (n:Label)<-[:REL]-(other)-[:REL2]->(d)-[:PART_OF]->(c:Chunk)
 # WHERE n.name IN ['exact_db_value_1', 'exact_db_value_2']  -- RAW varyasyonlar
 # AND c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.80
 # RETURN c.text, n.name AS source, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -963,7 +963,7 @@ Uzun araştırma süreçlerinde kullanıcıyı güncel tut:
 # MATCH (n:Label)-[:REL]->...-[:PART_OF]->(c:Chunk)
 # WHERE [Orchestrator'dan gelen filtre koşulu]  -- Örn: n.fileName STARTS WITH '2024'
 # AND c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.80
 # RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -974,7 +974,7 @@ Uzun araştırma süreçlerinde kullanıcıyı güncel tut:
 # -- query_text: "aranan konu"
 # MATCH (c:Chunk)
 # WHERE c.embedding IS NOT NULL
-# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
+# AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.80
 # RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) AS score
 # ORDER BY score DESC LIMIT 10
 # ```
@@ -1308,7 +1308,7 @@ Orchestrator sana araştırma görevi verir. Sen:
 - Örnek:
 ```cypher
 MATCH (c:Chunk) WHERE c.embedding IS NOT NULL 
-AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.85
+AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.80
 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score
 ```
 

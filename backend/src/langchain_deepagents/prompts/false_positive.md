@@ -4,7 +4,7 @@ Embedding sonuçlarını doğrulama ve false positive tespiti.
 
 ## ⚠️ KRİTİK UYARI
 
-**Yüksek embedding skoru (>0.85) ≠ Doğru sonuç!**
+**Yüksek embedding skoru (>0.80) ≠ Doğru sonuç!**
 
 Embedding alan benzerliği yakalar (genel terminoloji), ama kavramsal farklılığı yakalayamaz (aranan terim ≠ alakasız içerik)
 
@@ -82,7 +82,7 @@ read_finding_dynamic(step_name, result_type="success", include_query=False)
 ## 🚫 YAPMA
 
 ❌ Embedding sonuçlarını doğrulamadan kabul etme!
-❌ Yüksek skor (>0.85) doğru sonuç DEMEK DEĞİL!
+❌ Yüksek skor (>0.80) doğru sonuç DEMEK DEĞİL!
 ❌ chunk.text'te aranan terim geçiyor mu kontrol etmeden devam etme
 ❌ Geçmiyorsa FALSE POSITIVE - text CONTAINS ile tekrar ara
 
