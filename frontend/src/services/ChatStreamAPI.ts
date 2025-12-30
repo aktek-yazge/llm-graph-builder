@@ -68,7 +68,7 @@ export interface ChatStreamOptions {
   userName?: string;
   password?: string;
   database?: string;
-  email?: string;
+  user_id?: string;  // Langfuse User Tracking için
 }
 
 export class ChatStreamAPI {
@@ -113,8 +113,8 @@ export class ChatStreamAPI {
       if (options.database) {
         formData.append('database', options.database);
       }
-      if (options.email) {
-        formData.append('email', options.email);
+      if (options.user_id) {
+        formData.append('user_id', options.user_id);
       }
 
       const streamUrl = `${url()}/chat_bot_stream`;

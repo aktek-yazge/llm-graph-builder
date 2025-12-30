@@ -101,6 +101,12 @@ def instrument_fastapi(app):
         logging.info("ℹ️ FastAPI instrumentation atlandı (tracing devre dışı)")
         return
     
+    # FastAPI HTTP span'ları devre dışı - Langfuse'da gereksiz gürültü oluşturuyordu
+    # Bunun yerine sadece LLM ve tool span'larını manuel olarak oluşturuyoruz
+    logging.info("ℹ️ FastAPI HTTP instrumentation devre dışı (manuel LLM tracing aktif)")
+    return
+    
+    # Eski kod - gerekirse açılabilir:
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         

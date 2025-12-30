@@ -156,10 +156,35 @@ class TokenTracker:
     total_llm_calls: int = 0
     total_tool_calls: int = 0
     
+    # Langfuse parent span referansı (tool span'ları bağlamak için)
+    _langfuse_parent_span: Any = field(default=None, repr=False)
+    _langfuse_parent_span_id: Optional[str] = field(default=None, repr=False)
+    # Tool spans - tool_call_id ile key'lenir (aynı tool birden fazla kez çağrılabilir)
+    _tool_spans: Dict[str, Any] = field(default_factory=dict, repr=False)
+    
+    def set_langfuse_parent(self, span: Any):
+        """Langfuse parent span'ı set et - tool span'ları bu span'a bağlanır"""
+        self._langfuse_parent_span = span
+        self._langfuse_parent_span_id = getattr(span, 'id', None)
+    
     def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
-                     cached_tokens: int = 0, duration_ms: float = 0, session_id: str = "",
-                     model: str = "gpt-5"):
-        """LLM çağrısı istatistiği ekle"""
+                     cached_tokens: int = 0, reasoning_tokens: int = 0, duration_ms: float = 0, 
+                     session_id: str = "", model: str = "gpt-5", 
+                     llm_input: Any = None, llm_output: Any = None):
+        """LLM çağrısı istatistiği ekle
+        
+        Args:
+            step_name: Step adı
+            input_tokens: Input token sayısı
+            output_tokens: Output token sayısı
+            cached_tokens: Cache'den okunan token sayısı
+            reasoning_tokens: GPT-5 reasoning için harcanan token sayısı
+            duration_ms: Süre (ms)
+            session_id: Session ID
+            model: Model adı
+            llm_input: LLM'e gönderilen mesajlar (Langfuse'da görünür)
+            llm_output: LLM'den gelen cevap (Langfuse'da görünür)
+        """
         step = StepStats(
             step_name=step_name,
             step_type="llm_call",
@@ -183,36 +208,79 @@ class TokenTracker:
         else:
             cache_status = "🔴 CACHE MISS"
         
-        # Log - Session ID ile birlikte
+        # Log - Session ID ile birlikte (reasoning tokens dahil)
         session_info = f"[Session: {session_id[:8]}]" if session_id else ""
         _log(f"📊 [TOKEN] {session_info} {step_name}")
         _log(f"   ├─ Input: {input_tokens:,} tokens")
         _log(f"   ├─ Output: {output_tokens:,} tokens")
+        if reasoning_tokens > 0:
+            _log(f"   ├─ Reasoning: {reasoning_tokens:,} tokens (düşünce süreci)")
         _log(f"   ├─ Cached: {cached_tokens:,} tokens ({cache_status})")
         _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cached={self.total_cached_tokens:,}")
         
-        # 📊 Langfuse'a gönder
+        # 📊 Langfuse'a gönder - PARENT SPAN altında child generation olarak
         try:
-            log_llm_usage(
-                session_id=session_id,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-                cost_usd=self._estimate_cost(model),
-                latency_ms=duration_ms,
-                step_name=step_name,
-                metadata={
-                    "cache_hit_rate": cache_pct,
-                    "cumulative_input": self.total_input_tokens,
-                    "cumulative_output": self.total_output_tokens,
-                }
-            )
+            if self._langfuse_parent_span:
+                # Parent span üzerinden child generation oluştur (ayrı trace değil!)
+                generation = self._langfuse_parent_span.start_generation(
+                    name=step_name,
+                    model=model,
+                    input=llm_input,  # 🔑 Dashboard'da görünür
+                    output=llm_output,  # 🔑 Dashboard'da görünür
+                    metadata={
+                        "session_id": session_id,
+                        "input_tokens": input_tokens,  # 📊 Token sayıları
+                        "output_tokens": output_tokens,
+                        "cached_tokens": cached_tokens,
+                        "reasoning_tokens": reasoning_tokens,
+                        "cache_hit_rate": cache_pct,
+                        "cumulative_input": self.total_input_tokens,
+                        "cumulative_output": self.total_output_tokens,
+                    },
+                )
+                generation.update(
+                    usage_details={
+                        "input": input_tokens,
+                        "output": output_tokens,
+                        "cached": cached_tokens,
+                        "reasoning": reasoning_tokens,
+                        "total": input_tokens + output_tokens,
+                    },
+                )
+                generation.end()
+                _log(f"📊 Langfuse generation created: {step_name} (child of parent)")
+            else:
+                # Fallback: parent yoksa standalone generation (eski davranış)
+                log_llm_usage(
+                    session_id=session_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_tokens=cached_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    cost_usd=self._estimate_cost(model),
+                    latency_ms=duration_ms,
+                    step_name=step_name,
+                    metadata={
+                        "cache_hit_rate": cache_pct,
+                        "cumulative_input": self.total_input_tokens,
+                        "cumulative_output": self.total_output_tokens,
+                        "reasoning_tokens": reasoning_tokens,
+                    },
+                    llm_input=llm_input,
+                    llm_output=llm_output,
+                )
         except Exception as e:
             _log(f"⚠️ Langfuse logging failed: {e}", "warning")
     
-    def add_tool_call(self, tool_name: str, params: Dict[str, Any]):
-        """Tool çağrısı ekle"""
+    def add_tool_call(self, tool_name: str, params: Dict[str, Any], tool_call_id: str = ""):
+        """Tool çağrısı ekle
+        
+        Args:
+            tool_name: Tool adı
+            params: Tool parametreleri
+            tool_call_id: Unique tool call ID (parallel calls için gerekli)
+        """
         # Tam parametreleri sakla (Langfuse için)
         step = StepStats(
             step_name=f"tool_{tool_name}",
@@ -230,28 +298,54 @@ class TokenTracker:
             log_val = v_str[:100] + "..." if len(v_str) > 100 else v_str
             _log(f"   ├─ {k}: {log_val}")
         
-        # Langfuse span başlat (tool çağrısı için) - TAM parametrelerle
+        # Input boyutunu hesapla (tiktoken ile gerçek token sayısı)
+        import json
         try:
-            from src.shared.langfuse_client import get_langfuse
-            langfuse = get_langfuse()
-            if langfuse:
-                span = langfuse.start_span(
+            import tiktoken
+            encoding = tiktoken.encoding_for_model("gpt-4")  # GPT-4/5 için aynı encoding
+        except Exception:
+            encoding = None
+        
+        input_str = json.dumps(params, ensure_ascii=False) if params else ""
+        input_chars = len(input_str)
+        
+        # Gerçek token sayısı (tiktoken) veya yaklaşık (fallback)
+        if encoding:
+            input_tokens = len(encoding.encode(input_str))
+        else:
+            input_tokens = input_chars // 4  # Fallback: yaklaşık hesap
+        
+        # Langfuse span başlat - parent span üzerinden child span oluştur
+        try:
+            if self._langfuse_parent_span:
+                # Parent span'ın start_span() metodu ile child span oluştur
+                span = self._langfuse_parent_span.start_span(
                     name=f"tool:{tool_name}",
-                    input=params,  # TAM parametreler (limit yok)
+                    input=params,  # TAM parametreler
                     metadata={
                         "tool_name": tool_name,
+                        "tool_call_id": tool_call_id,
                         "step_type": "tool_call",
+                        "input_chars": input_chars,  # 📊 Input karakter sayısı
+                        "input_tokens": input_tokens,  # 📊 Gerçek input token (tiktoken)
                     }
                 )
-                # Span'ı sakla (result'ta kullanmak için)
-                if not hasattr(self, '_tool_spans'):
-                    self._tool_spans = {}
-                self._tool_spans[tool_name] = span
+                # Span'ı tool_call_id ile sakla (aynı tool birden fazla kez çağrılabilir)
+                span_key = tool_call_id if tool_call_id else tool_name
+                self._tool_spans[span_key] = span
+                _log(f"📊 Langfuse tool span started: {tool_name} (key={span_key[:8] if span_key else 'none'})")
         except Exception as e:
             _log(f"⚠️ Langfuse tool span failed: {e}", "warning")
     
-    def add_tool_result(self, tool_name: str, result: str, success: bool = True):
-        """Tool sonucu ekle"""
+    def add_tool_result(self, tool_name: str, result: str, success: bool = True, tool_call_id: str = ""):
+        """Tool sonucu ekle
+        
+        Args:
+            tool_name: Tool adı
+            result: Tool sonucu
+            success: Başarılı mı?
+            tool_call_id: Unique tool call ID (span'ı bulmak için)
+        """
         step = StepStats(
             step_name=f"tool_{tool_name}_result",
             step_type="tool_result",
@@ -271,16 +365,45 @@ class TokenTracker:
         
         # Langfuse span'ı bitir - TAM sonuçla
         try:
-            if hasattr(self, '_tool_spans') and tool_name in self._tool_spans:
-                span = self._tool_spans[tool_name]
+            # Span'ı tool_call_id ile bul (yoksa tool_name ile dene - backward compat)
+            span_key = tool_call_id if tool_call_id else tool_name
+            span = self._tool_spans.get(span_key)
+            
+            if span:
                 try:
-                    span.update(output=result)  # TAM sonuç (limit yok)
-                except Exception:
-                    pass
+                    # Output boyutunu hesapla (tiktoken ile gerçek token sayısı)
+                    try:
+                        import tiktoken
+                        encoding = tiktoken.encoding_for_model("gpt-4")
+                    except Exception:
+                        encoding = None
+                    
+                    output_chars = len(result)
+                    if encoding:
+                        output_tokens = len(encoding.encode(result))
+                    else:
+                        output_tokens = output_chars // 4  # Fallback
+                    
+                    # Output olarak sonucu ekle
+                    span.update(
+                        output=result,  # TAM sonuç
+                        metadata={
+                            "success": success,
+                            "status": status,
+                            "output_chars": output_chars,  # 📊 Output karakter sayısı
+                            "output_tokens": output_tokens,  # 📊 Gerçek output token (LLM'e gidecek)
+                        }
+                    )
+                except Exception as update_err:
+                    _log(f"⚠️ Langfuse span update failed: {update_err}", "warning")
+                
+                # Span'ı kapat
                 span.end()
-                del self._tool_spans[tool_name]
+                del self._tool_spans[span_key]
+                _log(f"📊 Langfuse tool span ended: {tool_name} ({status})")
         except Exception as e:
             _log(f"⚠️ Langfuse tool span end failed: {e}", "warning")
+        
         # Sonucu satır satır göster (max 5 satır - sadece log için)
         lines = result.split('\n')[:5]
         for line in lines:
@@ -2000,10 +2123,10 @@ class ReactAgent:
             return ""
     
     def _get_neo4j_url(self) -> str:
-        """Neo4j URL'ini al"""
-        uri = os.getenv("NEO4J_URI", "")
-        database = os.getenv("NEO4J_DATABASE", "neo4j")
-        return f"{uri}/{database}"
+        """Neo4j URL'ini al - sunucu başlangıcıyla aynı format kullan"""
+        # NOT: Sunucu başlangıcında sadece neo4j_uri kullanılıyor (database eklenmeden)
+        # Cache key eşleşmesi için aynı formatı kullanmalıyız
+        return os.getenv("NEO4J_URI", "")
     
     def _get_conversation_history(self, session_id: str) -> List[Dict[str, str]]:
         """PostgreSQL'den conversation history al"""
@@ -2183,6 +2306,9 @@ class ReactAgent:
         system_prompt = self._build_system_prompt(schema_info, session_id)
         _log(f"📜 System prompt: {len(system_prompt)} chars")
         
+        # Debug: Tam prompt'u loga yaz (limitsiz)
+        # _log(f"📜 [FULL SYSTEM PROMPT START]\n{system_prompt}\n📜 [FULL SYSTEM PROMPT END]")
+        
         # Debug: Tam prompt'u dosyaya yaz
         prompt_log_path = os.path.join(os.getcwd(), "agent_findings", "react", "_system_prompt.txt")
         try:
@@ -2222,15 +2348,16 @@ class ReactAgent:
         
         api_key = os.environ.get("OPENAI_API_KEY")
         
-        # GPT-5 için reasoning_effort
+        # GPT-5 için reasoning_effort + summary
         # AgentAwareSemanticCache wrapper tool_calls serialize sorununu çözer
         # Artık cache=False gerekmez
+        # summary: "auto" | "concise" | "detailed" - düşünce süreçlerini gösterir
         if "gpt-5" in actual_model.lower() and self.reasoning_effort:
-            _log(f"🔧 Model: {actual_model}, reasoning={self.reasoning_effort}")
+            _log(f"🔧 Model: {actual_model}, reasoning={self.reasoning_effort}, summary=auto")
             return ChatOpenAI(
                 model=actual_model,
                 api_key=SecretStr(api_key) if api_key else None,
-                reasoning={"effort": self.reasoning_effort},
+                reasoning={"effort": self.reasoning_effort, "summary": "auto"},
             )
         else:
             _log(f"🔧 Model: {actual_model}")
@@ -2303,20 +2430,27 @@ class ReactAgent:
                     }
                 )
                 langfuse_session_ctx.__enter__()
-                _log(f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user: {effective_user_id}")
+                _log(f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user_id param: {user_id}, effective_user_id: {effective_user_id}")
                 
-                # 2. Ana span başlat (Langfuse v3 SDK)
-                langfuse_trace = langfuse.start_span(  # type: ignore[union-attr]
+                # 2. Ana span başlat (Langfuse SDK - propagate_attributes context'i içinde)
+                # NOT: propagate_attributes session/user bilgisini set ediyor
+                # Bu context içindeki tüm span'lar otomatik olarak trace'e eklenir
+                langfuse_trace = langfuse.start_span(
                     name="react_agent_query",
                     input={"question": question},
                     metadata={
                         "model": self.model_name,
                         "reasoning_effort": self.reasoning_effort,
                         "question_id": original_question_id,
+                        "session_id": session_id,
+                        "user_id": effective_user_id,
                     }
                 )
                 trace_id = getattr(langfuse_trace, 'id', 'unknown')
                 _log(f"📊 Langfuse span started: {trace_id}")
+                
+                # TokenTracker'a parent span'ı bağla (tool span'ları bu span'a child olarak eklenir)
+                token_tracker.set_langfuse_parent(langfuse_trace)
             except Exception as e:
                 _log(f"⚠️ Langfuse session/trace start failed: {e}", "warning")
         
@@ -2334,18 +2468,21 @@ class ReactAgent:
                 # Langfuse'a cache hit logla
                 if langfuse_trace:
                     try:
-                        # Langfuse SDK v3+: update() then end()
+                        # Langfuse SDK: span.update() ile cache hit bilgisi ekle, sonra end()
                         langfuse_trace.update(
                             output={"response": cached_response["response"], "cache_hit": True},
                             metadata={
                                 "cache_hit": True,
                                 "similarity": cached_response.get("similarity", 0),
                                 "cache_hit_rate": cache_metrics.hit_rate,
+                                "total_time_seconds": 0.1,
                             }
                         )
+                        langfuse_trace.end()
                         flush_langfuse()
-                    except:
-                        pass
+                        _log(f"📊 Langfuse span (cache hit) completed")
+                    except Exception as cache_trace_err:
+                        _log(f"⚠️ Langfuse cache span failed: {cache_trace_err}", "warning")
                 
                 # Cache'den gelen cevabı döndür
                 yield {
@@ -2573,6 +2710,7 @@ class ReactAgent:
                             input_tokens = 0
                             output_tokens = 0
                             cached_tokens = 0
+                            reasoning_tokens = 0  # GPT-5 reasoning token sayısı
                             
                             # DEBUG: usage_metadata yapısını logla
                             if usage_metadata:
@@ -2598,6 +2736,11 @@ class ReactAgent:
                                     if cached_tokens == 0:
                                         cached_tokens = input_details.get("cached_tokens", 0)
                                 
+                                # GPT-5 reasoning tokens - output_token_details içinde
+                                output_details = usage_metadata.get("output_token_details", {})
+                                if output_details and isinstance(output_details, dict):
+                                    reasoning_tokens = output_details.get("reasoning", 0)
+                                
                                 # Anthropic format
                                 if cached_tokens == 0:
                                     cached_tokens = usage_metadata.get("cache_read_input_tokens", 0)
@@ -2618,12 +2761,56 @@ class ReactAgent:
                             
                             if input_tokens > 0 or output_tokens > 0:
                                 llm_step_count += 1
+                                
+                                # LLM output - AI mesajının içeriği
+                                # GPT-5 reasoning response: content = [{'type': 'reasoning', 'summary': [...]}, {'type': 'text', 'text': '...'}]
+                                llm_output_data = None
+                                reasoning_summary = None
+                                text_content = None
+                                
+                                if hasattr(message, "content") and message.content:
+                                    content = message.content
+                                    
+                                    # GPT-5 reasoning format: content liste olabilir
+                                    if isinstance(content, list):
+                                        for item in content:
+                                            if isinstance(item, dict):
+                                                if item.get("type") == "reasoning":
+                                                    # Reasoning summary - düşünce süreci
+                                                    reasoning_summary = item.get("summary", [])
+                                                elif item.get("type") == "text":
+                                                    # Metin cevabı
+                                                    text_content = item.get("text", "")
+                                    elif isinstance(content, str):
+                                        text_content = content
+                                    
+                                    llm_output_data = {
+                                        "text": text_content,
+                                        "reasoning_summary": reasoning_summary if reasoning_summary else None,
+                                        "tool_calls": [
+                                            {"name": tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown"),
+                                             "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})}
+                                            for tc in (message.tool_calls or [])
+                                        ] if hasattr(message, "tool_calls") and message.tool_calls else None
+                                    }
+                                elif hasattr(message, "tool_calls") and message.tool_calls:
+                                    llm_output_data = {
+                                        "tool_calls": [
+                                            {"name": tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown"),
+                                             "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})}
+                                            for tc in message.tool_calls
+                                        ]
+                                    }
+                                
                                 token_tracker.add_llm_step(
                                     step_name=f"llm_step_{llm_step_count}",
                                     input_tokens=input_tokens,
                                     output_tokens=output_tokens,
                                     cached_tokens=cached_tokens,
-                                    session_id=session_id
+                                    reasoning_tokens=reasoning_tokens,  # 🧠 GPT-5 reasoning
+                                    session_id=session_id,
+                                    llm_input={"question": question, "step": llm_step_count},
+                                    llm_output=llm_output_data,
                                 )
                         
                         # Tool calls
@@ -2634,8 +2821,8 @@ class ReactAgent:
                                 tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
                                 tool_call_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
                                 
-                                # Token tracker'a ekle
-                                token_tracker.add_tool_call(tool_name, tool_args)
+                                # Token tracker'a ekle (tool_call_id ile - Langfuse span'ı için)
+                                token_tracker.add_tool_call(tool_name, tool_args, tool_call_id)
                                 
                                 # Tool call ID'yi sakla (result için)
                                 if tool_call_id:
@@ -2674,8 +2861,8 @@ class ReactAgent:
                             else:
                                 result_status = "failed"
                             
-                            # Token tracker'a ekle
-                            token_tracker.add_tool_result(tool_name, str(tool_content), result_status == "success")
+                            # Token tracker'a ekle (tool_call_id ile - Langfuse span'ı bulmak için)
+                            token_tracker.add_tool_result(tool_name, str(tool_content), result_status == "success", tool_call_id)
                             
                             # 📚 Feedback için tool call'ı kaydet
                             if tool_call_id and tool_call_id in pending_tool_inputs:
@@ -2921,11 +3108,11 @@ class ReactAgent:
                     )
                     _log(f"🚀 LLM-Judge started in background")
                 
-                # 📊 Langfuse trace sonlandır
+                # 📊 Langfuse span sonlandır
                 cache_stats = get_cache_metrics().to_dict()
                 if langfuse_trace:
                     try:
-                        # Langfuse SDK v3+: update() then end()
+                        # Langfuse SDK: span.update() ile output ekle, sonra end()
                         langfuse_trace.update(
                             output={"response": final_response},
                             metadata={
@@ -2933,6 +3120,9 @@ class ReactAgent:
                                 "tool_calls": tool_call_count,
                                 "llm_calls": token_stats["total_llm_calls"],
                                 "total_tokens": token_stats["total_tokens"],
+                                "input_tokens": token_stats["total_input_tokens"],
+                                "output_tokens": token_stats["total_output_tokens"],
+                                "cached_tokens": token_stats["total_cached_tokens"],
                                 "cache_hit_rate": token_stats["cache_hit_rate"],
                                 "estimated_cost_usd": token_stats["estimated_cost_usd"],
                                 "sources_count": len(sources["documents"]) + len(sources["pages"]),
@@ -2940,11 +3130,13 @@ class ReactAgent:
                                 "llm_judge": "background",  # LLM-Judge runs in background
                             }
                         )
-                        # Langfuse async flush (trace auto-closes)
+                        # Span'ı kapat
+                        langfuse_trace.end()
+                        # Langfuse async flush
                         flush_langfuse()
-                        _log(f"📊 Langfuse trace completed")
+                        _log(f"📊 Langfuse span completed: {tool_call_count} tool calls logged")
                     except Exception as e:
-                        _log(f"⚠️ Langfuse trace update failed: {e}", "warning")
+                        _log(f"⚠️ Langfuse span update failed: {e}", "warning")
                 
                 yield {
                     "type": "final_response",
@@ -2990,18 +3182,23 @@ class ReactAgent:
             # Hata durumunda da istatistikleri göster
             token_tracker.print_summary(session_id=session_id)
             
-            # 📊 Langfuse trace hata ile sonlandır
+            # 📊 Langfuse span hata ile sonlandır
             if langfuse_trace:
                 try:
-                    # Langfuse SDK v3+: update() (trace auto-closes)
+                    # Langfuse SDK: span.update() ile hata bilgisi ekle, sonra end()
                     langfuse_trace.update(
-                        level="ERROR",
-                        status_message=str(e)[:500],
                         output={"error": str(e)},
+                        metadata={
+                            "error": True,
+                            "error_message": str(e)[:500],
+                            "error_type": type(e).__name__,
+                        },
+                        level="ERROR",
                     )
+                    langfuse_trace.end()
                     flush_langfuse()
                 except Exception as lf_error:
-                    _log(f"⚠️ Langfuse error trace failed: {lf_error}", "warning")
+                    _log(f"⚠️ Langfuse error span failed: {lf_error}", "warning")
             
             yield {
                 "type": "error",

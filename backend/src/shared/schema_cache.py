@@ -351,7 +351,18 @@ class SchemaVersionCache:
             lines = ["# NODES"]
             # Count'a göre sırala
             sorted_nodes = sorted(nodes.items(), key=lambda x: x[1]["count"], reverse=True)
+            
+            # Policy alt-tiplerini ayır (TrafikPolicy, KaskoPolicy vb.)
+            policy_subtypes = []
+            main_nodes = []
             for label, info in sorted_nodes:
+                if label.endswith("Policy") and label != "Policy":
+                    policy_subtypes.append((label, info["count"]))
+                else:
+                    main_nodes.append((label, info))
+            
+            # Ana node'ları listele
+            for label, info in main_nodes:
                 count = info["count"]
                 props = info["props"]
                 if props:
@@ -359,19 +370,35 @@ class SchemaVersionCache:
                 else:
                     lines.append(f"({label}:{count})")
             
+            # Policy alt-tipleri varsa açıklama ekle
+            if policy_subtypes:
+                subtypes_str = ", ".join([f"{name}({cnt})" for name, cnt in sorted(policy_subtypes, key=lambda x: -x[1])])
+                lines.append("")
+                lines.append("# POLICY SUBTYPES (Policy label'ının alt-tipleri, her biri aynı zamanda Policy'dir)")
+                lines.append(f"# Tüm poliçeler için: MATCH (p:Policy)")
+                lines.append(f"# Belirli tip için: MATCH (p:TrafikPolicy) veya MATCH (p:KaskoPolicy) vb.")
+                lines.append(f"# Alt-tipler: {subtypes_str}")
+            
             lines.append("")
             lines.append("# RELATIONSHIPS")
             
-            # Unique pattern'ler
+            # Policy alt-tip label'larını set olarak tut
+            policy_subtype_labels = set([label for label, _ in policy_subtypes])
+            
+            # Unique pattern'ler - Policy alt-tiplerini Policy olarak normalize et
             seen = set()
             for from_l, rel, to_l in relationships:
-                pattern = f"({from_l})-[:{rel}]->({to_l})"
+                # Policy alt-tiplerini Policy olarak değiştir
+                normalized_from = "Policy" if from_l in policy_subtype_labels else from_l
+                normalized_to = "Policy" if to_l in policy_subtype_labels else to_l
+                
+                pattern = f"({normalized_from})-[:{rel}]->({normalized_to})"
                 if pattern not in seen:
                     seen.add(pattern)
                     lines.append(pattern)
             
             schema = "\n".join(lines)
-            logger.info(f"✅ APOC Schema: {len(schema)} karakter, {len(sorted_nodes)} node, {len(seen)} pattern ({elapsed:.2f}s)")
+            logger.info(f"✅ APOC Schema: {len(schema)} karakter, {len(main_nodes)} node, {len(seen)} pattern ({elapsed:.2f}s)")
             return schema
             
         except Exception as e:
@@ -486,7 +513,18 @@ class SchemaVersionCache:
             
             # 4. Format oluştur
             lines = ["# NODES"]
+            
+            # Policy alt-tiplerini ayır
+            policy_subtypes = []
+            main_labels = []
             for label, count in labels_with_count:
+                if label.endswith("Policy") and label != "Policy":
+                    policy_subtypes.append((label, count))
+                else:
+                    main_labels.append((label, count))
+            
+            # Ana node'ları listele
+            for label, count in main_labels:
                 props = node_props.get(label, [])
                 props_with_types = []
                 for prop in props:
@@ -507,18 +545,34 @@ class SchemaVersionCache:
                 else:
                     lines.append(f"({label}:{count})")
             
+            # Policy alt-tipleri varsa açıklama ekle
+            if policy_subtypes:
+                subtypes_str = ", ".join([f"{name}({cnt})" for name, cnt in sorted(policy_subtypes, key=lambda x: -x[1])])
+                lines.append("")
+                lines.append("# POLICY SUBTYPES (Policy label'ının alt-tipleri, her biri aynı zamanda Policy'dir)")
+                lines.append(f"# Tüm poliçeler için: MATCH (p:Policy)")
+                lines.append(f"# Belirli tip için: MATCH (p:TrafikPolicy) veya MATCH (p:KaskoPolicy) vb.")
+                lines.append(f"# Alt-tipler: {subtypes_str}")
+            
             lines.append("")
             lines.append("# RELATIONSHIPS")
             
+            # Policy alt-tip label'larını set olarak tut
+            policy_subtype_labels = set([label for label, _ in policy_subtypes])
+            
             seen_patterns = set()
             for from_label, rel_type, to_label in patterns:
-                pattern = f"({from_label})-[:{rel_type}]->({to_label})"
+                # Policy alt-tiplerini Policy olarak değiştir
+                normalized_from = "Policy" if from_label in policy_subtype_labels else from_label
+                normalized_to = "Policy" if to_label in policy_subtype_labels else to_label
+                
+                pattern = f"({normalized_from})-[:{rel_type}]->({normalized_to})"
                 if pattern not in seen_patterns:
                     seen_patterns.add(pattern)
                     lines.append(pattern)
             
             schema = "\n".join(lines)
-            logger.info(f"✅ Schema oluşturuldu: {len(schema)} karakter, {len(labels_with_count)} node, {len(seen_patterns)} pattern")
+            logger.info(f"✅ Schema oluşturuldu: {len(schema)} karakter, {len(main_labels)} node, {len(seen_patterns)} pattern")
             return schema
             
         except Exception as e:

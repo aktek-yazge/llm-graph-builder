@@ -425,10 +425,13 @@ def log_llm_usage(
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
     cost_usd: float = 0.0,
     latency_ms: float = 0.0,
     step_name: str = "llm_call",
     metadata: Optional[Dict[str, Any]] = None,
+    llm_input: Optional[Any] = None,
+    llm_output: Optional[Any] = None,
 ):
     """
     Log LLM usage to Langfuse without full trace.
@@ -440,10 +443,13 @@ def log_llm_usage(
         input_tokens: Input token count
         output_tokens: Output token count
         cached_tokens: Cached token count
+        reasoning_tokens: GPT-5 reasoning token count
         cost_usd: Estimated cost in USD
         latency_ms: Latency in milliseconds
         step_name: Name of the step
         metadata: Additional metadata
+        llm_input: LLM input (messages/prompt) - SHOWS IN DASHBOARD
+        llm_output: LLM output (response) - SHOWS IN DASHBOARD
     """
     if not is_langfuse_enabled():
         return
@@ -453,31 +459,43 @@ def log_llm_usage(
         return
     
     try:
+        # Debug: input/output değerlerini logla
+        logger.info(f"📊 Langfuse log_llm_usage: step={step_name}, input={llm_input is not None}, output={llm_output is not None}")
+        if llm_output:
+            logger.info(f"   └─ output type: {type(llm_output)}, keys: {llm_output.keys() if isinstance(llm_output, dict) else 'N/A'}")
+        
         # Langfuse SDK v3+: start_generation -> update -> end
-        # session_id goes into metadata
+        # INPUT/OUTPUT are critical for dashboard visibility!
         generation = langfuse.start_generation(
             name=step_name,
             model=model,
+            input=llm_input,  # 🔑 Dashboard'da görünür
+            output=llm_output,  # 🔑 Dashboard'da görünür
             metadata={
                 "session_id": session_id,
                 "model": model,
                 "cost_usd": cost_usd,
                 "latency_ms": latency_ms,
                 "cache_hit_rate": round(cached_tokens / max(input_tokens, 1) * 100, 1),
+                "reasoning_tokens": reasoning_tokens,  # 🧠 GPT-5 reasoning
                 **(metadata or {}),
             },
         )
         
         # Update with usage details, then end
+        # reasoning_tokens dahil - GPT-5'in düşünce süreci için harcanan tokenlar
         generation.update(
             usage_details={
                 "input": input_tokens,
                 "output": output_tokens,
                 "cached": cached_tokens,
+                "reasoning": reasoning_tokens,  # 🧠 GPT-5 reasoning tokens
                 "total": input_tokens + output_tokens,
             },
         )
         generation.end()
+        
+        logger.info(f"✅ Langfuse generation created: {step_name}")
         
     except Exception as e:
         logger.warning(f"⚠️ Langfuse usage logging failed: {e}")

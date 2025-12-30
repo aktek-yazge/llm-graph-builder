@@ -2584,7 +2584,7 @@ async def chat_bot_stream(
     session_id: str = Form(None),
     question_id: str = Form(None),  # Log correlation ID
     mode: str = Form(None),
-    email: str = Form(None),
+    user_id: str = Form(None),  # Langfuse User Tracking için
     files: Optional[str] = Form(None),
     agent_type: str = Form("deep_agent"),  # "deep_agent", "fast_agent" veya "standard"
 ):
@@ -2598,7 +2598,7 @@ async def chat_bot_stream(
     """
     # Set request context for log correlation - all logs will include session_id and question_id
     set_request_context(session_id=session_id, question_id=question_id)
-    logging.info(f"chat_bot_stream started | question_id={question_id} | session_id={session_id}")
+    logging.info(f"chat_bot_stream started | question_id={question_id} | session_id={session_id} | user_id={user_id}")
 
     # print("chat_bot_stream files: ", files)
 
@@ -2695,7 +2695,7 @@ async def chat_bot_stream(
                         session_id=session_id,
                         question_id=question_id,
                         reasoning_effort=os.environ.get("REACT_REASONING_EFFORT", "low"),
-                        user_id=email,  # Langfuse User Tracking için
+                        user_id=user_id,  # Langfuse User Tracking için
                     ):
                         if await request.is_disconnected():
                             logging.info("SSE Client disconnected during ReAct agent streaming")
@@ -2817,7 +2817,7 @@ async def chat_bot_stream(
                 "logging_time": formatted_time(datetime.now(timezone.utc)),
                 "elapsed_api_time": f"{total_call_time:.2f}",
                 "total_tokens": total_tokens,
-                "email": email,
+                "user_id": user_id,
                 "streaming_type": "real_llm_streaming",
             }
             logger.log_struct(json_obj, "INFO")
