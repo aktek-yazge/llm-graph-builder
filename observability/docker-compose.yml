@@ -104,6 +104,28 @@ services:
       retries: 3
 
   # ---------------------------------------------------------------------------
+  # Redis Stack - Semantic Cache (RediSearch + RedisJSON)
+  # ---------------------------------------------------------------------------
+  # LLM response caching için vector similarity search desteği
+  # Port: 6381 (Langfuse Redis ile çakışmasın diye)
+  # ---------------------------------------------------------------------------
+  redis-stack:
+    image: redis/redis-stack-server:latest
+    container_name: redis-stack
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis-stack-data:/data
+    restart: always
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
   # Grafana - Visualization ve Dashboards
   # ---------------------------------------------------------------------------
   grafana:
@@ -149,3 +171,5 @@ volumes:
     name: observability-grafana-data
   alloy-data:
     name: observability-alloy-data
+  redis-stack-data:
+    name: observability-redis-stack-data

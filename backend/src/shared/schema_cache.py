@@ -49,6 +49,9 @@ class SchemaVersion(Base):
 _cached_schema: Optional[str] = None
 _cached_version: Optional[int] = None
 _cached_database_url: Optional[str] = None
+_cached_raw_schema: Optional[Dict[str, Any]] = None  # Raw APOC schema (for DSL validation)
+_version_check_time: Optional[float] = None  # Son version kontrolü zamanı (Unix timestamp)
+VERSION_CHECK_TTL_SECONDS = 60  # Version kontrolü TTL (saniye) - bu süre içinde PostgreSQL'e gidilmez
 
 
 class SchemaVersionCache:
@@ -64,7 +67,7 @@ class SchemaVersionCache:
     3. Version farklı? → Neo4j'den çek, RAM'e yükle
     """
     
-    def __init__(self, db_url: str = None):
+    def __init__(self, db_url: Optional[str] = None):
         """Initialize with database URL"""
         if db_url:
             self.db_url = db_url
@@ -107,7 +110,10 @@ class SchemaVersionCache:
     
     def get_schema(self, database_url: str, graph) -> str:
         """
-        Version kontrolü ile şema al
+        Version kontrolü ile şema al (TTL bazlı cache)
+        
+        TTL süresi içinde PostgreSQL'e gitmez, direkt RAM'den döner.
+        Bu sayede her chat mesajında DB sorgusu çalışmaz.
         
         Args:
             database_url: Neo4j database URL (e.g., "bolt://host:port/dbname")
@@ -116,26 +122,36 @@ class SchemaVersionCache:
         Returns:
             Schema string
         """
-        global _cached_schema, _cached_version, _cached_database_url
+        global _cached_schema, _cached_version, _cached_database_url, _version_check_time
         
-        # 1. PostgreSQL'den güncel version'ı al
+        current_time = time.time()
+        
+        # 1. TTL kontrolü - Son kontrolden bu yana TTL geçmemişse ve cache doluysa direkt dön
+        if (_cached_schema 
+            and _cached_database_url == database_url
+            and _version_check_time is not None
+            and (current_time - _version_check_time) < VERSION_CHECK_TTL_SECONDS):
+            # TTL içinde, PostgreSQL'e gitme, RAM'den dön
+            logger.debug(f"✅ Schema RAM'den alındı (TTL cache hit, {VERSION_CHECK_TTL_SECONDS - (current_time - _version_check_time):.0f}s kaldı)")
+            return _cached_schema
+        
+        # 2. TTL geçmiş veya cache boş → PostgreSQL'den version kontrolü
         db_version = self._get_version(database_url)
+        _version_check_time = current_time  # Version kontrolü zamanını güncelle
         
-        # 2. RAM cache kontrolü
+        # 3. RAM cache kontrolü (version eşleşiyor mu?)
         if (_cached_schema 
             and _cached_version == db_version 
             and _cached_database_url == database_url):
-            logger.info(f"✅ Schema RAM'den alındı (version: {db_version}, url_match: True)")
+            logger.info(f"✅ Schema RAM'den alındı (version: {db_version}, TTL reset)")
             return _cached_schema
         
-        # 3. Version değişmiş veya RAM boş veya URL farklı → Neo4j'den çek
+        # 4. Version değişmiş veya RAM boş veya URL farklı → Neo4j'den çek
         url_match = _cached_database_url == database_url
         logger.info(
             f"🔄 Schema yenileniyor - "
             f"RAM_version: {_cached_version}, DB_version: {db_version}, "
-            f"URL_match: {url_match}, "
-            f"Cached_URL: {_cached_database_url[:30] if _cached_database_url else 'None'}..., "
-            f"Request_URL: {database_url[:30] if database_url else 'None'}..."
+            f"URL_match: {url_match}"
         )
         
         schema = self._fetch_from_neo4j(graph)
@@ -162,7 +178,7 @@ class SchemaVersionCache:
         db = self.SessionLocal()
         try:
             # UPSERT: Insert veya Update
-            if "sqlite" in self.db_url:
+            if self.db_url and "sqlite" in self.db_url:
                 # SQLite için INSERT OR REPLACE
                 db.execute(text("""
                     INSERT INTO schema_version (database_url, version, updated_at)
@@ -211,13 +227,15 @@ class SchemaVersionCache:
     
     def invalidate_cache(self):
         """RAM cache'i temizle (debug/test için)"""
-        global _cached_schema, _cached_version, _cached_database_url
+        global _cached_schema, _cached_version, _cached_database_url, _cached_raw_schema, _version_check_time
         
         _cached_schema = None
         _cached_version = None
         _cached_database_url = None
+        _cached_raw_schema = None
+        _version_check_time = None
         
-        logger.info("🗑️ Schema RAM cache temizlendi")
+        logger.info("🗑️ Schema RAM cache temizlendi (raw schema + TTL dahil)")
     
     def _get_version(self, database_url: str) -> int:
         """PostgreSQL'den version al"""
@@ -291,6 +309,11 @@ class SchemaVersionCache:
             schema_data = result[0]["value"]
             elapsed = time.time() - start_time
             logger.info(f"⏱️ APOC sorgusu: {elapsed:.2f} saniye")
+            
+            # Raw schema'yı global cache'e kaydet (DSL Validation için)
+            global _cached_raw_schema
+            _cached_raw_schema = schema_data
+            logger.info(f"📦 Raw APOC schema global cache'e kaydedildi ({len(schema_data)} node/rel)")
             
             # Tip dönüşümü
             type_map = {
@@ -600,4 +623,23 @@ def get_cached_schema(database_url: str, graph) -> str:
 def increment_schema_version(database_url: str) -> int:
     """Shortcut: Increment schema version (call after document processing)"""
     return get_schema_cache().increment_version(database_url)
+
+
+def get_raw_schema() -> Optional[Dict[str, Any]]:
+    """
+    Raw APOC schema'yı global cache'den al.
+    
+    DSL Validation için kullanılır.
+    
+    Returns:
+        APOC meta.schema() çıktısı (dict) veya None
+    """
+    global _cached_raw_schema
+    return _cached_raw_schema
+
+
+def is_raw_schema_available() -> bool:
+    """Raw schema cache'de var mı?"""
+    global _cached_raw_schema
+    return _cached_raw_schema is not None
 

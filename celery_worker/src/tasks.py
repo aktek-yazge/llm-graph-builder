@@ -10,8 +10,8 @@ from src.processing_utils import GeminiOCRException, GeminiRateLimitException
 # Langfuse LLM Observability
 from src.shared.langfuse_client import trace_document_processing, flush_langfuse
 
-# Schema version cache - artık belge yüklenince version artırılıyor
-from src.shared.schema_cache import increment_schema_version
+# Schema version - belge yüklenince version artırılıyor (minimal modül)
+from src.shared.schema_version import increment_schema_version
 
 # Import DB Write Queue helpers - async writes to PostgreSQL
 from src.db_writer import (

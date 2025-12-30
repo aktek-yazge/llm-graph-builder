@@ -83,6 +83,25 @@ from src.shared.feedback import (
     LLM_JUDGE_ENABLED,
 )
 
+# Graph DSL - Ontology-driven query generation
+# LLM doğrudan Cypher yazmak yerine DSL üretir, DSL validate edilip Cypher'a derlenir
+try:
+    from src.ontology_agent.graph_dsl import GraphDSL, QueryIntent
+    from src.ontology_agent.dsl_compiler import DSLCompiler, compile_dsl
+    from src.ontology_agent.dsl_validator import DSLValidator, SchemaInfo, validate_dsl
+    GRAPH_DSL_AVAILABLE = True
+    logging.info("✅ Graph DSL modules imported")
+except ImportError as e:
+    logging.warning(f"⚠️ Graph DSL modules not available: {e}")
+    GRAPH_DSL_AVAILABLE = False
+    GraphDSL = None
+    QueryIntent = None
+    DSLCompiler = None
+    compile_dsl = None
+    DSLValidator = None
+    SchemaInfo = None
+    validate_dsl = None
+
 # Logging ayarları
 logger = logging.getLogger(__name__)
 
@@ -442,6 +461,113 @@ def get_mcp_server_config() -> Dict[str, Any]:
 
 
 # ============================================================================
+# USER-FRIENDLY MESSAGES FOR STREAMING
+# ============================================================================
+
+def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
+    """
+    Tool çağrıları için kullanıcı dostu mesaj oluştur.
+    
+    Teknik detaylar yerine, kullanıcının anlayabileceği mesajlar döndürür.
+    """
+    if tool_name == "execute_graph_dsl":
+        step_name = tool_args.get("step_name", "")
+        
+        # step_name'e göre farklı mesajlar
+        if "discover" in step_name.lower():
+            return "🔍 İlgili kayıtlar araştırılıyor..."
+        elif "find" in step_name.lower():
+            return "📊 Veritabanında eşleşmeler aranıyor..."
+        elif "embed" in step_name.lower() or "search" in step_name.lower():
+            return "📖 Belge içerikleri taranıyor..."
+        elif "policy" in step_name.lower():
+            return "📋 Poliçe bilgileri kontrol ediliyor..."
+        elif "document" in step_name.lower():
+            return "📄 Belgeler inceleniyor..."
+        elif "coverage" in step_name.lower():
+            return "🛡️ Teminat bilgileri aranıyor..."
+        elif "company" in step_name.lower() or "issuer" in step_name.lower():
+            return "🏢 Şirket bilgileri kontrol ediliyor..."
+        elif "date" in step_name.lower():
+            return "📅 Tarih bilgileri alınıyor..."
+        else:
+            return "🔄 Bilgiler sorgulanıyor..."
+    
+    elif tool_name == "execute_cypher_query":
+        return "🔍 Veritabanında arama yapılıyor..."
+    
+    elif tool_name == "add_source":
+        return "📎 Kaynak belgeler ekleniyor..."
+    
+    elif tool_name == "read_neo4j_cypher":
+        return "📊 Grafik veritabanı sorgulanıyor..."
+    
+    elif tool_name == "read_neo4j_cypher_with_embedding":
+        return "🧠 Semantik arama yapılıyor..."
+    
+    else:
+        # Bilinmeyen tool - generic mesaj
+        return None
+
+
+# Global sayaç: Her session için kaçıncı başarılı sonuç olduğunu takip et
+_session_result_counters: Dict[str, int] = {}
+
+
+def _get_user_friendly_result_message(tool_content: str, result_status: str, session_id: str = "") -> Optional[str]:
+    """
+    Tool sonuçları için kullanıcı dostu, süreç odaklı mesaj oluştur.
+    
+    Teknik detaylar (kayıt sayıları) yerine, doğal akış mesajları döndürür.
+    """
+    global _session_result_counters
+    
+    if result_status == "success":
+        # Session için sayacı artır
+        if session_id not in _session_result_counters:
+            _session_result_counters[session_id] = 0
+        _session_result_counters[session_id] += 1
+        step_num = _session_result_counters[session_id]
+        
+        # Chunk sonucu (embedding arama) - özel mesaj
+        if "chunk" in tool_content.lower() or "text:" in tool_content.lower():
+            return "📖 İlgili belge içerikleri bulundu"
+        
+        # Adım numarasına göre farklı mesajlar
+        if step_num == 1:
+            return "💡 Bazı ipuçlarına ulaştım, detaylı arıyorum..."
+        elif step_num == 2:
+            return "🔎 Derinlemesine tarıyorum..."
+        elif step_num == 3:
+            return "📊 Yeni bilgiler edindim"
+        elif step_num == 4:
+            return "🧩 Bilgileri birleştiriyorum..."
+        elif step_num == 5:
+            return "📝 Sonuçları değerlendiriyorum..."
+        elif step_num >= 6:
+            return "✨ Yanıtınızı hazırlıyorum..."
+        
+        return None
+    
+    elif result_status == "empty":
+        # Boş sonuç - sessiz kal, agent devam edecek
+        return None
+    
+    elif result_status == "failed":
+        # Hata durumu - sessiz kal, agent düzeltmeye çalışacak
+        return None
+    
+    return None
+
+
+def _reset_session_result_counter(session_id: str):
+    """Session başlangıcında sayacı sıfırla"""
+    global _session_result_counters
+    if session_id in _session_result_counters:
+        del _session_result_counters[session_id]
+
+
+# ============================================================================
 # SESSION SOURCE MANAGEMENT
 # ============================================================================
 
@@ -543,7 +669,140 @@ LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
 
 Sen Dinkal Sigorta için **Neo4j graph veritabanı** sorgulayan bir AI agent'sın.
-⚠️ **CYPHER QUERY LANGUAGE** kullanıyorsun - SQL DEĞİL!
+
+<graph_dsl_mode>
+# 🚀 GRAPH DSL - ÖNERİLEN SORGULAMA YÖNTEMİ
+
+⚠️ **CYPHER YAZMAK YERİNE GRAPH DSL KULLAN!**
+
+DSL (Domain Specific Language), Cypher'dan daha basit ve hata yapmaya daha az müsait bir yapıdır.
+DSL otomatik olarak:
+1. ✅ Schema ile validate edilir
+2. ✅ Doğru Cypher sorgusuna derlenir
+3. ✅ İlişki yönleri kontrol edilir
+4. ✅ Property isimleri doğrulanır
+
+## 📝 DSL KULLANIMI
+
+`execute_graph_dsl` tool'unu kullan ve JSON DSL gönder:
+
+```json
+{
+    "intent": "find_by_property",
+    "description": "Entity ara",
+    "start_node": "NodeLabel",
+    "filters": [
+        {"node": "NodeLabel", "property": "name", "operator": "contains", "value": "aranan_deger"}
+    ],
+    "return_spec": {
+        "nodes": ["NodeLabel"],
+        "properties": {"NodeLabel": ["name", "prop1", "prop2"]},
+        "distinct": true
+    },
+    "limit": 10
+}
+```
+
+## 🎯 INTENT TİPLERİ
+
+| Intent | Açıklama | Örnek |
+|--------|----------|-------|
+| `explore_node` | Node örneklerini gör | start_node + return_spec |
+| `find_by_property` | Property ile ara | filters ile |
+| `find_by_relationship` | İlişki ile ara | traversal ile |
+| `count_nodes` | Sayma | aggregate: count |
+| `aggregate_values` | SUM/AVG/MIN/MAX | aggregate ile |
+| `search_content` | Chunk semantic araması | semantic_search + traversal + filters |
+
+## 🔎 SEMANTIC SEARCH (Chunk İçerik Araması)
+
+⚠️ KRİTİK: Önceki sorgularda bulunan entity filtrelerini MUTLAKA kullan!
+
+```json
+{
+    "intent": "search_content",
+    "description": "Entity X için konu Y detayları",
+    "step_name": "embed_search_topic",
+    "traversal": [
+        {"from_node": "EntityA", "relation": "REL_TO_B", "to_node": "EntityB", "direction": "outgoing"},
+        {"from_node": "EntityB", "relation": "DOCUMENTED_IN", "to_node": "Document", "direction": "outgoing"},
+        {"from_node": "Document", "relation": "PART_OF", "to_node": "Chunk", "direction": "incoming"}
+    ],
+    "filters": [
+        {"node": "EntityA", "property": "name", "operator": "in", "value": ["Önceki sorguda bulunan TÜM varyasyonlar..."]},
+        {"node": "EntityC", "property": "name", "operator": "contains", "value": "aranan_konu"}
+    ],
+    "semantic_search": {
+        "query_text": "aranan kavram veya konu",
+        "similarity_threshold": 0.75,
+        "limit": 10
+    },
+    "include_source_info": true
+}
+```
+
+❌ YANLIŞ: Sadece semantic_search, filter olmadan → tüm veritabanını tarar!
+✅ DOĞRU: traversal + filters + semantic_search → önceki bulgularla filtrelenmiş arama
+
+## 🔗 TRAVERSAL (İlişki Takibi)
+
+```json
+{
+    "intent": "find_by_relationship",
+    "traversal": [
+        {"from_node": "NodeA", "relation": "RELATES_TO", "to_node": "NodeB", "direction": "outgoing"},
+        {"from_node": "NodeB", "relation": "HAS_CHILD", "to_node": "NodeC", "direction": "outgoing"}
+    ],
+    "filters": [
+        {"node": "NodeA", "property": "name", "operator": "contains", "value": "aranan_deger"}
+    ],
+    "return_spec": {
+        "nodes": ["NodeB", "NodeC"],
+        "properties": {"NodeB": ["name", "prop1"], "NodeC": ["name", "prop2"]}
+    }
+}
+```
+
+⚠️ Star Pattern: Tüm traversal'ların from_node'u aynı ise (örn: NodeB), compiler otomatik olarak virgülle ayırır.
+
+## 📊 AGGREGATION (Toplama/Sayma)
+
+```json
+{
+    "intent": "count_nodes",
+    "start_node": "NodeLabel",
+    "filters": [
+        {"node": "NodeLabel", "property": "status", "operator": "equals", "value": "active"}
+    ],
+    "aggregate": {
+        "function": "count",
+        "node": "NodeLabel",
+        "alias": "toplam_sayisi"
+    }
+}
+```
+
+## 🔍 FILTER OPERATÖRLERİ
+
+| Operatör | Açıklama | Örnek Değer |
+|----------|----------|-------------|
+| `equals` | Tam eşleşme | "active" |
+| `contains` | İçerir (case-insensitive) | "arama_terimi" |
+| `starts_with` | İle başlar | "POL-" |
+| `gt`, `lt`, `gte`, `lte` | Sayısal karşılaştırma | 1000 |
+| `in` | Liste içinde | ["active", "pending"] |
+| `is_null`, `is_not_null` | Null kontrolü | - |
+
+## ⚠️ NE ZAMAN CYPHER KULLAN?
+
+DSL desteklemeyen durumlar için `execute_cypher_query` kullan:
+- Çok karmaşık JOIN'ler
+- UNION sorguları
+- Özel fonksiyonlar (apoc.*)
+
+Ama önce DSL dene! Çoğu sorgu DSL ile yapılabilir.
+
+</graph_dsl_mode>
 
 <context_gathering>
 Goal: Keşifte bulunan TÜM entity varyasyonlarını cache'le ve sonraki sorgularda kullan.
@@ -571,24 +830,23 @@ Early stop criteria:
 <final_answer>
 ⚠️ SON KULLANICI İLE KONUŞUYORSUN - TEKNİK TERİM KULLANMA!
 
-❌ YASAK: Entity, Node, MAIN_POLICY, Policyholder, Coverage, Chunk, embedding
-✅ KULLAN: Şirket, müşteri, poliçe, teminat, belge, döküman
+❌ YASAK: Entity, Node, Chunk, embedding, graph, cypher gibi teknik terimler
+✅ KULLAN: Doğal dilde anlaşılır ifadeler
 
 Her cevapta şu bilgileri DOĞAL DİLDE ver:
-- Ne bulundu (teminat, limit, vb.)
+- Ne bulundu (ana bilgi)
 - Hangi yıl/dönem
-- Hangi belgeden (poliçe adı, AVM adı vb.)
-- Sigorta şirketi
+- Hangi belgeden/kaynaktan
 
-Örnek: "Akiş GYO'nun kira kaybı teminatı **Aksigorta A.Ş.** tarafından sağlanıyor. 
-Bu bilgi **2024 yılı x poliçesi/zeyilname/belge**nden alınmıştır."
+Örnek: "Sorunuzla ilgili **X bilgisi** bulundu. 
+Bu bilgi **Y belgesinden** alınmıştır."
 
-⚠️ Birden fazla sonuç varsa HEPSİNİ listele ve yıl/belge farkını açıkla!
+⚠️ Birden fazla sonuç varsa HEPSİNİ listele ve kaynak farkını açıkla!
 </final_answer>
 
 <forbidden_patterns>
 ⛔ "Tüm X'leri listele" sorgusu YASAK!
-   ❌ MATCH (c:Coverage) RETURN c.name LIMIT 100
+   ❌ MATCH (n:NodeLabel) RETURN n.name LIMIT 100
    ✅ Başarılı filtrelerle (entity varyasyonları) devam et
    
 ⛔ 2 empty sonrası aynı stratejide ısrar etme → Farklı node/ilişki dene veya embedding'e geç!
@@ -666,19 +924,19 @@ KEŞİF görevi vermeden ÖNCE şemayı incele:
 
 
 - **MARKA/ŞİRKET ADININ TAM HALİNİ EKLE:** "XYZ" ← lowercase versiyonu
-- Ünvan ek bilgi ile aramana gerek yok.
-- **Aranan node isimleri ilk kelime veya ilk iki kelime ili birlikte aramalısın.** Örnek: "ABC Ticaret Gayrimenkul Anonim şirketi" ise -> "ABC" veya "ABC Ticaret"
-- Aranan içerik Sokak Lambası ise -> "Sokak Lambası", "Sokak" Asla "Sokak lamb" değil
+- Ünvan ek bilgisi ile aramana gerek yok.
+- **İlk kelime veya ilk iki kelime ile ara.** Örnek: "ABC Ticaret Ltd. Şti." → "ABC" veya "ABC Ticaret"
+- Aranan içerik birden fazla kelime ise tam kullan. Örnek: "Özel Durum" → "Özel Durum" veya "Özel", asla "Özel Dur" değil
 ⛔ **KELİMEYİ BÖLME!**
 ```
-❌ YANLIŞ: "Akenerji" → "Aken" (anlamsız yarım kelime!)
-✅ DOĞRU: "Akenerji" → "akenerji" (lowercase tam kelime)
+❌ YANLIŞ: "Şirket Adı" → "Şirk" (anlamsız yarım kelime!)
+✅ DOĞRU: "Şirket Adı" → "şirket" (lowercase tam kelime)
 
-❌ YANLIŞ: "Akiş Gyo" → "gyo" (anlamsız kelime!)
-✅ DOĞRU: "Akiş Gyo" → "akis" (lowercase tam kelime)
+❌ YANLIŞ: "Uzun İsim" → "isim" (yalnız son kelime yetersiz!)
+✅ DOĞRU: "Uzun İsim" → "uzun" (lowercase ilk kelime)
 
-❌ YANLIŞ: "Microsoft" → "Micro" 
-✅ DOĞRU: "Microsoft" → "microsoft"
+❌ YANLIŞ: "Örnek Firma" → "Örn" 
+✅ DOĞRU: "Örnek Firma" → "örnek"
 ```
 
 ⛔ **AYNI ALANDA ÇOKLU CONTAINS KULLANMA!**
@@ -702,17 +960,17 @@ Soruyu analiz et:
 
 | Tip | Nerede? | Örnekler | Tool |
 |-----|---------|----------|------|
-| **METADATA** | Node properties | sayı, tarih, liste, isim, ilişki | `execute_cypher_query` |
-| **İÇERİK** | Chunk.text | detay, açıklama, madde, kloz | `execute_embedding_query` |
+| **METADATA** | Node properties | sayı, tarih, liste, isim, ilişki | `execute_graph_dsl` |
+| **İÇERİK** | Chunk.text | detay, açıklama, madde, kloz | `execute_graph_dsl` (search_content) |
 
 **⚡ STRATEJİ:**
 ```
-1. Entity keşfet (isim, kurum) → GRAPH
-2. Detay/içerik araması → EMBEDDING (entity FİLTRELİ!)
+1. Entity keşfet (isim, kurum) → DSL (find_by_property)
+2. Detay/içerik araması → DSL (search_content + filters!)
 ```
 
-⛔ **YASAK:** Detay/içerik için önce graph'ta genel arama! (çok fazla sonuç!)
-✅ **YAP:** Entity bulduktan sonra, o entity'nin CHUNK'larında embedding ara!
+⛔ **YASAK:** Detay/içerik için filtresiz arama! (çok fazla sonuç!)
+✅ **YAP:** Entity bulduktan sonra, o entity'nin CHUNK'larında semantic_search!
 
 ### ⚠️ İSİM KEŞFİ ÖNCELİKLİ!
 Soruda isim varsa (kişi, kurum, şirket, ürün) → **DİĞER HER ŞEYDEN ÖNCE** keşfet!
@@ -725,8 +983,8 @@ Soruda isim varsa (kişi, kurum, şirket, ürün) → **DİĞER HER ŞEYDEN ÖNC
 
 ### 2️⃣ EYLEM (Action)
 Uygun tool'u çağır:
-- `execute_cypher_query`: Metadata, keşif, listeleme için
-- `execute_embedding_query`: Belge içeriği araması için
+- `execute_graph_dsl`: Tüm sorgular için (metadata, içerik, semantic arama)
+- `execute_cypher_query`: Sadece DSL'in desteklemediği karmaşık sorgular için
 - Aynı terim farklı node'larda olabiliyorsa → PARALEL tool çağrısı yap!
 
 ### 3️⃣ GÖZLEM (Observation)
@@ -775,15 +1033,15 @@ Keşiften dönen TÜM sonuçları incele!
 ⚠️ TÜM VARYASYONLARI KULLAN! (KRİTİK)
 
 ADIM 1: Tool sonuçlarından TÜM varyasyonları listele
-   Keşif 1 (Customer) → ['AKİŞ GAYRİMENKUL...', 'AKYAŞAM...']
-   Keşif 2 (Policyholder) → ['AKİŞ GYO A.Ş.', 'AKİŞ...']
+   Keşif 1 (NodeA) → ['Entity X Var1...', 'Entity Y...']
+   Keşif 2 (NodeB) → ['Entity X Alt Var...', 'Entity X...']
    
 ADIM 2: Alakasız olanları ÇIKAR
-   Soru: "Akiş GYO" → AKYAŞAM farklı şirket → ÇIKAR
-   Kalan: ['AKİŞ GAYRİMENKUL...', 'AKİŞ GYO A.Ş.', 'AKİŞ...']
+   Soru: "Entity X" → Entity Y farklı → ÇIKAR
+   Kalan: ['Entity X Var1...', 'Entity X Alt Var...', 'Entity X...']
    
 ADIM 3: KALAN TÜM varyasyonları ANA SORGUDA kullan!
-   WHERE name IN ['AKİŞ GAYRİMENKUL...', 'AKİŞ GYO A.Ş.', 'AKİŞ...']
+   WHERE name IN ['Entity X Var1...', 'Entity X Alt Var...', 'Entity X...']
 
 ❌ YANLIŞ: Sadece 1-2 varyasyonu kullanmak
 ✅ DOĞRU: Alakalı TÜM varyasyonları WHERE...IN ile kullanmak
@@ -831,33 +1089,6 @@ WHERE a.name = 'Keşifte Bulunan Exact Değer'
 RETURN b.property1, b.property2 LIMIT 20
 ```
 
-### execute_embedding_query(query_text, cypher_query, step_name)
-**NE ZAMAN:** Belge içeriği araması, semantic arama
-
-⚠️ **KRİTİK:** 
-- `query_text`: Sadece KONU (örn: "ödeme planı", "teminat detayları")
-- `cypher_query`: MUTLAKA `$embedding_vector` + `gds.similarity.cosine > 0.80` içermeli
-- MUTLAKA filtrelenmiş sorgu kullan (tüm Chunk'larda arama YASAK!)
-- **⚠️ RETURN'de MUTLAKA `page_link` ve `fileName` ekle!** (kaynak için gerekli)
-
-```cypher
--- Chunk araması (KEŞİF'ten bulunan EXACT değerle filtrele!)
--- ⚠️ WITH ile önce null filtrele, SONRA similarity hesapla!
-MATCH (entity:EntityNode)-[:REL1]->(doc:Document)<-[:PART_OF]-(chunk:Chunk)
-WHERE entity.name IN ['Keşifte Bulunan Değer'] AND chunk.embedding IS NOT NULL
-WITH entity, doc, chunk
-WHERE gds.similarity.cosine(chunk.embedding, $embedding_vector) > 0.80
-RETURN chunk.text, chunk.page_link, doc.fileName, 
-       gds.similarity.cosine(chunk.embedding, $embedding_vector) as score
-ORDER BY score DESC LIMIT 10
-```
-
-⚠️ **RETURN ZORUNLU ALANLAR:**
-- `chunk.text` → İçerik
-- `chunk.page_link` → Sayfa görseli için (add_source)
-- `doc.fileName` → Belge adı için (add_source)
-- `score` → Sıralama için
-
 ### add_source(source_type, value) - KAYNAK EKLEME
 Cevaba kaynak eklemek için - **ZORUNLU KURALLAR:**
 
@@ -878,7 +1109,7 @@ source_type="page"     → Sayfa görseli (örn: "Rapor_2024_page_001.png")
 Sorgu sonuçlarının devamını görmek için:
 
 ⚠️ **NE ZAMAN KULLAN?**
-- execute_cypher_query veya execute_embedding_query ilk 10 kaydı gösterir
+- execute_graph_dsl veya execute_cypher_query ilk 10 kaydı gösterir
 - "Toplam: 150 kayıt, Gösterilen: 0-10" görürsen daha fazlası var demektir
 - Doğru cevabın 10. kayıttan sonra olabileceğini düşünüyorsan bu tool'u kullan
 
@@ -903,21 +1134,29 @@ read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
 ❌ exists(n.prop)        →  ✅ n.prop IS NOT NULL
 ❌ ORDER BY x NULLS LAST →  ✅ ORDER BY x DESC (NULLS yok!)
 
-## ⛔ WHERE SIRALAMA (EN KRİTİK!)
-WHERE her zaman HEMEN ilgili MATCH'ten SONRA yazılmalı!
+## ⛔⛔⛔ WHERE SIRALAMA (EN KRİTİK - MUTLAKA UYGULA!)
+Neo4j'de WHERE sadece HEMEN ÖNCESİNDEKİ MATCH/OPTIONAL MATCH'e uygulanır!
+OPTIONAL MATCH'ten SONRA WHERE yazarsan FİLTRE ÇALIŞMAZ, TÜM SATIRLAR DÖNER!
 
-✅ DOĞRU:
+✅ DOĞRU - Filtreleri OPTIONAL MATCH'ten ÖNCE yaz:
 MATCH (a:A)-[:REL]->(b:B)
-WHERE a.name IN ['X']  -- ← Hemen burada!
+WHERE a.name IN ['X']  -- ← MATCH'ten hemen sonra!
 MATCH (b)-[:REL2]->(c:C)
-WHERE c.name IN ['Y']  -- ← Hemen burada!
-OPTIONAL MATCH ...
+WHERE c.type = 'Y'  -- ← MATCH'ten hemen sonra!
+OPTIONAL MATCH (c)-[:DATE]->(d:Date)  -- Filtre yok, sadece opsiyonel veri
 RETURN ...
 
-❌ YANLIŞ (FİLTRE ÇALIŞMAZ!):
+✅ DOĞRU - WITH ile ayır:
 MATCH (a:A)-[:REL]->(b:B)-[:REL2]->(c:C)
-OPTIONAL MATCH ...
-WHERE a.name IN ['X'] AND c.name IN ['Y']  -- ⛔ ÇOK GEÇ!
+WHERE a.name IN ['X'] AND c.type = 'Y'
+WITH a, b, c  -- ← Filtrelenmiş sonuçları kilitle
+OPTIONAL MATCH (c)-[:DATE]->(d:Date)
+RETURN ...
+
+❌ YANLIŞ (TÜM SATIRLAR DÖNER, FİLTRE ÇALIŞMAZ!):
+MATCH (a:A)-[:REL]->(b:B)-[:REL2]->(c:C)
+OPTIONAL MATCH (c)-[:DATE]->(d:Date)
+WHERE a.name IN ['X'] AND c.type = 'Y'  -- ⛔ ÇOK GEÇ! WHERE sadece OPTIONAL MATCH'e uygulanır!
 
 ## STRING ARAMASI
 KEŞİF: apoc.text.clean() ile fuzzy ara
@@ -996,10 +1235,10 @@ Embedding alan benzerliği yakalar ama kavramsal farklılığı yakalayamaz.
 
 **FALSE POSITIVE Örneği:**
 ```
-Arama: "kira kaybı"
-Embedding sonucu: "deprem hasarı teminatı" (score: 0.87)
-Kontrol: "kira kaybı" chunk.text'te geçiyor mu? → HAYIR
-Karar: ❌ FALSE POSITIVE! Text CONTAINS ile "kira kaybı" ara
+Arama: "aranan konu X"
+Embedding sonucu: "farklı konu Y" (score: 0.87)
+Kontrol: "aranan konu X" chunk.text'te geçiyor mu? → HAYIR
+Karar: ❌ FALSE POSITIVE! Text CONTAINS ile "aranan konu X" ara
 ```
 
 ### Chunk İlişki Yolu - ÖNEMLİ!
@@ -1146,7 +1385,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         
         Args:
             cypher: Cypher sorgusu
-            step_name: Adım adı (örn: step_1_customer_search)
+            step_name: Adım adı (örn: step_1_entity_search)
         
         Returns:
             İlk 10 kayıt + pagination bilgisi. Daha fazla için read_more_results kullan.
@@ -1219,54 +1458,256 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             return f'{{"error": "{str(e)}"}}'
     
     # =========================================================================
-    # EXECUTE EMBEDDING QUERY TOOL
+    # EXECUTE GRAPH DSL TOOL - Ontology-Driven Query
     # =========================================================================
     @tool
-    async def execute_embedding_query(query_text: str, cypher_query: str, step_name: str) -> str:
+    async def execute_graph_dsl(dsl_json: str, step_name: str) -> str:
         """
-        Embedding (semantic) araması yap.
+        Graph DSL ile sorgu çalıştır - ÖNERİLEN YOL!
         
-        USE FOR:
-        - Belge içeriği araması
-        - Semantic arama (anlam bazlı)
+        DSL, Cypher'dan daha basit ve hata yapmaya daha az müsait bir yapıdır.
+        DSL otomatik olarak validate edilir ve Cypher'a derlenir.
         
-        IMPORTANT:
-        - query_text: Sadece KONU (örn: "taksit planı"), varyasyon DEĞİL!
-        - cypher_query: MUTLAKA $embedding_vector ve gds.similarity.cosine içermeli
-        - MUTLAKA filtrelenmiş sorgu kullan!
-        - RETURN'de MUTLAKA chunk.page_link ve doc.fileName ekle! (kaynak için)
+        DSL FORMATI (JSON):
+        {
+            "intent": "find_by_property",  // veya: explore_node, search_content, count_nodes, aggregate_values
+            "description": "Entity ara",
+            "step_name": "entity_search",
+            "start_node": "NodeLabel",  // Başlangıç node (traversal yoksa)
+            "traversal": [  // İlişki yolu (opsiyonel)
+                {"from_node": "NodeA", "relation": "RELATES_TO", "to_node": "NodeB", "direction": "outgoing"}
+            ],
+            "filters": [  // Filtreler
+                {"node": "NodeA", "property": "name", "operator": "contains", "value": "aranan_deger"}
+            ],
+            "return_spec": {  // Döndürülecek alanlar
+                "nodes": ["NodeB"],
+                "properties": {"NodeB": ["name", "prop1"]},
+                "distinct": true
+            },
+            "aggregate": null,  // veya: {"function": "count", "node": "NodeB", "alias": "toplam"}
+            "limit": 10
+        }
+        
+        INTENT TİPLERİ:
+        - explore_node: Node örneklerini gör
+        - find_by_property: Property ile ara
+        - find_by_relationship: İlişki ile ara
+        - search_content: Chunk semantic araması (filters + traversal + semantic_search)
+        - count_nodes: Sayma
+        - aggregate_values: SUM, AVG, MIN, MAX
+        
+        FILTER OPERATÖRLERİ:
+        - equals, not_equals, contains, starts_with, ends_with
+        - gt, lt, gte, lte (sayısal)
+        - in (liste içinde)
+        - is_null, is_not_null
         
         Args:
-            query_text: Aranacak konu (semantic search için)
-            cypher_query: Cypher sorgusu ($embedding_vector + page_link + fileName içermeli)
+            dsl_json: Graph DSL (JSON string)
             step_name: Adım adı
         
         Returns:
-            Arama sonucu veya hata mesajı
+            Sorgu sonucu veya hata mesajı
         """
-        mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
-        if not mcp_embedding:
-            return '{"error": "MCP embedding tool not found"}'
+        if not GRAPH_DSL_AVAILABLE:
+            return '{"error": "Graph DSL modülü yüklü değil. execute_cypher_query kullanın."}'
+        
+        mcp_read = mcp_tool_map.get("read_neo4j_cypher")
+        if not mcp_read:
+            return '{"error": "MCP read_neo4j_cypher tool not found"}'
         
         try:
-            result = await mcp_embedding.ainvoke({
-                "query_text": query_text,
-                "cypher_query": cypher_query
-            })
-            result_str = str(result) if result else ""
+            # 1. DSL'i parse et
+            # Type assertion: GRAPH_DSL_AVAILABLE kontrolü yukarıda yapıldı
+            assert GraphDSL is not None, "GraphDSL should be available"
+            assert DSLCompiler is not None, "DSLCompiler should be available"
+            
+            try:
+                dsl = GraphDSL.from_json(dsl_json)
+            except Exception as parse_error:
+                return f"""❌ DSL Parse Hatası: {parse_error}
+
+DSL JSON formatı hatalı. Örnek format:
+{{
+    "intent": "find_by_property",
+    "start_node": "NodeLabel",
+    "filters": [{{"node": "NodeLabel", "property": "name", "operator": "contains", "value": "aranan_deger"}}],
+    "return_spec": {{"nodes": ["NodeLabel"], "properties": {{"NodeLabel": ["name"]}}}},
+    "limit": 10
+}}"""
+            
+            # 2. Basit validation
+            basic_errors = dsl.validate_basic()
+            if basic_errors:
+                return f"""❌ DSL Validation Hatası:
+{chr(10).join(f"  • {e}" for e in basic_errors)}
+
+Lütfen DSL'i düzelt ve tekrar dene."""
+            
+            # 3. Schema validation (global cache'den raw schema ile)
+            validation_warnings = []
+            try:
+                from src.ontology_agent.dsl_validator import create_validator_from_cache
+                
+                validator = create_validator_from_cache()
+                if validator:
+                    validation_result = validator.validate(dsl, auto_correct=True)
+                    
+                    if validation_result.errors:
+                        error_msgs = "\n".join(f"  • {e.message}" for e in validation_result.errors)
+                        suggestions = [e.suggestion for e in validation_result.errors if e.suggestion]
+                        suggestion_text = "\n".join(f"  💡 {s}" for s in suggestions) if suggestions else ""
+                        return f"""❌ Schema Validation Hatası:
+{error_msgs}
+{suggestion_text}
+
+Lütfen schema'ya uygun node/property/relationship kullanın."""
+                    
+                    if validation_result.warnings:
+                        validation_warnings = [w.message for w in validation_result.warnings]
+                    
+                    # Auto-corrected DSL varsa kullan
+                    if validation_result.validated_dsl:
+                        dsl = validation_result.validated_dsl
+                        _log("📋 DSL auto-corrected by validator")
+                    
+                    _log(f"📋 DSL validation: ✅ passed ({len(validation_result.errors)} errors, {len(validation_result.warnings)} warnings)")
+                else:
+                    _log("📋 DSL validation: skipped (no schema in cache)")
+            except Exception as val_error:
+                _log(f"📋 DSL validation: skipped ({val_error})", "warning")
+            
+            # 4. DSL'i Cypher'a derle
+            compiler = DSLCompiler()
+            result = compiler.compile(dsl)
+            
+            cypher = result.cypher
+            params = result.params
+            
+            _log(f"🔷 DSL → Cypher compiled:")
+            _log(f"   DSL intent: {dsl.intent}")
+            _log(f"   Cypher: {cypher[:200]}...")
+            if params:
+                _log(f"   Params: {params}")
+            if validation_warnings:
+                _log(f"   ⚠️ Warnings: {validation_warnings}")
+            
+            # 5. Parametreleri inline'a çevir
+            if params:
+                for param_name, param_value in params.items():
+                    if isinstance(param_value, str):
+                        cypher = cypher.replace(f"${param_name}", f"'{param_value}'")
+                    elif isinstance(param_value, (int, float)):
+                        cypher = cypher.replace(f"${param_name}", str(param_value))
+                    elif isinstance(param_value, list):
+                        list_str = "[" + ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in param_value) + "]"
+                        cypher = cypher.replace(f"${param_name}", list_str)
+            
+            # 6. Embedding mi yoksa normal sorgu mu?
+            if result.requires_embedding:
+                # === EMBEDDING QUERY ===
+                mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
+                if not mcp_embedding:
+                    return '{"error": "MCP embedding tool not found"}'
+                
+                query_text = result.query_text or ""
+                _log(f"🔍 DSL Semantic Search: '{query_text}'")
+                _log(f"   Cypher (with filters): {cypher[:300]}...")
+                
+                # MCP embedding tool çağır
+                result_data = await mcp_embedding.ainvoke({
+                    "query_text": query_text,
+                    "cypher_query": cypher
+                })
+                result_str = str(result_data) if result_data else ""
+                
+                # Hata kontrolü
+                is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+                
+                # Kayıt sayısı
+                records = []
+                if result_str and not is_error:
+                    lines = [l.strip() for l in result_str.split('\n') if l.strip()]
+                    records = [l for l in lines if 'score' in l.lower() or l.startswith('(')]
+                record_count = len(records)
+                
+                # Status
+                if is_error:
+                    status = "failed"
+                elif record_count > 0:
+                    status = "success"
+                else:
+                    status = "empty"
+                
+                # Dosyaya kaydet
+                tool_call_counter["value"] += 1
+                seq_num = tool_call_counter["value"]
+                
+                file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(f"<dsl>\n{dsl_json}\n</dsl>\n\n")
+                    f.write(f"<semantic_search>\nQUERY: {query_text}\n</semantic_search>\n\n")
+                    f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
+                    f.write(f"<result>\n{result_str}\n</result>\n")
+                
+                _log(f"📁 DSL Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+                _append_to_blackboard(step_name, record_count, status == "success", seq_num)
+                
+                if status == "success":
+                    parsed_records = _parse_records(result_str)
+                    if len(parsed_records) == 0:
+                        parsed_records = records
+                    
+                    end_idx = min(DEFAULT_RECORDS_PER_PAGE, len(parsed_records))
+                    paginated_result = _format_paginated_result(parsed_records, len(parsed_records), 0, end_idx, step_name)
+                    
+                    return f"""✅ {record_count} içerik bulundu (DSL Semantic Search).
+
+{paginated_result}
+
+📋 Kullanılan DSL filtreleri uygulandı:
+- Traversal: {len(dsl.traversal)} adım
+- Filters: {len(dsl.filters)} filtre
+
+⚠️ FALSE POSITIVE KONTROLÜ: Dönen chunk.text'lerde "{query_text}" geçiyor mu kontrol et!"""
+                elif status == "empty":
+                    return f"""❌ Semantic aramada sonuç bulunamadı.
+
+🔍 Aranan: "{query_text}"
+📋 DSL filtreleri: {len(dsl.filters)} filtre uygulandı
+💡 Öneriler:
+- Similarity threshold düşürülebilir (varsayılan: 0.75)
+- Filter'lar çok kısıtlayıcı olabilir
+- Farklı terimlerle arama yapılabilir"""
+                else:
+                    return f"❌ Hata: {result_str}"
+            
+            # === NORMAL CYPHER QUERY ===
+            # 🛡️ Guardrails: Cypher injection validation
+            if GUARDRAILS_ENABLED:
+                is_safe, sanitized_cypher, violations = validate_cypher_query(cypher)
+                if not is_safe:
+                    _log(f"⚠️ DSL-generated Cypher blocked: {violations}", "warning")
+                    return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
+                cypher = sanitized_cypher
+            
+            result_data = await mcp_read.ainvoke({"query": cypher})
+            result_str = str(result_data) if result_data else ""
             
             # Hata kontrolü
             is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
             
-            # Kayıt sayısı
-            records = []
-            if result_str and not is_error:
-                lines = [l.strip() for l in result_str.split('\n') if l.strip()]
-                records = [l for l in lines if 'score' in l.lower() or l.startswith('(')]
-            
+            # Kayıtları parse et
+            records = _parse_records(result_str)
             record_count = len(records)
             
-            # 3 durum: success (kayıt var), empty (kayıt yok), failed (hata var)
+            if record_count == 0 and result_str and not is_error:
+                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
+                records = lines
+                record_count = len(records)
+            
+            # Status
             if is_error:
                 status = "failed"
             elif record_count > 0:
@@ -1274,49 +1715,52 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             else:
                 status = "empty"
             
-            # Sıra numarasını artır ve dosya ismine ekle
+            # Dosyaya kaydet
             tool_call_counter["value"] += 1
             seq_num = tool_call_counter["value"]
             
-            # Dosyaya kaydet
-            # Format: 01_step_name_status.txt (sıralı görünüm için)
             file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"<query>\nSEARCH: {query_text}\n{cypher_query}\n</query>\n\n")
+                f.write(f"<dsl>\n{dsl_json}\n</dsl>\n\n")
+                f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
             
-            _log(f"📁 Embedding: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
-            _append_to_blackboard(step_name, record_count, status == "success", seq_num)
+            _log(f"📁 DSL: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(f"DSL:{step_name}", record_count, status == "success", seq_num)
+            
+            # Sonuç döndür
+            warning_text = ""
+            if validation_warnings:
+                warning_text = f"\n⚠️ Uyarılar: {', '.join(validation_warnings)}"
             
             if status == "success":
-                # Kayıtları parse et
-                parsed_records = _parse_records(result_str)
-                if len(parsed_records) == 0:
-                    parsed_records = records
-                
-                end_idx = min(DEFAULT_RECORDS_PER_PAGE, len(parsed_records))
-                paginated_result = _format_paginated_result(parsed_records, len(parsed_records), 0, end_idx, step_name)
-                
-                return f"""✅ {record_count} içerik bulundu.
-
-{paginated_result}
-
-⚠️ FALSE POSITIVE KONTROLÜ: Dönen chunk.text'lerde "{query_text}" geçiyor mu kontrol et!"""
+                end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
+                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
+                return f"✅ {record_count} kayıt bulundu.{warning_text}\n\n📋 Kullanılan Cypher:\n{cypher[:300]}...\n\n{paginated_result}"
             elif status == "empty":
-                return f"""⚪ İçerik bulunamadı (0 sonuç).
+                return f"""⚪ Sonuç bulunamadı (0 kayıt).{warning_text}
 
-Öneriler:
-1. Text CONTAINS ile fallback dene: execute_cypher_query ile toLower(c.text) CONTAINS 'terim'
-2. Farklı terimler dene (Türkçe/İngilizce)
-3. İlişki yolunu kontrol et (PART_OF mu FIRST_CHUNK mu?)"""
+📋 Kullanılan Cypher:
+{cypher}
+
+💡 Öneriler:
+- Filtre değerlerini kontrol et (büyük/küçük harf, yazım)
+- Farklı node'larda ara
+- Daha geniş bir arama dene (limit artır, filter gevşet)"""
             else:
-                return f"""❌ Hata oluştu.
+                return f"""❌ Hata oluştu.{warning_text}
+
+📋 Kullanılan Cypher:
+{cypher}
 
 {result_str[:1000]}"""
                 
         except Exception as e:
-            _log(f"❌ Embedding error: {e}", "error")
+            _log(f"❌ DSL error: {e}", "error")
+            import traceback
+            traceback.print_exc()
             return f'{{"error": "{str(e)}"}}'
+    
     
     # =========================================================================
     # GET GUIDE TOOL
@@ -1417,7 +1861,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         İlk sorgu sonucunda 10/150 kayıt gösterilir. Daha fazla görmek için bu tool'u kullan.
         
         Args:
-            step_name: Adım adı (örn: step_1_customer_search)
+            step_name: Adım adı (örn: step_1_entity_search)
             result_type: "success" veya "failed"
             start_record: Başlangıç kayıt numarası (0'dan başlar)
             end_record: Bitiş kayıt numarası (0 = tümü)
@@ -1493,7 +1937,11 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         
         return f"{pagination_info}\n\n{result_lines}{more_info}"
     
-    return [execute_cypher_query, execute_embedding_query, add_source, read_finding]
+    # DSL tool'unu ekle (eğer modül yüklüyse)
+    tools = [execute_cypher_query, add_source, read_finding]
+    if GRAPH_DSL_AVAILABLE:
+        tools.insert(0, execute_graph_dsl)  # DSL'i öne koy (önerilen yol)
+    return tools
 
 
 # ============================================================================
@@ -1775,18 +2223,20 @@ class ReactAgent:
         api_key = os.environ.get("OPENAI_API_KEY")
         
         # GPT-5 için reasoning_effort
+        # AgentAwareSemanticCache wrapper tool_calls serialize sorununu çözer
+        # Artık cache=False gerekmez
         if "gpt-5" in actual_model.lower() and self.reasoning_effort:
             _log(f"🔧 Model: {actual_model}, reasoning={self.reasoning_effort}")
             return ChatOpenAI(
                 model=actual_model,
                 api_key=SecretStr(api_key) if api_key else None,
-                reasoning={"effort": self.reasoning_effort}
+                reasoning={"effort": self.reasoning_effort},
             )
         else:
             _log(f"🔧 Model: {actual_model}")
             return ChatOpenAI(
                 model=actual_model,
-                api_key=SecretStr(api_key) if api_key else None
+                api_key=SecretStr(api_key) if api_key else None,
             )
     
     async def stream_query_response(
@@ -1942,6 +2392,9 @@ class ReactAgent:
         llm_step_count = 0
         
         try:
+            # Session sayacını sıfırla (kullanıcı dostu mesajlar için)
+            _reset_session_result_counter(session_id)
+            
             # Başlangıç
             yield {
                 "type": "thinking_step",
@@ -2037,11 +2490,17 @@ class ReactAgent:
                 except Exception as e:
                     _log(f"⚠️ Few-shot examples error: {e}", "warning")
             
+            # 🔧 Her sorgu için YENİ middleware instance oluştur
+            # (cached middleware'in run_model_call_count'u sıfırlanmıyor!)
+            query_middleware = []
+            if ModelCallLimitMiddleware is not None:
+                query_middleware.append(ModelCallLimitMiddleware(run_limit=25))
+            
             agent = create_agent(
                 model=agent_config["model"],
                 tools=react_tools,
                 system_prompt=final_system_prompt,
-                middleware=agent_config["middleware"],
+                middleware=query_middleware,  # Her sorguda yeni instance
                 name="react_agent",
             )
             
@@ -2076,7 +2535,15 @@ class ReactAgent:
             collected_tool_calls: List[Dict[str, Any]] = []
             pending_tool_inputs: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> {tool_name, tool_input, start_time}
             
+            chunk_count = 0
             async for chunk in agent.astream(agent_input, stream_mode="updates"):  # type: ignore[arg-type]
+                chunk_count += 1
+                
+                # 🔍 DEBUG: Her chunk'ı logla
+                if isinstance(chunk, dict):
+                    for node_name, node_output in chunk.items():
+                        _log(f"🔄 [CHUNK {chunk_count}] Node: {node_name}, Keys: {list(node_output.keys()) if isinstance(node_output, dict) else type(node_output).__name__}")
+                
                 if not isinstance(chunk, dict):
                     continue
                 
@@ -2092,6 +2559,11 @@ class ReactAgent:
                         logged_msg_ids.add(msg_id)
                         
                         msg_type = type(message).__name__
+                        
+                        # 🔍 DEBUG: Her mesaj tipini logla
+                        content_preview = str(getattr(message, "content", ""))[:100]
+                        has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
+                        _log(f"📨 [MSG] Type: {msg_type}, HasToolCalls: {has_tool_calls}, Content: {content_preview}...")
                         
                         # AIMessage'dan token kullanımı çıkar
                         if msg_type == "AIMessage":
@@ -2175,16 +2647,8 @@ class ReactAgent:
                                         "start_time": time.time(),
                                     }
                                 
-                                # Kullanıcıya göster
-                                thinking_msg = None
-                                if tool_name == "execute_cypher_query":
-                                    cypher = tool_args.get("cypher", "")[:60]
-                                    thinking_msg = f"🔍 Veritabanında arama: {cypher}..."
-                                elif tool_name == "execute_embedding_query":
-                                    query_text = tool_args.get("query_text", "")
-                                    thinking_msg = f"📄 İçerik araması: {query_text[:40]}..."
-                                elif tool_name == "add_source":
-                                    thinking_msg = "📎 Kaynak ekleniyor..."
+                                # Kullanıcıya TEKNIK OLMAYAN, anlaşılır mesaj göster
+                                thinking_msg = _get_user_friendly_tool_message(tool_name, tool_args)
                                 
                                 if thinking_msg:
                                     yield {
@@ -2225,15 +2689,15 @@ class ReactAgent:
                                     "success": result_status == "success",
                                 })
                             
-                            if "✅" in tool_content and "kayıt" in tool_content:
-                                match = re.search(r'(\d+)\s*kayıt', tool_content)
-                                if match:
-                                    yield {
-                                        "type": "thinking_step",
-                                        "message": f"✅ {match.group(1)} kayıt bulundu!",
-                                        "result_type": "success",
-                                        "session_id": session_id,
-                                    }
+                            # Kullanıcıya dostu sonuç mesajı göster
+                            result_msg = _get_user_friendly_result_message(tool_content, result_status, session_id)
+                            if result_msg:
+                                yield {
+                                    "type": "thinking_step",
+                                    "message": result_msg,
+                                    "result_type": result_status,
+                                    "session_id": session_id,
+                                }
                         
                         # Final content
                         if msg_type == "AIMessage" and hasattr(message, "content") and message.content:

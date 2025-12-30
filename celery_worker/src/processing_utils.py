@@ -2103,7 +2103,7 @@ class FileProcessor:
                 # Backend path'ini ekle (schema_cache backend'de)
                 if backend_path not in sys.path:
                     sys.path.insert(0, backend_path)
-                from src.shared.schema_cache import increment_schema_version
+                from src.shared.schema_version import increment_schema_version
                 database_url = uri or ""  # Neo4j connection URL
                 if database_url:
                     new_version = increment_schema_version(database_url)
