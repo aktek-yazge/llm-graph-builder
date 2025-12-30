@@ -98,6 +98,9 @@ services:
     networks:
       - preview
       - observability
+      - langfuse-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
     depends_on:
       - rabbitmq
@@ -180,5 +183,8 @@ networks:
   observability:
     external: true
     name: observability
+  langfuse-network:
+    external: true
+    name: langfuse_langfuse-network
 
 
