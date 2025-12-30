@@ -20,6 +20,9 @@ import remarkGfm from 'remark-gfm';
 import { v4 as uuidv4 } from 'uuid';
 import ChatBotAvatar from '../../assets/images/chatbot-ai.png';
 import { useFileContext } from '../../context/UsersFiles';
+import { useCredentials } from '../../context/UserCredentials';
+import { useAuth } from '../../context/AuthContext';
+import { SKIP_AUTH } from '../../utils/Constants';
 import useSpeechSynthesis from '../../hooks/useSpeech';
 import { chatStreamAPI, ChatStreamMessage } from '../../services/ChatStreamAPI';
 import { chatBotAPI } from '../../services/QnaAPI';
@@ -82,6 +85,11 @@ const Chatbot: FC<ChatbotProps> = (props) => {
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState<boolean>(isLoading);
   const { model, chatModes, selectedRows, filesData } = useFileContext();
+  const { userCredentials } = useCredentials();
+  
+  // JWT Auth - kullanıcı email'i için
+  const auth = SKIP_AUTH ? null : useAuth();
+  const authUser = auth?.user;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [showInfoModal, setShowInfoModal] = useState<boolean>(false);
   const [sourcesModal, setSourcesModal] = useState<string[]>([]);
@@ -285,6 +293,10 @@ const Chatbot: FC<ChatbotProps> = (props) => {
     setListMessages((prev) => [...prev, chatbotMessage]);
 
     try {
+      // Langfuse User Tracking için user_id - öncelik: authUser > userCredentials > fallback
+      const userId = authUser?.email || userCredentials?.email || userCredentials?.userName || `user_${sessionId.slice(0, 8)}`;
+      console.log('🔍 Sending chat request with user_id:', userId, '(authUser:', authUser?.email, ')');
+      
       await chatStreamAPI.startChatStream(
         {
           question: inputMessage,
@@ -293,6 +305,7 @@ const Chatbot: FC<ChatbotProps> = (props) => {
           model,
           mode: chatModes[0],
           document_names: selectedFileNames?.map((f) => f.name),
+          user_id: userId,  // Langfuse User Tracking için
         },
         (message: ChatStreamMessage) => {
           // eslint-disable-next-line no-console
