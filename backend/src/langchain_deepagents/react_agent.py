@@ -238,12 +238,18 @@ class TokenTracker:
                         "cumulative_output": self.total_output_tokens,
                     },
                 )
+                # Langfuse'un beklediği alan isimleri (Settings > Models > gpt-5 Pricing'e göre):
+                # - input: uncached input tokens
+                # - input_cached_tokens: cached input tokens (10x ucuz)
+                # - output: output tokens
+                # - output_reasoning_tokens: reasoning tokens
+                uncached_input = max(0, input_tokens - cached_tokens)
                 generation.update(
                     usage_details={
-                        "input": input_tokens,
+                        "input": uncached_input,  # Sadece cache'lenmemiş input
+                        "input_cached_tokens": cached_tokens,  # ✅ Langfuse'un beklediği isim
                         "output": output_tokens,
-                        "cached": cached_tokens,
-                        "reasoning": reasoning_tokens,
+                        "output_reasoning_tokens": reasoning_tokens,  # ✅ Langfuse'un beklediği isim
                         "total": input_tokens + output_tokens,
                     },
                 )

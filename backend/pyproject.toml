@@ -81,6 +81,6 @@ dependencies = [
     "secweb>=1.25.2",
     "pypdf2>=3.0.1",
     "pdf2image>=1.17.0",
-    "langfuse>=3.11.1",
     "slowapi>=0.1.9",
+    "langfuse>=3.11.1",
 ]
