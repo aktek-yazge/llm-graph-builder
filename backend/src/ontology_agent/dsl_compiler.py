@@ -314,60 +314,66 @@ class DSLCompiler:
     
     def _compile_filtered_semantic_search(self, dsl: GraphDSL, ss, chunk_alias: str, has_traversal: bool) -> CompilationResult:
         """
-        Filter/traversal ile context-aware semantic arama.
-        Önce filter ile chunk sayısını azaltır, sonra similarity hesaplar.
+        POST-FILTERING yaklaşımı ile semantic arama.
+        
+        1. Vector index ile hızlıca aday chunk'ları bul (O(log n))
+        2. Sonra MATCH ile traversal/filter uygula
+        3. Bu sayede gds.similarity.cosine() kullanmadan hızlı arama yapılır
         """
         params = {}
-        warnings = []
+        warnings = ["🔍 Post-filtering modu: Vector index → Traversal filter"]
         
-        # === MATCH CLAUSE ===
+        # Daha fazla aday al, sonra filtrele (traversal bazıları eleyebilir)
+        candidate_limit = ss.limit * 5 if ss.limit else 100
+        
+        # Vector index adı - Chunk embedding için 'vector' index'i kullanıyoruz
+        vector_index_name = "vector"
+        
+        parts = []
+        
+        # === STEP 1: VECTOR INDEX SEARCH ===
+        parts.append(f"CALL db.index.vector.queryNodes('{vector_index_name}', {candidate_limit}, $embedding_vector)")
+        parts.append(f"YIELD node AS {chunk_alias}, score")
+        
+        # Similarity threshold - ilk WHERE
+        parts.append(f"WHERE score > {ss.similarity_threshold}")
+        
+        # === STEP 2: TRAVERSAL MATCH ===
         if has_traversal:
-            # Traversal varsa kullan - star pattern desteği ile
-            traversal_pattern = self._build_traversal_pattern(dsl.traversal)
-            match_clause = f"MATCH {traversal_pattern}"
-        else:
-            # Traversal yoksa sadece Chunk'tan başla
-            match_clause = f"MATCH ({chunk_alias}:{ss.target_node})"
+            # Traversal'ı ters yönde kur - Chunk'tan başlayarak diğer node'lara bağlan
+            # Örnek: Chunk -> Document <- Policy
+            traversal_match = self._build_post_filter_traversal(dsl.traversal, chunk_alias)
+            if traversal_match:
+                parts.append(traversal_match)
         
-        parts = [match_clause]
+        # === STEP 3: ADDITIONAL FILTERS ===
+        filter_conditions = []
         
-        # === WHERE CLAUSE ===
-        where_conditions = []
-        
-        # 1. Embedding null check
-        where_conditions.append(f"{chunk_alias}.{ss.embedding_property} IS NOT NULL")
-        
-        # 2. DSL filters (Customer, Policyholder, Coverage vb. filtreleri)
-        # BU KRİTİK! Önceki sorgularda bulunan entity'lerin filtreleri
+        # DSL filters (Customer, Policyholder, Coverage vb. filtreleri)
         for filter_obj in dsl.filters:
             condition, filter_params = self._build_filter_condition(filter_obj)
-            where_conditions.append(condition)
+            filter_conditions.append(condition)
             params.update(filter_params)
         
-        # 3. Semantic search context filters (opsiyonel ek filtreler)
+        # Semantic search context filters
         for filter_obj in ss.context_filters:
             condition, filter_params = self._build_filter_condition(filter_obj)
-            where_conditions.append(condition)
+            filter_conditions.append(condition)
             params.update(filter_params)
         
-        # 4. Similarity condition
-        similarity_expr = f"gds.similarity.cosine({chunk_alias}.{ss.embedding_property}, $embedding_vector)"
-        where_conditions.append(f"{similarity_expr} > {ss.similarity_threshold}")
-        
-        parts.append("WHERE " + " AND ".join(where_conditions))
+        if filter_conditions:
+            parts.append("WHERE " + " AND ".join(filter_conditions))
         
         # === RETURN CLAUSE ===
         return_parts = [f"{chunk_alias}.{ss.text_property} AS text"]
         
         if ss.return_score:
-            return_parts.append(f"{similarity_expr} AS score")
+            return_parts.append("score")
         
-        # Source info - her zaman Document bilgisi ekle
+        # Source info - Document bilgisi
         doc_alias = self._node_aliases.get("Document")
         if doc_alias:
-            return_parts.extend([
-                f"{doc_alias}.fileName AS fileName",
-            ])
+            return_parts.append(f"{doc_alias}.fileName AS fileName")
         
         # Chunk page_link
         return_parts.append(f"{chunk_alias}.page_link AS page_link")
@@ -497,17 +503,29 @@ RETURN value"""
         if not traversal:
             return "(n)"
         
-        # Önce traversal'ı analiz et: aynı to_node birden fazla kez mi kullanılıyor?
-        to_node_counts: Dict[str, int] = {}
+        # Traversal analizi: aynı (from_node, to_node) çifti farklı relation'larla mı kullanılıyor?
+        # Bu durumda relation-based alias gerekir (örn: Policy->startDate, Policy->endDate)
+        # Farklı from_node'lar aynı to_node'a gidiyorsa → PAYLAŞILAN alias (pattern birleştirme)
+        from_to_relations: Dict[Tuple[str, str], List[str]] = {}
         for step in traversal:
-            to_node_counts[step.to_node] = to_node_counts.get(step.to_node, 0) + 1
+            key = (step.from_node, step.to_node)
+            if key not in from_to_relations:
+                from_to_relations[key] = []
+            from_to_relations[key].append(step.relation)
+        
+        # Aynı (from, to) çiftine birden fazla relation varsa relation-based alias gerekir
+        needs_relation_alias: Set[Tuple[str, str]] = set()
+        for key, relations in from_to_relations.items():
+            if len(relations) > 1:
+                needs_relation_alias.add(key)
         
         # İlk traversal için pattern oluştur
         first_step = traversal[0]
         from_alias = self._get_node_alias(first_step.from_node)
         
-        # to_node için alias: eğer birden fazla kez kullanılıyorsa relation-based alias kullan
-        if to_node_counts.get(first_step.to_node, 0) > 1:
+        # to_node için alias: sadece aynı (from, to) çiftine farklı relation'larla gidiliyorsa relation-based
+        first_key = (first_step.from_node, first_step.to_node)
+        if first_key in needs_relation_alias:
             to_alias = self._get_relation_based_alias(first_step.from_node, first_step.relation, first_step.to_node)
         else:
             to_alias = self._get_node_alias(first_step.to_node)
@@ -533,8 +551,18 @@ RETURN value"""
             else:
                 from_alias = self._get_node_alias(step.from_node)
             
-            # to_alias: eğer bu to_node birden fazla kez kullanılıyorsa relation-based alias
-            if to_node_counts.get(step.to_node, 0) > 1:
+            # to_alias belirleme - ÖNEMLİ: pattern'leri birleştirmek için
+            # Önce to_node zaten tanımlı mı kontrol et
+            to_node_already_exists = step.to_node in self._node_aliases
+            step_key = (step.from_node, step.to_node)
+            
+            if to_node_already_exists:
+                # to_node zaten var - AYNI NODE'A BAĞLAN (pattern birleştirme)
+                # Bu sayede Chunk->Document ve Policy->Document aynı Document'a bağlanır
+                to_alias = self._node_aliases[step.to_node]
+            elif step_key in needs_relation_alias:
+                # Aynı from_node'dan aynı to_node'a farklı relation'larla gidiliyor
+                # Örn: Policy->HAS_START_DATE->Date, Policy->HAS_END_DATE->Date
                 to_alias = self._get_relation_based_alias(step.from_node, step.relation, step.to_node)
             else:
                 to_alias = self._get_node_alias(step.to_node)
@@ -546,15 +574,21 @@ RETURN value"""
             else:
                 rel_pattern = f"-[:{step.relation}]-"
             
-            # from_node zaten tanımlı mı kontrol et
+            # Pattern oluşturma
             if step.from_node == last_to_node:
                 # Zincir devam: önceki to_node'dan devam et
-                # last_to_alias'ı kullan
                 main_patterns[0] += f"{rel_pattern}({to_alias}:{step.to_node})"
                 last_to_node = step.to_node
                 last_to_alias = to_alias
+            elif to_node_already_exists:
+                # to_node zaten var - yeni from_node'u mevcut to_node'a bağla
+                # Bu CARTESIAN PRODUCT'ı önler!
+                if step.from_node in self._node_aliases:
+                    main_patterns.append(f"({from_alias}){rel_pattern}({to_alias})")
+                else:
+                    main_patterns.append(f"({from_alias}:{step.from_node}){rel_pattern}({to_alias})")
             elif step.from_node in self._node_aliases:
-                # Star pattern veya farklı dallanma: yeni pattern ekle (virgül ile)
+                # Star pattern: mevcut node'dan yeni node'a
                 main_patterns.append(f"({from_alias}){rel_pattern}({to_alias}:{step.to_node})")
             else:
                 # Tamamen yeni bir başlangıç noktası
@@ -563,6 +597,120 @@ RETURN value"""
                 last_to_alias = to_alias
         
         return ",\n      ".join(main_patterns)
+    
+    def _build_post_filter_traversal(self, traversal: List[TraversalStep], chunk_alias: str) -> Optional[str]:
+        """
+        Post-filtering için traversal pattern oluştur.
+        
+        Vector index'ten gelen chunk'tan başlayarak diğer node'lara bağlan.
+        Örnek: chunk zaten var → MATCH (chunk)-[:PART_OF]->(doc:Document)<-[:DOCUMENTED_IN]-(policy:Policy)
+        """
+        if not traversal:
+            return None
+        
+        # Chunk'tan başlayan path'leri bul
+        chunk_steps = [s for s in traversal if s.from_node == "Chunk" or s.to_node == "Chunk"]
+        
+        if not chunk_steps:
+            # Traversal Chunk'ı içermiyorsa, doğrudan pattern kur
+            # Bu durumda muhtemelen Policy->Document->Chunk gibi bir yapı var
+            # Chunk'tan geriye doğru git
+            return self._build_reverse_traversal(traversal, chunk_alias)
+        
+        # Chunk'tan başlayan traversal pattern
+        # ÖNEMLİ: Önce Chunk ile ilgili step'leri işle, sonra diğerlerini
+        patterns = []
+        visited = {"Chunk"}
+        remaining_steps = list(traversal)
+        
+        # PASS 1: Chunk ile doğrudan bağlantılı step'ler
+        for step in list(remaining_steps):
+            if step.from_node == "Chunk":
+                # Chunk -> X yönünde
+                to_alias = self._get_node_alias(step.to_node)
+                if step.direction == "outgoing":
+                    rel_pattern = f"-[:{step.relation}]->"
+                else:
+                    rel_pattern = f"<-[:{step.relation}]-"
+                patterns.append(f"({chunk_alias}){rel_pattern}({to_alias}:{step.to_node})")
+                visited.add(step.to_node)
+                remaining_steps.remove(step)
+            elif step.to_node == "Chunk":
+                # X -> Chunk yönünde (ters: incoming direction demek Chunk<-X)
+                from_alias = self._get_node_alias(step.from_node)
+                if step.direction == "incoming":
+                    # Document -[:PART_OF]-> Chunk (incoming) = Chunk <-[:PART_OF]- Document
+                    # Ama biz chunk'tan başlıyoruz: (chunk)-[:PART_OF]->(document)
+                    rel_pattern = f"-[:{step.relation}]->"
+                else:
+                    rel_pattern = f"<-[:{step.relation}]-"
+                patterns.append(f"({chunk_alias}){rel_pattern}({from_alias}:{step.from_node})")
+                visited.add(step.from_node)
+                remaining_steps.remove(step)
+        
+        # PASS 2+: Zinciri genişlet - visited node'lara bağlı step'leri ekle
+        max_iterations = len(remaining_steps) + 1
+        for _ in range(max_iterations):
+            if not remaining_steps:
+                break
+            
+            for step in list(remaining_steps):
+                if step.from_node in visited and step.to_node not in visited:
+                    # Visited node'dan yeni node'a
+                    from_alias = self._node_aliases.get(step.from_node, step.from_node.lower())
+                    to_alias = self._get_node_alias(step.to_node)
+                    if step.direction == "outgoing":
+                        rel_pattern = f"-[:{step.relation}]->"
+                    else:
+                        rel_pattern = f"<-[:{step.relation}]-"
+                    patterns.append(f"({from_alias}){rel_pattern}({to_alias}:{step.to_node})")
+                    visited.add(step.to_node)
+                    remaining_steps.remove(step)
+                elif step.to_node in visited and step.from_node not in visited:
+                    # Yeni node'dan visited node'a
+                    to_alias = self._node_aliases.get(step.to_node, step.to_node.lower())
+                    from_alias = self._get_node_alias(step.from_node)
+                    if step.direction == "outgoing":
+                        # Policy -[:DOCUMENTED_IN]-> Document = (document)<-[:DOCUMENTED_IN]-(policy)
+                        rel_pattern = f"<-[:{step.relation}]-"
+                    else:
+                        rel_pattern = f"-[:{step.relation}]->"
+                    patterns.append(f"({to_alias}){rel_pattern}({from_alias}:{step.from_node})")
+                    visited.add(step.from_node)
+                    remaining_steps.remove(step)
+        
+        if patterns:
+            return "MATCH " + ", ".join(patterns)
+        return None
+    
+    def _build_reverse_traversal(self, traversal: List[TraversalStep], chunk_alias: str) -> Optional[str]:
+        """
+        Policy->Document->Chunk gibi yapılarda Chunk'tan geriye doğru traversal.
+        
+        Örnek DSL: Policy -[:DOCUMENTED_IN]-> Document <-[:PART_OF]- Chunk
+        Sonuç: MATCH (chunk)-[:PART_OF]->(document:Document)<-[:DOCUMENTED_IN]-(policy:Policy)
+        """
+        # Document'a bağlanan step'i bul
+        doc_step = next((s for s in traversal if s.to_node == "Document" or s.from_node == "Document"), None)
+        
+        if not doc_step:
+            return None
+        
+        # Chunk -> Document bağlantısı (varsayılan PART_OF)
+        doc_alias = self._get_node_alias("Document")
+        pattern_parts = [f"({chunk_alias})-[:PART_OF]->({doc_alias}:Document)"]
+        
+        # Document'a bağlanan diğer node'lar
+        for step in traversal:
+            if step.to_node == "Document" and step.from_node != "Chunk":
+                from_alias = self._get_node_alias(step.from_node)
+                if step.direction == "outgoing":
+                    # Policy -[:DOCUMENTED_IN]-> Document  =>  (doc)<-[:DOCUMENTED_IN]-(policy:Policy)
+                    pattern_parts.append(f"({doc_alias})<-[:{step.relation}]-({from_alias}:{step.from_node})")
+                else:
+                    pattern_parts.append(f"({doc_alias})-[:{step.relation}]->({from_alias}:{step.from_node})")
+        
+        return "MATCH " + ", ".join(pattern_parts)
     
     def _build_where_clause(self, filters: List[Filter]) -> Tuple[str, Dict[str, Any]]:
         """WHERE clause oluştur"""

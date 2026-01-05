@@ -89,11 +89,15 @@ try:
     from src.ontology_agent.graph_dsl import GraphDSL, QueryIntent
     from src.ontology_agent.dsl_compiler import DSLCompiler, compile_dsl
     from src.ontology_agent.dsl_validator import DSLValidator, SchemaInfo, validate_dsl
+    from src.ontology_agent.llm_cypher_generator import generate_cypher as llm_generate_cypher, LLMCompilationResult
     GRAPH_DSL_AVAILABLE = True
+    LLM_CYPHER_AVAILABLE = True
     logging.info("✅ Graph DSL modules imported")
+    logging.info("✅ LLM Cypher generator imported")
 except ImportError as e:
     logging.warning(f"⚠️ Graph DSL modules not available: {e}")
     GRAPH_DSL_AVAILABLE = False
+    LLM_CYPHER_AVAILABLE = False
     GraphDSL = None
     QueryIntent = None
     DSLCompiler = None
@@ -101,6 +105,12 @@ except ImportError as e:
     DSLValidator = None
     SchemaInfo = None
     validate_dsl = None
+    llm_generate_cypher = None
+    LLMCompilationResult = None
+
+# DSL Compiler Mode: "llm" (GPT-5-mini) veya "rule" (DSLCompiler)
+# Default: llm - LLM-based generation
+DSL_COMPILER_MODE = os.getenv("DSL_COMPILER_MODE", "llm")
 
 # Logging ayarları
 logger = logging.getLogger(__name__)
@@ -930,6 +940,9 @@ DSL verdin, sonuç boş geldi.
 DÜŞÜN:
 ├── Filtre çok dar mı? → operator: "contains" kullan, "equals" değil
 ├── Türkçe karakter sorunu mu? → Alternatif yazımları dene
+├── 🌐 DİL FARKI MI? → İngilizce karşılığını dene!
+│   └── Örn: "reasürans" → 0 sonuç? → "reinsurance" dene!
+│   └── Teknik terimler genelde İngilizce (coverage, clause, premium, deductible)
 ├── Yanlış node mu? → Traversal'ı gözden geçir
 └── Property yok mu? → SEARCH_CONTENT'e geç
 ```
@@ -1500,7 +1513,6 @@ ADIM 5: explore_node → Schema keşfi, alternatif bul
 
 ⚠️ **Semantic boş dönerse → search_text ile keyword ara!**
 ⚠️ **Chunk ilişkisi: PART_OF (tüm chunk'lar), FIRST_CHUNK değil!**
-⚠️ **Çok dilli arama: Türkçe + İngilizce terimlerle ara!**
 </fallback_strategy>
 
 <output_rules>
@@ -1703,12 +1715,14 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     # EXECUTE GRAPH DSL TOOL - Ontology-Driven Query
     # =========================================================================
     @tool
-    async def execute_graph_dsl(dsl_json: str, step_name: str) -> str:
+    async def execute_graph_dsl(dsl_json: str, step_name: str, compiler_mode: str = "") -> str:
         """
         Graph DSL ile sorgu çalıştır - ÖNERİLEN YOL!
         
         DSL, Cypher'dan daha basit ve hata yapmaya daha az müsait bir yapıdır.
         DSL otomatik olarak validate edilir ve Cypher'a derlenir.
+        
+        compiler_mode: "llm" (GPT-5-mini ile) veya "rule" (DSLCompiler ile). Boş bırakılırsa env'den alınır.
         
         DSL FORMATI (JSON):
         {
@@ -1820,14 +1834,46 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
             except Exception as val_error:
                 _log(f"📋 DSL validation: skipped ({val_error})", "warning")
             
-            # 4. DSL'i Cypher'a derle
-            compiler = DSLCompiler()
-            result = compiler.compile(dsl)
+            # 4. DSL'i Cypher'a derle - LLM veya Rule-based
+            # Compiler mode: parametre > env variable > default (llm)
+            effective_mode = compiler_mode if compiler_mode else DSL_COMPILER_MODE
             
-            cypher = result.cypher
-            params = result.params
+            if effective_mode == "llm" and LLM_CYPHER_AVAILABLE and llm_generate_cypher:
+                # === LLM-BASED GENERATION (GPT-5-mini) ===
+                _log(f"🤖 Using LLM Cypher generator (gpt-5-mini)")
+                
+                # Schema bilgisini al (opsiyonel)
+                schema_info = None
+                try:
+                    cached = get_cached_schema()
+                    if cached and cached.get("raw_schema"):
+                        schema_info = cached["raw_schema"][:2000]  # İlk 2000 karakter
+                except:
+                    pass
+                
+                result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini")
+                
+                cypher = result.cypher
+                params = result.params
+                
+                if not cypher:
+                    # LLM başarısız oldu, fallback to rule-based
+                    _log(f"⚠️ LLM failed, falling back to rule-based compiler")
+                    compiler = DSLCompiler()
+                    result = compiler.compile(dsl)
+                    cypher = result.cypher
+                    params = result.params
+                else:
+                    _log(f"🤖 LLM generated in {result.latency_ms:.0f}ms")
+            else:
+                # === RULE-BASED COMPILATION (DSLCompiler) ===
+                _log(f"📐 Using rule-based DSLCompiler")
+                compiler = DSLCompiler()
+                result = compiler.compile(dsl)
+                cypher = result.cypher
+                params = result.params
             
-            _log(f"🔷 DSL → Cypher compiled:")
+            _log(f"🔷 DSL → Cypher compiled ({effective_mode}):")
             _log(f"   DSL intent: {dsl.intent}")
             _log(f"   Cypher: {cypher[:200]}...")
             if params:
