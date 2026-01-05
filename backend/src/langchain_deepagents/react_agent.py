@@ -1852,7 +1852,8 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                     pass
                 
                 # Parent span'ı geçir - Langfuse'da child generation olarak görünsün
-                parent_span = token_tracker._langfuse_parent_span if token_tracker else None
+                # Not: token_tracker bu scope'da olmayabilir, try/except ile kontrol et
+                parent_span = None
                 result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini", parent_span=parent_span)
                 
                 cypher = result.cypher
