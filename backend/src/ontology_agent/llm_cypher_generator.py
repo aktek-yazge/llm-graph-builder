@@ -278,21 +278,26 @@ async def generate_cypher(
                     model=model,
                     input={"dsl": dsl_json[:500], "schema": schema_info[:200] if schema_info else None},
                     output={"cypher": cypher[:500]},
-                    usage={
-                        "input_tokens": prompt_tokens,
-                        "output_tokens": completion_tokens,
-                        "cache_read_input_tokens": cached_tokens
-                    },
                     metadata={
                         "latency_ms": latency_ms,
                         "cache_hit": cached_tokens > 0,
                         "requires_embedding": requires_embedding
                     }
                 )
+                # Token bilgilerini update ile ekle (react_agent.py ile aynı pattern)
+                uncached_input = max(0, prompt_tokens - cached_tokens)
+                generation.update(
+                    usage_details={
+                        "input": uncached_input,
+                        "input_cached_tokens": cached_tokens,
+                        "output": completion_tokens,
+                        "total": prompt_tokens + completion_tokens,
+                    }
+                )
                 generation.end()
-                logger.debug(f"📊 Langfuse generation added to parent span")
+                logger.info(f"📊 [LLM Cypher] Langfuse generation added to parent span")
             except Exception as lf_err:
-                logger.debug(f"Langfuse generation failed: {lf_err}")
+                logger.warning(f"⚠️ [LLM Cypher] Langfuse generation failed: {lf_err}")
         
         # Langfuse flush (parent yoksa standalone için)
         if LANGFUSE_AVAILABLE and flush_langfuse and not parent_span:

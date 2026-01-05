@@ -1541,7 +1541,7 @@ DYNAMIC_SUFFIX_TEMPLATE = """
 # TOOL DEFINITIONS
 # ============================================================================
 
-def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_question: str = ""):
+def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_question: str = "", token_tracker: Optional['TokenTracker'] = None):
     """
     ReAct agent için tool'ları oluşturur.
     
@@ -1550,6 +1550,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         session_id: Oturum ID'si
         question_id: Soru ID'si  
         user_question: Kullanıcının sorduğu orijinal soru
+        token_tracker: Token tracking için (Langfuse parent span erişimi)
     
     Returns:
         Tool listesi
@@ -1852,8 +1853,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                     pass
                 
                 # Parent span'ı geçir - Langfuse'da child generation olarak görünsün
-                # Not: token_tracker bu scope'da olmayabilir, try/except ile kontrol et
-                parent_span = None
+                parent_span = token_tracker._langfuse_parent_span if token_tracker else None
                 result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini", parent_span=parent_span)
                 
                 cypher = result.cypher
@@ -2747,7 +2747,8 @@ class ReactAgent:
                 self.mcp_tools,
                 session_id[:8] if session_id else "default",
                 short_question_id,
-                user_question=question
+                user_question=question,
+                token_tracker=token_tracker
             )
             
             # Gerçek agent'ı oluştur
