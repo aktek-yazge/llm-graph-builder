@@ -211,8 +211,9 @@ class DSLCompiler:
         """
         Semantic (embedding) arama sorgusu derle
         
-        Traversal ve filters kullanarak context-aware semantic arama yapar.
-        Örnek: Customer'dan başlayıp, Policy üzerinden Chunk'lara ulaşır.
+        İki mod destekler:
+        1. VECTOR INDEX modu: Filter/traversal yoksa → db.index.vector.queryNodes() kullanır (HIZLI)
+        2. FILTERED modu: Filter/traversal varsa → Önce filter, sonra similarity (context-aware)
         
         DSL Örneği:
         {
@@ -221,14 +222,8 @@ class DSLCompiler:
                 "query_text": "kira kaybı",
                 "similarity_threshold": 0.80
             },
-            "traversal": [
-                {"from_node": "Policyholder", "relation": "HAS_POLICYHOLDER", "to_node": "Policy", "direction": "incoming"},
-                {"from_node": "Policy", "relation": "DOCUMENTED_IN", "to_node": "Document"},
-                {"from_node": "Document", "relation": "PART_OF", "to_node": "Chunk", "direction": "incoming"}
-            ],
-            "filters": [
-                {"node": "Policyholder", "property": "name", "operator": "in", "value": ["Akiş..."]}
-            ]
+            "traversal": [...],  # Opsiyonel - varsa filtered mod
+            "filters": [...]     # Opsiyonel - varsa filtered mod
         }
         """
         if not dsl.semantic_search:
@@ -241,12 +236,92 @@ class DSLCompiler:
         
         ss = dsl.semantic_search
         params = {}
+        warnings = []
         
         # Chunk alias
         chunk_alias = self._get_node_alias(ss.target_node)
         
+        # Filter veya traversal var mı kontrol et
+        has_filters = bool(dsl.filters) or bool(ss.context_filters)
+        has_traversal = bool(dsl.traversal)
+        
+        # === MOD SEÇİMİ ===
+        if not has_filters and not has_traversal:
+            # 🚀 VECTOR INDEX MODU - Çok hızlı!
+            # Filter yoksa db.index.vector.queryNodes() kullan
+            return self._compile_vector_index_search(dsl, ss, chunk_alias)
+        else:
+            # 🔍 FILTERED MODU - Context-aware ama daha yavaş
+            return self._compile_filtered_semantic_search(dsl, ss, chunk_alias, has_traversal)
+    
+    def _compile_vector_index_search(self, dsl: GraphDSL, ss, chunk_alias: str) -> CompilationResult:
+        """
+        Vector index kullanarak hızlı semantic arama.
+        db.index.vector.queryNodes() Neo4j 5.11+ için.
+        
+        Bu metod filter/traversal OLMADAN çağrılır.
+        """
+        # Vector index adı - Chunk embedding için 'vector' index'i kullanıyoruz
+        vector_index_name = "vector"  # Neo4j'deki index adı
+        
+        # Limit - vector search için daha fazla sonuç al, sonra threshold uygula
+        search_limit = min(ss.limit * 2, 100)  # En fazla 100
+        
+        parts = []
+        
+        # CALL db.index.vector.queryNodes
+        parts.append(f"CALL db.index.vector.queryNodes('{vector_index_name}', {search_limit}, $embedding_vector)")
+        parts.append(f"YIELD node AS {chunk_alias}, score")
+        
+        # WHERE - threshold filtresi
+        parts.append(f"WHERE score > {ss.similarity_threshold}")
+        
+        # === RETURN CLAUSE ===
+        return_parts = [f"{chunk_alias}.{ss.text_property} AS text"]
+        
+        if ss.return_score:
+            return_parts.append("score")
+        
+        # Chunk bilgileri
+        return_parts.append(f"{chunk_alias}.page_link AS page_link")
+        return_parts.append(f"{chunk_alias}.fileName AS fileName")
+        
+        # Return spec'teki ek property'ler
+        if dsl.return_spec:
+            for node_label, props in dsl.return_spec.properties.items():
+                if node_label == ss.target_node:
+                    for prop in props:
+                        if prop not in ["text", "page_link", "fileName"]:
+                            return_parts.append(f"{chunk_alias}.{prop} AS {node_label}_{prop}")
+        
+        parts.append("RETURN " + ", ".join(return_parts))
+        
+        # ORDER BY score
+        parts.append("ORDER BY score DESC")
+        
+        # LIMIT
+        parts.append(f"LIMIT {ss.limit}")
+        
+        cypher = "\n".join(parts)
+        
+        return CompilationResult(
+            cypher=cypher,
+            params={},
+            requires_embedding=True,
+            query_text=ss.query_text,
+            warnings=["🚀 Vector index kullanılıyor (hızlı mod)"]
+        )
+    
+    def _compile_filtered_semantic_search(self, dsl: GraphDSL, ss, chunk_alias: str, has_traversal: bool) -> CompilationResult:
+        """
+        Filter/traversal ile context-aware semantic arama.
+        Önce filter ile chunk sayısını azaltır, sonra similarity hesaplar.
+        """
+        params = {}
+        warnings = []
+        
         # === MATCH CLAUSE ===
-        if dsl.traversal:
+        if has_traversal:
             # Traversal varsa kullan - star pattern desteği ile
             traversal_pattern = self._build_traversal_pattern(dsl.traversal)
             match_clause = f"MATCH {traversal_pattern}"
@@ -316,12 +391,16 @@ class DSLCompiler:
         
         cypher = "\n".join(parts)
         
+        # Filter yoksa uyarı ekle
+        if not dsl.filters and not ss.context_filters:
+            warnings.append("⚠️ Filter olmadan semantic arama yavaş olabilir. Text filter eklemeyi düşünün.")
+        
         return CompilationResult(
             cypher=cypher,
             params=params,
             requires_embedding=True,
             query_text=ss.query_text,
-            warnings=[]
+            warnings=warnings
         )
     
     def _compile_schema_exploration(self, dsl: GraphDSL) -> CompilationResult:
