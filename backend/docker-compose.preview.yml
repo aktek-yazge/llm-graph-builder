@@ -77,14 +77,13 @@ services:
       - OTEL_SERVICE_NAME=llm-graph-builder-backend
       - OTEL_ENVIRONMENT=preview
     volumes:
-      # TÜM BACKEND KLASÖRÜ MOUNT
-      - .:/code/backend
-      - /code/backend/.venv
+      # TÜM BACKEND KLASÖRÜ MOUNT - /code'u override et
+      - .:/code
+      - /code/.venv
       - ~/sqlite-db:/code/sqlite-data
       - ~/llm-graph-output:/code/output
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Logs klasörü - Alloy tarafından okunacak
-      - ./logs:/code/backend/logs
       - ./logs:/code/logs
       # Agent findings - Agent araştırma sonuçları
       - ./agent_findings:/code/agent_findings
