@@ -1851,7 +1851,9 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                 except:
                     pass
                 
-                result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini")
+                # Parent span'ı geçir - Langfuse'da child generation olarak görünsün
+                parent_span = token_tracker._langfuse_parent_span if token_tracker else None
+                result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini", parent_span=parent_span)
                 
                 cypher = result.cypher
                 params = result.params

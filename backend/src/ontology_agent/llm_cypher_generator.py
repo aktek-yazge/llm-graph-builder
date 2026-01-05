@@ -169,7 +169,8 @@ Sadece Cypher sorgusunu döndür, başka bir şey yazma. Markdown code block KUL
 async def generate_cypher(
     dsl_json: str,
     schema_info: Optional[str] = None,
-    model: str = "gpt-5-mini"
+    model: str = "gpt-5-mini",
+    parent_span: Optional[Any] = None
 ) -> LLMCompilationResult:
     """
     DSL JSON'ı GPT-5-mini ile Cypher'a çevir.
@@ -181,6 +182,7 @@ async def generate_cypher(
         dsl_json: DSL JSON string
         schema_info: Opsiyonel schema bilgisi (node labels, relationships)
         model: Kullanılacak model (default: gpt-5-mini)
+        parent_span: Langfuse parent span - child generation olarak bağlanır
     
     Returns:
         LLMCompilationResult: Cypher sorgusu ve metadata
@@ -223,18 +225,8 @@ async def generate_cypher(
             HumanMessage(content=user_message)
         ]
         
-        # Langfuse callback handler (token tracking otomatik)
-        callbacks = []
-        if LANGFUSE_AVAILABLE and get_langfuse_callback_handler:
-            try:
-                handler = get_langfuse_callback_handler()
-                if handler:
-                    callbacks.append(handler)
-            except Exception as cb_err:
-                logger.debug(f"Langfuse callback handler not available: {cb_err}")
-        
-        # Call LLM - LangChain handles token tracking
-        response = await llm.ainvoke(messages, config={"callbacks": callbacks})
+        # Call LLM - callback handler KULLANMA, parent span varsa generation oluşturacağız
+        response = await llm.ainvoke(messages)
         
         latency_ms = (time.time() - start_time) * 1000
         
@@ -278,8 +270,32 @@ async def generate_cypher(
         logger.info(f"🤖 LLM Cypher generated in {latency_ms:.0f}ms ({model})")
         logger.debug(f"   Cypher: {cypher[:200]}...")
         
-        # Langfuse flush
-        if LANGFUSE_AVAILABLE and flush_langfuse:
+        # Langfuse: parent span varsa child generation olarak ekle (ayrı trace değil!)
+        if parent_span and LANGFUSE_AVAILABLE:
+            try:
+                generation = parent_span.start_generation(
+                    name="llm_cypher_generator",
+                    model=model,
+                    input={"dsl": dsl_json[:500], "schema": schema_info[:200] if schema_info else None},
+                    output={"cypher": cypher[:500]},
+                    usage={
+                        "input_tokens": prompt_tokens,
+                        "output_tokens": completion_tokens,
+                        "cache_read_input_tokens": cached_tokens
+                    },
+                    metadata={
+                        "latency_ms": latency_ms,
+                        "cache_hit": cached_tokens > 0,
+                        "requires_embedding": requires_embedding
+                    }
+                )
+                generation.end()
+                logger.debug(f"📊 Langfuse generation added to parent span")
+            except Exception as lf_err:
+                logger.debug(f"Langfuse generation failed: {lf_err}")
+        
+        # Langfuse flush (parent yoksa standalone için)
+        if LANGFUSE_AVAILABLE and flush_langfuse and not parent_span:
             try:
                 flush_langfuse()
             except Exception:
