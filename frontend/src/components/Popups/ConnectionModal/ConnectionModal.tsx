@@ -7,7 +7,8 @@ import { buttonCaptions } from '../../../utils/Constants';
 import { createVectorIndex } from '../../../services/VectorIndexCreation';
 import { ConnectionModalProps, Message, UserCredentials } from '../../../types';
 import VectorIndexMisMatchAlert from './VectorIndexMisMatchAlert';
-import { useAuth0 } from '@auth0/auth0-react';
+import { useAuth } from '../../../context/AuthContext';
+import { SKIP_AUTH } from '../../../utils/Constants';
 import { createDefaultFormData } from '../../../API/Index';
 import { getNodeLabelsAndRelTypesFromText } from '../../../services/SchemaFromTextAPI';
 import { useFileContext } from '../../../context/UsersFiles';
@@ -45,7 +46,9 @@ export default function ConnectionModal({
   const [username, setUsername] = useState<string>(initialusername ?? 'neo4j');
   const [password, setPassword] = useState<string>('');
   const [connectionMessage, setMessage] = useState<Message | null>({ type: 'unknown', content: '' });
-  const { user } = useAuth0();
+  // JWT Auth - SKIP_AUTH=false ise kendi auth sistemimizi kullan
+  const auth = SKIP_AUTH ? null : useAuth();
+  const user = auth?.user ? { email: auth.user.email } : null;
   const {
     setUserCredentials,
     userCredentials,

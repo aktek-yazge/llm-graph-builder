@@ -43,7 +43,7 @@ load_dotenv()
 from src.shared.context import set_request_context, clear_request_context
 
 # Global Schema Cache import
-from src.shared.schema_cache import get_cached_schema, get_schema_cache
+from src.shared.schema_cache import get_cached_schema, get_schema_cache, get_raw_schema
 
 # Langfuse LLM Observability + Prompt Management + Sessions
 from src.shared.langfuse_client import (
@@ -588,15 +588,111 @@ except ImportError as e:
 MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8002"))
 
+# Stdio MCP servers toggle
+MCP_STDIO_ENABLED = os.environ.get("MCP_STDIO_ENABLED", "true").lower() == "true"
+
+
+def _check_uv_installed() -> bool:
+    """
+    uv/uvx kurulu olup olmadığını kontrol et.
+    
+    uvx = uv tool run - Python paketlerini indirip çalıştırır (npx benzeri)
+    
+    Returns:
+        True: uvx kullanılabilir
+        False: uvx kurulu değil
+    """
+    import shutil
+    
+    uvx_path = shutil.which("uvx")
+    if uvx_path:
+        return True
+    
+    # uvx yoksa uv'yi kontrol et (uvx = uv tool run)
+    uv_path = shutil.which("uv")
+    if uv_path:
+        return True
+    
+    return False
+
+
+# Modül yüklenirken uv kontrolü yap
+_UV_AVAILABLE = _check_uv_installed()
+
+if not _UV_AVAILABLE and MCP_STDIO_ENABLED:
+    logging.warning("=" * 70)
+    logging.warning("⚠️  UV/UVX KURULU DEĞİL!")
+    logging.warning("=" * 70)
+    logging.warning("   Stdio MCP sunucuları (time, sequential-thinking) kullanılamayacak.")
+    logging.warning("   ")
+    logging.warning("   Kurmak için:")
+    logging.warning("   curl -LsSf https://astral.sh/uv/install.sh | sh")
+    logging.warning("   ")
+    logging.warning("   veya:")
+    logging.warning("   pip install uv")
+    logging.warning("   ")
+    logging.warning("   Stdio'yu devre dışı bırakmak için: MCP_STDIO_ENABLED=false")
+    logging.warning("=" * 70)
+
 
 def get_mcp_server_config() -> Dict[str, Any]:
-    """MCP server konfigürasyonu"""
-    return {
+    """
+    MCP server konfigürasyonu - Sadece Stdio
+    
+    HTTP Transport: Devre dışı (Neo4j tool'ları custom olarak ekleniyor)
+    Stdio Transport: Hafif/Stateless tool'lar (Time, Sequential Thinking)
+    
+    Stdio sunucuları için uv/uvx gereklidir.
+    Devre dışı bırakmak için: MCP_STDIO_ENABLED=false
+    """
+    config: Dict[str, Any] = {}
+    
+    # ========== HTTP SERVERS - DEVRE DIŞI ==========
+    # Neo4j tool'ları custom olarak ekleniyor (execute_cypher_query, execute_graph_dsl)
+
+    
+    # ========== STDIO SERVERS (Hafif, Stateless) ==========
+    # uvx (Python) gerektirir - MCP_STDIO_ENABLED=false ile devre dışı bırakılabilir
+    # uvx = uv tool run (pip paketlerini çalıştırır)
+    
+    # uv kurulu değilse stdio'yu atla
+    if not _UV_AVAILABLE:
+        logging.warning("⚠️ Stdio MCP sunucuları atlandı (uv/uvx kurulu değil)")
+        return config
+    
+    # Neo4j MCP server (internal kullanım - agent'a sunulmaz, custom tool'lar kullanır)
+    config.update({
         "neo4j-database": {
             "url": f"http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/",
             "transport": "streamable_http",
-        }
-    }
+        },
+    })
+    
+    if MCP_STDIO_ENABLED:
+        config.update({
+            # 🕐 Time Server - Zaman ve timezone işlemleri
+            # https://github.com/modelcontextprotocol/servers/tree/main/src/time
+            # Tools: get_current_time, convert_time
+            "time": {
+                "command": "uvx",
+                "args": ["mcp-server-time", "--local-timezone=Europe/Istanbul"],
+                "transport": "stdio",
+            },
+            
+            # 🧠 Sequential Thinking - Adım adım düşünme ve problem çözme
+            # https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
+            # Tools: sequentialthinking
+            "sequential-thinking": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+                "transport": "stdio",
+            }
+        })
+        logging.info(f"📡 MCP Config: neo4j-database (internal) + time + sequential-thinking")
+    else:
+        logging.info(f"📡 MCP Config: Empty (stdio disabled)")
+    
+    return config
 
 
 # ============================================================================
@@ -643,6 +739,28 @@ def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -
     
     elif tool_name == "read_neo4j_cypher_with_embedding":
         return "🧠 Semantik arama yapılıyor..."
+    
+    # ========== STDIO MCP TOOLS ==========
+    # Time Server tools
+    elif tool_name == "get_current_time":
+        timezone = tool_args.get("timezone", "UTC")
+        return f"🕐 {timezone} için güncel saat alınıyor..."
+    
+    elif tool_name == "convert_time":
+        return "🕐 Saat dönüşümü yapılıyor..."
+    
+    # Sequential Thinking tools
+    elif tool_name == "sequentialthinking":
+        return "🧠 Adım adım düşünme süreci başlatılıyor..."
+    
+    elif tool_name == "create_thinking_session":
+        return "🧠 Düşünme oturumu oluşturuluyor..."
+    
+    elif tool_name == "add_thought":
+        return "💭 Düşünce ekleniyor..."
+    
+    elif tool_name == "get_thinking_summary":
+        return "📝 Düşünce özeti hazırlanıyor..."
     
     else:
         # Bilinmeyen tool - generic mesaj
@@ -806,6 +924,18 @@ LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 # Langfuse'da "react-agent-system" adlı prompt oluşturulmalı.
 
 CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
+
+## ⏰ ZAMAN BİLGİSİ
+- Kullanıcı tarih veya saat sorduğunda **MUTLAKA** `get_current_time` tool'unu kullan.
+- Asla kendi bilgini kullanarak tarih/saat tahmini yapma!
+
+## 🧠 KARMAŞIK PROBLEMLER İÇİN
+
+Eğer soru çok adımlı veya karmaşıksa:
+1. Önce `sequentialthinking` tool'unu çağır
+2. Problemi adımlara böl
+3. Her adımı sırayla çöz
+4. Sonra asıl tool'ları kullan
 
 Sen Dinkal Sigorta için verilen soruya cevap veren ontology-driven bir AI agent'sın. Talimatlar aşağıda verilmiştir.
 <thinking_guide>
@@ -1846,9 +1976,9 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                 # Schema bilgisini al (opsiyonel)
                 schema_info = None
                 try:
-                    cached = get_cached_schema()
-                    if cached and cached.get("raw_schema"):
-                        schema_info = cached["raw_schema"][:2000]  # İlk 2000 karakter
+                    raw_schema = get_raw_schema()
+                    if raw_schema:
+                        schema_info = str(raw_schema)[:2000]  # İlk 2000 karakter
                 except:
                     pass
                 
@@ -2232,6 +2362,22 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     tools = [execute_cypher_query, add_source, read_finding]
     if GRAPH_DSL_AVAILABLE:
         tools.insert(0, execute_graph_dsl)  # DSL'i öne koy (önerilen yol)
+    
+    # MCP tool'larını filtrele - DISALLOW listesindekiler agent'a sunulmaz
+    # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar (execute_graph_dsl vb.) 
+    # bunları wrapper olarak kullanır. Model doğrudan çağırmamalı.
+    # Yeni MCP tool'ları otomatik olarak agent'a eklenir, sadece engellemek istediklerinizi buraya ekleyin.
+    AGENT_DISALLOWED_MCP_TOOLS = {
+        "read_neo4j_cypher",              # Internal: execute_cypher_query kullanır
+        "read_neo4j_cypher_with_embedding", # Internal: execute_graph_dsl semantic search kullanır
+    }
+    agent_mcp_tools = [t for t in mcp_tools if t.name not in AGENT_DISALLOWED_MCP_TOOLS]
+    
+    for mcp_tool in agent_mcp_tools:
+        tools.append(mcp_tool)
+    
+    _log(f"🔧 Total tools: {len(tools)} (custom: {4 if GRAPH_DSL_AVAILABLE else 3}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})")
+    
     return tools
 
 
@@ -2468,7 +2614,8 @@ class ReactAgent:
             # Yeni API: doğrudan get_tools() çağır (async)
             self.mcp_tools = await self.mcp_client.get_tools()
             tool_count = len(self.mcp_tools) if self.mcp_tools else 0
-            _log(f"✅ MCP connected, {tool_count} tools available")
+            tool_names = [t.name for t in self.mcp_tools] if self.mcp_tools else []
+            _log(f"✅ MCP connected, {tool_count} tools available: {tool_names}")
         
         # System prompt oluştur (cache-optimized, Langfuse Prompt Management)
         system_prompt = self._build_system_prompt(schema_info, session_id)
@@ -2841,6 +2988,9 @@ class ReactAgent:
             collected_tool_calls: List[Dict[str, Any]] = []
             pending_tool_inputs: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> {tool_name, tool_input, start_time}
             
+            # 📊 Langfuse için: LLM'e giden tüm context'i biriktir
+            accumulated_tool_results: List[Dict[str, Any]] = []  # [{tool_name, input, output}, ...]
+            
             chunk_count = 0
             async for chunk in agent.astream(agent_input, stream_mode="updates"):  # type: ignore[arg-type]
                 chunk_count += 1
@@ -2971,6 +3121,17 @@ class ReactAgent:
                                         ]
                                     }
                                 
+                                # 📊 Langfuse için: Tam context oluştur (soru + önceki tool sonuçları)
+                                llm_input_data: Dict[str, Any] = {
+                                    "question": question,
+                                    "step": llm_step_count,
+                                }
+                                
+                                # Tool sonuçları varsa ekle (LLM'in gördüğü context)
+                                if accumulated_tool_results:
+                                    llm_input_data["previous_tool_results"] = accumulated_tool_results.copy()
+                                    llm_input_data["tool_count"] = len(accumulated_tool_results)
+                                
                                 token_tracker.add_llm_step(
                                     step_name=f"llm_step_{llm_step_count}",
                                     input_tokens=input_tokens,
@@ -2978,7 +3139,7 @@ class ReactAgent:
                                     cached_tokens=cached_tokens,
                                     reasoning_tokens=reasoning_tokens,  # 🧠 GPT-5 reasoning
                                     session_id=session_id,
-                                    llm_input={"question": question, "step": llm_step_count},
+                                    llm_input=llm_input_data,
                                     llm_output=llm_output_data,
                                 )
                         
@@ -3043,6 +3204,18 @@ class ReactAgent:
                                     "tool_output": str(tool_content),
                                     "duration_ms": duration_ms,
                                     "success": result_status == "success",
+                                })
+                                
+                                # 📊 Langfuse için: Tool sonucunu accumulated context'e ekle
+                                # Output'u 2000 karakterle sınırla (çok uzun olmasın)
+                                output_preview = str(tool_content)[:2000]
+                                if len(str(tool_content)) > 2000:
+                                    output_preview += f"... ({len(str(tool_content))} karakter)"
+                                accumulated_tool_results.append({
+                                    "tool": pending_info.get("tool_name", tool_name),
+                                    "input": pending_info.get("tool_input", "")[:500],  # Input özeti
+                                    "output": output_preview,
+                                    "status": result_status,
                                 })
                             
                             # Kullanıcıya dostu sonuç mesajı göster
