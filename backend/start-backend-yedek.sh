@@ -13,17 +13,7 @@ export QUEUE_DB_URL="postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_gra
 export CELERY_BROKER_URL="amqp://guest:guest@3.76.55.209:5672//"
 export CELERY_RESULT_BACKEND="db+postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder"
 
-# Load specific variables from .env file (safer than export all)
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    # Read only specific needed variables
-    NEO4J_URI=$(grep '^NEO4J_URI=' "$SCRIPT_DIR/.env" | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-    NEO4J_USERNAME=$(grep '^NEO4J_USERNAME=' "$SCRIPT_DIR/.env" | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-    NEO4J_PASSWORD=$(grep '^NEO4J_PASSWORD=' "$SCRIPT_DIR/.env" | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-    NEO4J_DATABASE=$(grep '^NEO4J_DATABASE=' "$SCRIPT_DIR/.env" | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-fi
 
-# Change to backend directory
-cd "$SCRIPT_DIR"
 
 # ==============================
 # MCP Server (Docker Container)

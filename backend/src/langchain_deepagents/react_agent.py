@@ -1,18 +1,38 @@
 """
-ReAct Agent with Prompt Caching Optimization
+ReAct Agent with Multi-Provider Support (OpenAI & Anthropic)
 
-Bu modül, OpenAI Prompt Caching özelliğinden faydalanarak optimize edilmiş
-tek bir ReAct agent implementasyonu sağlar.
+Bu modül, OpenAI (GPT-5, GPT-4o) ve Anthropic (Claude Opus 4.5, Sonnet) 
+modellerini destekleyen, Prompt Caching optimizasyonlu ReAct agent sağlar.
 
-Mimari:
-- Tek ReAct agent
-- Cache-optimized prompt yapısı (sabit prefix, dinamik suffix)
-- Paralel tool çağrıları
-- Streaming response
+Desteklenen Modeller:
+┌────────────────────────────────────────────────────────────┐
+│  OPENAI                                                    │
+│  - gpt-5 (reasoning: low/medium/high)                      │
+│  - gpt-4o, gpt-4-turbo                                     │
+│  - o1-preview, o1-mini, o3-mini                            │
+├────────────────────────────────────────────────────────────┤
+│  ANTHROPIC                                                 │
+│  - claude-opus-4-5 (extended thinking: budget_tokens)      │
+│  - claude-sonnet-4-5 (extended thinking: budget_tokens)    │
+│  - claude-3-5-sonnet, claude-3-opus                        │
+└────────────────────────────────────────────────────────────┘
 
-Prompt Caching Stratejisi:
+Model Seçimi (Environment Variables):
+    REACT_MODEL=gpt-5                → OpenAI GPT-5
+    REACT_MODEL=claude-opus-4-5      → Anthropic Claude Opus 4.5
+    REACT_MODEL=claude-sonnet-4-5    → Anthropic Claude Sonnet 4.5
+
+Extended Thinking:
+    GPT-5:  REACT_REASONING_EFFORT=low|medium|high
+    Claude: REACT_THINKING_BUDGET=10000 (token sayısı, 0=kapalı)
+
+API Keys:
+    OPENAI_API_KEY     → OpenAI modelleri için
+    ANTHROPIC_API_KEY  → Claude modelleri için
+
+Prompt Caching Stratejisi (her iki provider için geçerli):
 ┌─────────────────────────────────────────────┐
-│         CACHED PREFIX (~4000-5000 token)    │ ← %50 indirim
+│         CACHED PREFIX (~4000-5000 token)    │ ← %50-90 indirim
 │  - System Instructions                       │
 │  - Tool Descriptions                         │
 │  - Cypher Rules                              │
@@ -38,6 +58,25 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 load_dotenv()
+
+# ============ DEBUG: Environment Variables Check ============
+print("\n" + "="*60)
+print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent.py)")
+print("="*60)
+_debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL"]
+for _key in _debug_keys:
+    _val = os.environ.get(_key)
+    if _val:
+        # Mask the key for security (show first 10 and last 4 chars)
+        if len(_val) > 20:
+            _masked = _val[:10] + "..." + _val[-4:]
+        else:
+            _masked = _val[:4] + "..." if len(_val) > 4 else "***"
+        print(f"  ✅ {_key}: {_masked}")
+    else:
+        print(f"  ❌ {_key}: NOT SET")
+print("="*60 + "\n")
+# ============================================================
 
 # Context for logging (Grafana/Loki)
 from src.shared.context import set_request_context, clear_request_context
@@ -443,9 +482,10 @@ class TokenTracker:
         }
     
     def _estimate_cost(self, model: str = "gpt-5") -> float:
-        """Tahmini maliyet hesapla (OpenAI Standard tier fiyatları)
+        """Tahmini maliyet hesapla
         
-        Fiyatlar: https://platform.openai.com/docs/pricing
+        OpenAI Fiyatları: https://platform.openai.com/docs/pricing
+        Anthropic Fiyatları: https://www.anthropic.com/pricing
         
         GPT-5 Standard (per 1M tokens):
         - Input: $1.25
@@ -456,12 +496,51 @@ class TokenTracker:
         - Input: $2.50
         - Cached Input: $1.25
         - Output: $10.00
+        
+        Claude Opus 4.5 (per 1M tokens):
+        - Input: $15.00
+        - Cached Input: $1.50 (10x cheaper!)
+        - Output: $75.00
+        
+        Claude Sonnet 4.5 (per 1M tokens):
+        - Input: $3.00
+        - Cached Input: $0.30
+        - Output: $15.00
+        
+        Claude 3.5 Sonnet (per 1M tokens):
+        - Input: $3.00
+        - Cached Input: $0.30
+        - Output: $15.00
         """
-        if "gpt-5" in model.lower():
+        model_lower = model.lower()
+        
+        # Claude Opus 4.5
+        if "claude-opus-4" in model_lower or "claude-opus-4-5" in model_lower:
+            input_price = 15.00
+            cached_price = 1.50
+            output_price = 75.00
+        # Claude Sonnet 4.5 / 3.5
+        elif "claude-sonnet" in model_lower or "claude-3-5-sonnet" in model_lower or "claude-3.5-sonnet" in model_lower:
+            input_price = 3.00
+            cached_price = 0.30
+            output_price = 15.00
+        # Claude 3 Opus (eski)
+        elif "claude-3-opus" in model_lower:
+            input_price = 15.00
+            cached_price = 1.50
+            output_price = 75.00
+        # Claude (diğer)
+        elif "claude" in model_lower:
+            input_price = 3.00
+            cached_price = 0.30
+            output_price = 15.00
+        # GPT-5
+        elif "gpt-5" in model_lower:
             input_price = 1.25
             cached_price = 0.125
             output_price = 10.00
-        else:  # gpt-4o, etc.
+        # OpenAI diğer (gpt-4o, o1, o3, vb.)
+        else:
             input_price = 2.50
             cached_price = 1.25
             output_price = 10.00
@@ -525,6 +604,7 @@ if TYPE_CHECKING:
     from langchain.agents import create_agent
     from langchain.agents.middleware import ModelCallLimitMiddleware
     from langchain.chat_models import init_chat_model
+    from langchain_anthropic import ChatAnthropic
 
 try:
     from langchain.agents import create_agent  # type: ignore
@@ -546,6 +626,16 @@ except ImportError as e:
     HumanMessage = None
     AIMessage = None
     SystemMessage = None
+
+# Anthropic Claude import
+try:
+    from langchain_anthropic import ChatAnthropic  # type: ignore
+    ANTHROPIC_AVAILABLE = True
+    logging.info("✅ LangChain Anthropic (Claude) imported")
+except ImportError as e:
+    logging.warning(f"⚠️ LangChain Anthropic not available: {e}")
+    ANTHROPIC_AVAILABLE = False
+    ChatAnthropic = None  # type: ignore
 
 # MCP Adapters import
 if TYPE_CHECKING:
@@ -682,11 +772,11 @@ def get_mcp_server_config() -> Dict[str, Any]:
             # 🧠 Sequential Thinking - Adım adım düşünme ve problem çözme
             # https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
             # Tools: sequentialthinking
-            "sequential-thinking": {
-                "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-                "transport": "stdio",
-            }
+            # "sequential-thinking": {
+            #     "command": "npx",
+            #     "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+            #     "transport": "stdio",
+            # }
         })
         logging.info(f"📡 MCP Config: neo4j-database (internal) + time + sequential-thinking")
     else:
@@ -929,13 +1019,6 @@ CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
 - Kullanıcı tarih veya saat sorduğunda **MUTLAKA** `get_current_time` tool'unu kullan.
 - Asla kendi bilgini kullanarak tarih/saat tahmini yapma!
 
-## 🧠 KARMAŞIK PROBLEMLER İÇİN
-
-Eğer soru çok adımlı veya karmaşıksa:
-1. Önce `sequentialthinking` tool'unu çağır
-2. Problemi adımlara böl
-3. Her adımı sırayla çöz
-4. Sonra asıl tool'ları kullan
 
 Sen Dinkal Sigorta için verilen soruya cevap veren ontology-driven bir AI agent'sın. Talimatlar aşağıda verilmiştir.
 <thinking_guide>
@@ -2387,21 +2470,39 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
 
 class ReactAgent:
     """
-    OpenAI Prompt Caching optimizasyonlu ReAct Agent
+    Multi-Provider ReAct Agent - OpenAI ve Anthropic Desteği
     
     Özellikler:
-    - Tek agent 
-    - Cache-optimized prompt (sabit prefix + dinamik suffix)
+    - OpenAI (GPT-5, GPT-4o, o1, o3) ve Anthropic (Claude Opus 4.5, Sonnet) desteği
+    - Prompt Caching optimizasyonu (hem OpenAI hem Anthropic)
+    - Extended Thinking desteği (GPT-5: reasoning_effort, Claude: thinking budget)
     - Paralel tool çağrıları
     - Streaming response
+    
+    Model Seçimi (Environment Variables):
+        REACT_MODEL=gpt-5                    → OpenAI GPT-5
+        REACT_MODEL=claude-opus-4-5          → Anthropic Claude Opus 4.5
+        REACT_MODEL=claude-sonnet-4-5        → Anthropic Claude Sonnet 4.5
+    
+    Extended Thinking:
+        GPT-5:  REACT_REASONING_EFFORT=low|medium|high
+        Claude: REACT_THINKING_BUDGET=10000 (token sayısı, 0=kapalı)
+    
+    API Keys:
+        OPENAI_API_KEY     → OpenAI modelleri için
+        ANTHROPIC_API_KEY  → Claude modelleri için
     """
     
     def __init__(self, graph, model_name: Optional[str] = None, reasoning_effort: Optional[str] = None):
         """
         Args:
             graph: Neo4j graph connection
-            model_name: Model adı (default: env REACT_MODEL veya gpt-5)
+            model_name: Model adı. Desteklenen modeller:
+                - OpenAI: gpt-5, gpt-4o, o1-preview, o3-mini vb.
+                - Anthropic: claude-opus-4-5, claude-sonnet-4-5, claude-3-5-sonnet vb.
+                Default: env REACT_MODEL veya gpt-5
             reasoning_effort: GPT-5 için reasoning effort (none, low, medium, high)
+                Claude için REACT_THINKING_BUDGET env variable kullanılır
         """
         self.graph = graph
         self.model_name = model_name or os.environ.get("REACT_MODEL", "gpt-5")
@@ -2653,7 +2754,22 @@ class ReactAgent:
         }
     
     def _create_model(self) -> Any:
-        """Model instance oluştur"""
+        """
+        Model instance oluştur.
+        
+        Desteklenen modeller:
+        - OpenAI: gpt-5, gpt-4o, gpt-4-turbo, o1-*, o3-* vb.
+        - Anthropic: claude-opus-4-5, claude-sonnet-4-5, claude-3-5-sonnet, claude-3-opus vb.
+        
+        Model seçimi REACT_MODEL env variable ile yapılır:
+        - REACT_MODEL=gpt-5                    → OpenAI GPT-5
+        - REACT_MODEL=claude-opus-4-5          → Anthropic Claude Opus 4.5
+        - REACT_MODEL=claude-sonnet-4-5        → Anthropic Claude Sonnet 4.5
+        
+        Extended Thinking (Reasoning):
+        - GPT-5: REACT_REASONING_EFFORT=low|medium|high
+        - Claude: REACT_THINKING_BUDGET=10000 (token sayısı, 0=kapalı)
+        """
         from langchain_openai import ChatOpenAI
         from pydantic import SecretStr
         
@@ -2661,24 +2777,56 @@ class ReactAgent:
         if ":" in self.model_name:
             actual_model = self.model_name.split(":", 1)[1]
         
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # ========== ANTHROPIC CLAUDE ==========
+        if actual_model.lower().startswith("claude"):
+            if not ANTHROPIC_AVAILABLE or ChatAnthropic is None:
+                raise ImportError("langchain-anthropic paketi kurulu değil. `uv add langchain-anthropic` ile kurun.")
+            
+            anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not anthropic_api_key:
+                raise ValueError("ANTHROPIC_API_KEY environment variable gerekli.")
+            
+            # Claude Extended Thinking (budget_tokens ile kontrol edilir)
+            # REACT_THINKING_BUDGET=10000 → 10K token thinking bütçesi
+            # REACT_THINKING_BUDGET=0 → Extended thinking kapalı
+            thinking_budget = int(os.environ.get("REACT_THINKING_BUDGET", "10000"))
+            
+            # Claude model parametreleri
+            model_kwargs: dict[str, Any] = {
+                "model": actual_model,
+                "api_key": SecretStr(anthropic_api_key),
+                "max_tokens": 16384,  # Claude için max output token
+            }
+            
+            # Extended thinking etkinleştir (budget > 0 ise)
+            if thinking_budget > 0:
+                model_kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                }
+                _log(f"🔧 Model: {actual_model} (Claude), extended_thinking={thinking_budget} tokens")
+            else:
+                _log(f"🔧 Model: {actual_model} (Claude), extended_thinking=disabled")
+            
+            return ChatAnthropic(**model_kwargs)
+        
+        # ========== OPENAI GPT ==========
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
         
         # GPT-5 için reasoning_effort + summary
-        # AgentAwareSemanticCache wrapper tool_calls serialize sorununu çözer
-        # Artık cache=False gerekmez
         # summary: "auto" | "concise" | "detailed" - düşünce süreçlerini gösterir
         if "gpt-5" in actual_model.lower() and self.reasoning_effort:
-            _log(f"🔧 Model: {actual_model}, reasoning={self.reasoning_effort}, summary=auto")
+            _log(f"🔧 Model: {actual_model} (OpenAI), reasoning={self.reasoning_effort}, summary=auto")
             return ChatOpenAI(
                 model=actual_model,
-                api_key=SecretStr(api_key) if api_key else None,
+                api_key=SecretStr(openai_api_key) if openai_api_key else None,
                 reasoning={"effort": self.reasoning_effort, "summary": "auto"},
             )
         else:
-            _log(f"🔧 Model: {actual_model}")
+            _log(f"🔧 Model: {actual_model} (OpenAI)")
             return ChatOpenAI(
                 model=actual_model,
-                api_key=SecretStr(api_key) if api_key else None,
+                api_key=SecretStr(openai_api_key) if openai_api_key else None,
             )
     
     async def stream_query_response(
@@ -3685,17 +3833,28 @@ async def stream_react_agent_response(
     """
     ReAct Agent ile streaming cevap üret.
     
-    OpenAI Prompt Caching optimizasyonlu tek agent kullanır.
+    Multi-provider desteği: OpenAI (GPT-5, GPT-4o) ve Anthropic (Claude Opus 4.5, Sonnet)
     
     Args:
         question: Kullanıcının sorusu
-        model: LLM modeli (default: env REACT_MODEL veya gpt-5)
+        model: LLM modeli. Desteklenen modeller:
+            - OpenAI: gpt-5, gpt-4o, o1-preview, o3-mini vb.
+            - Anthropic: claude-opus-4-5, claude-sonnet-4-5, claude-3-5-sonnet vb.
+            Default: env REACT_MODEL veya gpt-5
         session_id: Oturum ID'si (ZORUNLU)
         question_id: Soru ID'si
         graph: Neo4j graph connection
         reasoning_effort: GPT-5 için reasoning seviyesi (none, low, medium, high)
+            Claude için REACT_THINKING_BUDGET env variable kullanılır
         user_id: Kullanıcı ID (email veya unique identifier) - Langfuse User Tracking için
         **kwargs: Ek parametreler
+    
+    Environment Variables:
+        REACT_MODEL: Model seçimi (gpt-5, claude-opus-4-5 vb.)
+        REACT_REASONING_EFFORT: GPT-5 reasoning seviyesi (low, medium, high)
+        REACT_THINKING_BUDGET: Claude extended thinking token bütçesi (default: 10000)
+        OPENAI_API_KEY: OpenAI API key
+        ANTHROPIC_API_KEY: Anthropic API key
     
     Yields:
         Dict: Streaming chunk'ları
