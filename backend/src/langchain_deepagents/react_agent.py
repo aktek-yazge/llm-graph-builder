@@ -63,15 +63,17 @@ load_dotenv()
 print("\n" + "="*60)
 print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent.py)")
 print("="*60)
-_debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL"]
+_debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL", "REACT_TOOL_MODE"]
 for _key in _debug_keys:
     _val = os.environ.get(_key)
     if _val:
-        # Mask the key for security (show first 10 and last 4 chars)
-        if len(_val) > 20:
+        # Mask API keys for security (show first 10 and last 4 chars)
+        if "API_KEY" in _key and len(_val) > 20:
             _masked = _val[:10] + "..." + _val[-4:]
-        else:
+        elif "API_KEY" in _key:
             _masked = _val[:4] + "..." if len(_val) > 4 else "***"
+        else:
+            _masked = _val  # Non-sensitive values shown as-is
         print(f"  ✅ {_key}: {_masked}")
     else:
         print(f"  ❌ {_key}: NOT SET")
@@ -151,6 +153,11 @@ except ImportError as e:
 # Default: llm - LLM-based generation
 DSL_COMPILER_MODE = os.getenv("DSL_COMPILER_MODE", "llm")
 
+# Tool Mode: "dsl" veya "cypher"
+# dsl (default): Model DSL üretir, DSL Cypher'a derlenir (önerilen)
+# cypher: Model doğrudan Cypher yazar (ileri düzey kullanıcılar için)
+REACT_TOOL_MODE = os.getenv("REACT_TOOL_MODE", "dsl")
+
 # Logging ayarları
 logger = logging.getLogger(__name__)
 
@@ -205,6 +212,9 @@ class TokenTracker:
     total_llm_calls: int = 0
     total_tool_calls: int = 0
     
+    # Model adı (maliyet hesabı için) - add_llm_step ile set edilir
+    model_name: str = "unknown"
+    
     # Langfuse parent span referansı (tool span'ları bağlamak için)
     _langfuse_parent_span: Any = field(default=None, repr=False)
     _langfuse_parent_span_id: Optional[str] = field(default=None, repr=False)
@@ -218,7 +228,7 @@ class TokenTracker:
     
     def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
                      cached_tokens: int = 0, reasoning_tokens: int = 0, duration_ms: float = 0, 
-                     session_id: str = "", model: str = "gpt-5", 
+                     session_id: str = "", model: str = "unknown", 
                      llm_input: Any = None, llm_output: Any = None):
         """LLM çağrısı istatistiği ekle
         
@@ -230,10 +240,13 @@ class TokenTracker:
             reasoning_tokens: GPT-5 reasoning için harcanan token sayısı
             duration_ms: Süre (ms)
             session_id: Session ID
-            model: Model adı
+            model: Model adı (claude-opus-4-5, gpt-5, vb.)
             llm_input: LLM'e gönderilen mesajlar (Langfuse'da görünür)
             llm_output: LLM'den gelen cevap (Langfuse'da görünür)
         """
+        # Model adını sakla (maliyet hesabı için)
+        self.model_name = model
+        
         step = StepStats(
             step_name=step_name,
             step_type="llm_call",
@@ -257,7 +270,7 @@ class TokenTracker:
         else:
             cache_status = "🔴 CACHE MISS"
         
-        # Log - Session ID ile birlikte (reasoning tokens dahil)
+        # Log token kullanımı (reasoning tokens dahil)
         session_info = f"[Session: {session_id[:8]}]" if session_id else ""
         _log(f"📊 [TOKEN] {session_info} {step_name}")
         _log(f"   ├─ Input: {input_tokens:,} tokens")
@@ -287,21 +300,43 @@ class TokenTracker:
                         "cumulative_output": self.total_output_tokens,
                     },
                 )
-                # Langfuse'un beklediği alan isimleri (Settings > Models > gpt-5 Pricing'e göre):
-                # - input: uncached input tokens
-                # - input_cached_tokens: cached input tokens (10x ucuz)
-                # - output: output tokens
-                # - output_reasoning_tokens: reasoning tokens
+                # Langfuse model'e göre farklı token alan isimleri bekliyor:
+                # - Claude: cache_read_input_tokens, cache_creation_input_tokens
+                # - OpenAI: input_cached_tokens
                 uncached_input = max(0, input_tokens - cached_tokens)
-                generation.update(
-                    usage_details={
-                        "input": uncached_input,  # Sadece cache'lenmemiş input
-                        "input_cached_tokens": cached_tokens,  # ✅ Langfuse'un beklediği isim
-                        "output": output_tokens,
-                        "output_reasoning_tokens": reasoning_tokens,  # ✅ Langfuse'un beklediği isim
-                        "total": input_tokens + output_tokens,
-                    },
-                )
+                
+                # Model tipine göre doğru alan isimlerini belirle
+                model_lower = model.lower()
+                is_anthropic = "claude" in model_lower
+                
+                if is_anthropic:
+                    # Anthropic Claude - Langfuse Settings > Models > claude-opus-4-5 Pricing'e göre:
+                    # - input: uncached input tokens
+                    # - cache_read_input_tokens: cache'den okunan tokens (10x ucuz)
+                    # - output: output tokens
+                    generation.update(
+                        usage_details={
+                            "input": uncached_input,  # Sadece cache'lenmemiş input
+                            "cache_read_input_tokens": cached_tokens,  # ✅ Claude için doğru isim
+                            "output": output_tokens,
+                            "total": input_tokens + output_tokens,
+                        },
+                    )
+                else:
+                    # OpenAI GPT-5 - Langfuse Settings > Models > gpt-5 Pricing'e göre:
+                    # - input: uncached input tokens
+                    # - input_cached_tokens: cached input tokens (10x ucuz)
+                    # - output: output tokens
+                    # - output_reasoning_tokens: reasoning tokens (GPT-5 için)
+                    generation.update(
+                        usage_details={
+                            "input": uncached_input,  # Sadece cache'lenmemiş input
+                            "input_cached_tokens": cached_tokens,  # ✅ OpenAI için doğru isim
+                            "output": output_tokens,
+                            "output_reasoning_tokens": reasoning_tokens,  # ✅ GPT-5 reasoning tokens
+                            "total": input_tokens + output_tokens,
+                        },
+                    )
                 generation.end()
                 _log(f"📊 Langfuse generation created: {step_name} (child of parent)")
             else:
@@ -470,6 +505,7 @@ class TokenTracker:
     def get_summary(self) -> Dict[str, Any]:
         """İstatistik özeti döndür"""
         return {
+            "model": self.model_name,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "total_cached_tokens": self.total_cached_tokens,
@@ -478,7 +514,7 @@ class TokenTracker:
             "total_llm_calls": self.total_llm_calls,
             "total_tool_calls": self.total_tool_calls,
             "steps": len(self.steps),
-            "estimated_cost_usd": self._estimate_cost()
+            "estimated_cost_usd": self._estimate_cost(self.model_name)
         }
     
     def _estimate_cost(self, model: str = "gpt-5") -> float:
@@ -568,17 +604,17 @@ class TokenTracker:
         _log(f"   Output Token: {summary['total_output_tokens']:,}")
         _log(f"   Cached Token: {summary['total_cached_tokens']:,}")
         
-        # Cache durumu açıklaması
+        # Cache durumu açıklaması (Organization bazlı - session'dan bağımsız)
         cache_rate = summary['cache_hit_rate']
         if cache_rate >= 70:
             cache_emoji = "🟢"
             cache_note = "Mükemmel! Prompt Caching çalışıyor."
         elif cache_rate >= 30:
             cache_emoji = "🟡"
-            cache_note = "Kısmi cache hit. Prefix değişkenlik gösteriyor."
+            cache_note = "Kısmi cache hit. Prompt içeriği değişmiş olabilir."
         else:
             cache_emoji = "🔴"
-            cache_note = "Cache miss! Session/prefix değişmiş olabilir."
+            cache_note = "Cache miss! Prompt içeriği veya sırası değişmiş olabilir."
         
         _log(f"   Cache Hit Rate: {cache_rate}% {cache_emoji}")
         _log(f"   └─ Not: {cache_note}")
@@ -587,12 +623,24 @@ class TokenTracker:
         _log(f"   Tahmini Maliyet: ${summary['estimated_cost_usd']:.6f}")
         _log("=" * 70)
         
-        # OpenAI Prompt Caching bilgisi
-        _log("ℹ️  OpenAI Prompt Caching Bilgisi:")
-        _log("   • Cache SESSION ID'ye bağlı DEĞİL - aynı org/proje içinde çalışır")
-        _log("   • Aynı prefix (system prompt + schema) = cache hit")
-        _log("   • Cache TTL: ~5-10 dakika (OpenAI tarafı)")
-        _log("   • Minimum prefix: 1024 token")
+        # Model'e göre Prompt Caching bilgisi
+        model_name = summary.get('model', 'unknown').lower()
+        if "claude" in model_name:
+            _log("ℹ️  Anthropic Claude Prompt Caching Bilgisi:")
+            _log("   • Cache ORGANIZATION bazlı - aynı org içinde paylaşılır")
+            _log("   • Session ID'den BAĞIMSIZ - farklı session'lar cache'i paylaşır")
+            _log("   • Exact match gerekli: System prompt + Tools + prefix %100 aynı olmalı")
+            _log("   • Cache TTL: 5 dakika (ephemeral), 1 saat (extended + ek maliyet)")
+            _log("   • Minimum cache: 1024 token")
+            _log(f"   • Model: {summary.get('model', 'claude')}")
+        else:
+            _log("ℹ️  OpenAI Prompt Caching Bilgisi:")
+            _log("   • Cache ORGANIZATION bazlı - aynı org içinde paylaşılır")
+            _log("   • Session ID'den BAĞIMSIZ - farklı session'lar cache'i paylaşır")
+            _log("   • Aynı prefix (system prompt + schema) = cache hit")
+            _log("   • Cache TTL: ~5-10 dakika")
+            _log("   • Minimum prefix: 1024 token")
+            _log(f"   • Model: {summary.get('model', 'unknown')}")
         _log("")
 
 
@@ -805,14 +853,14 @@ def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -
             return "📊 Veritabanında eşleşmeler aranıyor..."
         elif "embed" in step_name.lower() or "search" in step_name.lower():
             return "📖 Belge içerikleri taranıyor..."
-        elif "policy" in step_name.lower():
-            return "📋 Poliçe bilgileri kontrol ediliyor..."
+        elif "entity" in step_name.lower() or "record" in step_name.lower():
+            return "📋 Kayıt bilgileri kontrol ediliyor..."
         elif "document" in step_name.lower():
             return "📄 Belgeler inceleniyor..."
-        elif "coverage" in step_name.lower():
-            return "🛡️ Teminat bilgileri aranıyor..."
-        elif "company" in step_name.lower() or "issuer" in step_name.lower():
-            return "🏢 Şirket bilgileri kontrol ediliyor..."
+        elif "attribute" in step_name.lower() or "property" in step_name.lower():
+            return "🛡️ Özellik bilgileri aranıyor..."
+        elif "company" in step_name.lower() or "organization" in step_name.lower():
+            return "🏢 Organizasyon bilgileri kontrol ediliyor..."
         elif "date" in step_name.lower():
             return "📅 Tarih bilgileri alınıyor..."
         else:
@@ -1007,20 +1055,210 @@ LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 # ============================================================================
 
 # Bu prefix ~4000-5000 token olmalı ve session boyunca DEĞİŞMEMELİ
-# Prompt Caching bu prefix'i cache'leyerek %50 token indirimi sağlar
+# =============================================================================
+# PROMPT CONSTANTS
+# =============================================================================
+# Prompt Caching bu prefix'leri cache'leyerek %50 token indirimi sağlar
 #
-# NOT: Bu prompt FALLBACK olarak kullanılır.
+# YAPILAR:
+# - SHARED_SYSTEM_BASE: Her iki modda da ortak olan içerik
+# - DSL_TOOL_USAGE: DSL modu için tool kullanım rehberi
+# - CYPHER_TOOL_USAGE: Cypher modu için tool kullanım rehberi
+#
+# NOT: Bu prompt'lar FALLBACK olarak kullanılır.
 # Öncelik Langfuse Prompt Management'dadır.
-# Langfuse'da "react-agent-system" adlı prompt oluşturulmalı.
 
-CACHED_SYSTEM_PREFIX = """# 🎯 DİNKAL SİGORTA NEO4J AGENT
+# =============================================================================
+# SHARED BASE - Her iki modda da ortak
+# =============================================================================
+SHARED_SYSTEM_BASE = """# 🎯 NEO4J KNOWLEDGE GRAPH AGENT
 
 ## ⏰ ZAMAN BİLGİSİ
 - Kullanıcı tarih veya saat sorduğunda **MUTLAKA** `get_current_time` tool'unu kullan.
 - Asla kendi bilgini kullanarak tarih/saat tahmini yapma!
 
+Sen verilen knowledge graph üzerinde soruları cevaplayan ontology-driven bir AI agent'sın. 
+Node ve ilişki isimlerini her zaman ŞEMADAN al! Talimatlar aşağıda verilmiştir.
+"""
 
-Sen Dinkal Sigorta için verilen soruya cevap veren ontology-driven bir AI agent'sın. Talimatlar aşağıda verilmiştir.
+# =============================================================================
+# DSL MODE - Tool Usage Guide
+# =============================================================================
+DSL_TOOL_USAGE = """
+<tool_usage>
+## 🔧 TOOL KULLANIM REHBERİ (DSL MODE)
+
+### execute_graph_dsl(dsl_json, step_name, compiler_mode) - ANA ARAÇ
+DSL ile sorgu - hata yapmaya daha az müsait, otomatik validation ve Cypher derleme.
+
+**NE ZAMAN:** Graph sorgularının %90'ı bu tool ile yapılabilir
+- Entity keşfi, property araması
+- İlişki takibi (traversal)
+- Aggregation (COUNT, SUM, AVG, MAX, MIN)
+- Chunk semantic araması (search_content)
+
+**DSL FORMATI:**
+```json
+{
+    "intent": "find_by_property | find_by_relationship | search_content | count_nodes | aggregate_values",
+    "start_node": "NodeLabel",
+    "traversal": [{"from_node": "A", "relation": "REL", "to_node": "B", "direction": "outgoing"}],
+    "filters": [{"node": "A", "property": "name", "operator": "contains", "value": "aranan"}],
+    "return_spec": {"nodes": ["A", "B"], "properties": {"A": ["name"]}, "distinct": true},
+    "aggregate": {"function": "count", "node": "B", "alias": "toplam"},
+    "semantic_search": {"query_text": "kavram", "similarity_threshold": 0.7, "limit": 10},
+    "limit": 10
+}
+```
+
+**INTENT TİPLERİ:**
+| Intent | Kullanım | Örnek |
+|--------|----------|-------|
+| explore_node | Node örneklerini gör | Şemayı keşfet |
+| find_by_property | Property ile ara | name CONTAINS "X" |
+| find_by_relationship | İlişki takibi | A → B → C |
+| search_content | Semantic arama | Chunk içerik araması |
+| count_nodes | Sayma | Kaç tane X var? |
+| aggregate_values | SUM/AVG/MAX/MIN | En yüksek değer |
+
+**FILTER OPERATÖRLERİ:** equals, contains, starts_with, gt, lt, gte, lte, in, is_null
+
+---
+
+### execute_cypher_query(cypher, step_name) - FALLBACK
+DSL desteklemeyen özel durumlar için doğrudan Cypher.
+
+**NE ZAMAN:** 
+- DSL ile ifade edilemeyen karmaşık sorgular
+- UNION, CASE/WHEN gerektiren durumlar
+
+---
+
+### add_source(source_type, value) - KAYNAK EKLEME
+**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
+
+⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
+Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
+
+```
+source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
+source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
+```
+
+❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
+✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
+
+⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
+
+---
+
+### read_finding(step_name, start_record, end_record) - PAGINATION
+İlk sorgu 10 kayıt gösterir. Daha fazlası için:
+```
+read_finding("step_1", start_record=10, end_record=20)
+```
+</tool_usage>
+"""
+
+# =============================================================================
+# CYPHER MODE - Tool Usage Guide  
+# =============================================================================
+CYPHER_TOOL_USAGE = """
+<tool_usage>
+## 🔧 TOOL KULLANIM REHBERİ (CYPHER MODE)
+
+### execute_cypher_query(cypher, step_name) - METADATA SORGUSU
+**NE ZAMAN:** Graph node/ilişki sorguları, metadata, sayısal bilgiler
+
+```cypher
+-- KEŞİF: Entity bul (node label'ı ŞEMADAN al!)
+MATCH (n:NodeLabel) 
+WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan')
+RETURN DISTINCT n.name LIMIT 10
+
+-- METADATA: İlişki takibi
+MATCH (a:NodeA)-[:RELATIONSHIP]->(b:NodeB)
+WHERE a.name = 'Bulunan Değer'
+RETURN b.property1, b.property2 LIMIT 20
+```
+
+---
+
+### execute_cypher_query_with_embedding(query_text, cypher, step_name) - SEMANTİK ARAMA
+**NE ZAMAN:** Doküman içeriğinde arama, detay/liste/tablo istekleri
+
+⚠️ **KRİTİK KURALLAR:**
+1. Vector index adı: `'vector'` (sabit)
+2. `$embedding_vector` parametresi ZORUNLU
+3. `YIELD node AS c, score` formatı ZORUNLU
+4. query_text = KAVRAM (isim, tarih, kod DEĞİL!)
+
+**HIZLI MOD (Filter yok):**
+```python
+execute_cypher_query_with_embedding(
+    query_text="aranan kavram",
+    cypher=\"\"\"
+    CALL db.index.vector.queryNodes('vector', 50, $embedding_vector)
+    YIELD node AS c, score
+    WHERE score > 0.75
+    RETURN c.text AS text, score, c.page_link, c.fileName
+    ORDER BY score DESC LIMIT 15
+    \"\"\",
+    step_name="semantic_search"
+)
+```
+
+**FİLTRELİ MOD (Entity ile - ŞEMAYA GÖRE UYARLA):**
+```python
+execute_cypher_query_with_embedding(
+    query_text="aranan kavram",
+    cypher=\"\"\"
+    CALL db.index.vector.queryNodes('vector', 100, $embedding_vector)
+    YIELD node AS c, score
+    WHERE score > 0.70
+    MATCH (c)-[:CHUNK_REL]->(d:Document)<-[:DOC_REL]-(e:EntityNode)
+    WHERE e.name CONTAINS 'değer'
+    RETURN c.text AS text, score, d.fileName, e.name
+    ORDER BY score DESC LIMIT 15
+    \"\"\",
+    step_name="entity_search"
+)
+```
+
+⚠️ İlişki ve node adlarını ŞEMADAN al! (CHUNK_REL, DOC_REL, EntityNode örnektir)
+
+---
+
+### add_source(source_type, value) - KAYNAK EKLEME
+**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
+
+⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
+Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
+
+```
+source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
+source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
+```
+
+❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
+✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
+
+⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
+
+---
+
+### read_finding(step_name, start_record, end_record) - PAGINATION
+İlk sorgu 10 kayıt gösterir. Daha fazlası için:
+```
+read_finding("step_1", start_record=10, end_record=20)
+```
+</tool_usage>
+"""
+
+# =============================================================================
+# DSL MODE - Thinking Guide (DSL-specific content)
+# =============================================================================
+DSL_THINKING_GUIDE = """
 <thinking_guide>
 📚 **DÜŞÜNME REHBERİ:** 
    - Hangi intent seçmeli, nereye bakmalı, bulamazsan ne yapmalı, hata alırsan nasıl çözmeli
@@ -1049,42 +1287,42 @@ SORU ANALİZİ → INTENT SEÇİMİ
 ### ADIM 1: Schema'da Property Var mı?
 
 ```
-SORU: "Reasürans oranı en yüksek poliçe hangisi?"
+SORU: "X özelliği en yüksek Y hangisi?"
 
-DÜŞÜN: "reasürans" schema'da hangi node'da?
-├── Policy property'leri: policyNumber, currency, source_file → YOK
-├── Premium property'leri: amount, currency, commissionRate → YOK  
-├── Coverage property'leri: name → Belki "reasürans" içerir?
-├── CoverageLimit property'leri: limit_value, limit_unit → YOK
-└── SONUÇ: Structured data'da direkt property yok!
+DÜŞÜN: "X" schema'da hangi node'da? (ŞEMAYA BAK!)
+├── EntityA property'leri: id, name, type → VAR MI?
+├── EntityB property'leri: value, amount → VAR MI?
+├── AttributeNode property'leri: name, description → VAR MI?
+└── SONUÇ: Şemadaki property'leri kontrol et!
 ```
 
 **Varsa → FIND_BY_PROPERTY veya AGGREGATE_VALUES:**
 ```json
 {
   "intent": "aggregate_values",
-  "traversal": [{"from_node": "Policy", "relation": "HAS_X", "to_node": "X"}],
-  "aggregate": {"function": "max", "node": "X", "property": "oran"},
-  "order_by": {"node": "X", "property": "oran", "direction": "DESC"}
+  "traversal": [{"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}],
+  "aggregate": {"function": "max", "node": "AttributeNode", "property": "value"},
+  "order_by": {"node": "AttributeNode", "property": "value", "direction": "DESC"}
 }
 ```
+⚠️ Node ve ilişki adlarını ŞEMADAN al!
 
 ### ADIM 2: İlişkili Node'da Var mı?
 
 ```
-DÜŞÜN: Coverage.name içinde "reasürans" olabilir mi?
+DÜŞÜN: AttributeNode.name içinde "aranan_terim" olabilir mi?
 
-DSL:
+DSL (node/ilişki adlarını ŞEMADAN al!):
 {
   "intent": "find_by_relationship",
-  "start_node": "Policy",
+  "start_node": "EntityA",
   "traversal": [
-    {"from_node": "Policy", "relation": "HAS_COVERAGE", "to_node": "Coverage"}
+    {"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}
   ],
   "filters": [
-    {"node": "Coverage", "property": "name", "operator": "contains", "value": "reasürans"}
+    {"node": "AttributeNode", "property": "name", "operator": "contains", "value": "aranan_terim"}
   ],
-  "return_spec": {"nodes": ["Policy", "Coverage"], "properties": {...}}
+  "return_spec": {"nodes": ["EntityA", "AttributeNode"], "properties": {...}}
 }
 ```
 
@@ -1097,7 +1335,7 @@ DSL:
 {
   "intent": "search_content",
   "semantic_search": {
-    "query_text": "reasürans oranı reinsurance rate",
+    "query_text": "aranan kavram alternatif terimler",
     "target_node": "Chunk",
     "similarity_threshold": 0.7,
     "limit": 10
@@ -1119,7 +1357,7 @@ DSL:
 ├─────────────────────────────────────────────────────────────────┤
 │  ADIM 2: FIND_BY_RELATIONSHIP                                   │
 │  └── İlişkili node'ların property'lerinde var mı?               │
-│      Policy → Coverage/Clause/Guarantee.name CONTAINS terim?    │
+│      EntityA → RelatedNode.property CONTAINS terim?             │
 │      ✓ Bulundu → Sonuç döndür                                   │
 │      ✗ Bulunamadı → ADIM 3'e geç                                │
 ├─────────────────────────────────────────────────────────────────┤
@@ -1154,8 +1392,8 @@ DÜŞÜN:
 ├── Filtre çok dar mı? → operator: "contains" kullan, "equals" değil
 ├── Türkçe karakter sorunu mu? → Alternatif yazımları dene
 ├── 🌐 DİL FARKI MI? → İngilizce karşılığını dene!
-│   └── Örn: "reasürans" → 0 sonuç? → "reinsurance" dene!
-│   └── Teknik terimler genelde İngilizce (coverage, clause, premium, deductible)
+│   └── Örn: Türkçe terim → 0 sonuç? → İngilizce karşılığını dene!
+│   └── Teknik terimler genelde İngilizce (specification, attribute, status, type)
 ├── Yanlış node mu? → Traversal'ı gözden geçir
 └── Property yok mu? → SEARCH_CONTENT'e geç
 ```
@@ -1187,7 +1425,7 @@ DSL:
 }
 
 NEDEN: Semantic search bazen exact match'leri kaçırabilir.
-       "reasürans" kelimesi belgede geçiyor ama farklı anlamda yorumlanmış olabilir.
+       Aranan kelime belgede geçiyor ama farklı anlamda yorumlanmış olabilir.
 ```
 
 ### Durum 4: Traversal Hatası
@@ -1197,45 +1435,45 @@ NEDEN: Semantic search bazen exact match'leri kaçırabilir.
 DÜŞÜN:
 ├── Relationship yönü doğru mu? → "outgoing" vs "incoming"
 ├── Relationship adı doğru mu? → Schema'yı kontrol et
-├── Ara node gerekli mi? → Policy → X → Y şeklinde mi?
+├── Ara node gerekli mi? → EntityA → X → Y şeklinde mi?
 └── OPTIONAL MATCH gerekli mi? → "optional": true ekle
 ```
 
 ---
 
-## 📋 INTENT → DSL ŞABLONLARI
+## 📋 INTENT → DSL ŞABLONLARI (Node/İlişki adlarını ŞEMADAN al!)
 
-### Müşteri Poliçelerini Bul
+### Entity İlişkisi Bul
 ```json
 {
   "intent": "find_by_relationship",
   "traversal": [
-    {"from_node": "Customer", "relation": "HAS_POLICY", "to_node": "Policy"}
+    {"from_node": "EntityA", "relation": "HAS_RELATION", "to_node": "EntityB"}
   ],
   "filters": [
-    {"node": "Customer", "property": "name", "operator": "contains", "value": "..."}
+    {"node": "EntityA", "property": "name", "operator": "contains", "value": "..."}
   ],
   "return_spec": {
-    "nodes": ["Customer", "Policy"],
-    "properties": {"Customer": ["name"], "Policy": ["policyNumber"]}
+    "nodes": ["EntityA", "EntityB"],
+    "properties": {"EntityA": ["name"], "EntityB": ["id", "value"]}
   }
 }
 ```
 
-### En Yüksek Prim
+### En Yüksek/Düşük Değer (Aggregate)
 ```json
 {
   "intent": "aggregate_values",
   "traversal": [
-    {"from_node": "Policy", "relation": "HAS_PREMIUM", "to_node": "Premium"}
+    {"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}
   ],
   "aggregate": {
     "function": "max",
-    "node": "Premium",
-    "property": "amount",
-    "alias": "max_prim"
+    "node": "AttributeNode",
+    "property": "value",
+    "alias": "max_value"
   },
-  "order_by": {"node": "Premium", "property": "amount", "direction": "DESC"},
+  "order_by": {"node": "AttributeNode", "property": "value", "direction": "DESC"},
   "limit": 1
 }
 ```
@@ -1245,7 +1483,7 @@ DÜŞÜN:
 {
   "intent": "search_content",
   "semantic_search": {
-    "query_text": "taksit ödeme planı vade tutarı",
+    "query_text": "aranan kavram alternatif terimler",
     "similarity_threshold": 0.7,
     "limit": 10
   },
@@ -1253,19 +1491,19 @@ DÜŞÜN:
 }
 ```
 
-### Belirli Poliçenin İçeriğinde Ara (Hibrit)
+### Belirli Entity'nin İçeriğinde Ara (Hibrit)
 ```json
 {
   "intent": "search_content",
   "traversal": [
-    {"from_node": "Policy", "relation": "DOCUMENTED_IN", "to_node": "Document"},
+    {"from_node": "EntityA", "relation": "HAS_DOCUMENT", "to_node": "Document"},
     {"from_node": "Document", "relation": "FIRST_CHUNK", "to_node": "Chunk"}
   ],
   "filters": [
-    {"node": "Policy", "property": "policyNumber", "operator": "equals", "value": "946006"}
+    {"node": "EntityA", "property": "id", "operator": "equals", "value": "123"}
   ],
   "semantic_search": {
-    "query_text": "muafiyet istisna",
+    "query_text": "aranan kavram detay",
     "similarity_threshold": 0.6
   }
 }
@@ -1277,7 +1515,7 @@ DÜŞÜN:
   "intent": "search_text",
   "start_node": "Chunk",
   "filters": [
-    {"node": "Chunk", "property": "text", "operator": "contains", "value": "reasürans"}
+    {"node": "Chunk", "property": "text", "operator": "contains", "value": "aranan_kelime"}
   ],
   "return_spec": {
     "nodes": ["Chunk"],
@@ -1296,8 +1534,8 @@ DÜŞÜN:
     {"from_node": "Chunk", "relation": "PART_OF", "to_node": "Document"}
   ],
   "filters": [
-    {"node": "Chunk", "property": "text", "operator": "contains", "value": "reasürans"},
-    {"node": "Document", "property": "fileName", "operator": "contains", "value": "policy_123"}
+    {"node": "Chunk", "property": "text", "operator": "contains", "value": "aranan_kelime"},
+    {"node": "Document", "property": "fileName", "operator": "contains", "value": "dosya_adi"}
   ],
   "return_spec": {
     "nodes": ["Chunk", "Document"],
@@ -1309,18 +1547,18 @@ DÜŞÜN:
 
 ---
 
-## 🎯 HIZLI KARAR TABLOSU
+## 🎯 HIZLI KARAR TABLOSU (Node adlarını ŞEMADAN al!)
 
-| Soru İçeriği | Intent | Traversal Başlangıcı |
+| Soru İçeriği | Intent | Traversal Örneği |
 |-------------|--------|---------------------|
-| "X'in poliçeleri" | find_by_relationship | Customer → Policy |
-| "Poliçenin primi" | find_by_relationship | Policy → Premium |
-| "Kaç poliçe var" | count_nodes | Policy |
-| "En yüksek prim" | aggregate_values | Policy → Premium |
-| "Taksit detayları" | search_content | Chunk (semantic) |
+| "X'in Y'leri neler" | find_by_relationship | EntityA → EntityB |
+| "Y'nin Z'si" | find_by_relationship | EntityB → AttributeNode |
+| "Kaç tane X var" | count_nodes | EntityA |
+| "En yüksek/düşük Z" | aggregate_values | EntityA → AttributeNode |
+| "Detayları neler" | search_content | Chunk (semantic) |
 | "Ne yazıyor" | search_content | Chunk (semantic) |
-| "2024 poliçeleri" | find_by_relationship | Policy → Date |
-| "İstanbul'daki" | find_by_relationship | Policy → RiskAddress |
+| "Tarih filtreli" | find_by_relationship | EntityA → Date |
+| "Lokasyon filtreli" | find_by_relationship | EntityA → Location |
 | Semantic boş geldi | search_text | Chunk.text CONTAINS |
 | "X kelimesi geçen" | search_text | Chunk.text CONTAINS |
 
@@ -1330,14 +1568,14 @@ DÜŞÜN:
 
 ```
 ✅ DOĞRU: Sadece kavramsal terimler
-   "taksit ödeme planı vade"
-   "reasürans oranı reinsurance"
-   "muafiyet istisna kapsam dışı"
+   "ödeme planı vade detayları"
+   "teknik özellikler spesifikasyon"
+   "şartlar koşullar kapsam"
 
 ❌ YANLIŞ: Metadata karıştırma
-   "Ayşe Yılmaz 2024 kasko taksit"
-   "946006 poliçe primi"
-   "Zurich yangın"
+   "Ahmet Yılmaz 2024 kayıt detay"
+   "123456 numara özellik"
+   "Şirket X rapor"
    
 ⚠️ Metadata filtrelemesi → DSL filters[] içinde yap, query_text'e koyma!
 ```
@@ -1385,8 +1623,8 @@ DÜŞÜN:
     "step_name": "embed_search_topic",
     "traversal": [
         {"from_node": "EntityA", "relation": "REL_TO_B", "to_node": "EntityB", "direction": "outgoing"},
-        {"from_node": "EntityB", "relation": "DOCUMENTED_IN", "to_node": "Document", "direction": "outgoing"},
-        {"from_node": "Document", "relation": "PART_OF", "to_node": "Chunk", "direction": "incoming"}
+        {"from_node": "EntityB", "relation": "HAS_DOCUMENT", "to_node": "Document", "direction": "outgoing"},
+        {"from_node": "Document", "relation": "HAS_CHUNK", "to_node": "Chunk", "direction": "outgoing"}
     ],
     "filters": [
         {"node": "EntityA", "property": "name", "operator": "in", "value": ["Önceki sorguda bulunan TÜM varyasyonlar..."]},
@@ -1463,7 +1701,12 @@ DSL desteklemeyen durumlar için `execute_cypher_query` kullan:
 Ama önce DSL dene! Çoğu sorgu DSL ile yapılabilir.
 
 </graph_dsl_mode>
+"""
 
+# =============================================================================
+# SHARED CONTENT - Her iki modda da ortak
+# =============================================================================
+SHARED_CONTENT = """
 <context_gathering>
 Goal: Keşifte bulunan TÜM entity varyasyonlarını cache'le ve sonraki sorgularda kullan.
 
@@ -1591,56 +1834,6 @@ SORGUYU BASİT TUT!
 
 ---
 
-<tools>
-## 🔧 ARAÇLAR (Neo4j Cypher)
-
-### execute_cypher_query(cypher, step_name)
-**NE ZAMAN:** Metadata sorguları, entity keşfi, ilişki takibi, sayısal bilgiler
-⚠️ `cypher` parametresi **Neo4j Cypher** syntax'ı olmalı!
-
-```cypher
--- KEŞİF: Şemadaki node'larda arama (node label'ı ŞEMADAN al!)
-MATCH (n:NodeLabel) 
-WHERE apoc.text.clean(n.propertyName) CONTAINS apoc.text.clean('arama_terimi')
-RETURN DISTINCT n.propertyName LIMIT 10
-
--- METADATA: KEŞİF'ten bulunan EXACT değerle sorgula
-MATCH (a:NodeA)-[:RELATIONSHIP]->(b:NodeB)
-WHERE a.name = 'Keşifte Bulunan Exact Değer'
-RETURN b.property1, b.property2 LIMIT 20
-```
-
-### add_source(source_type, value) - KAYNAK EKLEME
-Cevaba kaynak eklemek için - **ZORUNLU KURALLAR:**
-
-⚠️ **NE ZAMAN ÇAĞIRMALISIN?**
-- Sorgu sonucunda `fileName` veya `file` varsa → `add_source("document", fileName)` çağır!
-- Sorgu sonucunda `page_link` varsa → `add_source("page", page_link)` çağır!
-- Cevabında PDF dosya adı geçecekse → ÖNCE add_source çağır!
-
-```
-source_type="document" → PDF dosya adı (örn: "Rapor_2024.pdf")
-source_type="page"     → Sayfa görseli (örn: "Rapor_2024_page_001.png")
-```
-
-⛔ **KURAL:** add_source çağırmadan dosya adı/page_link YAZMA!
-✅ **SADECE** add_source çağır, cevabında dosya adı/kaynak YAZMA! (Link otomatik eklenir)
-
-### read_finding(step_name, start_record, end_record) - PAGINATION
-Sorgu sonuçlarının devamını görmek için:
-
-⚠️ **NE ZAMAN KULLAN?**
-- execute_graph_dsl veya execute_cypher_query ilk 10 kaydı gösterir
-- "Toplam: 150 kayıt, Gösterilen: 0-10" görürsen daha fazlası var demektir
-- Doğru cevabın 10. kayıttan sonra olabileceğini düşünüyorsan bu tool'u kullan
-
-```
-Örnekler:
-read_finding("step_1_search", start_record=10, end_record=20)  → 10-20 arası
-read_finding("step_1_search", start_record=20, end_record=50)  → 20-50 arası
-```
-</tools>
-
 <cypher_rules>
 ## ŞEMA-TABANLI SORGULAMA
 1. Node label'larını ŞEMADAN al → Tahmin ETME!
@@ -1725,7 +1918,7 @@ ADIM 5: explore_node → Schema keşfi, alternatif bul
 ```
 
 ⚠️ **Semantic boş dönerse → search_text ile keyword ara!**
-⚠️ **Chunk ilişkisi: PART_OF (tüm chunk'lar), FIRST_CHUNK değil!**
+⚠️ **Chunk ilişkisi: ŞEMADAN bak! (Document-Chunk arası ilişki adı değişebilir)**
 </fallback_strategy>
 
 <output_rules>
@@ -1843,21 +2036,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
     # =========================================================================
     @tool
     async def execute_cypher_query(cypher: str, step_name: str) -> str:
-        """
-        Cypher sorgusunu çalıştır ve sonucu döndür.
-        
-        USE FOR:
-        - Entity keşfi (varyasyon bulma)
-        - Metadata sorguları (sayı, tarih, liste)
-        - İlişki takibi
-        
-        Args:
-            cypher: Cypher sorgusu
-            step_name: Adım adı (örn: step_1_entity_search)
-        
-        Returns:
-            İlk 10 kayıt + pagination bilgisi. Daha fazla için read_more_results kullan.
-        """
+        """Neo4j Cypher sorgusu çalıştır. Detaylar prompt'ta."""
         mcp_read = mcp_tool_map.get("read_neo4j_cypher")
         if not mcp_read:
             return '{"error": "MCP read_neo4j_cypher tool not found"}'
@@ -1926,60 +2105,125 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             return f'{{"error": "{str(e)}"}}'
     
     # =========================================================================
+    # EXECUTE CYPHER QUERY WITH EMBEDDING TOOL - Semantic Search
+    # =========================================================================
+    @tool
+    async def execute_cypher_query_with_embedding(query_text: str, cypher: str, step_name: str) -> str:
+        """Vector index ile semantik arama. query_text=kavram, cypher=$embedding_vector içermeli. Detaylar prompt'ta."""
+        mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
+        if not mcp_embedding:
+            return '{"error": "MCP read_neo4j_cypher_with_embedding tool not found"}'
+        
+        try:
+            # Validate: $embedding_vector parametresi zorunlu
+            if "$embedding_vector" not in cypher:
+                return """❌ HATA: Cypher sorgusu $embedding_vector parametresi içermiyor!
+
+✅ DOĞRU KULLANIM (db.index.vector.queryNodes):
+execute_cypher_query_with_embedding(
+    query_text="aranan kavram",
+    cypher=\"\"\"
+    CALL db.index.vector.queryNodes('vector', 50, $embedding_vector)
+    YIELD node AS c, score
+    WHERE score > 0.75
+    RETURN c.text AS text, score, c.page_link AS page_link, c.fileName AS fileName
+    ORDER BY score DESC
+    LIMIT 15
+    \"\"\",
+    step_name="semantic_search"
+)
+
+🔍 FİLTRELİ ARAMA (ilişki ve node adlarını ŞEMADAN al!):
+execute_cypher_query_with_embedding(
+    query_text="aranan kavram",
+    cypher=\"\"\"
+    CALL db.index.vector.queryNodes('vector', 100, $embedding_vector)
+    YIELD node AS c, score
+    WHERE score > 0.70
+    MATCH (c)-[:PART_OF]->(d:Document)<-[:HAS_DOCUMENT]-(e:Entity)
+    WHERE e.property CONTAINS 'değer'
+    RETURN c.text AS text, score, d.fileName AS fileName
+    ORDER BY score DESC
+    LIMIT 15
+    \"\"\",
+    step_name="filtered_search"
+)
+
+⚠️ NOT: İlişki adları (PART_OF, HAS_DOCUMENT vb.) ve node label'ları (Entity) ŞEMAYA GÖRE DEĞİŞİR!
+Lütfen sorguyu düzelt ve tekrar dene."""
+            
+            # 🛡️ Guardrails: Cypher injection validation
+            if GUARDRAILS_ENABLED:
+                is_safe, sanitized_cypher, violations = validate_cypher_query(cypher)
+                if not is_safe:
+                    _log(f"⚠️ Cypher blocked: {violations}", "warning")
+                    return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
+                cypher = sanitized_cypher
+            
+            result = await mcp_embedding.ainvoke({
+                "query_text": query_text,
+                "cypher_query": cypher,
+                "params": {}
+            })
+            result_str = str(result) if result else ""
+            
+            # Hata kontrolü
+            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+            
+            # Kayıtları parse et
+            records = _parse_records(result_str)
+            record_count = len(records)
+            
+            # Eğer parse edilemezse eski yönteme fallback
+            if record_count == 0 and result_str and not is_error:
+                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
+                records = lines
+                record_count = len(records)
+            
+            # Status belirleme
+            if is_error:
+                status = "failed"
+            elif record_count > 0:
+                status = "success"
+            else:
+                status = "empty"
+            
+            # Sıra numarasını artır ve dosya ismine ekle
+            tool_call_counter["value"] += 1
+            seq_num = tool_call_counter["value"]
+            
+            # Dosyaya TÜM sonucu kaydet
+            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"<query_text>\n{query_text}\n</query_text>\n\n")
+                f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
+                f.write(f"<result>\n{result_str}\n</result>\n")
+            
+            _log(f"📁 Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+            _append_to_blackboard(step_name, record_count, status == "success", seq_num)
+            
+            # Sonuç döndür
+            if status == "success":
+                end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
+                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
+                return f"✅ Semantic search: {record_count} sonuç bulundu.\n\n{paginated_result}"
+            elif status == "empty":
+                return f"⚪ Semantic search sonuç bulunamadı. Farklı query_text dene veya threshold'u düşür (0.75 → 0.6)."
+            else:
+                return f"""❌ Semantic search hatası.
+
+{result_str[:1000]}"""
+                
+        except Exception as e:
+            _log(f"❌ Semantic search error: {e}", "error")
+            return f'{{"error": "{str(e)}"}}'
+    
+    # =========================================================================
     # EXECUTE GRAPH DSL TOOL - Ontology-Driven Query
     # =========================================================================
     @tool
     async def execute_graph_dsl(dsl_json: str, step_name: str, compiler_mode: str = "") -> str:
-        """
-        Graph DSL ile sorgu çalıştır - ÖNERİLEN YOL!
-        
-        DSL, Cypher'dan daha basit ve hata yapmaya daha az müsait bir yapıdır.
-        DSL otomatik olarak validate edilir ve Cypher'a derlenir.
-        
-        compiler_mode: "llm" (GPT-5-mini ile) veya "rule" (DSLCompiler ile). Boş bırakılırsa env'den alınır.
-        
-        DSL FORMATI (JSON):
-        {
-            "intent": "find_by_property",  // veya: explore_node, search_content, count_nodes, aggregate_values
-            "description": "Entity ara",
-            "step_name": "entity_search",
-            "start_node": "NodeLabel",  // Başlangıç node (traversal yoksa)
-            "traversal": [  // İlişki yolu (opsiyonel)
-                {"from_node": "NodeA", "relation": "RELATES_TO", "to_node": "NodeB", "direction": "outgoing"}
-            ],
-            "filters": [  // Filtreler
-                {"node": "NodeA", "property": "name", "operator": "contains", "value": "aranan_deger"}
-            ],
-            "return_spec": {  // Döndürülecek alanlar
-                "nodes": ["NodeB"],
-                "properties": {"NodeB": ["name", "prop1"]},
-                "distinct": true
-            },
-            "aggregate": null,  // veya: {"function": "count", "node": "NodeB", "alias": "toplam"}
-            "limit": 10
-        }
-        
-        INTENT TİPLERİ:
-        - explore_node: Node örneklerini gör
-        - find_by_property: Property ile ara
-        - find_by_relationship: İlişki ile ara
-        - search_content: Chunk semantic araması (filters + traversal + semantic_search)
-        - count_nodes: Sayma
-        - aggregate_values: SUM, AVG, MIN, MAX
-        
-        FILTER OPERATÖRLERİ:
-        - equals, not_equals, contains, starts_with, ends_with
-        - gt, lt, gte, lte (sayısal)
-        - in (liste içinde)
-        - is_null, is_not_null
-        
-        Args:
-            dsl_json: Graph DSL (JSON string)
-            step_name: Adım adı
-        
-        Returns:
-            Sorgu sonucu veya hata mesajı
-        """
+        """Graph DSL ile sorgu. dsl_json=JSON, compiler_mode=llm/rule. Detaylar prompt'ta."""
         if not GRAPH_DSL_AVAILABLE:
             return '{"error": "Graph DSL modülü yüklü değil. execute_cypher_query kullanın."}'
         
@@ -2326,16 +2570,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     # =========================================================================
     @tool
     def add_source(source_type: str, value: str) -> str:
-        """
-        Cevaba kaynak ekle.
-        
-        Args:
-            source_type: "document" (PDF) veya "page" (sayfa görseli)
-            value: Dosya adı veya sayfa linki
-        
-        Returns:
-            Ekleme onayı
-        """
+        """Kaynak ekle. source_type=document/page, value=dosya_adı. Detaylar prompt'ta."""
         sources = _get_session_sources(question_id)
         
         if source_type == "document":
@@ -2359,25 +2594,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
         start_record: int = 0,
         end_record: int = 0
     ) -> str:
-        """
-        Daha önce kaydedilen sorgu sonuçlarını oku - PAGINATION destekli!
-        
-        İlk sorgu sonucunda 10/150 kayıt gösterilir. Daha fazla görmek için bu tool'u kullan.
-        
-        Args:
-            step_name: Adım adı (örn: step_1_entity_search)
-            result_type: "success" veya "failed"
-            start_record: Başlangıç kayıt numarası (0'dan başlar)
-            end_record: Bitiş kayıt numarası (0 = tümü)
-        
-        Örnekler:
-            İlk 10 kayıt: start_record=0, end_record=10
-            10-20 arası:  start_record=10, end_record=20
-            20-50 arası:  start_record=20, end_record=50
-        
-        Returns:
-            İstenen aralıktaki kayıtlar
-        """
+        """Sorgu sonuçlarının devamını oku. Pagination için start_record/end_record kullan."""
         import re
         import glob as glob_module
         
@@ -2441,10 +2658,26 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
         
         return f"{pagination_info}\n\n{result_lines}{more_info}"
     
-    # DSL tool'unu ekle (eğer modül yüklüyse)
-    tools = [execute_cypher_query, add_source, read_finding]
-    if GRAPH_DSL_AVAILABLE:
-        tools.insert(0, execute_graph_dsl)  # DSL'i öne koy (önerilen yol)
+    # =========================================================================
+    # TOOL MODE: DSL vs CYPHER
+    # =========================================================================
+    # REACT_TOOL_MODE=dsl   → execute_graph_dsl (DSL → Cypher derleme)
+    # REACT_TOOL_MODE=cypher → execute_cypher_query + execute_cypher_query_with_embedding (doğrudan Cypher)
+    
+    base_tools = [add_source, read_finding]  # Her iki modda da ortak
+    
+    if REACT_TOOL_MODE == "cypher":
+        # CYPHER MODE: Model doğrudan Cypher yazar
+        # Primary tool'lar: execute_cypher_query, execute_cypher_query_with_embedding
+        tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
+        _log(f"🔧 TOOL MODE: cypher (direct Cypher queries)")
+    else:
+        # DSL MODE (default): Model DSL üretir, sistem Cypher'a derler
+        # Primary tool: execute_graph_dsl, fallback: execute_cypher_query
+        tools = [execute_cypher_query] + base_tools
+        if GRAPH_DSL_AVAILABLE:
+            tools.insert(0, execute_graph_dsl)  # DSL'i öne koy (önerilen yol)
+        _log(f"🔧 TOOL MODE: dsl (DSL → Cypher compilation)")
     
     # MCP tool'larını filtrele - DISALLOW listesindekiler agent'a sunulmaz
     # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar (execute_graph_dsl vb.) 
@@ -2452,14 +2685,15 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     # Yeni MCP tool'ları otomatik olarak agent'a eklenir, sadece engellemek istediklerinizi buraya ekleyin.
     AGENT_DISALLOWED_MCP_TOOLS = {
         "read_neo4j_cypher",              # Internal: execute_cypher_query kullanır
-        "read_neo4j_cypher_with_embedding", # Internal: execute_graph_dsl semantic search kullanır
+        "read_neo4j_cypher_with_embedding", # Internal: execute_cypher_query_with_embedding kullanır
     }
     agent_mcp_tools = [t for t in mcp_tools if t.name not in AGENT_DISALLOWED_MCP_TOOLS]
     
     for mcp_tool in agent_mcp_tools:
         tools.append(mcp_tool)
     
-    _log(f"🔧 Total tools: {len(tools)} (custom: {4 if GRAPH_DSL_AVAILABLE else 3}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})")
+    custom_count = len(tools) - len(agent_mcp_tools)
+    _log(f"🔧 Total tools: {len(tools)} (custom: {custom_count}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})")
     
     return tools
 
@@ -2543,10 +2777,27 @@ class ReactAgent:
         # Cache key eşleşmesi için aynı formatı kullanmalıyız
         return os.getenv("NEO4J_URI", "")
     
-    def _get_conversation_history(self, session_id: str) -> List[Dict[str, str]]:
-        """PostgreSQL'den conversation history al"""
+    def _get_conversation_history(self, session_id: str, cache_enabled: bool = True) -> List[Dict[str, Any]]:
+        """
+        PostgreSQL'den conversation history al.
+        
+        Anthropic Prompt Caching için:
+        - Son human mesajına cache_control eklenir
+        - Claude otomatik olarak önceki cache'lenmiş prefix'i kullanır
+        - https://docs.langchain.com/oss/python/integrations/chat/anthropic#incremental-caching-in-conversational-applications
+        
+        Args:
+            session_id: Session identifier
+            cache_enabled: True ise son human mesajına cache_control ekler
+            
+        Returns:
+            List of message dicts with cache_control on last human message
+        """
         if not session_id:
             return []
+        
+        # History limit: 100 mesaj (Anthropic cache için yeterli context)
+        HISTORY_LIMIT = 100
         
         try:
             from src.shared.postgres_chat_history import create_postgres_chat_message_history
@@ -2556,16 +2807,37 @@ class ReactAgent:
             )
             
             if conversation_history and hasattr(conversation_history, "messages"):
-                messages: List[Dict[str, str]] = []
-                recent_messages = conversation_history.messages[-20:] if len(conversation_history.messages) > 20 else conversation_history.messages
+                messages: List[Dict[str, Any]] = []
+                recent_messages = (
+                    conversation_history.messages[-HISTORY_LIMIT:] 
+                    if len(conversation_history.messages) > HISTORY_LIMIT 
+                    else conversation_history.messages
+                )
                 
-                for msg in recent_messages:
+                # Son human mesajın index'ini bul (cache_control için)
+                last_human_idx = -1
+                for i in range(len(recent_messages) - 1, -1, -1):
+                    if hasattr(recent_messages[i], "type") and recent_messages[i].type == "human":
+                        last_human_idx = i
+                        break
+                
+                for idx, msg in enumerate(recent_messages):
                     if hasattr(msg, "content"):
                         role = "user" if (hasattr(msg, "type") and msg.type == "human") else "assistant"
                         content = str(msg.content) if msg.content else ""
-                        messages.append({"role": role, "content": content})
+                        
+                        # Cache-enabled format: content as list for cache_control support
+                        if cache_enabled and role == "user":
+                            # Son human mesajına cache_control ekle
+                            content_block: Dict[str, Any] = {"type": "text", "text": content}
+                            if idx == last_human_idx:
+                                content_block["cache_control"] = {"type": "ephemeral"}
+                            messages.append({"role": role, "content": [content_block]})
+                        else:
+                            # Assistant mesajları veya cache disabled: basit format
+                            messages.append({"role": role, "content": content})
                 
-                _log(f"History: {len(messages)} msgs")
+                _log(f"📜 History: {len(messages)} msgs (limit: {HISTORY_LIMIT}, cache: {cache_enabled})")
                 return messages
         except Exception as e:
             _log(f"⚠️ History fetch error: {e}", "warning")
@@ -2605,13 +2877,26 @@ class ReactAgent:
         - Önce Langfuse'dan "react-agent-system" prompt'u çekilir
         - Langfuse erişilemezse CACHED_SYSTEM_PREFIX fallback olarak kullanılır
         - Prompt'ta {{schema_info}} placeholder'ı değişken olarak compile edilir
+        
+        Tool Mode:
+        - REACT_TOOL_MODE=dsl → DSL araçları için talimatlar
+        - REACT_TOOL_MODE=cypher → Doğrudan Cypher yazma talimatları
         """
-        # 1. Langfuse'dan prompt al
+        # Mode'a göre prompt oluştur
+        _log(f"📋 Tool mode: {REACT_TOOL_MODE.upper()}")
+        if REACT_TOOL_MODE == "cypher":
+            # CYPHER MODE: DSL thinking guide dahil değil
+            base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
+        else:
+            # DSL MODE: DSL thinking guide dahil
+            base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+        
+        # 1. Langfuse'dan prompt al (opsiyonel override)
         langfuse_prompt = get_prompt(
             name=LANGFUSE_PROMPT_NAME,
             prompt_type=LANGFUSE_PROMPT_TYPE,
             label=LANGFUSE_PROMPT_LABEL,
-            fallback=CACHED_SYSTEM_PREFIX,  # Fallback: kod içindeki prompt
+            fallback=base_prompt,  # Fallback: kod içindeki prompt
         )
         
         if langfuse_prompt:
@@ -2631,8 +2916,8 @@ class ReactAgent:
         
         # 2. Fallback: Kod içindeki prompt
         _log(f"📋 Using fallback prompt (Langfuse unavailable)")
-        full_prefix = CACHED_SYSTEM_PREFIX + schema_info
-        return full_prefix
+        full_prompt = base_prompt + schema_info
+        return full_prompt
     
     def _ensure_prompt_in_langfuse(self) -> bool:
         """
@@ -2654,7 +2939,9 @@ class ReactAgent:
         
         # Prompt yok, oluştur
         # NOT: {{schema_info}} placeholder olarak kalmalı
-        prompt_with_placeholder = CACHED_SYSTEM_PREFIX + "{{schema_info}}"
+        # DSL mode için tam prompt (en kapsamlı versiyon)
+        full_base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+        prompt_with_placeholder = full_base_prompt + "{{schema_info}}"
         
         success = create_prompt(
             name=LANGFUSE_PROMPT_NAME,
@@ -2807,6 +3094,11 @@ class ReactAgent:
                 _log(f"🔧 Model: {actual_model} (Claude), extended_thinking={thinking_budget} tokens")
             else:
                 _log(f"🔧 Model: {actual_model} (Claude), extended_thinking=disabled")
+            
+            # 📦 Anthropic Prompt Caching
+            # https://docs.langchain.com/oss/python/integrations/chat/anthropic#prompt-caching
+            # NOT: beta_cache parametresi deprecate edildi, artık cache_control ile yapılıyor
+            # Tool caching için bind_tools kullanılacak (create_agent'da)
             
             return ChatAnthropic(**model_kwargs)
         
@@ -3097,10 +3389,56 @@ class ReactAgent:
             if ModelCallLimitMiddleware is not None:
                 query_middleware.append(ModelCallLimitMiddleware(run_limit=25))
             
+            # 📦 Anthropic Prompt Caching
+            # https://docs.langchain.com/oss/python/integrations/chat/anthropic#prompt-caching
+            actual_model = self.model_name
+            if ":" in self.model_name:
+                actual_model = self.model_name.split(":", 1)[1]
+            
+            model_for_agent = agent_config["model"]
+            tools_for_agent = react_tools
+            system_prompt_for_agent: Any = final_system_prompt
+            
+            if actual_model.lower().startswith("claude"):
+                # Claude için prompt caching:
+                # 1. Tool caching: bind_tools ile cache_control
+                # 2. System prompt caching: SystemMessage ile cache_control
+                # NOT: bind_tools cache için, ama create_agent'a da tools geçmeli (graph için)
+                try:
+                    # Tool'ları cache için işaretle
+                    model_for_agent = agent_config["model"].bind_tools(
+                        react_tools,
+                        cache_control={"type": "ephemeral"},
+                    )
+                    # ⚠️ tools_for_agent hala react_tools olmalı - create_agent graph için gerekli!
+                    # bind_tools sadece cache için, agent'ın tool node'u tools listesine bakıyor
+                    tools_for_agent = react_tools
+                    _log(f"📦 Anthropic tool caching enabled (ephemeral)")
+                    
+                    # System prompt'u cache için işaretle
+                    # SystemMessage ile content block formatı kullan
+                    if SystemMessage is not None:
+                        system_prompt_for_agent = SystemMessage(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": final_system_prompt,
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ]
+                        )
+                        _log(f"📦 Anthropic system prompt caching enabled (ephemeral)")
+                    
+                except Exception as cache_err:
+                    _log(f"⚠️ Anthropic caching setup failed: {cache_err}, using default", "warning")
+                    model_for_agent = agent_config["model"]
+                    tools_for_agent = react_tools
+                    system_prompt_for_agent = final_system_prompt
+            
             agent = create_agent(
-                model=agent_config["model"],
-                tools=react_tools,
-                system_prompt=final_system_prompt,
+                model=model_for_agent,
+                tools=tools_for_agent,
+                system_prompt=system_prompt_for_agent,
                 middleware=query_middleware,  # Her sorguda yeni instance
                 name="react_agent",
             )
@@ -3113,11 +3451,49 @@ class ReactAgent:
             )
             
             # Sadece user messages'ı agent'a gönder (system prompt zaten agent'ta)
-            agent_input: Dict[str, Any] = {"messages": [{"role": "user", "content": question}]}
+            # Anthropic Incremental Cache: Yeni soru mesajı da cache_control ile işaretlenmeli
+            # Bu sayede bu soru da cache'e eklenir ve sonraki sorularda okunur
+            is_claude = actual_model.lower().startswith("claude")
+            
+            if is_claude:
+                # Cache-enabled format: content as list with cache_control
+                new_user_message: Dict[str, Any] = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": question,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                }
+            else:
+                # Non-Claude models: simple format
+                new_user_message = {"role": "user", "content": question}
+            
+            agent_input: Dict[str, Any] = {"messages": [new_user_message]}
             
             # History varsa ekle
+            # NOT: History'deki son human mesajın cache_control'ü var,
+            # ama yeni soru "en son" human mesaj olduğu için onun cache_control'ü önemli
             if conversation_history:
-                agent_input["messages"] = conversation_history + [{"role": "user", "content": question}]
+                # History'den cache_control'ü kaldır (yeni soru artık "son" mesaj)
+                history_for_input = []
+                for msg in conversation_history:
+                    if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                        # User mesajından cache_control'ü kaldır
+                        cleaned_content = []
+                        for block in msg["content"]:
+                            if isinstance(block, dict):
+                                block_copy = {k: v for k, v in block.items() if k != "cache_control"}
+                                cleaned_content.append(block_copy)
+                            else:
+                                cleaned_content.append(block)
+                        history_for_input.append({"role": "user", "content": cleaned_content})
+                    else:
+                        history_for_input.append(msg)
+                
+                agent_input["messages"] = history_for_input + [new_user_message]
             
             yield {
                 "type": "thinking_step",
@@ -3179,9 +3555,30 @@ class ReactAgent:
                             cached_tokens = 0
                             reasoning_tokens = 0  # GPT-5 reasoning token sayısı
                             
-                            # DEBUG: usage_metadata yapısını logla
+                            # 📦 Anthropic Cache Verification Logging
+                            # https://docs.langchain.com/oss/python/integrations/chat/anthropic#caching-tools
                             if usage_metadata:
+                                input_details = usage_metadata.get("input_token_details", {})
+                                if input_details and isinstance(input_details, dict):
+                                    cache_creation = input_details.get("cache_creation", 0)
+                                    cache_read = input_details.get("cache_read", 0)
+                                    ephemeral_5m = input_details.get("ephemeral_5m_input_tokens", 0)
+                                    ephemeral_1h = input_details.get("ephemeral_1h_input_tokens", 0)
+                                    
+                                    # Cache durumu özeti
+                                    if cache_creation > 0 or cache_read > 0:
+                                        cache_status = "✅ CACHE_HIT" if cache_read > 0 else "📝 CACHE_WRITE"
+                                        _log(f"📦 [CACHE] {cache_status} | creation: {cache_creation}, read: {cache_read}, ephemeral_5m: {ephemeral_5m}")
+                                        
+                                        # Tool cache çalışıyor mu?
+                                        if cache_read > 0:
+                                            _log(f"✅ [CACHE VERIFIED] System prompt + Tool definitions reading from cache ({cache_read} tokens)")
+                                        elif cache_creation > 0:
+                                            _log(f"📝 [CACHE CREATED] System prompt + Tool definitions cached ({cache_creation} tokens)")
+                                
+                                # Full debug log
                                 _log(f"🔍 [DEBUG] usage_metadata: {usage_metadata}")
+                            
                             if response_metadata:
                                 # Sadece token ile ilgili kısımları logla
                                 token_related = {k: v for k, v in response_metadata.items() 
@@ -3287,6 +3684,7 @@ class ReactAgent:
                                     cached_tokens=cached_tokens,
                                     reasoning_tokens=reasoning_tokens,  # 🧠 GPT-5 reasoning
                                     session_id=session_id,
+                                    model=self.model_name,  # 📌 Gerçek model adı (claude-opus-4-5, gpt-5, vb.)
                                     llm_input=llm_input_data,
                                     llm_output=llm_output_data,
                                 )

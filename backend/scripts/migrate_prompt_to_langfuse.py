@@ -3,7 +3,7 @@
 """
 Langfuse Prompt Migration Script
 
-Bu script, react_agent.py'deki CACHED_SYSTEM_PREFIX prompt'unu
+Bu script, react_agent.py'deki prompt constant'larını
 Langfuse Prompt Management sistemine yükler.
 
 Kullanım:
@@ -12,18 +12,22 @@ Kullanım:
     export LANGFUSE_SECRET_KEY="sk-..."
     export LANGFUSE_HOST="http://localhost:3101"
     
-    # Script'i çalıştır
+    # Cypher modu için (varsayılan)
     python scripts/migrate_prompt_to_langfuse.py
+    
+    # DSL modu için
+    python scripts/migrate_prompt_to_langfuse.py --mode dsl
 
 Notlar:
-    - Bu script sadece bir kez çalıştırılmalıdır (ilk kurulum)
-    - Sonraki güncellemeler Langfuse UI'dan yapılmalıdır
-    - Prompt adı: react-agent-system
+    - DSL mode: DSL thinking guide dahil (intent seçimi, DSL şablonları)
+    - Cypher mode: Sadece Cypher tool kullanımı, DSL rehberi yok
+    - Prompt adı: react-agent-system (mode label'da belirtilir)
     - Placeholder: {{schema_info}} - runtime'da gerçek şema ile değiştirilir
 """
 
 import os
 import sys
+import argparse
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,25 +36,88 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.shared.langfuse_client import get_langfuse, create_prompt, get_prompt
-from src.langchain_deepagents.react_agent import CACHED_SYSTEM_PREFIX
+from src.langchain_deepagents.react_agent import (
+    SHARED_SYSTEM_BASE,
+    DSL_TOOL_USAGE,
+    CYPHER_TOOL_USAGE,
+    DSL_THINKING_GUIDE,
+    SHARED_CONTENT,
+)
 
 
-# Prompt Configuration
-PROMPT_NAME = "react-agent-system"
-PROMPT_TYPE = "text"
-PROMPT_LABELS = ["production"]
-
-# Prompt Template - react_agent.py'den import ediliyor
-# {{schema_info}} placeholder'ı ekleniyor (runtime'da gerçek şema ile değiştirilir)
-PROMPT_TEMPLATE = CACHED_SYSTEM_PREFIX + "{{schema_info}}"
-
+def build_prompt_template(mode: str) -> str:
+    """
+    Mode'a göre prompt template oluştur.
+    
+    Args:
+        mode: "dsl" veya "cypher"
+        
+    Returns:
+        Tam prompt template ({{schema_info}} placeholder ile)
+    """
+    if mode == "cypher":
+        # CYPHER MODE: DSL thinking guide dahil değil
+        base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
+    else:
+        # DSL MODE: DSL thinking guide dahil
+        base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+    
+    # Schema placeholder ekle
+    return base_prompt + "{{schema_info}}"
 
 
 def main():
     """Ana migration fonksiyonu"""
+    # Argüman parser
+    parser = argparse.ArgumentParser(
+        description="Langfuse Prompt Migration Script",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modlar:
+  dsl     DSL thinking guide dahil (intent seçimi, DSL şablonları, vb.)
+          Tool: execute_graph_dsl (önerilen), execute_cypher_query (fallback)
+          
+  cypher  Sadece Cypher tool kullanımı, DSL rehberi yok
+          Tool: execute_cypher_query, execute_cypher_query_with_embedding
+
+Örnekler:
+  python scripts/migrate_prompt_to_langfuse.py              # cypher (varsayılan)
+  python scripts/migrate_prompt_to_langfuse.py --mode dsl   # dsl modu
+        """
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["dsl", "cypher"],
+        default="cypher",
+        help="Prompt modu: cypher (varsayılan) veya dsl"
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Özel prompt adı (varsayılan: react-agent-system)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Prompt Configuration
+    prompt_name = args.name or "react-agent-system"
+    prompt_type = "text"
+    prompt_labels = ["production", args.mode]
+    
     print("=" * 60)
     print("🚀 Langfuse Prompt Migration Script")
     print("=" * 60)
+    print(f"📋 Mode: {args.mode.upper()}")
+    
+    # Mode açıklaması
+    if args.mode == "cypher":
+        print("   → Cypher mode: Doğrudan Cypher yazma")
+        print("   → DSL thinking guide DAHİL DEĞİL")
+        print("   → Tool: execute_cypher_query, execute_cypher_query_with_embedding")
+    else:
+        print("   → DSL mode: Ontology-driven sorgulama")
+        print("   → DSL thinking guide DAHİL")
+        print("   → Tool: execute_graph_dsl (önerilen), execute_cypher_query (fallback)")
     
     # Ortam değişkenlerini kontrol et
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
@@ -58,16 +125,16 @@ def main():
     host = os.environ.get("LANGFUSE_HOST", "http://localhost:3101")
     
     if not public_key or not secret_key:
-        print("❌ LANGFUSE_PUBLIC_KEY ve LANGFUSE_SECRET_KEY ortam değişkenleri gerekli!")
+        print("\n❌ LANGFUSE_PUBLIC_KEY ve LANGFUSE_SECRET_KEY ortam değişkenleri gerekli!")
         print("\nÖrnek:")
         print('  export LANGFUSE_PUBLIC_KEY="pk-..."')
         print('  export LANGFUSE_SECRET_KEY="sk-..."')
         print('  export LANGFUSE_HOST="http://localhost:3101"')
         sys.exit(1)
     
-    print(f"📡 Langfuse Host: {host}")
-    print(f"📋 Prompt Name: {PROMPT_NAME}")
-    print(f"🏷️ Labels: {PROMPT_LABELS}")
+    print(f"\n📡 Langfuse Host: {host}")
+    print(f"📋 Prompt Name: {prompt_name}")
+    print(f"🏷️ Labels: {prompt_labels}")
     
     # Langfuse bağlantısını test et
     langfuse = get_langfuse()
@@ -77,17 +144,21 @@ def main():
     
     print("✅ Langfuse bağlantısı başarılı")
     
+    # Prompt template oluştur
+    prompt_template = build_prompt_template(args.mode)
+    print(f"📏 Template uzunluğu: {len(prompt_template)} karakter")
+    
     # Mevcut prompt var mı kontrol et
-    print(f"\n🔍 Mevcut prompt kontrol ediliyor: {PROMPT_NAME}")
+    print(f"\n🔍 Mevcut prompt kontrol ediliyor: {prompt_name}")
     existing = get_prompt(
-        name=PROMPT_NAME,
-        prompt_type=PROMPT_TYPE,
-        label=PROMPT_LABELS[0] if PROMPT_LABELS else "production",
+        name=prompt_name,
+        prompt_type=prompt_type,
+        label=prompt_labels[0] if prompt_labels else "production",
     )
     
     if existing:
         version = getattr(existing, 'version', 'unknown')
-        print(f"⚠️ Prompt zaten mevcut: {PROMPT_NAME} (v{version})")
+        print(f"⚠️ Prompt zaten mevcut: {prompt_name} (v{version})")
         
         response = input("\nMevcut prompt'u güncellemek ister misiniz? (y/N): ")
         if response.lower() != 'y':
@@ -96,18 +167,21 @@ def main():
         
         print("📝 Prompt güncellenecek...")
     else:
-        print(f"📝 Yeni prompt oluşturulacak: {PROMPT_NAME}")
+        print(f"📝 Yeni prompt oluşturulacak: {prompt_name}")
     
     # Prompt oluştur/güncelle
     success = create_prompt(
-        name=PROMPT_NAME,
-        prompt=PROMPT_TEMPLATE,
-        prompt_type=PROMPT_TYPE,
-        labels=PROMPT_LABELS,
+        name=prompt_name,
+        prompt=prompt_template,
+        prompt_type=prompt_type,
+        labels=prompt_labels,
         config={
-            "description": "ReAct Agent system prompt for Neo4j graph queries",
+            "description": f"ReAct Agent system prompt for Neo4j graph queries ({args.mode.upper()} mode)",
+            "mode": args.mode,
             "placeholder": "{{schema_info}}",
-            "usage": "This prompt is used by the ReAct Agent to query Neo4j database. The schema_info placeholder is replaced with the actual database schema at runtime.",
+            "usage": f"This prompt is used by the ReAct Agent in {args.mode.upper()} mode. The schema_info placeholder is replaced with the actual database schema at runtime.",
+            "tools": ["execute_cypher_query", "execute_cypher_query_with_embedding"] if args.mode == "cypher" 
+                     else ["execute_graph_dsl", "execute_cypher_query"],
         },
     )
     
@@ -115,11 +189,13 @@ def main():
         print("\n" + "=" * 60)
         print("✅ Prompt başarıyla Langfuse'a yüklendi!")
         print("=" * 60)
-        print(f"\n📋 Prompt: {PROMPT_NAME}")
-        print(f"🏷️ Labels: {PROMPT_LABELS}")
-        print(f"📏 Template uzunluğu: {len(PROMPT_TEMPLATE)} karakter")
+        print(f"\n📋 Prompt: {prompt_name}")
+        print(f"🏷️ Labels: {prompt_labels}")
+        print(f"📋 Mode: {args.mode.upper()}")
+        print(f"📏 Template uzunluğu: {len(prompt_template)} karakter")
         print(f"\n🔗 Langfuse UI: {host}")
         print("\n💡 Artık prompt'u Langfuse UI'dan düzenleyebilirsiniz!")
+        print(f"\n⚠️ NOT: Bu prompt'u kullanmak için REACT_TOOL_MODE={args.mode} ayarlayın!")
     else:
         print("\n❌ Prompt yüklenemedi!")
         sys.exit(1)
@@ -127,4 +203,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
