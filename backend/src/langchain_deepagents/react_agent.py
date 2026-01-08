@@ -192,7 +192,8 @@ class StepStats:
     step_type: str  # "llm_call", "tool_call", "tool_result"
     input_tokens: int = 0
     output_tokens: int = 0
-    cached_tokens: int = 0
+    cached_tokens: int = 0  # cache_read - cache'den okunan tokenlar
+    cache_creation_tokens: int = 0  # cache_creation - yeni cache'lenen tokenlar
     tool_name: Optional[str] = None
     tool_params: Optional[Dict[str, Any]] = None
     tool_result_preview: Optional[str] = None
@@ -208,7 +209,8 @@ class TokenTracker:
     # Kümülatif sayaçlar
     total_input_tokens: int = 0
     total_output_tokens: int = 0
-    total_cached_tokens: int = 0
+    total_cached_tokens: int = 0  # cache_read - cache'den okunan tokenlar
+    total_cache_creation_tokens: int = 0  # cache_creation - yeni cache'lenen tokenlar
     total_llm_calls: int = 0
     total_tool_calls: int = 0
     
@@ -227,7 +229,8 @@ class TokenTracker:
         self._langfuse_parent_span_id = getattr(span, 'id', None)
     
     def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
-                     cached_tokens: int = 0, reasoning_tokens: int = 0, duration_ms: float = 0, 
+                     cached_tokens: int = 0, cache_creation_tokens: int = 0,
+                     reasoning_tokens: int = 0, duration_ms: float = 0, 
                      session_id: str = "", model: str = "unknown", 
                      llm_input: Any = None, llm_output: Any = None):
         """LLM çağrısı istatistiği ekle
@@ -236,7 +239,8 @@ class TokenTracker:
             step_name: Step adı
             input_tokens: Input token sayısı
             output_tokens: Output token sayısı
-            cached_tokens: Cache'den okunan token sayısı
+            cached_tokens: Cache'den okunan token sayısı (cache_read)
+            cache_creation_tokens: Yeni cache'lenen token sayısı (cache_creation)
             reasoning_tokens: GPT-5 reasoning için harcanan token sayısı
             duration_ms: Süre (ms)
             session_id: Session ID
@@ -253,6 +257,7 @@ class TokenTracker:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             duration_ms=duration_ms
         )
         self.steps.append(step)
@@ -261,12 +266,15 @@ class TokenTracker:
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.total_cached_tokens += cached_tokens
+        self.total_cache_creation_tokens += cache_creation_tokens
         self.total_llm_calls += 1
         
         # Cache durumu analizi
         cache_pct = round(cached_tokens / max(input_tokens, 1) * 100, 1)
         if cached_tokens > 0:
             cache_status = f"🟢 CACHE HIT {cache_pct}%"
+        elif cache_creation_tokens > 0:
+            cache_status = f"📝 CACHE WRITE"
         else:
             cache_status = "🔴 CACHE MISS"
         
@@ -277,8 +285,10 @@ class TokenTracker:
         _log(f"   ├─ Output: {output_tokens:,} tokens")
         if reasoning_tokens > 0:
             _log(f"   ├─ Reasoning: {reasoning_tokens:,} tokens (düşünce süreci)")
-        _log(f"   ├─ Cached: {cached_tokens:,} tokens ({cache_status})")
-        _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cached={self.total_cached_tokens:,}")
+        _log(f"   ├─ Cache Read: {cached_tokens:,} tokens ({cache_status})")
+        if cache_creation_tokens > 0:
+            _log(f"   ├─ Cache Creation: {cache_creation_tokens:,} tokens (yeni cache)")
+        _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cache_read={self.total_cached_tokens:,} cache_create={self.total_cache_creation_tokens:,}")
         
         # 📊 Langfuse'a gönder - PARENT SPAN altında child generation olarak
         try:
@@ -303,7 +313,8 @@ class TokenTracker:
                 # Langfuse model'e göre farklı token alan isimleri bekliyor:
                 # - Claude: cache_read_input_tokens, cache_creation_input_tokens
                 # - OpenAI: input_cached_tokens
-                uncached_input = max(0, input_tokens - cached_tokens)
+                # uncached_input = toplam input - cache_read - cache_creation
+                uncached_input = max(0, input_tokens - cached_tokens - cache_creation_tokens)
                 
                 # Model tipine göre doğru alan isimlerini belirle
                 model_lower = model.lower()
@@ -311,13 +322,15 @@ class TokenTracker:
                 
                 if is_anthropic:
                     # Anthropic Claude - Langfuse Settings > Models > claude-opus-4-5 Pricing'e göre:
-                    # - input: uncached input tokens
+                    # - input: uncached input tokens (tam fiyat)
                     # - cache_read_input_tokens: cache'den okunan tokens (10x ucuz)
+                    # - cache_creation_input_tokens: yeni cache'lenen tokens (%25 pahalı)
                     # - output: output tokens
                     generation.update(
                         usage_details={
-                            "input": uncached_input,  # Sadece cache'lenmemiş input
-                            "cache_read_input_tokens": cached_tokens,  # ✅ Claude için doğru isim
+                            "input": uncached_input,  # Cache'lenmemiş input (tam fiyat)
+                            "cache_read_input_tokens": cached_tokens,  # ✅ Cache hit (10x ucuz)
+                            "cache_creation_input_tokens": cache_creation_tokens,  # ✅ Cache write (%25 pahalı)
                             "output": output_tokens,
                             "total": input_tokens + output_tokens,
                         },
@@ -508,7 +521,8 @@ class TokenTracker:
             "model": self.model_name,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
-            "total_cached_tokens": self.total_cached_tokens,
+            "total_cached_tokens": self.total_cached_tokens,  # cache_read
+            "total_cache_creation_tokens": self.total_cache_creation_tokens,  # cache_creation
             "total_tokens": self.total_input_tokens + self.total_output_tokens,
             "cache_hit_rate": round(self.total_cached_tokens / max(self.total_input_tokens, 1) * 100, 1),
             "total_llm_calls": self.total_llm_calls,
@@ -517,7 +531,7 @@ class TokenTracker:
             "estimated_cost_usd": self._estimate_cost(self.model_name)
         }
     
-    def _estimate_cost(self, model: str = "gpt-5") -> float:
+    def _estimate_cost(self, model: str = "unknown") -> float:
         """Tahmini maliyet hesapla
         
         OpenAI Fiyatları: https://platform.openai.com/docs/pricing
@@ -525,27 +539,30 @@ class TokenTracker:
         
         GPT-5 Standard (per 1M tokens):
         - Input: $1.25
-        - Cached Input: $0.125 (10x cheaper!)
+        - Cached Input (read): $0.125 (10x cheaper!)
         - Output: $10.00
         
         GPT-4o Standard (per 1M tokens):
         - Input: $2.50
-        - Cached Input: $1.25
+        - Cached Input (read): $1.25
         - Output: $10.00
         
         Claude Opus 4.5 (per 1M tokens):
         - Input: $15.00
-        - Cached Input: $1.50 (10x cheaper!)
+        - Cache Read: $1.50 (10x cheaper!)
+        - Cache Creation: $18.75 (25% more expensive!)
         - Output: $75.00
         
         Claude Sonnet 4.5 (per 1M tokens):
         - Input: $3.00
-        - Cached Input: $0.30
+        - Cache Read: $0.30
+        - Cache Creation: $3.75
         - Output: $15.00
         
         Claude 3.5 Sonnet (per 1M tokens):
         - Input: $3.00
-        - Cached Input: $0.30
+        - Cache Read: $0.30
+        - Cache Creation: $3.75
         - Output: $15.00
         """
         model_lower = model.lower()
@@ -553,40 +570,50 @@ class TokenTracker:
         # Claude Opus 4.5
         if "claude-opus-4" in model_lower or "claude-opus-4-5" in model_lower:
             input_price = 15.00
-            cached_price = 1.50
+            cache_read_price = 1.50  # 10x ucuz
+            cache_creation_price = 18.75  # %25 pahalı
             output_price = 75.00
         # Claude Sonnet 4.5 / 3.5
         elif "claude-sonnet" in model_lower or "claude-3-5-sonnet" in model_lower or "claude-3.5-sonnet" in model_lower:
             input_price = 3.00
-            cached_price = 0.30
+            cache_read_price = 0.30
+            cache_creation_price = 3.75
             output_price = 15.00
         # Claude 3 Opus (eski)
         elif "claude-3-opus" in model_lower:
             input_price = 15.00
-            cached_price = 1.50
+            cache_read_price = 1.50
+            cache_creation_price = 18.75
             output_price = 75.00
         # Claude (diğer)
         elif "claude" in model_lower:
             input_price = 3.00
-            cached_price = 0.30
+            cache_read_price = 0.30
+            cache_creation_price = 3.75
             output_price = 15.00
         # GPT-5
         elif "gpt-5" in model_lower:
             input_price = 1.25
-            cached_price = 0.125
+            cache_read_price = 0.125
+            cache_creation_price = 1.25  # GPT-5 için cache creation ücretsiz (normal input fiyatı)
             output_price = 10.00
         # OpenAI diğer (gpt-4o, o1, o3, vb.)
         else:
             input_price = 2.50
-            cached_price = 1.25
+            cache_read_price = 1.25
+            cache_creation_price = 2.50  # Normal input fiyatı
             output_price = 10.00
         
-        uncached_input = self.total_input_tokens - self.total_cached_tokens
+        # uncached_input = toplam - cache_read - cache_creation
+        uncached_input = self.total_input_tokens - self.total_cached_tokens - self.total_cache_creation_tokens
+        uncached_input = max(0, uncached_input)  # Negatif olmaması için
+        
         input_cost = uncached_input * input_price / 1_000_000
-        cached_cost = self.total_cached_tokens * cached_price / 1_000_000
+        cache_read_cost = self.total_cached_tokens * cache_read_price / 1_000_000
+        cache_creation_cost = self.total_cache_creation_tokens * cache_creation_price / 1_000_000
         output_cost = self.total_output_tokens * output_price / 1_000_000
         
-        return round(input_cost + cached_cost + output_cost, 6)
+        return round(input_cost + cache_read_cost + cache_creation_cost + output_cost, 6)
     
     def print_summary(self, session_id: str = ""):
         """Özeti logla"""
@@ -602,7 +629,8 @@ class TokenTracker:
         _log("-" * 70)
         _log(f"   Input Token: {summary['total_input_tokens']:,}")
         _log(f"   Output Token: {summary['total_output_tokens']:,}")
-        _log(f"   Cached Token: {summary['total_cached_tokens']:,}")
+        _log(f"   Cache Read Token: {summary['total_cached_tokens']:,} (10x ucuz)")
+        _log(f"   Cache Creation Token: {summary['total_cache_creation_tokens']:,} (%25 pahalı)")
         
         # Cache durumu açıklaması (Organization bazlı - session'dan bağımsız)
         cache_rate = summary['cache_hit_rate']
@@ -1174,12 +1202,12 @@ CYPHER_TOOL_USAGE = """
 -- KEŞİF: Entity bul (node label'ı ŞEMADAN al!)
 MATCH (n:NodeLabel) 
 WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan')
-RETURN DISTINCT n.name LIMIT 10
+RETURN DISTINCT n.name
 
 -- METADATA: İlişki takibi
 MATCH (a:NodeA)-[:RELATIONSHIP]->(b:NodeB)
 WHERE a.name = 'Bulunan Değer'
-RETURN b.property1, b.property2 LIMIT 20
+RETURN b.property1, b.property2
 ```
 
 ---
@@ -1202,7 +1230,7 @@ execute_cypher_query_with_embedding(
     YIELD node AS c, score
     WHERE score > 0.75
     RETURN c.text AS text, score, c.page_link, c.fileName
-    ORDER BY score DESC LIMIT 15
+    ORDER BY score DESC
     \"\"\",
     step_name="semantic_search"
 )
@@ -1219,7 +1247,7 @@ execute_cypher_query_with_embedding(
     MATCH (c)-[:CHUNK_REL]->(d:Document)<-[:DOC_REL]-(e:EntityNode)
     WHERE e.name CONTAINS 'değer'
     RETURN c.text AS text, score, d.fileName, e.name
-    ORDER BY score DESC LIMIT 15
+    ORDER BY score DESC
     \"\"\",
     step_name="entity_search"
 )
@@ -2128,7 +2156,6 @@ execute_cypher_query_with_embedding(
     WHERE score > 0.75
     RETURN c.text AS text, score, c.page_link AS page_link, c.fileName AS fileName
     ORDER BY score DESC
-    LIMIT 15
     \"\"\",
     step_name="semantic_search"
 )
@@ -2144,7 +2171,6 @@ execute_cypher_query_with_embedding(
     WHERE e.property CONTAINS 'değer'
     RETURN c.text AS text, score, d.fileName AS fileName
     ORDER BY score DESC
-    LIMIT 15
     \"\"\",
     step_name="filtered_search"
 )
@@ -3552,7 +3578,8 @@ class ReactAgent:
                             
                             input_tokens = 0
                             output_tokens = 0
-                            cached_tokens = 0
+                            cached_tokens = 0  # cache_read
+                            cache_creation_tokens = 0  # cache_creation
                             reasoning_tokens = 0  # GPT-5 reasoning token sayısı
                             
                             # 📦 Anthropic Cache Verification Logging
@@ -3560,21 +3587,21 @@ class ReactAgent:
                             if usage_metadata:
                                 input_details = usage_metadata.get("input_token_details", {})
                                 if input_details and isinstance(input_details, dict):
-                                    cache_creation = input_details.get("cache_creation", 0)
+                                    cache_creation_tokens = input_details.get("cache_creation", 0)
                                     cache_read = input_details.get("cache_read", 0)
                                     ephemeral_5m = input_details.get("ephemeral_5m_input_tokens", 0)
                                     ephemeral_1h = input_details.get("ephemeral_1h_input_tokens", 0)
                                     
                                     # Cache durumu özeti
-                                    if cache_creation > 0 or cache_read > 0:
+                                    if cache_creation_tokens > 0 or cache_read > 0:
                                         cache_status = "✅ CACHE_HIT" if cache_read > 0 else "📝 CACHE_WRITE"
-                                        _log(f"📦 [CACHE] {cache_status} | creation: {cache_creation}, read: {cache_read}, ephemeral_5m: {ephemeral_5m}")
+                                        _log(f"📦 [CACHE] {cache_status} | creation: {cache_creation_tokens}, read: {cache_read}, ephemeral_5m: {ephemeral_5m}")
                                         
                                         # Tool cache çalışıyor mu?
                                         if cache_read > 0:
                                             _log(f"✅ [CACHE VERIFIED] System prompt + Tool definitions reading from cache ({cache_read} tokens)")
-                                        elif cache_creation > 0:
-                                            _log(f"📝 [CACHE CREATED] System prompt + Tool definitions cached ({cache_creation} tokens)")
+                                        elif cache_creation_tokens > 0:
+                                            _log(f"📝 [CACHE CREATED] System prompt + Tool definitions cached ({cache_creation_tokens} tokens)")
                                 
                                 # Full debug log
                                 _log(f"🔍 [DEBUG] usage_metadata: {usage_metadata}")
@@ -3681,7 +3708,8 @@ class ReactAgent:
                                     step_name=f"llm_step_{llm_step_count}",
                                     input_tokens=input_tokens,
                                     output_tokens=output_tokens,
-                                    cached_tokens=cached_tokens,
+                                    cached_tokens=cached_tokens,  # cache_read
+                                    cache_creation_tokens=cache_creation_tokens,  # cache_creation
                                     reasoning_tokens=reasoning_tokens,  # 🧠 GPT-5 reasoning
                                     session_id=session_id,
                                     model=self.model_name,  # 📌 Gerçek model adı (claude-opus-4-5, gpt-5, vb.)
