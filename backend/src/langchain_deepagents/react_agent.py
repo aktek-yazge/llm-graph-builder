@@ -757,6 +757,9 @@ MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8002"))
 # Stdio MCP servers toggle
 MCP_STDIO_ENABLED = os.environ.get("MCP_STDIO_ENABLED", "true").lower() == "true"
 
+# Pagination - LLM'e gösterilecek kayıt sayısı (prompt'larda da kullanılır)
+DEFAULT_RECORDS_PER_PAGE = int(os.environ.get("DEFAULT_RECORDS_PER_PAGE", "5"))
+
 
 def _check_uv_installed() -> bool:
     """
@@ -1160,31 +1163,8 @@ DSL desteklemeyen özel durumlar için doğrudan Cypher.
 - DSL ile ifade edilemeyen karmaşık sorgular
 - UNION, CASE/WHEN gerektiren durumlar
 
----
+⚠️ **TEXT ARAMASI:** `apoc.text.clean()` kullan! (Türkçe karakter sorunu önler)
 
-### add_source(source_type, value) - KAYNAK EKLEME
-**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
-
-⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
-Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
-
-```
-source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
-source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
-```
-
-❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
-✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
-
-⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
-
----
-
-### read_finding(step_name, start_record, end_record) - PAGINATION
-İlk sorgu 10 kayıt gösterir. Daha fazlası için:
-```
-read_finding("step_1", start_record=10, end_record=20)
-```
 </tool_usage>
 """
 
@@ -1198,16 +1178,32 @@ CYPHER_TOOL_USAGE = """
 ### execute_cypher_query(cypher, step_name) - METADATA SORGUSU
 **NE ZAMAN:** Graph node/ilişki sorguları, metadata, sayısal bilgiler
 
+## 🔤 STRING ARAMASI (ÇOK ÖNEMLİ!)
+
+⚠️ **KURAL: Text araması yaparken HER ZAMAN `apoc.text.clean()` kullan!**
+
+**NEDEN?** Unicode karakterler, büyük/küçük harf, fazla boşluklar sorun yaratır.
+
 ```cypher
--- KEŞİF: Entity bul (node label'ı ŞEMADAN al!)
-MATCH (n:NodeLabel) 
+-- ✅ DOĞRU: apoc.text.clean() ile temizle
+WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan terim')
+
+-- ❌ YANLIŞ: Direkt CONTAINS
+WHERE n.name CONTAINS 'aranan terim'
+WHERE toLower(n.name) CONTAINS 'terim'  -- toLower Unicode'da güvenilmez!
+```
+
+**apoc.text.clean():** Küçük harf + boşluk temizleme + Unicode normalleştirme
+
+**Şablonlar:**
+```cypher
+-- KEŞİF (node label'ı ŞEMADAN al!)
+MATCH (n:NodeLabel)
 WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan')
 RETURN DISTINCT n.name
 
--- METADATA: İlişki takibi
-MATCH (a:NodeA)-[:RELATIONSHIP]->(b:NodeB)
-WHERE a.name = 'Bulunan Değer'
-RETURN b.property1, b.property2
+-- ANA SORGU: Keşifte bulunan EXACT değeri kullan
+WHERE n.name = 'Keşifte Bulunan Değer'  -- Exact match, clean gerekmez
 ```
 
 ---
@@ -1255,31 +1251,6 @@ execute_cypher_query_with_embedding(
 
 ⚠️ İlişki ve node adlarını ŞEMADAN al! (CHUNK_REL, DOC_REL, EntityNode örnektir)
 
----
-
-### add_source(source_type, value) - KAYNAK EKLEME
-**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
-
-⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
-Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
-
-```
-source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
-source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
-```
-
-❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
-✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
-
-⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
-
----
-
-### read_finding(step_name, start_record, end_record) - PAGINATION
-İlk sorgu 10 kayıt gösterir. Daha fazlası için:
-```
-read_finding("step_1", start_record=10, end_record=20)
-```
 </tool_usage>
 """
 
@@ -1735,6 +1706,48 @@ Ama önce DSL dene! Çoğu sorgu DSL ile yapılabilir.
 # SHARED CONTENT - Her iki modda da ortak
 # =============================================================================
 SHARED_CONTENT = """
+<common_tools>
+## 🔧 ORTAK TOOL'LAR
+
+### add_source(source_type, value) - KAYNAK EKLEME
+**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
+
+⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
+Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
+
+```
+source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
+source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
+```
+
+❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
+✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
+
+⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
+
+---
+
+### read_finding(step_name, start_record, end_record) - PAGINATION
+
+⚠️ **KISITLI BİLGİ:** Her sorgu sonucu sadece **ilk {records_per_page} kayıt** gösterilir!
+Toplam kayıt sayısı mesajda belirtilir. Daha fazlasını görmek için bu tool'u kullan.
+
+**NE ZAMAN KULLAN:**
+- ✅ İlk {records_per_page} kayıtta aranan bilgi YOKSA → Sonraki kayıtları iste
+- ✅ Toplam kayıt sayısı {records_per_page}'ten fazla VE soruya tam cevap verilememişse
+- ✅ Farklı varyasyonlar/örnekler gerekiyorsa
+
+**NE ZAMAN KULLANMA:**
+- ❌ İlk {records_per_page} kayıtta soruya yeterli cevap varsa
+- ❌ Sadece kaç tane olduğunu öğrenmek için (toplam zaten görünür)
+- ❌ Tüm kayıtları okumak için (gereksiz token harcaması)
+
+```python
+# İlk {records_per_page} sonrasını görmek için:
+read_finding("step_name", start_record={records_per_page}, end_record={records_per_page_double})
+```
+</common_tools>
+
 <context_gathering>
 Goal: Keşifte bulunan TÜM entity varyasyonlarını cache'le ve sonraki sorgularda kullan.
 
@@ -1901,11 +1914,8 @@ OPTIONAL MATCH (c)-[:DATE]->(d:Date)
 WHERE a.name IN ['X'] AND c.type = 'Y'  -- ⛔ ÇOK GEÇ! WHERE sadece OPTIONAL MATCH'e uygulanır!
 
 ## STRING ARAMASI
-KEŞİF: apoc.text.clean() ile fuzzy ara
-WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('terim')
-
-ANA SORGU: Keşiften bulunan EXACT değer
-WHERE n.name = 'Keşifte Bulunan Tam Değer'
+KEŞİF: apoc.text.clean() ile fuzzy ara → TOOL KULLANIM REHBERİne bak!
+ANA SORGU: Keşiften bulunan EXACT değer kullan
 
 ## İLİŞKİ YÖNÜ
 Şemada (A)-[:REL]->(B) ise:
@@ -2031,10 +2041,8 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             _log(f"⚠️ Blackboard append error: {e}")
     
     # =========================================================================
-    # PAGINATION CONFIG
+    # PAGINATION HELPERS
     # =========================================================================
-    DEFAULT_RECORDS_PER_PAGE = 10  # İlk gösterilecek kayıt sayısı
-    
     def _parse_records(result_str: str) -> List[str]:
         """Sonuç string'inden kayıtları parse et - (R:N){...} formatı"""
         import re
@@ -2053,7 +2061,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         pagination_info = f"📊 Gösterilen: {start}-{start + shown_count} / Toplam: {total_count} kayıt"
         
         if end < total_count:
-            more_info = f"\n\n💡 Daha fazla görmek için: read_more_results(\"{step_name}\", start_record={end}, end_record={min(end + DEFAULT_RECORDS_PER_PAGE, total_count)})"
+            more_info = f"\n\n💡 Daha fazla görmek için: read_finding(\"{step_name}\", start_record={end}, end_record={min(end + DEFAULT_RECORDS_PER_PAGE, total_count)})"
         else:
             more_info = ""
         
@@ -2917,6 +2925,10 @@ class ReactAgent:
             # DSL MODE: DSL thinking guide dahil
             base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
         
+        # Pagination placeholder'larını değerlerle değiştir
+        base_prompt = base_prompt.replace("{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE))
+        base_prompt = base_prompt.replace("{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2))
+        
         # 1. Langfuse'dan prompt al (opsiyonel override)
         langfuse_prompt = get_prompt(
             name=LANGFUSE_PROMPT_NAME,
@@ -2929,6 +2941,10 @@ class ReactAgent:
             try:
                 # Langfuse prompt'u compile et - {{schema_info}} → gerçek şema
                 compiled_prompt = langfuse_prompt.compile(schema_info=schema_info)
+                
+                # Pagination placeholder'larını Langfuse prompt'unda da değiştir
+                compiled_prompt = compiled_prompt.replace("{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE))
+                compiled_prompt = compiled_prompt.replace("{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2))
                 
                 # Version bilgisini logla
                 version = getattr(langfuse_prompt, 'version', 'unknown')
