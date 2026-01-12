@@ -2587,6 +2587,7 @@ async def chat_bot_stream(
     user_id: str = Form(None),  # Langfuse User Tracking için
     files: Optional[str] = Form(None),
     agent_type: str = Form("deep_agent"),  # "deep_agent", "fast_agent" veya "standard"
+    domain: str = Form(os.environ.get("REACT_DOMAIN", "sigorta")),  # Prompt domain: "sigorta" veya "bakim" (env: REACT_DOMAIN)
 ):
     """
     Gerçek LLM streaming kullanarak Server-Sent Events (SSE) ile
@@ -2598,7 +2599,7 @@ async def chat_bot_stream(
     """
     # Set request context for log correlation - all logs will include session_id and question_id
     set_request_context(session_id=session_id, question_id=question_id)
-    logging.info(f"chat_bot_stream started | question_id={question_id} | session_id={session_id} | user_id={user_id}")
+    logging.info(f"chat_bot_stream started | question_id={question_id} | session_id={session_id} | user_id={user_id} | domain={domain}")
 
     # print("chat_bot_stream files: ", files)
 
@@ -2696,6 +2697,7 @@ async def chat_bot_stream(
                         question_id=question_id,
                         reasoning_effort=os.environ.get("REACT_REASONING_EFFORT", "low"),
                         user_id=user_id,  # Langfuse User Tracking için
+                        domain=domain,  # Prompt domain: sigorta, bakim
                     ):
                         if await request.is_disconnected():
                             logging.info("SSE Client disconnected during ReAct agent streaming")

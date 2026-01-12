@@ -1,5 +1,5 @@
 // Chat Stream API servisi - Server-Sent Events (SSE) kullanarak gerçek zamanlı chat
-import { url } from '../utils/Utils';
+import { url, getDomain } from '../utils/Utils';
 
 export interface ChatStreamMessage {
   type: 'status' | 'message_chunk' | 'complete' | 'error' | 'thinking_step';
@@ -69,6 +69,7 @@ export interface ChatStreamOptions {
   password?: string;
   database?: string;
   user_id?: string;  // Langfuse User Tracking için
+  domain?: string;  // Prompt domain: "sigorta" veya "bakim"
 }
 
 export class ChatStreamAPI {
@@ -116,6 +117,9 @@ export class ChatStreamAPI {
       if (options.user_id) {
         formData.append('user_id', options.user_id);
       }
+      // Domain: options'dan veya env'den al (default: sigorta)
+      const domain = options.domain || getDomain();
+      formData.append('domain', domain);
 
       const streamUrl = `${url()}/chat_bot_stream`;
 

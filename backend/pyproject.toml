@@ -83,4 +83,7 @@ dependencies = [
     "pdf2image>=1.17.0",
     "slowapi>=0.1.9",
     "langfuse>=3.11.1",
+    # Excel Processing
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.0",
 ]

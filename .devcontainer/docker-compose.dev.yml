@@ -103,6 +103,39 @@ services:
     networks:
       - llm-graph-builder_net
 
+  # WAT Motor - Ayrı Neo4j Instance
+  neo4j-wat-motor:
+    image: neo4j:2025.07.1
+    container_name: neo4j-wat-motor
+    restart: always
+    ports:
+      - "7475:7474"  # HTTP Browser
+      - "7688:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/Watmotor!654*
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_usage__report_enabled=false
+      - NEO4J_server_memory_heap_initial__size=512M
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512M
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
+    volumes:
+      - neo4j_wat_motor_data:/data
+      - neo4j_wat_motor_plugins:/plugins
+      - neo4j_wat_motor_import:/var/lib/neo4j/import
+    networks:
+      - llm-graph-builder_net
+
   # RabbitMQ - Message Broker
   rabbitmq:
     image: rabbitmq:3-management
@@ -167,6 +200,10 @@ volumes:
   neo4j_import:
     external: true
     name: llm-graph-builder_neo4j_import
+  # WAT Motor Neo4j Volumes
+  neo4j_wat_motor_data:
+  neo4j_wat_motor_plugins:
+  neo4j_wat_motor_import:
   postgres_data_dev:
     external: true
     name: llm-graph-builder_postgres_data_dev

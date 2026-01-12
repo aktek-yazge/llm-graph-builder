@@ -1,30 +1,37 @@
 # ⚠️ OTOMATİK BAŞLATMA: restart: always - Docker başladığında otomatik açılır
+# 
+# KULLANIM:
+#   - sigorta: MCP_PORT=8002 MCP_CONTAINER_NAME=mcp-neo4j-cypher docker compose up -d
+#   - bakim:   MCP_PORT=8003 MCP_CONTAINER_NAME=mcp-neo4j-cypher-bakim docker compose -p mcp-neo4j-cypher-bakim up -d
+#
 services:
   # MCP Neo4j Cypher Server
   mcp-neo4j-cypher:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mcp-neo4j-cypher
+    container_name: ${MCP_CONTAINER_NAME:-mcp-neo4j-cypher}
     restart: always
     ports:
-      - "${MCP_HTTP_PORT:-8002}:8002"
+      - "${MCP_PORT:-8002}:${MCP_PORT:-8002}"
     environment:
-      # Neo4j connection (varsayılanlar backend/.env'den override edilebilir)
-      - NEO4J_URI=${NEO4J_URI:-bolt://host.docker.internal:7687}
+      # Neo4j connection - MCP container için ayrı env variable
+      # MCP_NEO4J_URI kullan (localhost otomatik host.docker.internal olur)
+      # Yoksa NEO4J_URI kullan ama localhost -> host.docker.internal çevrilmeli
+      - NEO4J_URI=${MCP_NEO4J_URI:-${NEO4J_URI:-bolt://host.docker.internal:7687}}
       - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
       - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
-      # MCP Server settings
+      # MCP Server settings - port dinamik
       - MCP_TRANSPORT=http
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=8002
+      - MCP_PORT=${MCP_PORT:-8002}
       - NEO4J_TRANSPORT=http
       - NEO4J_MCP_SERVER_HOST=0.0.0.0
-      - NEO4J_MCP_SERVER_PORT=8002
+      - NEO4J_MCP_SERVER_PORT=${MCP_PORT:-8002}
       - NEO4J_MCP_SERVER_PATH=/mcp/
       - NEO4J_NAMESPACE=
-      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,backend-preview
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,mcp-neo4j-cypher-bakim,backend-preview
       - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
       - NEO4J_READ_TIMEOUT=30
       # Embedding için OpenAI (isteğe bağlı)
@@ -52,8 +59,8 @@ services:
           target: /app/src/mcp_neo4j_cypher
     
     healthcheck:
-      # MCP server kontrolü - POST isteği ile tools/list çağrısı yap
-      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
+      # MCP server kontrolü - port dinamik
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:${MCP_PORT:-8002}/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

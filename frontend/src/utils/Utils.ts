@@ -42,6 +42,12 @@ export const url = () => {
   return !url || !url.match('/$') ? url : url.substring(0, url.length - 1);
 };
 
+// Get the Domain (for prompt selection)
+// VITE_DOMAIN: "sigorta" (default) or "bakim" (WAT Motor)
+export const getDomain = (): string => {
+  return process.env.VITE_DOMAIN || 'sigorta';
+};
+
 // validation check for s3 bucket url
 export const validation = (url: string) => {
   return url.trim() != '' && S3_URL_REGEX.test(url) != false;

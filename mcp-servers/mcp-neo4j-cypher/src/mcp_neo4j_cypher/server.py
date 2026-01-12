@@ -397,9 +397,7 @@ def create_mcp_server(
     token_limit: Optional[int] = None,
     read_only: bool = False,
 ) -> FastMCP:
-    mcp: FastMCP = FastMCP(
-        "mcp-neo4j-cypher", dependencies=["neo4j", "pydantic"]
-    )
+    mcp: FastMCP = FastMCP("mcp-neo4j-cypher")
 
     namespace_prefix = _format_namespace(namespace)
     allow_writes = not read_only

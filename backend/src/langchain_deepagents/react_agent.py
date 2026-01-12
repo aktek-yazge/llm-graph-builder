@@ -1082,892 +1082,43 @@ LANGFUSE_PROMPT_TYPE = "text"
 LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 
 # ============================================================================
-# CACHE-OPTIMIZED PROMPT - SABİT PREFIX (OpenAI Prompt Caching için)
+# PROMPT MODÜLÜNDEN IMPORT
 # ============================================================================
-
-# Bu prefix ~4000-5000 token olmalı ve session boyunca DEĞİŞMEMELİ
-# =============================================================================
-# PROMPT CONSTANTS
-# =============================================================================
-# Prompt Caching bu prefix'leri cache'leyerek %50 token indirimi sağlar
+# Prompt'lar artık prompts/ modülünde organize edildi.
+# Sigorta ve Bakım domain'leri için ayrı prompt'lar mevcut.
 #
-# YAPILAR:
-# - SHARED_SYSTEM_BASE: Her iki modda da ortak olan içerik
-# - DSL_TOOL_USAGE: DSL modu için tool kullanım rehberi
-# - CYPHER_TOOL_USAGE: Cypher modu için tool kullanım rehberi
+# Kullanım:
+#   from .prompts import get_domain_prompts, build_full_prompt
+#   prompts = get_domain_prompts("sigorta", "cypher")  # veya "bakim"
 #
 # NOT: Bu prompt'lar FALLBACK olarak kullanılır.
 # Öncelik Langfuse Prompt Management'dadır.
 
-# =============================================================================
-# SHARED BASE - Her iki modda da ortak
-# =============================================================================
-SHARED_SYSTEM_BASE = """# 🎯 NEO4J KNOWLEDGE GRAPH AGENT
-
-## ⏰ ZAMAN BİLGİSİ
-- Kullanıcı tarih veya saat sorduğunda **MUTLAKA** `get_current_time` tool'unu kullan.
-- Asla kendi bilgini kullanarak tarih/saat tahmini yapma!
-
-Sen verilen knowledge graph üzerinde soruları cevaplayan ontology-driven bir AI agent'sın. 
-Node ve ilişki isimlerini her zaman ŞEMADAN al! Talimatlar aşağıda verilmiştir.
-"""
-
-# =============================================================================
-# DSL MODE - Tool Usage Guide
-# =============================================================================
-DSL_TOOL_USAGE = """
-<tool_usage>
-## 🔧 TOOL KULLANIM REHBERİ (DSL MODE)
-
-### execute_graph_dsl(dsl_json, step_name, compiler_mode) - ANA ARAÇ
-DSL ile sorgu - hata yapmaya daha az müsait, otomatik validation ve Cypher derleme.
-
-**NE ZAMAN:** Graph sorgularının %90'ı bu tool ile yapılabilir
-- Entity keşfi, property araması
-- İlişki takibi (traversal)
-- Aggregation (COUNT, SUM, AVG, MAX, MIN)
-- Chunk semantic araması (search_content)
-
-**DSL FORMATI:**
-```json
-{
-    "intent": "find_by_property | find_by_relationship | search_content | count_nodes | aggregate_values",
-    "start_node": "NodeLabel",
-    "traversal": [{"from_node": "A", "relation": "REL", "to_node": "B", "direction": "outgoing"}],
-    "filters": [{"node": "A", "property": "name", "operator": "contains", "value": "aranan"}],
-    "return_spec": {"nodes": ["A", "B"], "properties": {"A": ["name"]}, "distinct": true},
-    "aggregate": {"function": "count", "node": "B", "alias": "toplam"},
-    "semantic_search": {"query_text": "kavram", "similarity_threshold": 0.7, "limit": 10},
-    "limit": 10
-}
-```
-
-**INTENT TİPLERİ:**
-| Intent | Kullanım | Örnek |
-|--------|----------|-------|
-| explore_node | Node örneklerini gör | Şemayı keşfet |
-| find_by_property | Property ile ara | name CONTAINS "X" |
-| find_by_relationship | İlişki takibi | A → B → C |
-| search_content | Semantic arama | Chunk içerik araması |
-| count_nodes | Sayma | Kaç tane X var? |
-| aggregate_values | SUM/AVG/MAX/MIN | En yüksek değer |
-
-**FILTER OPERATÖRLERİ:** equals, contains, starts_with, gt, lt, gte, lte, in, is_null
-
----
-
-### execute_cypher_query(cypher, step_name) - FALLBACK
-DSL desteklemeyen özel durumlar için doğrudan Cypher.
-
-**NE ZAMAN:** 
-- DSL ile ifade edilemeyen karmaşık sorgular
-- UNION, CASE/WHEN gerektiren durumlar
-
-⚠️ **TEXT ARAMASI:** `apoc.text.clean()` kullan! (Türkçe karakter sorunu önler)
-
-</tool_usage>
-"""
-
-# =============================================================================
-# CYPHER MODE - Tool Usage Guide  
-# =============================================================================
-CYPHER_TOOL_USAGE = """
-<tool_usage>
-## 🔧 TOOL KULLANIM REHBERİ (CYPHER MODE)
-
-### execute_cypher_query(cypher, step_name) - METADATA SORGUSU
-**NE ZAMAN:** Graph node/ilişki sorguları, metadata, sayısal bilgiler
-
-## 🔤 STRING ARAMASI (ÇOK ÖNEMLİ!)
-
-⚠️ **KURAL: Text araması yaparken HER ZAMAN `apoc.text.clean()` kullan!**
-
-**NEDEN?** Unicode karakterler, büyük/küçük harf, fazla boşluklar sorun yaratır.
-
-```cypher
--- ✅ DOĞRU: apoc.text.clean() ile temizle
-WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan terim')
-
--- ❌ YANLIŞ: Direkt CONTAINS
-WHERE n.name CONTAINS 'aranan terim'
-WHERE toLower(n.name) CONTAINS 'terim'  -- toLower Unicode'da güvenilmez!
-```
-
-**apoc.text.clean():** Küçük harf + boşluk temizleme + Unicode normalleştirme
-
-**Şablonlar:**
-```cypher
--- KEŞİF (node label'ı ŞEMADAN al!)
-MATCH (n:NodeLabel)
-WHERE apoc.text.clean(n.name) CONTAINS apoc.text.clean('aranan')
-RETURN DISTINCT n.name
-
--- ANA SORGU: Keşifte bulunan EXACT değeri kullan
-WHERE n.name = 'Keşifte Bulunan Değer'  -- Exact match, clean gerekmez
-```
-
----
-
-### execute_cypher_query_with_embedding(query_text, cypher, step_name) - SEMANTİK ARAMA
-**NE ZAMAN:** Doküman içeriğinde arama, detay/liste/tablo istekleri
-
-⚠️ **KRİTİK KURALLAR:**
-1. Vector index adı: `'vector'` (sabit)
-2. `$embedding_vector` parametresi ZORUNLU
-3. `YIELD node AS c, score` formatı ZORUNLU
-4. query_text = KAVRAM (isim, tarih, kod DEĞİL!)
-
-**HIZLI MOD (Filter yok):**
-```python
-execute_cypher_query_with_embedding(
-    query_text="aranan kavram",
-    cypher=\"\"\"
-    CALL db.index.vector.queryNodes('vector', 50, $embedding_vector)
-    YIELD node AS c, score
-    WHERE score > 0.75
-    RETURN c.text AS text, score, c.page_link, c.fileName
-    ORDER BY score DESC
-    \"\"\",
-    step_name="semantic_search"
+from .prompts import (
+    get_domain_prompts,
+    build_full_prompt,
+    # Backward compatibility - aynı isimlerle export edilir
+    SHARED_SYSTEM_BASE,
+    DSL_TOOL_USAGE,
+    CYPHER_TOOL_USAGE,
+    DSL_THINKING_GUIDE,
+    SHARED_CONTENT,
 )
-```
-
-**FİLTRELİ MOD (Entity ile - ŞEMAYA GÖRE UYARLA):**
-```python
-execute_cypher_query_with_embedding(
-    query_text="aranan kavram",
-    cypher=\"\"\"
-    CALL db.index.vector.queryNodes('vector', 100, $embedding_vector)
-    YIELD node AS c, score
-    WHERE score > 0.70
-    MATCH (c)-[:CHUNK_REL]->(d:Document)<-[:DOC_REL]-(e:EntityNode)
-    WHERE e.name CONTAINS 'değer'
-    RETURN c.text AS text, score, d.fileName, e.name
-    ORDER BY score DESC
-    \"\"\",
-    step_name="entity_search"
-)
-```
-
-⚠️ İlişki ve node adlarını ŞEMADAN al! (CHUNK_REL, DOC_REL, EntityNode örnektir)
-
-</tool_usage>
-"""
 
 # =============================================================================
-# DSL MODE - Thinking Guide (DSL-specific content)
+# PROMPT CONSTANTS - prompts/ modülünden import edildi
 # =============================================================================
-DSL_THINKING_GUIDE = """
-<thinking_guide>
-📚 **DÜŞÜNME REHBERİ:** 
-   - Hangi intent seçmeli, nereye bakmalı, bulamazsan ne yapmalı, hata alırsan nasıl çözmeli
-
-# 🧠 ONTOLOGY-DRIVEN DSL DÜŞÜNME REHBERİ
-
-## 🎯 SORU GELDİĞİNDE HANGİ INTENT?
-
-```
-SORU ANALİZİ → INTENT SEÇİMİ
-├── "X'in Y'leri neler?" → FIND_BY_RELATIONSHIP
-├── "X'i bul" → FIND_BY_PROPERTY
-├── "Kaç tane X var?" → COUNT_NODES veya AGGREGATE_VALUES
-├── "En yüksek/düşük X" → AGGREGATE_VALUES (MAX/MIN)
-├── "X ile ilgili detay/içerik" → SEARCH_CONTENT (semantic)
-├── "Ne yazıyor/tablo/liste" → SEARCH_CONTENT (semantic)
-├── "X kelimesi geçen yerler" → SEARCH_TEXT (keyword)
-├── Semantic boş gelirse → SEARCH_TEXT (fallback)
-└── "X örnekleri/yapısı" → EXPLORE_NODE
-```
-
----
-
-## 🔍 TERİMİ NEREDE ARAMALIYIM?
-
-### ADIM 1: Schema'da Property Var mı?
-
-```
-SORU: "X özelliği en yüksek Y hangisi?"
-
-DÜŞÜN: "X" schema'da hangi node'da? (ŞEMAYA BAK!)
-├── EntityA property'leri: id, name, type → VAR MI?
-├── EntityB property'leri: value, amount → VAR MI?
-├── AttributeNode property'leri: name, description → VAR MI?
-└── SONUÇ: Şemadaki property'leri kontrol et!
-```
-
-**Varsa → FIND_BY_PROPERTY veya AGGREGATE_VALUES:**
-```json
-{
-  "intent": "aggregate_values",
-  "traversal": [{"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}],
-  "aggregate": {"function": "max", "node": "AttributeNode", "property": "value"},
-  "order_by": {"node": "AttributeNode", "property": "value", "direction": "DESC"}
-}
-```
-⚠️ Node ve ilişki adlarını ŞEMADAN al!
-
-### ADIM 2: İlişkili Node'da Var mı?
-
-```
-DÜŞÜN: AttributeNode.name içinde "aranan_terim" olabilir mi?
-
-DSL (node/ilişki adlarını ŞEMADAN al!):
-{
-  "intent": "find_by_relationship",
-  "start_node": "EntityA",
-  "traversal": [
-    {"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}
-  ],
-  "filters": [
-    {"node": "AttributeNode", "property": "name", "operator": "contains", "value": "aranan_terim"}
-  ],
-  "return_spec": {"nodes": ["EntityA", "AttributeNode"], "properties": {...}}
-}
-```
-
-### ADIM 3: Chunk İçeriğinde Ara (Semantic Search)
-
-```
-Property'de ve ilişkili node'da yoksa → SEARCH_CONTENT
-
-DSL:
-{
-  "intent": "search_content",
-  "semantic_search": {
-    "query_text": "aranan kavram alternatif terimler",
-    "target_node": "Chunk",
-    "similarity_threshold": 0.7,
-    "limit": 10
-  },
-  "include_source_info": true
-}
-```
-
----
-
-## 🔄 ARAMA HİYERARŞİSİ (Fallback Zinciri)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  ADIM 1: FIND_BY_PROPERTY                                       │
-│  └── Terim direkt bir node property'si mi?                      │
-│      ✓ Bulundu → Sonuç döndür                                   │
-│      ✗ Bulunamadı → ADIM 2'ye geç                               │
-├─────────────────────────────────────────────────────────────────┤
-│  ADIM 2: FIND_BY_RELATIONSHIP                                   │
-│  └── İlişkili node'ların property'lerinde var mı?               │
-│      EntityA → RelatedNode.property CONTAINS terim?             │
-│      ✓ Bulundu → Sonuç döndür                                   │
-│      ✗ Bulunamadı → ADIM 3'e geç                                │
-├─────────────────────────────────────────────────────────────────┤
-│  ADIM 3: SEARCH_CONTENT (Semantic)                              │
-│  └── Chunk.text içinde semantic arama                           │
-│      query_text: "terim + ilgili kavramlar"                     │
-│      ✓ Bulundu → Chunk + kaynak bilgisi döndür                  │
-│      ✗ Bulunamadı → ADIM 4'e geç                                │
-├─────────────────────────────────────────────────────────────────┤
-│  ADIM 4: SEARCH_TEXT (Keyword/Exact Match)                      │
-│  └── Chunk.text içinde direkt keyword araması                   │
-│      Chunk.text CONTAINS "terim" (case-insensitive)             │
-│      ✓ Bulundu → Chunk + kaynak bilgisi döndür                  │
-│      ✗ Bulunamadı → ADIM 5'e geç                                │
-├─────────────────────────────────────────────────────────────────┤
-│  ADIM 5: EXPLORE_NODE                                           │
-│  └── Schema keşfi yap, alternatif property'leri bul             │
-│      ✓ Yeni property bulundu → ADIM 1'e dön                     │
-│      ✗ Alternatif yok → Kullanıcıya bildir                      │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## ⚠️ BOŞ SONUÇ ALDIĞINDA
-
-### Durum 1: Property Bulunamadı
-```
-DSL verdin, sonuç boş geldi.
-
-DÜŞÜN:
-├── Filtre çok dar mı? → operator: "contains" kullan, "equals" değil
-├── Türkçe karakter sorunu mu? → Alternatif yazımları dene
-├── 🌐 DİL FARKI MI? → İngilizce karşılığını dene!
-│   └── Örn: Türkçe terim → 0 sonuç? → İngilizce karşılığını dene!
-│   └── Teknik terimler genelde İngilizce (specification, attribute, status, type)
-├── Yanlış node mu? → Traversal'ı gözden geçir
-└── Property yok mu? → SEARCH_CONTENT'e geç
-```
-
-### Durum 2: Semantic Search Boş
-```
-SEARCH_CONTENT verdin, sonuç boş.
-
-DÜŞÜN:
-├── query_text çok spesifik mi? → Daha genel terimler ekle
-├── threshold çok yüksek mi? → 0.7 → 0.5'e düşür
-├── Yanlış terimler mi? → İngilizce/Türkçe alternatifleri ekle
-└── Hala boş mu? → SEARCH_TEXT ile keyword aramasına geç!
-```
-
-### Durum 3: Semantic → Text Fallback
-```
-Semantic arama boş geldi, keyword aramasına geç:
-
-DSL:
-{
-  "intent": "search_text",
-  "start_node": "Chunk",
-  "filters": [
-    {"node": "Chunk", "property": "text", "operator": "contains", "value": "orijinal_terim"}
-  ],
-  "return_spec": {...},
-  "limit": 15
-}
-
-NEDEN: Semantic search bazen exact match'leri kaçırabilir.
-       Aranan kelime belgede geçiyor ama farklı anlamda yorumlanmış olabilir.
-```
-
-### Durum 4: Traversal Hatası
-```
-"Relationship not found" veya boş path.
-
-DÜŞÜN:
-├── Relationship yönü doğru mu? → "outgoing" vs "incoming"
-├── Relationship adı doğru mu? → Schema'yı kontrol et
-├── Ara node gerekli mi? → EntityA → X → Y şeklinde mi?
-└── OPTIONAL MATCH gerekli mi? → "optional": true ekle
-```
-
----
-
-## 📋 INTENT → DSL ŞABLONLARI (Node/İlişki adlarını ŞEMADAN al!)
-
-### Entity İlişkisi Bul
-```json
-{
-  "intent": "find_by_relationship",
-  "traversal": [
-    {"from_node": "EntityA", "relation": "HAS_RELATION", "to_node": "EntityB"}
-  ],
-  "filters": [
-    {"node": "EntityA", "property": "name", "operator": "contains", "value": "..."}
-  ],
-  "return_spec": {
-    "nodes": ["EntityA", "EntityB"],
-    "properties": {"EntityA": ["name"], "EntityB": ["id", "value"]}
-  }
-}
-```
-
-### En Yüksek/Düşük Değer (Aggregate)
-```json
-{
-  "intent": "aggregate_values",
-  "traversal": [
-    {"from_node": "EntityA", "relation": "HAS_ATTRIBUTE", "to_node": "AttributeNode"}
-  ],
-  "aggregate": {
-    "function": "max",
-    "node": "AttributeNode",
-    "property": "value",
-    "alias": "max_value"
-  },
-  "order_by": {"node": "AttributeNode", "property": "value", "direction": "DESC"},
-  "limit": 1
-}
-```
-
-### İçerik/Detay Araması
-```json
-{
-  "intent": "search_content",
-  "semantic_search": {
-    "query_text": "aranan kavram alternatif terimler",
-    "similarity_threshold": 0.7,
-    "limit": 10
-  },
-  "include_source_info": true
-}
-```
-
-### Belirli Entity'nin İçeriğinde Ara (Hibrit)
-```json
-{
-  "intent": "search_content",
-  "traversal": [
-    {"from_node": "EntityA", "relation": "HAS_DOCUMENT", "to_node": "Document"},
-    {"from_node": "Document", "relation": "FIRST_CHUNK", "to_node": "Chunk"}
-  ],
-  "filters": [
-    {"node": "EntityA", "property": "id", "operator": "equals", "value": "123"}
-  ],
-  "semantic_search": {
-    "query_text": "aranan kavram detay",
-    "similarity_threshold": 0.6
-  }
-}
-```
-
-### Keyword/Text Araması (Semantic Başarısızsa Fallback)
-```json
-{
-  "intent": "search_text",
-  "start_node": "Chunk",
-  "filters": [
-    {"node": "Chunk", "property": "text", "operator": "contains", "value": "aranan_kelime"}
-  ],
-  "return_spec": {
-    "nodes": ["Chunk"],
-    "properties": {"Chunk": ["text", "page_link", "fileName"]}
-  },
-  "include_source_info": true,
-  "limit": 10
-}
-```
-
-### Keyword Araması + Document Filtresi
-```json
-{
-  "intent": "search_text",
-  "traversal": [
-    {"from_node": "Chunk", "relation": "PART_OF", "to_node": "Document"}
-  ],
-  "filters": [
-    {"node": "Chunk", "property": "text", "operator": "contains", "value": "aranan_kelime"},
-    {"node": "Document", "property": "fileName", "operator": "contains", "value": "dosya_adi"}
-  ],
-  "return_spec": {
-    "nodes": ["Chunk", "Document"],
-    "properties": {"Chunk": ["text", "page_link"], "Document": ["fileName"]}
-  },
-  "limit": 10
-}
-```
-
----
-
-## 🎯 HIZLI KARAR TABLOSU (Node adlarını ŞEMADAN al!)
-
-| Soru İçeriği | Intent | Traversal Örneği |
-|-------------|--------|---------------------|
-| "X'in Y'leri neler" | find_by_relationship | EntityA → EntityB |
-| "Y'nin Z'si" | find_by_relationship | EntityB → AttributeNode |
-| "Kaç tane X var" | count_nodes | EntityA |
-| "En yüksek/düşük Z" | aggregate_values | EntityA → AttributeNode |
-| "Detayları neler" | search_content | Chunk (semantic) |
-| "Ne yazıyor" | search_content | Chunk (semantic) |
-| "Tarih filtreli" | find_by_relationship | EntityA → Date |
-| "Lokasyon filtreli" | find_by_relationship | EntityA → Location |
-| Semantic boş geldi | search_text | Chunk.text CONTAINS |
-| "X kelimesi geçen" | search_text | Chunk.text CONTAINS |
-
----
-
-## 💡 query_text SEÇİMİ (Semantic Search)
-
-```
-✅ DOĞRU: Sadece kavramsal terimler
-   "ödeme planı vade detayları"
-   "teknik özellikler spesifikasyon"
-   "şartlar koşullar kapsam"
-
-❌ YANLIŞ: Metadata karıştırma
-   "Ahmet Yılmaz 2024 kayıt detay"
-   "123456 numara özellik"
-   "Şirket X rapor"
-   
-⚠️ Metadata filtrelemesi → DSL filters[] içinde yap, query_text'e koyma!
-```
-</thinking_guide>
-
-<graph_dsl_mode>
-`execute_graph_dsl` tool'unu kullan ve JSON DSL gönder:
-
-```json
-{
-    "intent": "find_by_property",
-    "description": "Entity ara",
-    "start_node": "NodeLabel",
-    "filters": [
-        {"node": "NodeLabel", "property": "name", "operator": "contains", "value": "aranan_deger"}
-    ],
-    "return_spec": {
-        "nodes": ["NodeLabel"],
-        "properties": {"NodeLabel": ["name", "prop1", "prop2"]},
-        "distinct": true
-    },
-    "limit": 10
-}
-```
-
-## 🎯 INTENT TİPLERİ
-
-| Intent | Açıklama | Örnek |
-|--------|----------|-------|
-| `explore_node` | Node örneklerini gör | start_node + return_spec |
-| `find_by_property` | Property ile ara | filters ile |
-| `find_by_relationship` | İlişki ile ara | traversal ile |
-| `count_nodes` | Sayma | aggregate: count |
-| `aggregate_values` | SUM/AVG/MIN/MAX | aggregate ile |
-| `search_content` | Chunk semantic araması | semantic_search + traversal + filters |
-
-## 🔎 SEMANTIC SEARCH (Chunk İçerik Araması)
-
-⚠️ KRİTİK: Önceki sorgularda bulunan entity filtrelerini MUTLAKA kullan!
-
-```json
-{
-    "intent": "search_content",
-    "description": "Entity X için konu Y detayları",
-    "step_name": "embed_search_topic",
-    "traversal": [
-        {"from_node": "EntityA", "relation": "REL_TO_B", "to_node": "EntityB", "direction": "outgoing"},
-        {"from_node": "EntityB", "relation": "HAS_DOCUMENT", "to_node": "Document", "direction": "outgoing"},
-        {"from_node": "Document", "relation": "HAS_CHUNK", "to_node": "Chunk", "direction": "outgoing"}
-    ],
-    "filters": [
-        {"node": "EntityA", "property": "name", "operator": "in", "value": ["Önceki sorguda bulunan TÜM varyasyonlar..."]},
-        {"node": "EntityC", "property": "name", "operator": "contains", "value": "aranan_konu"}
-    ],
-    "semantic_search": {
-        "query_text": "aranan kavram veya konu",
-        "similarity_threshold": 0.75,
-        "limit": 10
-    },
-    "include_source_info": true
-}
-```
-
-❌ YANLIŞ: Sadece semantic_search, filter olmadan → tüm veritabanını tarar!
-✅ DOĞRU: traversal + filters + semantic_search → önceki bulgularla filtrelenmiş arama
-
-## 🔗 TRAVERSAL (İlişki Takibi)
-
-```json
-{
-    "intent": "find_by_relationship",
-    "traversal": [
-        {"from_node": "NodeA", "relation": "RELATES_TO", "to_node": "NodeB", "direction": "outgoing"},
-        {"from_node": "NodeB", "relation": "HAS_CHILD", "to_node": "NodeC", "direction": "outgoing"}
-    ],
-    "filters": [
-        {"node": "NodeA", "property": "name", "operator": "contains", "value": "aranan_deger"}
-    ],
-    "return_spec": {
-        "nodes": ["NodeB", "NodeC"],
-        "properties": {"NodeB": ["name", "prop1"], "NodeC": ["name", "prop2"]}
-    }
-}
-```
-
-⚠️ Star Pattern: Tüm traversal'ların from_node'u aynı ise (örn: NodeB), compiler otomatik olarak virgülle ayırır.
-
-## 📊 AGGREGATION (Toplama/Sayma)
-
-```json
-{
-    "intent": "count_nodes",
-    "start_node": "NodeLabel",
-    "filters": [
-        {"node": "NodeLabel", "property": "status", "operator": "equals", "value": "active"}
-    ],
-    "aggregate": {
-        "function": "count",
-        "node": "NodeLabel",
-        "alias": "toplam_sayisi"
-    }
-}
-```
-
-## 🔍 FILTER OPERATÖRLERİ
-
-| Operatör | Açıklama | Örnek Değer |
-|----------|----------|-------------|
-| `equals` | Tam eşleşme | "active" |
-| `contains` | İçerir (case-insensitive) | "arama_terimi" |
-| `starts_with` | İle başlar | "POL-" |
-| `gt`, `lt`, `gte`, `lte` | Sayısal karşılaştırma | 1000 |
-| `in` | Liste içinde | ["active", "pending"] |
-| `is_null`, `is_not_null` | Null kontrolü | - |
-
-## ⚠️ NE ZAMAN CYPHER KULLAN?
-
-DSL desteklemeyen durumlar için `execute_cypher_query` kullan:
-- Çok karmaşık JOIN'ler
-- UNION sorguları
-- Özel fonksiyonlar (apoc.*)
-
-Ama önce DSL dene! Çoğu sorgu DSL ile yapılabilir.
-
-</graph_dsl_mode>
-"""
-
+# Artık burada tanımlı değil, yukarıdaki import'tan geliyor:
+# - SHARED_SYSTEM_BASE
+# - DSL_TOOL_USAGE  
+# - CYPHER_TOOL_USAGE
+# - DSL_THINKING_GUIDE
+# - SHARED_CONTENT
+#
+# Domain bazlı prompt'lar için:
+#   prompts = get_domain_prompts("sigorta", "cypher")
+#   prompts = get_domain_prompts("bakim", "cypher")  # WAT Motor
 # =============================================================================
-# SHARED CONTENT - Her iki modda da ortak
-# =============================================================================
-SHARED_CONTENT = """
-<common_tools>
-## 🔧 ORTAK TOOL'LAR
-
-### add_source(source_type, value) - KAYNAK EKLEME
-**NE ZAMAN:** Bulunan sayfa/doküman SORUYLA İLGİLİ BİLGİ İÇERİYORSA ekle!
-
-⚠️ **KRİTİK:** Her sonucu kaynak olarak EKLEME! 
-Sadece cevabı destekleyen, soruyla ALAKALI bilgi içeren kaynakları ekle.
-
-```
-source_type="document" → PDF dosya adı (belge soruyla alakalıysa)
-source_type="page"     → Sayfa görseli (sayfa soruya cevap içeriyorsa)
-```
-
-❌ YANLIŞ: Sorgu sonucundaki HER dosyayı/sayfayı eklemek
-✅ DOĞRU: Sadece cevabı destekleyen, alakalı kaynakları eklemek
-
-⛔ add_source çağırmadan cevabına dosya adı/kaynak YAZMA!
-
----
-
-### read_finding(step_name, start_record, end_record) - PAGINATION
-
-⚠️ **KISITLI BİLGİ:** Her sorgu sonucu sadece **ilk {records_per_page} kayıt** gösterilir!
-Toplam kayıt sayısı mesajda belirtilir. Daha fazlasını görmek için bu tool'u kullan.
-
-**NE ZAMAN KULLAN:**
-- ✅ İlk {records_per_page} kayıtta aranan bilgi YOKSA → Sonraki kayıtları iste
-- ✅ Toplam kayıt sayısı {records_per_page}'ten fazla VE soruya tam cevap verilememişse
-- ✅ Farklı varyasyonlar/örnekler gerekiyorsa
-
-**NE ZAMAN KULLANMA:**
-- ❌ İlk {records_per_page} kayıtta soruya yeterli cevap varsa
-- ❌ Sadece kaç tane olduğunu öğrenmek için (toplam zaten görünür)
-- ❌ Tüm kayıtları okumak için (gereksiz token harcaması)
-
-```python
-# İlk {records_per_page} sonrasını görmek için:
-read_finding("step_name", start_record={records_per_page}, end_record={records_per_page_double})
-```
-</common_tools>
-
-<context_gathering>
-Goal: Keşifte bulunan TÜM entity varyasyonlarını cache'le ve sonraki sorgularda kullan.
-
-Method:
-1. Paralel keşif → Aynı entity'yi farklı node'larda aynı anda ara
-2. Sonuçları topla → TÜM varyasyonları listele
-3. Semantik filtre → Soruyla alakalı olanları seç, alakasız olanları çıkar
-4. Cache & kullan → Seçilen TÜM varyasyonları IN [...] ile kullan
-
-Early stop criteria:
-- Soruya EXACT cevap verebilecek veri bulundu
-- Keşif sonuçları tutarlı (aynı entity'nin farklı yazılışları)
-
-⚠️ KRİTİK: Keşifte 5 varyasyon bulduysan, alakalı olanların HEPSİNİ kullan!
-</context_gathering>
-
-<persistence>
-- Kullanıcının sorgusu tamamen çözülene kadar devam et
-- Belirsizlikte durma → En mantıklı yaklaşımı seç ve devam et
-- Kullanıcıya onay sorma → Varsayımını belgele ve ilerle
-- Hata aldığında → Düzelt ve tekrar dene
-</persistence>
-
-<final_answer>
-⚠️ SON KULLANICI İLE KONUŞUYORSUN - TEKNİK TERİM KULLANMA!
-
-❌ YASAK: Entity, Node, Chunk, embedding, graph, cypher gibi teknik terimler
-✅ KULLAN: Doğal dilde anlaşılır ifadeler
-
-Her cevapta şu bilgileri DOĞAL DİLDE ver:
-- Ne bulundu (ana bilgi)
-- Hangi yıl/dönem
-- Hangi belgeden/kaynaktan
-
-Örnek: "Sorunuzla ilgili **X bilgisi** bulundu. 
-Bu bilgi **Y belgesinden** alınmıştır."
-
-⚠️ Birden fazla sonuç varsa HEPSİNİ listele ve kaynak farkını açıkla!
-</final_answer>
-
-<forbidden_patterns>
-⛔ "Tüm X'leri listele" sorgusu YASAK!
-   ❌ MATCH (n:NodeLabel) RETURN n.name LIMIT 100
-   ✅ Başarılı filtrelerle (entity varyasyonları) devam et
-   
-⛔ 2 empty sonrası aynı stratejide ısrar etme → Farklı node/ilişki dene veya SEARCH_CONTENT'e geç!
-</forbidden_patterns>
-
-<exploration>
-1. ŞEMAYI İNCELE → "VERİTABANI ŞEMASI" bölümünü oku
-2. PLANLA → Cevaba ulaşmak için hangi node'lar ve ilişkiler gerekli?
-3. KEŞİF YAP → Entity hangi node/nodelar'da? (paralel ara!)
-4. DOĞRU SORGULA → Şemadaki ilişkileri TAKİP ederek veriyi bul
-</exploration>
-
-<deep_research>
-⚠️ ZORUNLU: Graph sonucu bulduktan SONRA → SEARCH_CONTENT ile DERİN ARAŞTIRMA yap!
-
-NEDEN: Graph'ta olmayan ekstra bilgi olabilir
-
-NASIL:
-1. Graph'tan entity bul
-2. Semantic aramada (SEARCH_CONTENT):
-   - query_text: Sorudaki anahtar kelime
-   - Filtre: Bulunan entity'ler
-   - ⛔ Belge filtresi KOYMA! TÜM chunk'larda ara!
-3. Ekstra bilgi varsa cevaba ekle
-
-❌ WHERE doc.fileName = '...' (sadece o belgede arar)
-✅ WHERE ilişkili_entity IN [...] veya filtresiz (tüm chunk'larda arar)
-</deep_research>
-
-<query_simplicity>
-SORGUYU BASİT TUT!
-
-❌ 10+ satır, çok OPTIONAL MATCH, CASE/COALESCE
-✅ Önce basit sorgu → Sonuç varsa ayrı detay sorgusu
-</query_simplicity>
-
-⛔ **YAPMA:**
-- Şemaya bakmadan sorgu yazma
-- İlişki/node adlarını tahmin etme
-- Aynı hatayı tekrarlama
-- Keşifte bulunan varyasyonları atla
-
-✅ **YAP:**
-- Her adımda şemayı kontrol et
-- Bulamadığında farklı node'larda ara
-- Keşifte bulunan TÜM alakalı varyasyonları kullan
-- Türkçe/İngilizce switch yap (belgeler İngilizce olabilir!)
-
----
-
-<discovery_guide>
-## 🔍 KEŞİF: Şemadaki TÜM olası node tiplerinde ara (Chunk hariç - o içerik araması için)
-</discovery_guide>
-
-<search_term_rules>
-## 🚨 ARAMA TERİMLERİ: İlk kelime/kelimeler ile lowercase ara. Kelimeyi bölme! Çoklu CONTAINS kullanma!
-</search_term_rules>
-
-<react_loop>
-## 🔄 ReAct DÖNGÜSÜ
-
-### 1️⃣ DÜŞÜN → Intent seç (find_by_property, find_by_relationship, search_content, search_text)
-### 2️⃣ EYLEM → execute_graph_dsl veya execute_cypher_query çağır
-### 3️⃣ GÖZLEM → Sonuç yeterli mi? Boşsa fallback zincirini takip et
-### 4️⃣ TEKRARLA veya CEVAPLA → add_source ile kaynak ekle, sonra cevapla
-
-⚠️ **İSİM KEŞFİ ÖNCELİKLİ!** Soruda isim varsa önce keşfet, varyasyonları bul, sonra ara!
-⚠️ **TÜM varyasyonları WHERE...IN ile kullan!**
-</react_loop>
-
-<use_all_variations>
-⚠️ Keşifte bulunan TÜM alakalı varyasyonları WHERE...IN ile kullan!
-</use_all_variations>
-
-<result_validation>
-### ⚠️ Tam eşleşme yoksa → Chunk içeriğinde de ara!
-</result_validation>
-
-<content_search_strategy>
-### 🔍 İÇERİK ARAMASI: Entity bul → search_content (semantic) → search_text (fallback)
-</content_search_strategy>
-
----
-
-<cypher_rules>
-## ŞEMA-TABANLI SORGULAMA
-1. Node label'larını ŞEMADAN al → Tahmin ETME!
-2. İlişki adlarını ŞEMADAN al → Uydurma!
-3. Property isimlerini ŞEMADAN al → Varsayma!
-4. İlişki yönlerini ŞEMADAN al → Ters yazma!
-
-## NEO4J 5.x SYNTAX
-❌ [:REL1, :REL2]        →  ✅ [:REL1|REL2]
-❌ WITH x, x as y        →  ✅ WITH x, x as z
-❌ [:REL*1:5]            →  ✅ [:REL*1..5]
-❌ exists(n.prop)        →  ✅ n.prop IS NOT NULL
-❌ ORDER BY x NULLS LAST →  ✅ ORDER BY x DESC (NULLS yok!)
-
-## ⛔⛔⛔ WHERE SIRALAMA (EN KRİTİK - MUTLAKA UYGULA!)
-Neo4j'de WHERE sadece HEMEN ÖNCESİNDEKİ MATCH/OPTIONAL MATCH'e uygulanır!
-OPTIONAL MATCH'ten SONRA WHERE yazarsan FİLTRE ÇALIŞMAZ, TÜM SATIRLAR DÖNER!
-
-✅ DOĞRU - Filtreleri OPTIONAL MATCH'ten ÖNCE yaz:
-MATCH (a:A)-[:REL]->(b:B)
-WHERE a.name IN ['X']  -- ← MATCH'ten hemen sonra!
-MATCH (b)-[:REL2]->(c:C)
-WHERE c.type = 'Y'  -- ← MATCH'ten hemen sonra!
-OPTIONAL MATCH (c)-[:DATE]->(d:Date)  -- Filtre yok, sadece opsiyonel veri
-RETURN ...
-
-✅ DOĞRU - WITH ile ayır:
-MATCH (a:A)-[:REL]->(b:B)-[:REL2]->(c:C)
-WHERE a.name IN ['X'] AND c.type = 'Y'
-WITH a, b, c  -- ← Filtrelenmiş sonuçları kilitle
-OPTIONAL MATCH (c)-[:DATE]->(d:Date)
-RETURN ...
-
-❌ YANLIŞ (TÜM SATIRLAR DÖNER, FİLTRE ÇALIŞMAZ!):
-MATCH (a:A)-[:REL]->(b:B)-[:REL2]->(c:C)
-OPTIONAL MATCH (c)-[:DATE]->(d:Date)
-WHERE a.name IN ['X'] AND c.type = 'Y'  -- ⛔ ÇOK GEÇ! WHERE sadece OPTIONAL MATCH'e uygulanır!
-
-## STRING ARAMASI
-KEŞİF: apoc.text.clean() ile fuzzy ara → TOOL KULLANIM REHBERİne bak!
-ANA SORGU: Keşiften bulunan EXACT değer kullan
-
-## İLİŞKİ YÖNÜ
-Şemada (A)-[:REL]->(B) ise:
-✅ MATCH (a:A)-[:REL]->(b:B)
-❌ MATCH (b:B)-[:REL]->(a:A)
-
-## PARALEL SORGULAR
-✅ PARALEL: Aynı terim, farklı node'larda → Paralel tool call
-❌ PARALEL DEĞİL: Farklı terimler → Sıralı keşif
-
-## AGGREGATE
-Toplam: SUM(n.field) | Ortalama: AVG(n.field) | Sayı: COUNT(DISTINCT n)
-</cypher_rules>
-
-<critical_rules>
-## ⚠️ KRİTİK KURALLAR (NEO4J CYPHER!)
-
-0. ⚠️ **Neo4j Cypher syntax kullan** → SQL DEĞİL! Yukarıdaki "NEO4J 5.x SYNTAX" kurallarına uy!
-1. ⛔ **Şemada olmayan node/ilişki/property YAZMA** → ŞEMAYI KONTROL ET!
-2. ⛔ **Tüm Chunk'larda arama YASAK** → Her zaman filtrelenmiş sorgu!
-3. ⛔ **Kullanıcıdan onay İSTEME** → Veri varsa direkt CEVAPLA
-4. ⛔ **Teknik terim kullanıcıya GÖSTERME** → Node, property, Cypher yok!
-5. ✅ **Paralel tool çağrıları KULLAN** → Sadece AYNI TERİM farklı node'larda ise!
-6. ✅ **SEARCH_CONTENT sonuçlarını DOĞRULA** → False positive kontrolü
-7. ✅ **KAYNAK EKLE** → Sonuçta fileName/page_link varsa add_source ÇAĞIR!
-8. ✅ **PARALEL KAYNAK** → Birden fazla kaynak ekleyeceksen TEK ADIMDA hepsini paralel çağır!
-</critical_rules>
-
-<fallback_strategy>
-## 🔄 FALLBACK ZİNCİRİ
-
-```
-ADIM 1: find_by_property → Terim property'de var mı?
-ADIM 2: find_by_relationship → İlişkili node'da var mı?  
-ADIM 3: search_content (semantic) → Chunk içerik araması
-ADIM 4: search_text (keyword) → Chunk.text CONTAINS araması
-ADIM 5: explore_node → Schema keşfi, alternatif bul
-```
-
-⚠️ **Semantic boş dönerse → search_text ile keyword ara!**
-⚠️ **Chunk ilişkisi: ŞEMADAN bak! (Document-Chunk arası ilişki adı değişebilir)**
-</fallback_strategy>
-
-<output_rules>
-⚠️ **YASAK:** Node isimleri, Cypher sorguları, teknik açıklamalar
-</output_rules>
-
----
-
-## 📊 VERİTABANI ŞEMASI
-
-"""
 
 # Dinamik suffix template - her istekte değişir
 DYNAMIC_SUFFIX_TEMPLATE = """
@@ -2680,7 +1831,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
         
         result_lines = "\n".join(selected_records)
         
-        pagination_info = f"📊 Gösterilen: {start_record}-{effective_end} / Toplam: {total_records} kayıt"
+        pagination_info = f"✅ 📊 Gösterilen: {start_record}-{effective_end} / Toplam: {total_records} kayıt"
         
         if effective_end < total_records:
             next_end = min(effective_end + DEFAULT_RECORDS_PER_PAGE, total_records)
@@ -2761,7 +1912,10 @@ class ReactAgent:
         ANTHROPIC_API_KEY  → Claude modelleri için
     """
     
-    def __init__(self, graph, model_name: Optional[str] = None, reasoning_effort: Optional[str] = None):
+    # Geçerli domain'ler
+    VALID_DOMAINS = {"sigorta", "bakim"}
+    
+    def __init__(self, graph, model_name: Optional[str] = None, reasoning_effort: Optional[str] = None, domain: Optional[str] = None):
         """
         Args:
             graph: Neo4j graph connection
@@ -2771,7 +1925,24 @@ class ReactAgent:
                 Default: env REACT_MODEL veya gpt-5
             reasoning_effort: GPT-5 için reasoning effort (none, low, medium, high)
                 Claude için REACT_THINKING_BUDGET env variable kullanılır
+            domain: Prompt domain'i. ZORUNLU parametre.
+                - "sigorta": Sigorta poliçeleri, müşteriler, teminatlar
+                - "bakim": WAT Motor bakım/arıza yönetimi (CMMS)
+        
+        Raises:
+            ValueError: domain parametresi belirtilmemişse veya geçersizse
         """
+        # Domain validation - ZORUNLU
+        if domain is None:
+            raise ValueError(
+                f"domain parametresi zorunlu. Geçerli değerler: {self.VALID_DOMAINS}"
+            )
+        if domain not in self.VALID_DOMAINS:
+            raise ValueError(
+                f"Geçersiz domain: '{domain}'. Geçerli değerler: {self.VALID_DOMAINS}"
+            )
+        self.domain = domain
+        
         self.graph = graph
         self.model_name = model_name or os.environ.get("REACT_MODEL", "gpt-5")
         self.reasoning_effort = reasoning_effort or os.environ.get("REACT_REASONING_EFFORT", "low")
@@ -2780,6 +1951,8 @@ class ReactAgent:
         self.mcp_tools: Optional[List[Any]] = None
         self._schema_cache: Dict[str, str] = {}
         self.redis_cache_active = False
+        
+        _log(f"🔧 ReactAgent initialized: domain={domain}, model={self.model_name}")
         
         # Redis LLM Semantic Cache kurulumu
         if REDIS_CACHE_IMPORTED and REDIS_CACHE_ENABLED and setup_semantic_cache:
@@ -2899,6 +2072,15 @@ class ReactAgent:
         except Exception as e:
             _log(f"⚠️ History save error: {e}", "warning")
     
+    def _get_langfuse_prompt_name(self) -> str:
+        """Domain'e göre Langfuse prompt adını döndür."""
+        # Domain bazlı Langfuse prompt isimleri
+        prompt_names = {
+            "sigorta": "react-agent-system",
+            "bakim": "react-agent-wat-motor",
+        }
+        return prompt_names.get(self.domain, LANGFUSE_PROMPT_NAME)
+    
     def _build_system_prompt(self, schema_info: str, session_id: str = "") -> str:
         """
         Cache-optimized system prompt oluştur.
@@ -2908,30 +2090,47 @@ class ReactAgent:
         - Dinamik suffix ayrı tutulur
         
         Langfuse Prompt Management:
-        - Önce Langfuse'dan "react-agent-system" prompt'u çekilir
-        - Langfuse erişilemezse CACHED_SYSTEM_PREFIX fallback olarak kullanılır
+        - Domain'e göre farklı Langfuse prompt kullanılır
+        - Langfuse erişilemezse kod içindeki prompt fallback olarak kullanılır
         - Prompt'ta {{schema_info}} placeholder'ı değişken olarak compile edilir
         
+        Domain:
+        - sigorta: Sigorta domain'i prompt'ları (DSL destekli)
+        - bakim: WAT Motor bakım prompt'ları (sadece Cypher)
+        
         Tool Mode:
-        - REACT_TOOL_MODE=dsl → DSL araçları için talimatlar
+        - REACT_TOOL_MODE=dsl → DSL araçları için talimatlar (sadece sigorta)
         - REACT_TOOL_MODE=cypher → Doğrudan Cypher yazma talimatları
         """
-        # Mode'a göre prompt oluştur
-        _log(f"📋 Tool mode: {REACT_TOOL_MODE.upper()}")
-        if REACT_TOOL_MODE == "cypher":
-            # CYPHER MODE: DSL thinking guide dahil değil
-            base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
-        else:
-            # DSL MODE: DSL thinking guide dahil
-            base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+        # Domain'e göre prompt al
+        _log(f"📋 Domain: {self.domain}, Tool mode: {REACT_TOOL_MODE.upper()}")
+        
+        # Bakım domain'i sadece Cypher mode destekler
+        effective_mode = REACT_TOOL_MODE
+        if self.domain == "bakim":
+            effective_mode = "cypher"  # Bakım domain'i için DSL desteklenmiyor
+            if REACT_TOOL_MODE == "dsl":
+                _log(f"⚠️ Bakım domain'i DSL desteklemiyor, cypher mode'a geçiliyor", "warning")
+        
+        # Domain ve mode'a göre prompt'ları al
+        prompts = get_domain_prompts(self.domain, effective_mode)
+        
+        # Base prompt oluştur
+        base_prompt = (
+            prompts["system_base"] +
+            prompts["tool_usage"] +
+            prompts.get("thinking_guide", "") +
+            prompts["content"]
+        )
         
         # Pagination placeholder'larını değerlerle değiştir
         base_prompt = base_prompt.replace("{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE))
         base_prompt = base_prompt.replace("{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2))
         
         # 1. Langfuse'dan prompt al (opsiyonel override)
+        langfuse_prompt_name = self._get_langfuse_prompt_name()
         langfuse_prompt = get_prompt(
-            name=LANGFUSE_PROMPT_NAME,
+            name=langfuse_prompt_name,
             prompt_type=LANGFUSE_PROMPT_TYPE,
             label=LANGFUSE_PROMPT_LABEL,
             fallback=base_prompt,  # Fallback: kod içindeki prompt
@@ -2949,7 +2148,7 @@ class ReactAgent:
                 # Version bilgisini logla
                 version = getattr(langfuse_prompt, 'version', 'unknown')
                 labels = getattr(langfuse_prompt, 'labels', [])
-                _log(f"📋 Langfuse prompt loaded: {LANGFUSE_PROMPT_NAME} v{version} {labels}")
+                _log(f"📋 Langfuse prompt loaded: {langfuse_prompt_name} v{version} {labels}")
                 
                 return compiled_prompt
                 
@@ -2957,7 +2156,7 @@ class ReactAgent:
                 _log(f"⚠️ Langfuse prompt compile failed: {e}, using fallback", "warning")
         
         # 2. Fallback: Kod içindeki prompt
-        _log(f"📋 Using fallback prompt (Langfuse unavailable)")
+        _log(f"📋 Using fallback prompt for domain: {self.domain}")
         full_prompt = base_prompt + schema_info
         return full_prompt
     
@@ -4216,35 +3415,53 @@ async def get_or_create_react_session_agent(
     session_id: str,
     model: Optional[str] = None,
     graph: Any = None,
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[str] = None,
+    domain: Optional[str] = None,
 ) -> ReactAgent:
     """
     Session bazlı ReactAgent al veya oluştur.
     
     Her session için tek agent instance tutulur - MCP bağlantısı reuse edilir.
+    
+    Args:
+        session_id: Session identifier
+        model: LLM model adı
+        graph: Neo4j graph connection
+        reasoning_effort: GPT-5 reasoning effort
+        domain: Prompt domain'i (ZORUNLU). Geçerli değerler: sigorta, bakim
+    
+    Returns:
+        ReactAgent instance
+    
+    Raises:
+        ValueError: domain parametresi belirtilmemişse veya geçersizse
     """
     global _react_session_agents, _react_session_access_times
     
     # Cleanup
     _cleanup_old_react_sessions()
     
-    # Mevcut agent varsa döndür
-    if session_id in _react_session_agents:
-        _react_session_access_times[session_id] = datetime.now()
-        _log(f"React session {session_id[:8]}: reusing cached agent")
-        return _react_session_agents[session_id]
+    # Session key: session_id + domain (farklı domain'ler farklı agent'lar)
+    cache_key = f"{session_id}:{domain}"
     
-    # Yeni agent oluştur
+    # Mevcut agent varsa döndür
+    if cache_key in _react_session_agents:
+        _react_session_access_times[cache_key] = datetime.now()
+        _log(f"React session {session_id[:8]} (domain={domain}): reusing cached agent")
+        return _react_session_agents[cache_key]
+    
+    # Yeni agent oluştur (domain validation constructor'da yapılır)
     agent = ReactAgent(
         graph=graph,
         model_name=model,
-        reasoning_effort=reasoning_effort
+        reasoning_effort=reasoning_effort,
+        domain=domain,
     )
     
-    _react_session_agents[session_id] = agent
-    _react_session_access_times[session_id] = datetime.now()
+    _react_session_agents[cache_key] = agent
+    _react_session_access_times[cache_key] = datetime.now()
     
-    _log(f"React session {session_id[:8]}: new agent created (cache={len(_react_session_agents)})")
+    _log(f"React session {session_id[:8]} (domain={domain}): new agent created (cache={len(_react_session_agents)})")
     return agent
 
 
@@ -4270,6 +3487,7 @@ async def stream_react_agent_response(
     graph: Any = None,
     reasoning_effort: Optional[str] = None,
     user_id: Optional[str] = None,  # Kullanıcı ID (email veya unique ID)
+    domain: Optional[str] = None,  # Prompt domain'i (ZORUNLU)
     **kwargs: Any,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -4289,6 +3507,9 @@ async def stream_react_agent_response(
         reasoning_effort: GPT-5 için reasoning seviyesi (none, low, medium, high)
             Claude için REACT_THINKING_BUDGET env variable kullanılır
         user_id: Kullanıcı ID (email veya unique identifier) - Langfuse User Tracking için
+        domain: Prompt domain'i (ZORUNLU). Geçerli değerler:
+            - "sigorta": Sigorta poliçeleri, müşteriler, teminatlar
+            - "bakim": WAT Motor bakım/arıza yönetimi (CMMS)
         **kwargs: Ek parametreler
     
     Environment Variables:
@@ -4300,6 +3521,9 @@ async def stream_react_agent_response(
     
     Yields:
         Dict: Streaming chunk'ları
+    
+    Raises:
+        ValueError: domain parametresi belirtilmemişse veya geçersizse
     """
     if not LANGCHAIN_AVAILABLE:
         yield {
@@ -4320,10 +3544,29 @@ async def stream_react_agent_response(
         }
         return
     
+    # Domain validation - hatayı yield ile döndür
+    if not domain:
+        yield {
+            "type": "error",
+            "message": f"domain parametresi zorunlu. Geçerli değerler: {ReactAgent.VALID_DOMAINS}",
+            "status": "missing_domain",
+            "timestamp": datetime.now().isoformat(),
+        }
+        return
+    
+    if domain not in ReactAgent.VALID_DOMAINS:
+        yield {
+            "type": "error",
+            "message": f"Geçersiz domain: '{domain}'. Geçerli değerler: {ReactAgent.VALID_DOMAINS}",
+            "status": "invalid_domain",
+            "timestamp": datetime.now().isoformat(),
+        }
+        return
+    
     try:
         # Session bazlı agent al veya oluştur
         agent = await get_or_create_react_session_agent(
-            session_id, model, graph, reasoning_effort
+            session_id, model, graph, reasoning_effort, domain
         )
         
         async for chunk in agent.stream_query_response(

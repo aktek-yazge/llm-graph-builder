@@ -39,13 +39,14 @@ ENV NEO4J_DATABASE="neo4j"
 ENV NEO4J_NAMESPACE=""
 ENV NEO4J_TRANSPORT="http"
 ENV NEO4J_MCP_SERVER_HOST="0.0.0.0"
-ENV NEO4J_MCP_SERVER_PORT="8002"
+ENV NEO4J_MCP_SERVER_PORT="${MCP_PORT:-8002}"
 ENV NEO4J_MCP_SERVER_PATH="/mcp/"
 ENV NEO4J_MCP_SERVER_ALLOW_ORIGINS="*"
 ENV NEO4J_MCP_SERVER_ALLOWED_HOSTS="localhost,127.0.0.1,host.docker.internal"
 ENV NEO4J_READ_TIMEOUT="30"
 
-EXPOSE 8002
+# Expose both ports (sigorta: 8002, bakim: 8003)
+EXPOSE 8002 8003
 
 # Command to run the server directly via Python module
 CMD ["python", "-m", "mcp_neo4j_cypher.server"]
