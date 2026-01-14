@@ -680,7 +680,7 @@ if TYPE_CHECKING:
     from langchain.agents import create_agent
     from langchain.agents.middleware import ModelCallLimitMiddleware
     from langchain.chat_models import init_chat_model
-    from langchain_anthropic import ChatAnthropic
+    from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool
 
 try:
     from langchain.agents import create_agent  # type: ignore
@@ -705,13 +705,25 @@ except ImportError as e:
 
 # Anthropic Claude import
 try:
-    from langchain_anthropic import ChatAnthropic  # type: ignore
+    from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool  # type: ignore
     ANTHROPIC_AVAILABLE = True
     logging.info("✅ LangChain Anthropic (Claude) imported")
 except ImportError as e:
     logging.warning(f"⚠️ LangChain Anthropic not available: {e}")
     ANTHROPIC_AVAILABLE = False
     ChatAnthropic = None  # type: ignore
+    convert_to_anthropic_tool = None  # type: ignore
+
+# Anthropic Prompt Caching Middleware - Cache için ZORUNLU!
+# https://docs.langchain.com/oss/python/integrations/middleware/anthropic
+try:
+    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware  # type: ignore
+    ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE = True
+    logging.info("✅ AnthropicPromptCachingMiddleware imported")
+except ImportError as e:
+    logging.warning(f"⚠️ AnthropicPromptCachingMiddleware not available: {e}")
+    ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE = False
+    AnthropicPromptCachingMiddleware = None  # type: ignore
 
 # MCP Adapters import
 if TYPE_CHECKING:
@@ -2588,12 +2600,14 @@ class ReactAgent:
                 }
                 return
             
-            # 📚 Few-shot learning: Başarılı örnekleri system prompt'a ekle
+            # 📚 Few-shot learning: User message'a ekle (System prompt'u değiştirmeden)
+            # ⚠️ CACHE İÇİN ÖNEMLİ: System prompt SABİT kalmalı, few-shot user message'da olmalı
             few_shot_examples: List[Dict[str, Any]] = []
-            # Her soru için orijinal system_prompt kullan (cache'lenmiş few-shot'u önle)
-            # agent_config["system_prompt"] cache'lenmiş olabilir, yeniden oluştur
+            few_shot_prompt: str = ""  # User message'a eklenecek
+            
+            # Her soru için orijinal system_prompt kullan (cache için SABİT)
             original_system_prompt = agent_config.get("original_system_prompt") or agent_config["system_prompt"]
-            final_system_prompt = original_system_prompt
+            final_system_prompt = original_system_prompt  # ⚠️ DEĞİŞTİRME - Cache için sabit
             
             if FEEDBACK_ENABLED and FEEDBACK_FEW_SHOT_ENABLED and question:
                 try:
@@ -2614,8 +2628,9 @@ class ReactAgent:
                     
                     if few_shot_examples or corrections:
                         few_shot_prompt = format_few_shot_prompt(few_shot_examples, corrections)
-                        final_system_prompt = final_system_prompt + "\n\n" + few_shot_prompt
-                        _log(f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme eklendi")
+                        # ⚠️ ESKİ: final_system_prompt = final_system_prompt + "\n\n" + few_shot_prompt
+                        # ✅ YENİ: few_shot_prompt user message'a eklenecek (aşağıda)
+                        _log(f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme (user message'a eklenecek)")
                         
                         # Few-shot içeriğini logla (ilk 1000 karakter)
                         _log(f"📋 Few-shot strateji: {few_shot_prompt[:1000]}...")
@@ -2630,23 +2645,91 @@ class ReactAgent:
             if ModelCallLimitMiddleware is not None:
                 query_middleware.append(ModelCallLimitMiddleware(run_limit=25))
             
-            # 📦 Anthropic Prompt Caching
-            # https://docs.langchain.com/oss/python/integrations/chat/anthropic#prompt-caching
+            # 📦 Anthropic Prompt Caching Middleware - Cache için ZORUNLU!
+            # https://docs.langchain.com/oss/python/integrations/middleware/anthropic
             actual_model = self.model_name
             if ":" in self.model_name:
                 actual_model = self.model_name.split(":", 1)[1]
             
+            is_claude = actual_model.lower().startswith("claude")
+            if is_claude and ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE and AnthropicPromptCachingMiddleware is not None:
+                try:
+                    # AnthropicPromptCachingMiddleware otomatik olarak:
+                    # - System prompt'u cache'ler
+                    # - Tool definitions'ı cache'ler
+                    # - Conversation prefix'i cache'ler
+                    caching_middleware = AnthropicPromptCachingMiddleware(
+                        ttl="5m",  # 5 dakika cache (default)
+                        unsupported_model_behavior="warn",  # Claude dışı modellerde uyar
+                    )
+                    query_middleware.append(caching_middleware)
+                    _log(f"📦 AnthropicPromptCachingMiddleware added (ttl=5m)")
+                except Exception as cache_mw_err:
+                    _log(f"⚠️ AnthropicPromptCachingMiddleware failed: {cache_mw_err}", "warning")
+            
             model_for_agent = agent_config["model"]
             tools_for_agent = react_tools
             system_prompt_for_agent: Any = final_system_prompt
+            
+            # 🔍 DEBUG: System prompt hash'ini logla - cache için SABİT olmalı!
+            import hashlib
+            prompt_hash = hashlib.md5(final_system_prompt.encode()).hexdigest()[:12]
+            _log(f"🔍 [CACHE DEBUG] System prompt hash: {prompt_hash}")
+            _log(f"🔍 [CACHE DEBUG] System prompt length: {len(final_system_prompt)} chars")
+            _log(f"🔍 [CACHE DEBUG] System prompt first 200: {final_system_prompt[:200]}...")
+            _log(f"🔍 [CACHE DEBUG] System prompt last 200: ...{final_system_prompt[-200:]}")
+            
+            # Cache uygunluk kontrolü için değişkenler
+            cache_eligible = True
+            cache_warning: str | None = None
+            estimated_prompt_tokens = len(final_system_prompt) // 4  # Ortalama ~4 karakter = 1 token
             
             if actual_model.lower().startswith("claude"):
                 # Claude için prompt caching:
                 # 1. Tool caching: bind_tools ile cache_control
                 # 2. System prompt caching: SystemMessage ile cache_control
                 # NOT: bind_tools cache için, ama create_agent'a da tools geçmeli (graph için)
+                # ⚠️ ÖNEMLİ: convert_to_anthropic_tool KULLANMA! bind_tools zaten dönüşümü yapıyor.
+                #    Manuel dönüşüm cache mekanizmasını bozuyor.
+                
+                # 📊 Minimum Token Kontrolü (Anthropic Cache Limitations)
+                # - Claude Opus 4.5: minimum 4096 token
+                # - Claude Sonnet 4.5/4: minimum 1024 token
+                # - Claude Haiku 4.5: minimum 4096 token
+                is_opus = "opus" in actual_model.lower()
+                is_haiku_45 = "haiku-4-5" in actual_model.lower() or "haiku-4.5" in actual_model.lower()
+                min_tokens_required = 4096 if (is_opus or is_haiku_45) else 1024
+                
+                if estimated_prompt_tokens < min_tokens_required:
+                    cache_eligible = False
+                    cache_warning = (
+                        f"⚠️ CACHE UYUMSUZ: {actual_model} için minimum {min_tokens_required} token gerekli, "
+                        f"mevcut prompt ~{estimated_prompt_tokens} token ({len(final_system_prompt)} karakter). "
+                        f"Cache çalışmayacak!"
+                    )
+                    _log(cache_warning, "warning")
+                else:
+                    _log(f"✅ Cache uyumlu: ~{estimated_prompt_tokens} token >= {min_tokens_required} minimum")
+                
+                # 📊 Langfuse'a cache eligibility metadata'sı ekle
+                if langfuse_trace:
+                    try:
+                        langfuse_trace.update(
+                            metadata={
+                                "model": self.model_name,
+                                "cache_eligible": cache_eligible,
+                                "cache_min_tokens_required": min_tokens_required,
+                                "cache_estimated_prompt_tokens": estimated_prompt_tokens,
+                                "cache_prompt_chars": len(final_system_prompt),
+                                "cache_warning": cache_warning,
+                            }
+                        )
+                        _log(f"📊 Langfuse cache metadata updated: eligible={cache_eligible}")
+                    except Exception as lf_err:
+                        _log(f"⚠️ Langfuse cache metadata update failed: {lf_err}", "warning")
+                
                 try:
-                    # Tool'ları cache için işaretle
+                    # Tool'ları cache için işaretle (orijinal LangChain tool'ları kullan)
                     model_for_agent = agent_config["model"].bind_tools(
                         react_tools,
                         cache_control={"type": "ephemeral"},
@@ -2654,7 +2737,11 @@ class ReactAgent:
                     # ⚠️ tools_for_agent hala react_tools olmalı - create_agent graph için gerekli!
                     # bind_tools sadece cache için, agent'ın tool node'u tools listesine bakıyor
                     tools_for_agent = react_tools
-                    _log(f"📦 Anthropic tool caching enabled (ephemeral)")
+                    _log(f"📦 Anthropic tool caching enabled ({len(react_tools)} tools)")
+                    
+                    # 🔍 DEBUG: Tool isimlerini logla
+                    tool_names = [getattr(t, 'name', 'unknown') for t in react_tools]
+                    _log(f"🔍 [CACHE DEBUG] Tool names: {tool_names}")
                     
                     # System prompt'u cache için işaretle
                     # SystemMessage ile content block formatı kullan
@@ -2676,6 +2763,23 @@ class ReactAgent:
                     tools_for_agent = react_tools
                     system_prompt_for_agent = final_system_prompt
             
+            # 🔍 DEBUG: Agent oluşturma öncesi kontrol
+            _log(f"🔍 [CACHE DEBUG] Creating agent with:")
+            _log(f"🔍 [CACHE DEBUG]   - model_for_agent type: {type(model_for_agent).__name__}")
+            _log(f"🔍 [CACHE DEBUG]   - tools_for_agent count: {len(tools_for_agent)}")
+            _log(f"🔍 [CACHE DEBUG]   - system_prompt_for_agent type: {type(system_prompt_for_agent).__name__}")
+            if isinstance(system_prompt_for_agent, str):
+                _log(f"🔍 [CACHE DEBUG]   - system_prompt hash: {hashlib.md5(system_prompt_for_agent.encode()).hexdigest()[:12]}")
+            else:
+                # SystemMessage ise content'i hash'le
+                content = getattr(system_prompt_for_agent, 'content', None)
+                if content:
+                    if isinstance(content, list) and len(content) > 0:
+                        text = content[0].get('text', '') if isinstance(content[0], dict) else str(content[0])
+                        _log(f"🔍 [CACHE DEBUG]   - SystemMessage content hash: {hashlib.md5(text.encode()).hexdigest()[:12]}")
+                    else:
+                        _log(f"🔍 [CACHE DEBUG]   - SystemMessage content: {str(content)[:100]}")
+            
             agent = create_agent(
                 model=model_for_agent,
                 tools=tools_for_agent,
@@ -2696,6 +2800,13 @@ class ReactAgent:
             # Bu sayede bu soru da cache'e eklenir ve sonraki sorularda okunur
             is_claude = actual_model.lower().startswith("claude")
             
+            # 📚 Few-shot'u user message'a ekle (cache'i bozmamak için system prompt'ta DEĞİL)
+            # Few-shot varsa question'ın önüne ekle
+            user_question_with_context = question
+            if few_shot_prompt:
+                user_question_with_context = f"{few_shot_prompt}\n\n---\n\n**Kullanıcı Sorusu:**\n{question}"
+                _log(f"📚 Few-shot user message'a eklendi ({len(few_shot_prompt)} chars)")
+            
             if is_claude:
                 # Cache-enabled format: content as list with cache_control
                 new_user_message: Dict[str, Any] = {
@@ -2703,14 +2814,14 @@ class ReactAgent:
                     "content": [
                         {
                             "type": "text",
-                            "text": question,
+                            "text": user_question_with_context,
                             "cache_control": {"type": "ephemeral"},
                         }
                     ]
                 }
             else:
                 # Non-Claude models: simple format
-                new_user_message = {"role": "user", "content": question}
+                new_user_message = {"role": "user", "content": user_question_with_context}
             
             agent_input: Dict[str, Any] = {"messages": [new_user_message]}
             

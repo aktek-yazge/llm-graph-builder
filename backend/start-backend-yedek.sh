@@ -25,14 +25,68 @@ if [[ "$DOMAIN" != "sigorta" && "$DOMAIN" != "bakim" ]]; then
     exit 1
 fi
 
+# Parse .env file and prepare for env command
+# Bash'te nokta içeren değişken adları export edilemez,
+# bu yüzden env komutuyla process'e geçiriyoruz
+#
+# İki işlem yapılır:
+# 1. Nokta içermeyen değişkenler → export (script içinde kullanılabilir)
+# 2. Tüm değişkenler → ENV_ARGS array'i (uvicorn'a env komutuyla geçilir)
+parse_env_file() {
+    local env_file="$1"
+    ENV_ARGS=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines
+        [[ -z "$line" ]] && continue
+        # Skip comment-only lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        # Skip lines that don't look like VAR=value
+        [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_.\-]*= ]] && continue
+        
+        # Extract variable name and value
+        local var_name="${line%%=*}"
+        local var_value="${line#*=}"
+        
+        # Remove inline comments (but preserve # inside quotes)
+        # First check if value starts with quote
+        if [[ "$var_value" =~ ^\" ]]; then
+            # Double quoted: extract content between quotes
+            var_value="${var_value#\"}"      # Remove leading "
+            var_value="${var_value%%\"*}"    # Remove trailing " and everything after
+        elif [[ "$var_value" =~ ^\' ]]; then
+            # Single quoted: extract content between quotes
+            var_value="${var_value#\'}"      # Remove leading '
+            var_value="${var_value%%\'*}"    # Remove trailing ' and everything after
+        else
+            # Unquoted: remove inline comment (# and everything after)
+            var_value="${var_value%%#*}"
+            # Trim trailing whitespace
+            var_value="${var_value%"${var_value##*[![:space:]]}"}"
+        fi
+        
+        # Build clean line
+        local clean_line="${var_name}=${var_value}"
+        
+        # Add to array for env command
+        ENV_ARGS+=("$clean_line")
+        
+        # Export only bash-compatible names (no dots) for script use
+        if [[ ! "$var_name" =~ \. ]]; then
+            export "$clean_line" 2>/dev/null || true
+        fi
+    done < "$env_file"
+}
+
+# Global array for env command arguments
+declare -a ENV_ARGS
+
 # İlgili .env dosyasını yükle
 ENV_FILE="${SCRIPT_DIR}/.env.${DOMAIN}"
 if [[ -f "$ENV_FILE" ]]; then
     echo "📁 Loading environment: $ENV_FILE"
-    set -a  # Export all variables
-    source "$ENV_FILE"
-    set +a
+    parse_env_file "$ENV_FILE"
     echo "🎯 Domain: ${REACT_DOMAIN:-$DOMAIN}"
+    echo "📊 Loaded ${#ENV_ARGS[@]} environment variables"
 else
     echo "⚠️  Dosya bulunamadı: $ENV_FILE"
     echo "   Default .env kullanılacak (varsa)"
@@ -145,7 +199,13 @@ echo ""
 # Start uvicorn with multiple workers for parallel upload handling
 # NOTE: --reload is incompatible with --workers, so we use --workers only
 # For development with hot-reload, comment out --workers line and uncomment --reload line
-uv run uvicorn score:app --host 0.0.0.0 --port 8000 --workers ${WORKERS} --log-level info
+#
+# env komutu ile tüm değişkenleri (nokta içerenler dahil) process'e geçiriyoruz
+if [[ ${#ENV_ARGS[@]} -gt 0 ]]; then
+    env "${ENV_ARGS[@]}" uv run uvicorn score:app --host 0.0.0.0 --port 8000 --workers ${WORKERS} --log-level info
+else
+    uv run uvicorn score:app --host 0.0.0.0 --port 8000 --workers ${WORKERS} --log-level info
+fi
 
 # Development mode with hot-reload (single worker):
-# uv run uvicorn score:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+# env "${ENV_ARGS[@]}" uv run uvicorn score:app --host 0.0.0.0 --port 8000 --reload --log-level debug
