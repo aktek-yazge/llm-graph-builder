@@ -135,8 +135,13 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.local`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -148,6 +153,7 @@ services:
     restart: always
     networks:
       - observability
+      - traefik-public
     depends_on:
       - loki
       - tempo
@@ -161,6 +167,9 @@ networks:
   observability:
     driver: bridge
     name: observability
+  traefik-public:
+    external: true
+    name: traefik-public
 
 volumes:
   loki-data:

@@ -370,10 +370,10 @@ if __name__ == "__main__":
     
     # Neo4j bağlantısı
     graph = Neo4jGraph(
-        url='bolt://3.76.55.209:7688',
-        username='neo4j',
-        password='qwerty5555',
-        database='neo4j'
+        url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        username=os.getenv("NEO4J_USERNAME", "neo4j"),
+        password=os.getenv("NEO4J_PASSWORD", "password"),
+        database=os.getenv("NEO4J_DATABASE", "neo4j")
     )
     
     # LLM - get_llm kullan (Gemini veya OpenAI)

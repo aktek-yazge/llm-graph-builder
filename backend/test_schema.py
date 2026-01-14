@@ -4,17 +4,18 @@ Schema fonksiyonunu test eder
 Kullanım: python test_schema.py
 """
 
+import os
 import sys
 import time
 sys.path.insert(0, 'src')
 
 from langchain_community.graphs import Neo4jGraph
 
-# Neo4j bağlantısı
-NEO4J_URL = 'bolt://3.76.55.209:7688'
-NEO4J_USER = 'neo4j'
-NEO4J_PASS = 'qwerty5555'
-NEO4J_DB = 'neo4j'
+# Neo4j bağlantısı (environment'tan veya default)
+NEO4J_URL = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USERNAME", "neo4j")
+NEO4J_PASS = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_DB = os.getenv("NEO4J_DATABASE", "neo4j")
 
 
 def fetch_schema_apoc(graph) -> str:

@@ -11,5 +11,10 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [react()],
     optimizeDeps: { esbuildOptions: { target: 'es2020' } },
+    server: {
+      host: true,
+      // Traefik reverse proxy için izin verilen hostlar
+      allowedHosts: ['localhost', 'wat.local', 'aksa.local', 'kormas.local', 'demoserver.yazge.aktekbilisim.com'],
+    },
   };
 });

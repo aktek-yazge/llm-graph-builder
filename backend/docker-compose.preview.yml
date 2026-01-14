@@ -1,40 +1,60 @@
+# =============================================================================
+# WAT-MOTOR PREVIEW STACK
+# =============================================================================
+# Traefik entegrasyonu ile multi-tenant desteği
+# 
+# Erişim:
+#   Frontend:  http://demoserver.yazge.aktekbilisim.com/wat
+#   Backend:   http://demoserver.yazge.aktekbilisim.com/wat/api
+#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/wat-neo4j
+#
+# Lokal test için /etc/hosts:
+#   127.0.0.1   demoserver.yazge.aktekbilisim.com
+# =============================================================================
+
 services:
   # RabbitMQ - Message Broker
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: rabbitmq-preview
-    ports:
-      - "5672:5672"
-      - "15672:15672"
+    container_name: rabbitmq-wat
+    expose:
+      - "5672"
+      - "15672"
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     labels:
       - "logging=alloy"
+      - "traefik.enable=true"
+      # RabbitMQ Management UI
+      - "traefik.http.routers.rabbitmq-wat.rule=Host(`rabbitmq-wat.local`)"
+      - "traefik.http.routers.rabbitmq-wat.entrypoints=web"
+      - "traefik.http.services.rabbitmq-wat.loadbalancer.server.port=15672"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - preview
+      - wat
       - observability
+      - traefik-public
     restart: always
 
   # PostgreSQL - Database
   postgres:
     image: postgres:16-alpine
-    container_name: postgres-preview
-    ports:
-      - "5432:5432"
+    container_name: postgres-wat
+    expose:
+      - "5432"
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=Ekdmjweu483i
       - POSTGRES_DB=llm_graph_builder
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
-      - ~/postgres-data-preview:/var/lib/postgresql/data
+      - ~/postgres-data-wat:/var/lib/postgresql/data
     labels:
       - "logging=alloy"
     logging:
@@ -43,23 +63,26 @@ services:
         max-size: "500m"
         max-file: "10"
     networks:
-      - preview
+      - wat
       - observability
     restart: always
 
-  # Backend - preview servisi
+  # Backend - WAT servisi
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .preview.env
-    container_name: backend-preview
-    ports:
-      - "8000:8000"
+      - .env
+    container_name: backend-wat
+    expose:
+      - "8000"
     environment:
       - PYTHONPATH=/code
       - ENV=preview
+      # Neo4j bağlantısı - env dosyasını override et
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_PASSWORD=password
       - QUEUE_DB_PATH=/code/sqlite-data/queue.db
       - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
@@ -89,33 +112,89 @@ services:
       - ./agent_findings:/code/agent_findings
     labels:
       - "logging=alloy"
+      - "traefik.enable=true"
+      # API routing - /wat/server prefix ile (HTTP + HTTPS)
+      - "traefik.http.routers.backend-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat/server`)"
+      - "traefik.http.routers.backend-wat.entrypoints=web,websecure"
+      - "traefik.http.routers.backend-wat.priority=20"
+      - "traefik.http.services.backend-wat.loadbalancer.server.port=8000"
+      # Strip /wat/server prefix (backend / bekliyor)
+      - "traefik.http.middlewares.strip-wat-server.stripprefix.prefixes=/wat/server"
+      - "traefik.http.routers.backend-wat.middlewares=strip-wat-server"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - preview
+      - wat
       - observability
-      - langfuse-network
+      - traefik-public
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
     depends_on:
       - rabbitmq
       - postgres
+      - neo4j
+
+  # Neo4j - Graph Database
+  neo4j:
+    image: neo4j:2025.07.1
+    container_name: neo4j-wat
+    restart: always
+    expose:
+      - "7474"
+      - "7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_usage__report_enabled=false
+      - NEO4J_server_memory_heap_initial__size=2G
+      - NEO4J_server_memory_heap_max__size=4G
+      - NEO4J_server_memory_pagecache_size=2G
+      - NEO4J_dbms_memory_transaction_total_max=4G
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "4"
+    volumes:
+      - neo4j_data_wat:/data
+      - neo4j_plugins_wat:/plugins
+      - neo4j_import_wat:/var/lib/neo4j/import
+    labels:
+      - "logging=alloy"
+      # Neo4j dışarıdan erişime kapalı - sadece internal network
+      - "traefik.enable=false"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - wat
+      - observability
+      - traefik-public
 
   # MCP Neo4j Cypher Server
   mcp-neo4j-cypher:
     build:
       context: ../mcp-servers/mcp-neo4j-cypher
       dockerfile: Dockerfile
-    container_name: mcp-neo4j-cypher
+    container_name: mcp-neo4j-cypher-wat
     restart: always
-    ports:
-      - "8002:8002"
+    expose:
+      - "8002"
     environment:
-      - NEO4J_URI=${NEO4J_URI:-bolt://host.docker.internal:7688}
+      - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
       - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
       - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
@@ -127,7 +206,7 @@ services:
       - NEO4J_MCP_SERVER_PORT=8002
       - NEO4J_MCP_SERVER_PATH=/mcp/
       - NEO4J_NAMESPACE=
-      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,backend-preview
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher-wat,backend-wat
       - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
       - NEO4J_READ_TIMEOUT=30
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -137,14 +216,22 @@ services:
       - ../mcp-servers/mcp-neo4j-cypher/src:/app/src
     labels:
       - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat/mcp`)"
+      - "traefik.http.routers.mcp-wat.entrypoints=web,websecure"
+      - "traefik.http.routers.mcp-wat.priority=20"
+      - "traefik.http.services.mcp-wat.loadbalancer.server.port=8002"
+      - "traefik.http.middlewares.strip-wat-mcp.stripprefix.prefixes=/wat/mcp"
+      - "traefik.http.routers.mcp-wat.middlewares=strip-wat-mcp"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     networks:
-      - preview
+      - wat
       - observability
+      - traefik-public
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
       interval: 30s
@@ -152,7 +239,7 @@ services:
       retries: 3
       start_period: 10s
 
-  # Frontend - preview servisi
+  # Frontend - WAT servisi
   frontend:
     build:
       context: ../frontend
@@ -160,30 +247,45 @@ services:
       args:
         - DEPLOYMENT_ENV=preview
     env_file:
-      - ../frontend/.preview.env
-    container_name: frontend-preview
-    ports:
-      - "5173:5173"
+      - ../frontend/.env
+    container_name: frontend-wat
+    expose:
+      - "5173"
     labels:
       - "logging=alloy"
+      - "traefik.enable=true"
+      # Frontend - /wat path ile (HTTP + HTTPS)
+      - "traefik.http.routers.frontend-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat`)"
+      - "traefik.http.routers.frontend-wat.entrypoints=web,websecure"
+      - "traefik.http.routers.frontend-wat.priority=10"
+      - "traefik.http.services.frontend-wat.loadbalancer.server.port=5173"
+      - "traefik.http.middlewares.strip-wat.stripprefix.prefixes=/wat"
+      - "traefik.http.routers.frontend-wat.middlewares=strip-wat"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - preview
+      - wat
       - observability
+      - traefik-public
     restart: always
 
 networks:
-  preview:
+  wat:
     driver: bridge
+    name: wat-network
   observability:
     external: true
     name: observability
-  langfuse-network:
+  traefik-public:
     external: true
-    name: langfuse_langfuse-network
+    name: traefik-public
+
+volumes:
+  neo4j_data_wat:
+  neo4j_plugins_wat:
+  neo4j_import_wat:
 
 

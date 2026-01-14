@@ -969,10 +969,10 @@ def test_alternative_agent():
     # Basit test fonksiyonu (lokal Neo4j config'ine bağlıdır)
     # Endpoint ile aynı parametreleri kullan (sanitize=False artık)
     graph = Neo4jGraph(
-        url="bolt://localhost:7687",
-        username="neo4j",
-        password="qwerty5555",
-        database="neo4j",
+        url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        username=os.getenv("NEO4J_USERNAME", "neo4j"),
+        password=os.getenv("NEO4J_PASSWORD", "password"),
+        database=os.getenv("NEO4J_DATABASE", "neo4j"),
         sanitize=False,
         refresh_schema=False
     )
