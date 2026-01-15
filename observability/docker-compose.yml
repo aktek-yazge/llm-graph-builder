@@ -1,5 +1,3 @@
-version: '3.8'
-
 # =============================================================================
 # OBSERVABILITY STACK (Modern - Grafana Alloy)
 # =============================================================================
@@ -165,7 +163,7 @@ services:
 
 networks:
   observability:
-    driver: bridge
+    external: true
     name: observability
   traefik-public:
     external: true

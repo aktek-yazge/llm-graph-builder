@@ -2650,13 +2650,12 @@ async def chat_bot_stream(
                 actual_database = tenant_config.get("database") or database
                 logging.info(f"🏢 Multi-tenant: {tenant.id}, database: {actual_database}")
             else:
-                actual_uri = os.environ.get("NEO4J_URI", uri) if uri else uri
-                actual_username = userName
-                actual_password = password
-                actual_database = database
-            
-            if actual_uri and actual_uri != uri:
-                logging.info(f"URI override: {uri} -> {actual_uri}")
+                # Her zaman environment variable kullan - client credentials'a güvenme
+                actual_uri = os.environ.get("NEO4J_URI")
+                actual_username = os.environ.get("NEO4J_USERNAME")
+                actual_password = os.environ.get("NEO4J_PASSWORD")
+                actual_database = os.environ.get("NEO4J_DATABASE", database)
+                logging.info(f"Neo4j credentials from env: uri={actual_uri}, user={actual_username}, pwd={'***' if actual_password else 'MISSING'}, db={actual_database}")
             
             if mode == "graph":
                 graph = Neo4jGraph(

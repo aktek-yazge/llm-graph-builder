@@ -3,6 +3,11 @@
 celery_worker/logs/
 logs/
 
+# Excel data files
+*.xlsx
+*.xls
+backend/scripts/*.xlsx
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
