@@ -252,6 +252,22 @@ class SchemaVersionCache:
             # Version yok, 0 döndür (ilk çekimde Neo4j'den alınacak)
             return 0
             
+        except Exception as e:
+            # Tablo yoksa (PostgreSQL restart vs.) yeniden oluştur
+            error_str = str(e).lower()
+            if "undefined" in error_str or "does not exist" in error_str or "relation" in error_str:
+                logger.warning(f"⚠️ schema_version tablosu bulunamadı, yeniden oluşturuluyor...")
+                db.rollback()
+                try:
+                    Base.metadata.create_all(bind=self.engine)
+                    logger.info("✅ schema_version tablosu yeniden oluşturuldu")
+                    return 0  # Yeni tablo, version 0
+                except Exception as create_error:
+                    logger.error(f"❌ Tablo oluşturma hatası: {create_error}")
+                    raise create_error
+            else:
+                logger.error(f"❌ Version okuma hatası: {e}")
+                raise e
         finally:
             db.close()
     

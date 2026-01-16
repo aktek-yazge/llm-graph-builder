@@ -2,6 +2,9 @@
 FROM node:24-alpine3.21
 
 ARG DEPLOYMENT_ENV="local"
+# DEPLOYMENT_ENV'i runtime'da da kullanılabilir yap (vite.config.ts base path için)
+ENV DEPLOYMENT_ENV=${DEPLOYMENT_ENV}
+
 WORKDIR /app
 COPY package.json yarn.lock ./
 RUN yarn install
