@@ -1,8 +1,8 @@
 import ReactDOM from 'react-dom/client';
-import './index.css';
 import { BrowserRouter } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext.tsx';
 import App from './App.tsx';
+import { AuthProvider } from './context/AuthContext.tsx';
+import './index.css';
 import { SKIP_AUTH } from './utils/Constants.ts';
 
 // Vite base URL'den basename al (örn: '/wat/' -> '/wat')
