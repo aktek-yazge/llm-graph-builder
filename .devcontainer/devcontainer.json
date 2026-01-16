@@ -1,5 +1,5 @@
 {
-  "name": "LLM Graph Builder - Full Stack Dev",
+  "name": "LLM Graph Builder - Full Stack Dev (Traefik)",
   "dockerComposeFile": [
     "./docker-compose.dev.yml"
   ],
@@ -29,6 +29,8 @@
     }
   },
   "forwardPorts": [
+    80,
+    443,
     8000,
     5173,
     7474,
@@ -36,15 +38,29 @@
     6333,
     6274,
     6277,
-    16686
+    8002,
+    8090,
+    15672
   ],
   "portsAttributes": {
+    "80": {
+      "label": "Traefik HTTP",
+      "onAutoForward": "silent"
+    },
+    "443": {
+      "label": "Traefik HTTPS",
+      "onAutoForward": "silent"
+    },
+    "8090": {
+      "label": "Traefik Dashboard",
+      "onAutoForward": "silent"
+    },
     "8000": {
-      "label": "Backend API",
+      "label": "Backend API (Direct)",
       "onAutoForward": "silent"
     },
     "5173": {
-      "label": "Frontend Vite Dev",
+      "label": "Frontend Vite Dev (Direct)",
       "onAutoForward": "silent"
     },
     "7474": {
@@ -67,8 +83,12 @@
       "label": "MCP Inspector Proxy",
       "onAutoForward": "silent"
     },
-    "16686": {
-      "label": "Jaeger UI",
+    "8002": {
+      "label": "MCP Neo4j Cypher",
+      "onAutoForward": "silent"
+    },
+    "15672": {
+      "label": "RabbitMQ Management",
       "onAutoForward": "silent"
     }
   },

@@ -1249,7 +1249,15 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                     return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
                 cypher = sanitized_cypher
             
-            result = await mcp_read.ainvoke({"query": cypher})
+            # Multi-tenant: Add db credentials from environment
+            db_params = {
+                "query": cypher,
+                "db_url": os.environ.get("NEO4J_URI"),
+                "db_username": os.environ.get("NEO4J_USERNAME"),
+                "db_password": os.environ.get("NEO4J_PASSWORD"),
+                "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+            }
+            result = await mcp_read.ainvoke(db_params)
             result_str = str(result) if result else ""
             
             # Hata kontrolü
@@ -1357,10 +1365,15 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                     return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
                 cypher = sanitized_cypher
             
+            # Multi-tenant: Add db credentials from environment
             result = await mcp_embedding.ainvoke({
                 "query_text": query_text,
                 "cypher_query": cypher,
-                "params": {}
+                "params": {},
+                "db_url": os.environ.get("NEO4J_URI"),
+                "db_username": os.environ.get("NEO4J_USERNAME"),
+                "db_password": os.environ.get("NEO4J_PASSWORD"),
+                "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
             })
             result_str = str(result) if result else ""
             
@@ -1560,10 +1573,14 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                 _log(f"🔍 DSL Semantic Search: '{query_text}'")
                 _log(f"   Cypher (with filters): {cypher[:300]}...")
                 
-                # MCP embedding tool çağır
+                # MCP embedding tool çağır (multi-tenant)
                 result_data = await mcp_embedding.ainvoke({
                     "query_text": query_text,
-                    "cypher_query": cypher
+                    "cypher_query": cypher,
+                    "db_url": os.environ.get("NEO4J_URI"),
+                    "db_username": os.environ.get("NEO4J_USERNAME"),
+                    "db_password": os.environ.get("NEO4J_PASSWORD"),
+                    "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
                 })
                 result_str = str(result_data) if result_data else ""
                 
@@ -1637,7 +1654,14 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                     return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
                 cypher = sanitized_cypher
             
-            result_data = await mcp_read.ainvoke({"query": cypher})
+            # Multi-tenant: Add db credentials from environment
+            result_data = await mcp_read.ainvoke({
+                "query": cypher,
+                "db_url": os.environ.get("NEO4J_URI"),
+                "db_username": os.environ.get("NEO4J_USERNAME"),
+                "db_password": os.environ.get("NEO4J_PASSWORD"),
+                "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+            })
             result_str = str(result_data) if result_data else ""
             
             # Hata kontrolü

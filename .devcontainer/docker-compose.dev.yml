@@ -1,8 +1,67 @@
-# Development environment compose
-# Ana docker-compose.yml'e development ayarları ekler
-# DevContainer için tek container - hem Python hem Node.js
+# =============================================================================
+# DEVELOPMENT ENVIRONMENT COMPOSE - Traefik Entegrasyonu
+# =============================================================================
+# DevContainer için full-stack development ortamı
+# Traefik ile reverse proxy ve multi-tenant desteği
+#
+# WAT Projesi Erişim (Traefik):
+#   Frontend:     http://dev.local/wat/ui
+#   Backend:      http://dev.local/wat/server
+#   MCP:          http://dev.local/wat/mcp
+#   Neo4j:        http://dev.local/wat/neo4j
+#   Qdrant:       http://dev.local/wat/qdrant
+#
+# Altyapı Servisleri:
+#   RabbitMQ:     http://dev.local/rabbitmq
+#   Traefik:      http://localhost:8090/dashboard/
+#
+# Lokal test için /etc/hosts:
+#   127.0.0.1   dev.local
+#
+# Alternatif direkt erişim (Traefik olmadan):
+#   Backend:   http://localhost:8000
+#   Frontend:  http://localhost:5173
+#   Neo4j:     http://localhost:7474
+# =============================================================================
 
 services:
+  # ===========================================================================
+  # TRAEFIK - Reverse Proxy & Load Balancer
+  # ===========================================================================
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik-dev
+    restart: always
+    command:
+      # API ve Dashboard
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      # Docker provider - container label'larını dinle
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=wat-dev-network"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Logging
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+    ports:
+      - "80:80"       # HTTP
+      - "443:443"     # HTTPS
+      - "8090:8080"   # Traefik Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dev.local`) && PathPrefix(`/traefik`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+
+  # ===========================================================================
+  # MCP INSPECTOR & JAEGER
+  # ===========================================================================
   mcp-inspector:
     image: ghcr.io/modelcontextprotocol/inspector:latest
     container_name: mcp-inspector
@@ -14,25 +73,19 @@ services:
       - PORT=6274
     restart: unless-stopped
     networks:
-      - llm-graph-builder_net
-  jaeger:
-    image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
-    container_name: jaeger
-    ports:
-      - "16686:16686" # Web UI
-      - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP
-      - "5778:5778" # Configuration server
-      - "9411:9411" # Zipkin compatible endpoint
-    restart: unless-stopped
-  # Full-stack development container
+      - wat-dev-network
+
+  # ===========================================================================
+  # DEVCONTAINER - Full-stack Development Container
+  # ===========================================================================
   devcontainer:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: devcontainer
     ports:
-      - "8000:8000" # Backend API
-      - "5173:5173" # Frontend Vite
+      - "8000:8000" # Backend API (direct access)
+      - "5173:5173" # Frontend Vite (direct access)
     volumes:
       - ../:/workspace:cached # Full workspace mount
       - backend_pip_cache:/root/.cache/pip # Python cache
@@ -40,11 +93,31 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
     environment:
       - PYTHONPATH=/workspace/backend
+      # Neo4j bağlantısı
+      - NEO4J_URI=bolt://neo4j-wat:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=Watmotor!654*
+      - NEO4J_DATABASE=neo4j
+      # PostgreSQL bağlantısı
+      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
+      # Celery/RabbitMQ
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq-dev:5672//
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
+      # MCP Server
+      - MCP_HTTP_HOST=mcp-neo4j-cypher-wat
+      - MCP_HTTP_PORT=8002
+      # OpenTelemetry
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=llm-graph-builder-backend
+      - OTEL_ENVIRONMENT=development
     working_dir: /workspace
     command: ["tail", "-f", "/dev/null"] # Manuel başlatma
     depends_on:
       - neo4j
       - qdrant
+      - postgres
+      - rabbitmq
+      - traefik
     deploy:
       resources:
         limits:
@@ -53,11 +126,30 @@ services:
         reservations:
           memory: 8g
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      # Backend API routing - /wat/server prefix
+      - "traefik.http.routers.wat-backend.rule=Host(`dev.local`) && PathPrefix(`/wat/server`)"
+      - "traefik.http.routers.wat-backend.entrypoints=web"
+      - "traefik.http.routers.wat-backend.priority=20"
+      - "traefik.http.services.wat-backend.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.strip-wat-server.stripprefix.prefixes=/wat/server"
+      - "traefik.http.routers.wat-backend.middlewares=strip-wat-server"
+      # Frontend routing - /wat/ui path
+      - "traefik.http.routers.wat-frontend.rule=Host(`dev.local`) && PathPrefix(`/wat/ui`)"
+      - "traefik.http.routers.wat-frontend.entrypoints=web"
+      - "traefik.http.routers.wat-frontend.priority=15"
+      - "traefik.http.services.wat-frontend.loadbalancer.server.port=5173"
+      - "traefik.http.middlewares.strip-wat-ui.stripprefix.prefixes=/wat/ui"
+      - "traefik.http.routers.wat-frontend.middlewares=strip-wat-ui"
 
+  # ===========================================================================
+  # QDRANT - Vector Database
+  # ===========================================================================
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: qdrant-service
+    container_name: qdrant-wat
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -69,17 +161,27 @@ services:
           memory: 16g
           cpus: "4"
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wat-qdrant.rule=Host(`dev.local`) && PathPrefix(`/wat/qdrant`)"
+      - "traefik.http.routers.wat-qdrant.entrypoints=web"
+      - "traefik.http.services.wat-qdrant.loadbalancer.server.port=6333"
+      - "traefik.http.middlewares.strip-wat-qdrant.stripprefix.prefixes=/wat/qdrant"
+      - "traefik.http.routers.wat-qdrant.middlewares=strip-wat-qdrant"
 
+  # ===========================================================================
+  # NEO4J - WAT Graph Database
+  # ===========================================================================
   neo4j:
     image: neo4j:2025.07.1
-    container_name: neo4j-service
+    container_name: neo4j-wat
     restart: always
     ports:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/qwerty5555
+      - NEO4J_AUTH=neo4j/Watmotor!654*
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false
@@ -94,49 +196,77 @@ services:
     deploy:
       resources:
         limits:
-          memory: 16g
+          memory: 8g
           cpus: "4"
     volumes:
       - neo4j_data:/data
       - neo4j_plugins:/plugins
       - neo4j_import:/var/lib/neo4j/import
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wat-neo4j.rule=Host(`dev.local`) && PathPrefix(`/wat/neo4j`)"
+      - "traefik.http.routers.wat-neo4j.entrypoints=web"
+      - "traefik.http.routers.wat-neo4j.priority=15"
+      - "traefik.http.services.wat-neo4j.loadbalancer.server.port=7474"
+      - "traefik.http.middlewares.strip-wat-neo4j.stripprefix.prefixes=/wat/neo4j"
+      - "traefik.http.routers.wat-neo4j.middlewares=strip-wat-neo4j"
 
-  # WAT Motor - Ayrı Neo4j Instance
-  neo4j-wat-motor:
-    image: neo4j:2025.07.1
-    container_name: neo4j-wat-motor
+  # ===========================================================================
+  # MCP NEO4J CYPHER - MCP Server for Neo4j
+  # ===========================================================================
+  mcp-neo4j-cypher:
+    build:
+      context: ../mcp-servers/mcp-neo4j-cypher
+      dockerfile: Dockerfile
+    container_name: mcp-neo4j-cypher-wat
     restart: always
     ports:
-      - "7475:7474"  # HTTP Browser
-      - "7688:7687"  # Bolt
+      - "8002:8002"
     environment:
-      - NEO4J_AUTH=neo4j/Watmotor!654*
-      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
-      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
-      - NEO4J_dbms_usage__report_enabled=false
-      - NEO4J_server_memory_heap_initial__size=512M
-      - NEO4J_server_memory_heap_max__size=1G
-      - NEO4J_server_memory_pagecache_size=512M
-      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
-      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
-      - NEO4J_apoc_export_file_enabled=true
-      - NEO4J_apoc_import_file_enabled=true
-      - NEO4J_apoc_import_file_use__neo4j__config=true
-    deploy:
-      resources:
-        limits:
-          memory: 4g
-          cpus: "2"
+      - NEO4J_URI=bolt://neo4j-wat:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=Watmotor!654*
+      - NEO4J_DATABASE=neo4j
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8002
+      - NEO4J_TRANSPORT=http
+      - NEO4J_MCP_SERVER_HOST=0.0.0.0
+      - NEO4J_MCP_SERVER_PORT=8002
+      - NEO4J_MCP_SERVER_PATH=/mcp/
+      - NEO4J_NAMESPACE=
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher-wat,mcp-neo4j-cypher,devcontainer
+      - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
+      - NEO4J_READ_TIMEOUT=30
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - neo4j_wat_motor_data:/data
-      - neo4j_wat_motor_plugins:/plugins
-      - neo4j_wat_motor_import:/var/lib/neo4j/import
+      - ../mcp-servers/mcp-neo4j-cypher/src:/app/src
+    depends_on:
+      - neo4j
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wat-mcp.rule=Host(`dev.local`) && PathPrefix(`/wat/mcp`)"
+      - "traefik.http.routers.wat-mcp.entrypoints=web"
+      - "traefik.http.routers.wat-mcp.priority=20"
+      - "traefik.http.services.wat-mcp.loadbalancer.server.port=8002"
+      - "traefik.http.middlewares.strip-wat-mcp.stripprefix.prefixes=/wat/mcp"
+      - "traefik.http.routers.wat-mcp.middlewares=strip-wat-mcp"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  # RabbitMQ - Message Broker
+  # ===========================================================================
+  # RABBITMQ - Message Broker
+  # ===========================================================================
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq-dev
@@ -146,32 +276,38 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
-      # Disable consumer timeout for long-running tasks (default is 30min = 1800000ms)
-      # Use 'infinity' to completely disable, or high value like 7200000 (2 hours)
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     restart: unless-stopped
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rabbitmq.rule=Host(`dev.local`) && PathPrefix(`/rabbitmq`)"
+      - "traefik.http.routers.rabbitmq.entrypoints=web"
+      - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
+      - "traefik.http.middlewares.strip-rabbitmq.stripprefix.prefixes=/rabbitmq"
+      - "traefik.http.routers.rabbitmq.middlewares=strip-rabbitmq"
 
-  # PostgreSQL - Database
+  # ===========================================================================
+  # POSTGRESQL with pgvector - Database
+  # ===========================================================================
   postgres:
-    image: postgres:16-alpine
-    container_name: postgres-dev
+    image: pgvector/pgvector:pg16
+    container_name: postgres-wat
     ports:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=Ekdmjweu483i
       - POSTGRES_DB=llm_graph_builder
-    # Increase max_connections for high concurrency workloads
     command: postgres -c max_connections=2000 -c shared_buffers=256MB
     volumes:
       - postgres_data_dev:/var/lib/postgresql/data
     deploy:
       resources:
         limits:
-          memory: 1g
-          cpus: "1"
+          memory: 2g
+          cpus: "2"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -179,38 +315,34 @@ services:
       retries: 5
     restart: always
     networks:
-      - llm-graph-builder_net
+      - wat-dev-network
 
 volumes:
   frontend_node_modules:
     external: true
-    name: llm-graph-builder_frontend_node_modules
+    name: wat_frontend_node_modules
   backend_pip_cache:
     external: true
-    name: llm-graph-builder_backend_pip_cache
+    name: wat_backend_pip_cache
   qdrant_storage:
     external: true
-    name: llm-graph-builder_qdrant_storage
+    name: wat_qdrant_storage
   neo4j_data:
     external: true
-    name: llm-graph-builder_neo4j_data
+    name: wat_neo4j_data
   neo4j_plugins:
     external: true
-    name: llm-graph-builder_neo4j_plugins
+    name: wat_neo4j_plugins
   neo4j_import:
     external: true
-    name: llm-graph-builder_neo4j_import
-  # WAT Motor Neo4j Volumes
-  neo4j_wat_motor_data:
-  neo4j_wat_motor_plugins:
-  neo4j_wat_motor_import:
+    name: wat_neo4j_import
   postgres_data_dev:
     external: true
-    name: llm-graph-builder_postgres_data_dev
+    name: wat_postgres_data
 
 
-# Development network - ana compose ile uyumlu
+# Development network - WAT projesi için
 networks:
-  llm-graph-builder_net:
-    external: true
-    name: workspace_llm-graph-builder_net
+  wat-dev-network:
+    driver: bridge
+    name: wat-dev-network

@@ -1,9 +1,11 @@
+import hashlib
 import json
 import logging
 import os
 import re
 import unicodedata
-from typing import Any, Literal, LiteralString, Optional, cast
+from datetime import datetime
+from typing import Any, Dict, Literal, LiteralString, Optional, Tuple, cast
 
 from dotenv import load_dotenv
 from fastmcp.exceptions import ToolError
@@ -35,6 +37,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp_neo4j_cypher")
 logger.setLevel(logging.INFO)
+
+
+# =============================================================================
+# MULTI-TENANT CONNECTION POOL MANAGER
+# =============================================================================
+
+class ConnectionPoolManager:
+    """
+    Multi-tenant connection pool manager.
+    Aynı db_url+username+password kombinasyonu için driver'ı cache'ler.
+    Farklı projeler aynı MCP sunucusunu kullanabilir.
+    """
+    
+    def __init__(self, max_idle_seconds: int = 3600):
+        self._pools: Dict[str, Tuple[Any, datetime]] = {}  # key -> (driver, last_used)
+        self._max_idle_seconds = max_idle_seconds
+    
+    def _get_key(self, db_url: str, username: str, password: str) -> str:
+        """Unique key for connection (hash of credentials)"""
+        return hashlib.sha256(f"{db_url}:{username}:{password}".encode()).hexdigest()[:16]
+    
+    async def get_driver(self, db_url: str, username: str, password: str) -> Any:
+        """
+        Get or create driver for the given credentials.
+        Returns cached driver if available, creates new one otherwise.
+        """
+        key = self._get_key(db_url, username, password)
+        
+        if key in self._pools:
+            driver, _ = self._pools[key]
+            self._pools[key] = (driver, datetime.now())  # Update last used time
+            logger.debug(f"🔄 Reusing connection pool for {db_url[:30]}...")
+            return driver
+        
+        # Create new driver with connection pool settings
+        driver = AsyncGraphDatabase.driver(
+            db_url,
+            auth=(username, password),
+            max_connection_pool_size=50,
+            connection_acquisition_timeout=60,
+            max_connection_lifetime=3600,
+        )
+        self._pools[key] = (driver, datetime.now())
+        logger.info(f"✅ New connection pool created for {db_url[:30]}... (total pools: {len(self._pools)})")
+        return driver
+    
+    async def cleanup_idle(self):
+        """Remove idle connections (older than max_idle_seconds)"""
+        now = datetime.now()
+        to_remove = []
+        
+        for key, (driver, last_used) in self._pools.items():
+            idle_seconds = (now - last_used).total_seconds()
+            if idle_seconds > self._max_idle_seconds:
+                try:
+                    await driver.close()
+                except Exception as e:
+                    logger.warning(f"Error closing idle driver: {e}")
+                to_remove.append(key)
+        
+        for key in to_remove:
+            del self._pools[key]
+            logger.info(f"🧹 Idle connection pool removed (remaining: {len(self._pools)})")
+    
+    async def close_all(self):
+        """Close all connection pools"""
+        for key, (driver, _) in self._pools.items():
+            try:
+                await driver.close()
+            except Exception as e:
+                logger.warning(f"Error closing driver: {e}")
+        self._pools.clear()
+        logger.info("🔌 All connection pools closed")
+
+
+# Global connection pool manager instance
+connection_pool_manager = ConnectionPoolManager()
 
 
 def normalize_unicode_text(text: str) -> str:
@@ -390,13 +469,20 @@ def _is_write_query(query: str) -> bool:
 
 
 def create_mcp_server(
-    neo4j_driver: AsyncDriver,
-    database: str = "neo4j",
     namespace: str = "",
     read_timeout: int = 30,
     token_limit: Optional[int] = None,
     read_only: bool = False,
 ) -> FastMCP:
+    """
+    Create MCP server with Neo4j tools.
+    
+    Multi-tenant Support (STRICT MODE):
+    - db_url, db_username, db_password MUST be provided in every tool call
+    - NO environment variable fallback - this ensures proper multi-tenant isolation
+    - If credentials are missing, an explicit error is returned
+    - Connection pooling ensures efficient reuse of connections per tenant
+    """
     mcp: FastMCP = FastMCP("mcp-neo4j-cypher")
 
     namespace_prefix = _format_namespace(namespace)
@@ -438,9 +524,25 @@ def create_mcp_server(
         params: dict[str, Any] = Field(
             dict(), description="The parameters to pass to the Cypher query."
         ),
+        # Multi-tenant parameters (REQUIRED - no env fallback)
+        db_url: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j connection URL (bolt://host:port)"
+        ),
+        db_username: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j username"
+        ),
+        db_password: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j password"
+        ),
+        db_database: Optional[str] = Field(
+            "neo4j", description="Neo4j database name (default: neo4j)"
+        ),
     ) -> str:
         """
         Execute a read Cypher query on the neo4j database.
+        
+        MULTI-TENANT MODE: db_url, db_username, db_password are REQUIRED.
+        No environment variable fallback - credentials must be explicitly provided.
         
         USE THIS TOOL FOR:
         - METADATA queries: names, numbers, dates, counts, IDs
@@ -462,18 +564,51 @@ def create_mcp_server(
         logger.info(f"{'🔷'*20}")
         logger.info(f"📝 {query}")
         logger.info(f"📦 Params: {params}")
+        logger.info(f"🔗 DB: {db_url[:30] if db_url else 'NOT PROVIDED'}...")
         logger.info(f"{'🔷'*20}")
+
+        # STRICT MODE: Require db credentials
+        if not db_url or not db_username or not db_password:
+            missing = []
+            if not db_url:
+                missing.append("db_url")
+            if not db_username:
+                missing.append("db_username")
+            if not db_password:
+                missing.append("db_password")
+            
+            error_msg = f"""❌ MULTI-TENANT ERROR: Missing required database credentials!
+
+Missing parameters: {', '.join(missing)}
+
+This MCP server operates in STRICT MULTI-TENANT MODE.
+Database credentials must be provided in every tool call.
+
+Required parameters:
+- db_url: Neo4j connection URL (e.g., bolt://neo4j-host:7687)
+- db_username: Neo4j username (e.g., neo4j)
+- db_password: Neo4j password
+- db_database: Database name (optional, default: neo4j)
+
+Please ensure your agent wrapper includes these parameters from environment variables."""
+            
+            logger.error(f"❌ Missing db credentials: {missing}")
+            return error_msg
 
         if _is_write_query(query):
             raise ValueError("Only MATCH queries are allowed for read-query")
 
         try:
+            # Get driver from connection pool
+            driver = await connection_pool_manager.get_driver(db_url, db_username, db_password)
+            target_database = db_database or "neo4j"
+            
             query_obj = Query(cast(LiteralString, query), timeout=float(read_timeout))
-            results = await neo4j_driver.execute_query(
+            results = await driver.execute_query(
                 query_obj,
                 parameters_=params,
                 routing_control=RoutingControl.READ,
-                database_=database,
+                database_=target_database,
                 result_transformer_=lambda r: r.data(),
             )
             # Önce DateTime objelerini handle et, sonra sanitize et
@@ -556,9 +691,25 @@ Sorguyu düzeltip TEKRAR DENE!"""
                 "Note: $embedding_vector will be automatically added to params."
             ),
         ),
+        # Multi-tenant parameters (REQUIRED - no env fallback)
+        db_url: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j connection URL (bolt://host:port)"
+        ),
+        db_username: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j username"
+        ),
+        db_password: Optional[str] = Field(
+            None, description="REQUIRED: Neo4j password"
+        ),
+        db_database: Optional[str] = Field(
+            "neo4j", description="Neo4j database name (default: neo4j)"
+        ),
     ) -> str:
         """
         Execute a semantic search in document content (Chunks) using embeddings.
+        
+        MULTI-TENANT MODE: db_url, db_username, db_password are REQUIRED.
+        No environment variable fallback - credentials must be explicitly provided.
         
         ⚠️ USE THIS TOOL WHEN:
         - Question asks for DETAILS, LISTS, TABLES, or EXPLANATIONS
@@ -592,7 +743,36 @@ Sorguyu düzeltip TEKRAR DENE!"""
         logger.info(f"🔤 Text: {query_text}")
         logger.info(f"📝 Cypher: {cypher_query}")
         logger.info(f"📦 Params: {params}")
+        logger.info(f"🔗 DB: {db_url[:30] if db_url else 'NOT PROVIDED'}...")
         logger.info(f"{'🟣'*20}")
+
+        # STRICT MODE: Require db credentials
+        if not db_url or not db_username or not db_password:
+            missing = []
+            if not db_url:
+                missing.append("db_url")
+            if not db_username:
+                missing.append("db_username")
+            if not db_password:
+                missing.append("db_password")
+            
+            error_msg = f"""❌ MULTI-TENANT ERROR: Missing required database credentials!
+
+Missing parameters: {', '.join(missing)}
+
+This MCP server operates in STRICT MULTI-TENANT MODE.
+Database credentials must be provided in every tool call.
+
+Required parameters:
+- db_url: Neo4j connection URL (e.g., bolt://neo4j-host:7687)
+- db_username: Neo4j username (e.g., neo4j)
+- db_password: Neo4j password
+- db_database: Database name (optional, default: neo4j)
+
+Please ensure your agent wrapper includes these parameters from environment variables."""
+            
+            logger.error(f"❌ Missing db credentials: {missing}")
+            return error_msg
 
         # Validate that cypher_query contains $embedding_vector parameter
         # Soft-fail: Return error message instead of raising exception to allow agent retry
@@ -642,14 +822,18 @@ Sorguyu düzeltip TEKRAR DENE!"""
             params_with_embedding = params.copy()
             params_with_embedding["embedding_vector"] = embedding_vector
 
-            # Step 5: Execute Cypher query
+            # Step 5: Get driver from connection pool (credentials already validated above)
+            driver = await connection_pool_manager.get_driver(db_url, db_username, db_password)
+            target_database = db_database or "neo4j"
+
+            # Step 6: Execute Cypher query
             logger.info(f"🔍 Cypher sorgusu çalıştırılıyor...")
             query_obj = Query(cast(LiteralString, cypher_query), timeout=float(read_timeout))
-            results = await neo4j_driver.execute_query(
+            results = await driver.execute_query(
                 query_obj,
                 parameters_=params_with_embedding,
                 routing_control=RoutingControl.READ,
-                database_=database,
+                database_=target_database,
                 result_transformer_=lambda r: r.data(),
             )
 
@@ -771,10 +955,6 @@ Sorguyu düzeltip TEKRAR DENE!"""
 
 
 async def main(
-    db_url: str,
-    username: str,
-    password: str,
-    database: str,
     transport: Literal["stdio", "sse", "http"] = "stdio",
     namespace: str = "",
     host: str = "127.0.0.1",
@@ -786,20 +966,24 @@ async def main(
     token_limit: Optional[int] = None,
     read_only: bool = False,
 ) -> None:
-    logger.info("Starting MCP neo4j Server")
+    """
+    Start the MCP Neo4j Server in STRICT MULTI-TENANT MODE.
+    
+    In this mode:
+    - NO default Neo4j connection is created at startup
+    - EVERY tool call MUST include db_url, db_username, db_password
+    - ConnectionPoolManager handles per-tenant connection pooling
+    - Missing credentials result in explicit error messages
+    """
+    logger.info("=" * 60)
+    logger.info("🚀 Starting MCP Neo4j Server (STRICT MULTI-TENANT MODE)")
+    logger.info("=" * 60)
+    logger.info("⚠️  No default Neo4j connection - credentials required per tool call")
+    logger.info("📡 Transport: %s", transport)
+    if transport in ["http", "sse"]:
+        logger.info("🌐 Endpoint: http://%s:%d%s", host, port, path)
+    logger.info("=" * 60)
 
-    neo4j_driver = AsyncGraphDatabase.driver(
-        db_url,
-        auth=(
-            username,
-            password,
-        ),
-        # Connection pool ayarları - tek soru için bağlantıları yeniden kullan
-        max_connection_pool_size=50,  # Maksimum bağlantı sayısı
-        connection_acquisition_timeout=60,  # Bağlantı alma timeout (saniye)
-        max_connection_lifetime=3600,  # Bağlantı ömrü (saniye)
-    )
-    logger.info("✅ Neo4j connection pool oluşturuldu (max: 50 bağlantı)")
     custom_middleware = [
         Middleware(
             CORSMiddleware,
@@ -811,7 +995,10 @@ async def main(
     ]
 
     mcp = create_mcp_server(
-        neo4j_driver, database, namespace, read_timeout, token_limit, read_only
+        namespace=namespace,
+        read_timeout=read_timeout,
+        token_limit=token_limit,
+        read_only=read_only,
     )
 
     # Run the server with the specified transport
@@ -850,17 +1037,16 @@ async def main(
 if __name__ == "__main__":
     import asyncio
     
-    # Environment variables'dan al
-    db_url = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    username = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "password")
-    database = os.getenv("NEO4J_DATABASE", "neo4j")
-    transport = os.getenv("MCP_TRANSPORT", "stdio")
-    host = os.getenv("MCP_HOST", "127.0.0.1")
+    # Transport and server settings from environment
+    # NOTE: Database credentials are NOT read here - they must be provided per tool call
+    transport = os.getenv("MCP_TRANSPORT", "http")
+    host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8000"))
     path = os.getenv("MCP_PATH", "/mcp/")
+    namespace = os.getenv("NEO4J_NAMESPACE", "")
+    read_timeout = int(os.getenv("NEO4J_READ_TIMEOUT", "30"))
     
-    # Allowed hosts ve origins
+    # Allowed hosts ve origins (for HTTP/SSE transport)
     allowed_hosts_str = os.getenv("NEO4J_MCP_SERVER_ALLOWED_HOSTS", "localhost,127.0.0.1,host.docker.internal")
     allowed_hosts = [h.strip() for h in allowed_hosts_str.split(",") if h.strip()]
     
@@ -868,14 +1054,12 @@ if __name__ == "__main__":
     allow_origins = allow_origins_str.split(",") if allow_origins_str != "*" else ["*"]
     
     asyncio.run(main(
-        db_url=db_url,
-        username=username,
-        password=password,
-        database=database,
         transport=transport,  # type: ignore
+        namespace=namespace,
         host=host,
         port=port,
         path=path,
         allowed_hosts=allowed_hosts,
         allow_origins=allow_origins,
+        read_timeout=read_timeout,
     ))
