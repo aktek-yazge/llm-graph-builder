@@ -86,9 +86,9 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
       - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
       - QUEUE_DB_PATH=/code/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
+      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq-wat:5672//
+      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
       # Neo4j Timeout ayarları
       - NEO4J_CONNECTION_TIMEOUT=60
       - NEO4J_READ_TIMEOUT=300
