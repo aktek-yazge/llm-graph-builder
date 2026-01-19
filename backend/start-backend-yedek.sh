@@ -107,81 +107,40 @@ export CELERY_RESULT_BACKEND="${CELERY_RESULT_BACKEND:-db+postgresql://postgres:
 
 
 # ==============================
-# MCP Server (Docker Container)
-# Domain'e göre farklı port ve container
-# - sigorta: mcp-neo4j-cypher (port 8002)
-# - bakim:   mcp-neo4j-cypher-bakim (port 8003)
+# MCP Server (Docker Container) - DISABLED
 # ==============================
+# MCP Server artık multi-tenant modda çalışıyor ve ayrı yönetiliyor.
+# Her tool çağrısında db bilgileri parametre olarak geçiliyor.
+# MCP server'ı manuel olarak başlatın veya docker-compose ile yönetin.
+#
+# Eski kod yorum satırına alındı:
+# ------------------------------
+# MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
+# 
+# # Domain'e göre MCP port ve container belirle
+# if [[ "$DOMAIN" == "bakim" ]]; then
+#     MCP_PORT="${MCP_HTTP_PORT:-8003}"
+#     MCP_CONTAINER_NAME="mcp-neo4j-cypher-bakim"
+#     DEFAULT_NEO4J_URI="bolt://host.docker.internal:7688"
+#     DEFAULT_NEO4J_USER="neo4j"
+#     DEFAULT_NEO4J_PASS="Watmotor!654*"
+# else
+#     MCP_PORT="${MCP_HTTP_PORT:-8002}"
+#     MCP_CONTAINER_NAME="mcp-neo4j-cypher"
+#     DEFAULT_NEO4J_URI="bolt://3.76.55.209:7688"
+#     DEFAULT_NEO4J_USER="neo4j"
+#     DEFAULT_NEO4J_PASS="qwerty5555"
+# fi
+# 
+# echo "🐳 Checking MCP Server (Docker) for domain: $DOMAIN..."
+# docker compose -p "$COMPOSE_PROJECT" up -d --build
+# ... (full code removed for brevity)
+
+# MCP HTTP URL - .env dosyasından veya default
 MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
-
-# Domain'e göre MCP port ve container belirle
-if [[ "$DOMAIN" == "bakim" ]]; then
-    MCP_PORT="${MCP_HTTP_PORT:-8003}"
-    MCP_CONTAINER_NAME="mcp-neo4j-cypher-bakim"
-    # WAT Motor Neo4j defaults
-    DEFAULT_NEO4J_URI="bolt://host.docker.internal:7688"
-    DEFAULT_NEO4J_USER="neo4j"
-    DEFAULT_NEO4J_PASS="Watmotor!654*"
-else
-    MCP_PORT="${MCP_HTTP_PORT:-8002}"
-    MCP_CONTAINER_NAME="mcp-neo4j-cypher"
-    # Sigorta Neo4j defaults (uzak sunucu)
-    DEFAULT_NEO4J_URI="bolt://3.76.55.209:7688"
-    DEFAULT_NEO4J_USER="neo4j"
-    DEFAULT_NEO4J_PASS="qwerty5555"
-fi
-
-echo "🐳 Checking MCP Server (Docker) for domain: $DOMAIN..."
-echo "   📡 MCP Server: http://${MCP_HOST}:${MCP_PORT}/mcp/"
-echo "   🏷️  Container: ${MCP_CONTAINER_NAME}"
-
-# Check if Docker container is running
-if docker ps --format '{{.Names}}' | grep -q "^${MCP_CONTAINER_NAME}$"; then
-    echo "   ✅ MCP Server container is already running"
-else
-    echo "   ⚠️  MCP Server container is not running"
-    echo "   🚀 Starting MCP Server container..."
-    
-    # MCP container için localhost -> host.docker.internal çevir
-    # (Docker container içinden host'a erişmek için)
-    MCP_NEO4J_URI="${NEO4J_URI:-$DEFAULT_NEO4J_URI}"
-    MCP_NEO4J_URI="${MCP_NEO4J_URI//localhost/host.docker.internal}"
-    MCP_NEO4J_URI="${MCP_NEO4J_URI//127.0.0.1/host.docker.internal}"
-    
-    # MCP için ayrı env variable export et (compose bunu kullanır)
-    export MCP_NEO4J_URI="$MCP_NEO4J_URI"
-    export NEO4J_USERNAME="${NEO4J_USERNAME:-$DEFAULT_NEO4J_USER}"
-    export NEO4J_PASSWORD="${NEO4J_PASSWORD:-$DEFAULT_NEO4J_PASS}"
-    export NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
-    export MCP_PORT="$MCP_PORT"
-    export MCP_CONTAINER_NAME="$MCP_CONTAINER_NAME"
-    
-    echo "   🔗 Neo4j URI (MCP): ${MCP_NEO4J_URI}"
-    
-    # Start the Docker container with domain-specific settings
-    cd "$PROJECT_ROOT/mcp-servers/mcp-neo4j-cypher"
-    
-    # Domain'e göre farklı compose project name kullan
-    COMPOSE_PROJECT="${MCP_CONTAINER_NAME}"
-    docker compose -p "$COMPOSE_PROJECT" up -d --build
-    
-    # Wait for container to be ready
-    echo "   ⏳ Waiting for MCP server to be ready..."
-    sleep 5
-    
-    # Verify container started
-    if docker ps --format '{{.Names}}' | grep -q "^${MCP_CONTAINER_NAME}$"; then
-        echo "   ✅ MCP Server container started successfully"
-    else
-        echo "   ❌ Failed to start MCP Server container"
-        echo "   💡 Check logs with: docker logs ${MCP_CONTAINER_NAME}"
-    fi
-    
-    cd "$SCRIPT_DIR"
-fi
-
-# MCP HTTP URL'i backend için export et
+MCP_PORT="${MCP_HTTP_PORT:-8002}"
 export MCP_HTTP_URL="http://${MCP_HOST}:${MCP_PORT}/mcp/"
+echo "📡 MCP Server URL: ${MCP_HTTP_URL} (ensure it's running separately)"
 
 echo ""
 echo "🚀 Starting Backend API Server..."

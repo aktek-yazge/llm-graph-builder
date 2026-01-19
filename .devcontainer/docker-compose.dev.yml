@@ -10,6 +10,7 @@
 #   MCP:          http://dev.local/wat/mcp
 #   Neo4j:        http://dev.local/wat/neo4j
 #   Qdrant:       http://dev.local/wat/qdrant
+#   Redis:        http://localhost:8001 (RedisInsight)
 #
 # Altyapı Servisleri:
 #   RabbitMQ:     http://dev.local/rabbitmq
@@ -106,6 +107,10 @@ services:
       # MCP Server
       - MCP_HTTP_HOST=mcp-neo4j-cypher-wat
       - MCP_HTTP_PORT=8002
+      # Redis Cache
+      - REDIS_URL=redis://redis-wat:6379
+      - REDIS_SEMANTIC_URL=redis://redis-wat:6379
+      - REDIS_CACHE_ENABLED=true
       # OpenTelemetry
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
       - OTEL_SERVICE_NAME=llm-graph-builder-backend
@@ -117,6 +122,7 @@ services:
       - qdrant
       - postgres
       - rabbitmq
+      - redis
       - traefik
     deploy:
       resources:
@@ -289,6 +295,34 @@ services:
       - "traefik.http.routers.rabbitmq.middlewares=strip-rabbitmq"
 
   # ===========================================================================
+  # REDIS STACK - Semantic Cache (RediSearch)
+  # ===========================================================================
+  redis:
+    image: redis/redis-stack:latest
+    container_name: redis-wat
+    ports:
+      - "6379:6379"   # Redis
+      - "6381:6379"   # Alternative port for semantic cache
+      - "8001:8001"   # RedisInsight
+    environment:
+      - REDIS_ARGS=--save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - wat-dev-network
+
+  # ===========================================================================
   # POSTGRESQL with pgvector - Database
   # ===========================================================================
   postgres:
@@ -339,6 +373,8 @@ volumes:
   postgres_data_dev:
     external: true
     name: wat_postgres_data
+  redis_data:
+    name: wat_redis_data
 
 
 # Development network - WAT projesi için

@@ -38,6 +38,8 @@
     6333,
     6274,
     6277,
+    6379,
+    8001,
     8002,
     8090,
     15672
@@ -81,6 +83,14 @@
     },
     "6277": {
       "label": "MCP Inspector Proxy",
+      "onAutoForward": "silent"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "silent"
+    },
+    "8001": {
+      "label": "RedisInsight",
       "onAutoForward": "silent"
     },
     "8002": {
