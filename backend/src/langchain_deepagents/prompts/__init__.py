@@ -20,7 +20,7 @@ def get_domain_prompts(domain: str, mode: str = "cypher") -> Dict[str, str]:
     
     Args:
         domain: "sigorta" veya "bakim"
-        mode: "cypher" veya "dsl" (sadece sigorta için geçerli)
+        mode: "cypher" (sadece cypher mode destekleniyor)
         
     Returns:
         Dict with keys: system_base, tool_usage, thinking_guide (optional), content
@@ -28,26 +28,16 @@ def get_domain_prompts(domain: str, mode: str = "cypher") -> Dict[str, str]:
     if domain == "sigorta":
         from .sigorta import (
             SHARED_SYSTEM_BASE,
-            DSL_TOOL_USAGE,
             CYPHER_TOOL_USAGE,
-            DSL_THINKING_GUIDE,
             SHARED_CONTENT,
         )
         
-        if mode == "dsl":
-            return {
-                "system_base": SHARED_SYSTEM_BASE,
-                "tool_usage": DSL_TOOL_USAGE,
-                "thinking_guide": DSL_THINKING_GUIDE,
-                "content": SHARED_CONTENT,
-            }
-        else:  # cypher mode
-            return {
-                "system_base": SHARED_SYSTEM_BASE,
-                "tool_usage": CYPHER_TOOL_USAGE,
-                "thinking_guide": "",  # Cypher mode'da thinking guide yok
-                "content": SHARED_CONTENT,
-            }
+        return {
+            "system_base": SHARED_SYSTEM_BASE,
+            "tool_usage": CYPHER_TOOL_USAGE,
+            "thinking_guide": "",
+            "content": SHARED_CONTENT,
+        }
     
     elif domain == "bakim":
         from .bakim import (
@@ -96,9 +86,7 @@ def build_full_prompt(domain: str, mode: str = "cypher") -> str:
 # Backward compatibility - mevcut import'lar için
 from .sigorta import (
     SHARED_SYSTEM_BASE,
-    DSL_TOOL_USAGE,
     CYPHER_TOOL_USAGE,
-    DSL_THINKING_GUIDE,
     SHARED_CONTENT,
 )
 
@@ -107,8 +95,6 @@ __all__ = [
     "build_full_prompt",
     # Backward compatibility
     "SHARED_SYSTEM_BASE",
-    "DSL_TOOL_USAGE",
     "CYPHER_TOOL_USAGE",
-    "DSL_THINKING_GUIDE",
     "SHARED_CONTENT",
 ]

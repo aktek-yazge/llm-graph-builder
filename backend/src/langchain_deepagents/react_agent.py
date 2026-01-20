@@ -1111,9 +1111,7 @@ from .prompts import (
     build_full_prompt,
     # Backward compatibility - aynı isimlerle export edilir
     SHARED_SYSTEM_BASE,
-    DSL_TOOL_USAGE,
     CYPHER_TOOL_USAGE,
-    DSL_THINKING_GUIDE,
     SHARED_CONTENT,
 )
 
@@ -1122,9 +1120,7 @@ from .prompts import (
 # =============================================================================
 # Artık burada tanımlı değil, yukarıdaki import'tan geliyor:
 # - SHARED_SYSTEM_BASE
-# - DSL_TOOL_USAGE  
 # - CYPHER_TOOL_USAGE
-# - DSL_THINKING_GUIDE
 # - SHARED_CONTENT
 #
 # Domain bazlı prompt'lar için:
@@ -2112,7 +2108,7 @@ class ReactAgent:
         """Domain'e göre Langfuse prompt adını döndür."""
         # Domain bazlı Langfuse prompt isimleri
         prompt_names = {
-            "sigorta": "react-agent-system",
+            "sigorta": "react-agent-sigorta",
             "bakim": "react-agent-wat-motor",
         }
         return prompt_names.get(self.domain, LANGFUSE_PROMPT_NAME)
@@ -2216,8 +2212,8 @@ class ReactAgent:
         
         # Prompt yok, oluştur
         # NOT: {{schema_info}} placeholder olarak kalmalı
-        # DSL mode için tam prompt (en kapsamlı versiyon)
-        full_base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+        # Cypher mode için tam prompt
+        full_base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
         prompt_with_placeholder = full_base_prompt + "{{schema_info}}"
         
         success = create_prompt(

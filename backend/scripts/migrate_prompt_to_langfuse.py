@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Langfuse Prompt Migration Script
+Langfuse Prompt Migration Script (Multi-Domain)
 
-Bu script, react_agent.py'deki prompt constant'larını
+Bu script, farklı domain'ler için özelleştirilmiş prompt'ları
 Langfuse Prompt Management sistemine yükler.
 
 Kullanım:
@@ -12,16 +12,22 @@ Kullanım:
     export LANGFUSE_SECRET_KEY="sk-..."
     export LANGFUSE_HOST="http://localhost:3101"
     
-    # Cypher modu için (varsayılan)
-    python scripts/migrate_prompt_to_langfuse.py
+    # Sigorta domain'i - Cypher mode (varsayılan)
+    python scripts/migrate_prompt_to_langfuse.py --domain sigorta
     
-    # DSL modu için
-    python scripts/migrate_prompt_to_langfuse.py --mode dsl
+    # Sigorta domain'i - DSL mode
+    python scripts/migrate_prompt_to_langfuse.py --domain sigorta --mode dsl
+    
+    # Bakım domain'i (WAT Motor) - sadece Cypher
+    python scripts/migrate_prompt_to_langfuse.py --domain bakim
+
+Desteklenen Domain'ler:
+    - sigorta: Sigorta poliçeleri, müşteriler, teminatlar (DSL + Cypher)
+    - bakim: WAT Motor bakım/arıza yönetimi (sadece Cypher)
 
 Notlar:
     - DSL mode: DSL thinking guide dahil (intent seçimi, DSL şablonları)
     - Cypher mode: Sadece Cypher tool kullanımı, DSL rehberi yok
-    - Prompt adı: react-agent-system (mode label'da belirtilir)
     - Placeholder: {{schema_info}} - runtime'da gerçek şema ile değiştirilir
 """
 
@@ -36,31 +42,85 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.shared.langfuse_client import get_langfuse, create_prompt, get_prompt
-from src.langchain_deepagents.react_agent import (
-    SHARED_SYSTEM_BASE,
-    DSL_TOOL_USAGE,
-    CYPHER_TOOL_USAGE,
-    DSL_THINKING_GUIDE,
-    SHARED_CONTENT,
-)
 
 
-def build_prompt_template(mode: str) -> str:
+# =============================================================================
+# DOMAIN CONFIGURATIONS
+# =============================================================================
+
+DOMAIN_CONFIGS = {
+    "sigorta": {
+        "description": "Sigorta poliçeleri, müşteriler, teminatlar",
+        "modes": ["cypher"],  # DSL kaldırıldı - sadece Cypher
+        "default_mode": "cypher",
+        "vector_index": "vector",
+        "fulltext_index": "chunk_text_fulltext",
+        "prompt_name_template": "react-agent-sigorta",
+        "labels": ["production", "sigorta"],
+    },
+    "bakim": {
+        "description": "WAT Motor bakım/arıza yönetimi",
+        "modes": ["cypher"],
+        "default_mode": "cypher",
+        "vector_index": "task_embedding_index",
+        "fulltext_index": None,
+        "prompt_name_template": "react-agent-wat-motor",
+        "labels": ["production", "bakim", "wat-motor"],
+    },
+}
+
+
+def load_domain_prompts(domain: str):
     """
-    Mode'a göre prompt template oluştur.
+    Domain'e göre prompt modüllerini yükle.
     
     Args:
-        mode: "dsl" veya "cypher"
+        domain: "sigorta" veya "bakim"
+        
+    Returns:
+        Dict of prompt components
+    """
+    if domain == "sigorta":
+        from src.langchain_deepagents.prompts.sigorta import (
+            SHARED_SYSTEM_BASE,
+            CYPHER_TOOL_USAGE,
+            SHARED_CONTENT,
+        )
+        return {
+            "base": SHARED_SYSTEM_BASE,
+            "cypher_tools": CYPHER_TOOL_USAGE,
+            "content": SHARED_CONTENT,
+        }
+    elif domain == "bakim":
+        from src.langchain_deepagents.prompts.bakim import (
+            WAT_SYSTEM_BASE,
+            WAT_TOOL_USAGE,
+            WAT_CONTENT,
+        )
+        return {
+            "base": WAT_SYSTEM_BASE,
+            "cypher_tools": WAT_TOOL_USAGE,
+            "content": WAT_CONTENT,
+        }
+    else:
+        raise ValueError(f"Bilinmeyen domain: {domain}. Geçerli: {list(DOMAIN_CONFIGS.keys())}")
+
+
+def build_prompt_template(domain: str, mode: str) -> str:
+    """
+    Domain'e göre prompt template oluştur.
+    
+    Args:
+        domain: "sigorta" veya "bakim"
+        mode: "cypher" (sadece cypher destekleniyor)
         
     Returns:
         Tam prompt template ({{schema_info}} placeholder ile)
     """
-    if mode == "cypher":
-        # CYPHER MODE: DSL thinking guide dahil değil
-        base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
-    else:
-        # DSL MODE: DSL thinking guide dahil
-        base_prompt = SHARED_SYSTEM_BASE + DSL_TOOL_USAGE + DSL_THINKING_GUIDE + SHARED_CONTENT
+    prompts = load_domain_prompts(domain)
+    
+    # Cypher mode - tüm domain'ler için
+    base_prompt = prompts["base"] + prompts["cypher_tools"] + prompts["content"]
     
     # Schema placeholder ekle
     return base_prompt + "{{schema_info}}"
@@ -70,54 +130,62 @@ def main():
     """Ana migration fonksiyonu"""
     # Argüman parser
     parser = argparse.ArgumentParser(
-        description="Langfuse Prompt Migration Script",
+        description="Langfuse Prompt Migration Script (Multi-Domain)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Modlar:
-  dsl     DSL thinking guide dahil (intent seçimi, DSL şablonları, vb.)
-          Tool: execute_graph_dsl (önerilen), execute_cypher_query (fallback)
-          
-  cypher  Sadece Cypher tool kullanımı, DSL rehberi yok
-          Tool: execute_cypher_query, execute_cypher_query_with_embedding
+Domain'ler:
+  sigorta   Sigorta poliçeleri, müşteriler, teminatlar
+            Vector Index: vector
+            Fulltext Index: chunk_text_fulltext
+            
+  bakim     WAT Motor bakım/arıza yönetimi  
+            Vector Index: task_embedding_index
+
+Tool'lar:
+  - execute_cypher_query: Graph sorguları, metadata
+  - execute_cypher_query_with_embedding: Semantic arama
+  - Fulltext arama: execute_cypher_query + db.index.fulltext.queryNodes
 
 Örnekler:
-  python scripts/migrate_prompt_to_langfuse.py              # cypher (varsayılan)
-  python scripts/migrate_prompt_to_langfuse.py --mode dsl   # dsl modu
+  python scripts/migrate_prompt_to_langfuse.py --domain sigorta   # sigorta
+  python scripts/migrate_prompt_to_langfuse.py --domain bakim     # bakım (wat motor)
         """
     )
     parser.add_argument(
-        "--mode",
-        choices=["dsl", "cypher"],
-        default="cypher",
-        help="Prompt modu: cypher (varsayılan) veya dsl"
+        "--domain",
+        choices=list(DOMAIN_CONFIGS.keys()),
+        default="sigorta",
+        help="Domain: sigorta (varsayılan) veya bakim"
     )
     parser.add_argument(
         "--name",
         default=None,
-        help="Özel prompt adı (varsayılan: react-agent-system)"
+        help="Özel prompt adı (varsayılan: domain'e göre otomatik)"
     )
     
     args = parser.parse_args()
     
-    # Prompt Configuration
-    prompt_name = args.name or "react-agent-system"
-    prompt_type = "text"
-    prompt_labels = ["production", args.mode]
+    # Domain config al
+    domain_config = DOMAIN_CONFIGS[args.domain]
     
-    print("=" * 60)
-    print("🚀 Langfuse Prompt Migration Script")
-    print("=" * 60)
-    print(f"📋 Mode: {args.mode.upper()}")
-    
-    # Mode açıklaması
-    if args.mode == "cypher":
-        print("   → Cypher mode: Doğrudan Cypher yazma")
-        print("   → DSL thinking guide DAHİL DEĞİL")
-        print("   → Tool: execute_cypher_query, execute_cypher_query_with_embedding")
+    # Prompt adı
+    if args.name:
+        prompt_name = args.name
     else:
-        print("   → DSL mode: Ontology-driven sorgulama")
-        print("   → DSL thinking guide DAHİL")
-        print("   → Tool: execute_graph_dsl (önerilen), execute_cypher_query (fallback)")
+        prompt_name = domain_config["prompt_name_template"]
+    
+    prompt_type = "text"
+    prompt_labels = domain_config["labels"] + ["cypher"]
+    
+    print("=" * 60)
+    print("🚀 Langfuse Prompt Migration Script (Multi-Domain)")
+    print("=" * 60)
+    print(f"🏷️ Domain: {args.domain.upper()}")
+    print(f"   → {domain_config['description']}")
+    print("   → Tool: execute_cypher_query, execute_cypher_query_with_embedding")
+    if domain_config.get("fulltext_index"):
+        print(f"   → Fulltext Index: {domain_config['fulltext_index']}")
+    print(f"   → Vector Index: {domain_config['vector_index']}")
     
     # Ortam değişkenlerini kontrol et
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
@@ -145,8 +213,12 @@ Modlar:
     print("✅ Langfuse bağlantısı başarılı")
     
     # Prompt template oluştur
-    prompt_template = build_prompt_template(args.mode)
+    prompt_template = build_prompt_template(args.domain, "cypher")
     print(f"📏 Template uzunluğu: {len(prompt_template)} karakter")
+    
+    # Token tahmini (~4 char = 1 token)
+    estimated_tokens = len(prompt_template) // 4
+    print(f"📊 Tahmini token sayısı: ~{estimated_tokens}")
     
     # Mevcut prompt var mı kontrol et
     print(f"\n🔍 Mevcut prompt kontrol ediliyor: {prompt_name}")
@@ -169,6 +241,9 @@ Modlar:
     else:
         print(f"📝 Yeni prompt oluşturulacak: {prompt_name}")
     
+    # Tools listesi
+    tools = ["execute_cypher_query", "execute_cypher_query_with_embedding", "add_source", "read_finding"]
+    
     # Prompt oluştur/güncelle
     success = create_prompt(
         name=prompt_name,
@@ -176,12 +251,14 @@ Modlar:
         prompt_type=prompt_type,
         labels=prompt_labels,
         config={
-            "description": f"ReAct Agent system prompt for Neo4j graph queries ({args.mode.upper()} mode)",
-            "mode": args.mode,
+            "description": f"ReAct Agent - {domain_config['description']}",
+            "domain": args.domain,
             "placeholder": "{{schema_info}}",
-            "usage": f"This prompt is used by the ReAct Agent in {args.mode.upper()} mode. The schema_info placeholder is replaced with the actual database schema at runtime.",
-            "tools": ["execute_cypher_query", "execute_cypher_query_with_embedding"] if args.mode == "cypher" 
-                     else ["execute_graph_dsl", "execute_cypher_query"],
+            "vector_index": domain_config["vector_index"],
+            "fulltext_index": domain_config.get("fulltext_index"),
+            "usage": f"Bu prompt, {args.domain} domain'i için kullanılır. "
+                     "schema_info placeholder'ı runtime'da gerçek veritabanı şeması ile değiştirilir.",
+            "tools": tools,
         },
     )
     
@@ -189,13 +266,13 @@ Modlar:
         print("\n" + "=" * 60)
         print("✅ Prompt başarıyla Langfuse'a yüklendi!")
         print("=" * 60)
-        print(f"\n📋 Prompt: {prompt_name}")
+        print(f"\n🏷️ Domain: {args.domain.upper()}")
+        print(f"📋 Prompt: {prompt_name}")
         print(f"🏷️ Labels: {prompt_labels}")
-        print(f"📋 Mode: {args.mode.upper()}")
         print(f"📏 Template uzunluğu: {len(prompt_template)} karakter")
+        print(f"📊 Tahmini token: ~{estimated_tokens}")
         print(f"\n🔗 Langfuse UI: {host}")
         print("\n💡 Artık prompt'u Langfuse UI'dan düzenleyebilirsiniz!")
-        print(f"\n⚠️ NOT: Bu prompt'u kullanmak için REACT_TOOL_MODE={args.mode} ayarlayın!")
     else:
         print("\n❌ Prompt yüklenemedi!")
         sys.exit(1)

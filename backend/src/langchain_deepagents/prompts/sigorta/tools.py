@@ -3,62 +3,6 @@ Sigorta domain'i - Tool kullanım rehberleri.
 """
 
 # =============================================================================
-# DSL MODE - Tool Usage Guide
-# =============================================================================
-DSL_TOOL_USAGE = """
-<tool_usage>
-## 🔧 TOOL KULLANIM REHBERİ (DSL MODE)
-
-### execute_graph_dsl(dsl_json, step_name, compiler_mode) - ANA ARAÇ
-DSL ile sorgu - hata yapmaya daha az müsait, otomatik validation ve Cypher derleme.
-
-**NE ZAMAN:** Graph sorgularının %90'ı bu tool ile yapılabilir
-- Entity keşfi, property araması
-- İlişki takibi (traversal)
-- Aggregation (COUNT, SUM, AVG, MAX, MIN)
-- Chunk semantic araması (search_content)
-
-**DSL FORMATI:**
-```json
-{
-    "intent": "find_by_property | find_by_relationship | search_content | count_nodes | aggregate_values",
-    "start_node": "NodeLabel",
-    "traversal": [{"from_node": "A", "relation": "REL", "to_node": "B", "direction": "outgoing"}],
-    "filters": [{"node": "A", "property": "name", "operator": "contains", "value": "aranan"}],
-    "return_spec": {"nodes": ["A", "B"], "properties": {"A": ["name"]}, "distinct": true},
-    "aggregate": {"function": "count", "node": "B", "alias": "toplam"},
-    "semantic_search": {"query_text": "kavram", "similarity_threshold": 0.7, "limit": 10},
-    "limit": 10
-}
-```
-
-**INTENT TİPLERİ:**
-| Intent | Kullanım | Örnek |
-|--------|----------|-------|
-| explore_node | Node örneklerini gör | Şemayı keşfet |
-| find_by_property | Property ile ara | name CONTAINS "X" |
-| find_by_relationship | İlişki takibi | A → B → C |
-| search_content | Semantic arama | Chunk içerik araması |
-| count_nodes | Sayma | Kaç tane X var? |
-| aggregate_values | SUM/AVG/MAX/MIN | En yüksek değer |
-
-**FILTER OPERATÖRLERİ:** equals, contains, starts_with, gt, lt, gte, lte, in, is_null
-
----
-
-### execute_cypher_query(cypher, step_name) - FALLBACK
-DSL desteklemeyen özel durumlar için doğrudan Cypher.
-
-**NE ZAMAN:** 
-- DSL ile ifade edilemeyen karmaşık sorgular
-- UNION, CASE/WHEN gerektiren durumlar
-
-⚠️ **TEXT ARAMASI:** `apoc.text.clean()` kullan! (Türkçe karakter sorunu önler)
-
-</tool_usage>
-"""
-
-# =============================================================================
 # CYPHER MODE - Tool Usage Guide  
 # =============================================================================
 CYPHER_TOOL_USAGE = """
@@ -95,6 +39,63 @@ RETURN DISTINCT n.name
 -- ANA SORGU: Keşifte bulunan EXACT değeri kullan
 WHERE n.name = 'Keşifte Bulunan Değer'  -- Exact match, clean gerekmez
 ```
+
+---
+
+### execute_cypher_query - FULLTEXT ARAMA (Hızlı Kelime Araması)
+**NE ZAMAN:** 
+- Chunk içeriğinde hızlı kelime araması gerektiğinde
+- Yazım hatalarına toleranslı arama (fuzzy ~)
+- Spesifik kelime/terim araması (semantic'ten daha kesin)
+
+⚠️ **KRİTİK: KAVRAM VARYASYONLARI KULLAN!**
+Kullanıcının bahsettiği kavramın farklı versiyonlarını OR ile birleştir:
+
+| Kullanıcı Terimi | Fulltext Query |
+|------------------|----------------|
+| fiyat | `fiyat OR tutar OR bedel OR ücret OR "toplam tutar"` |
+| ödeme | `ödeme OR taksit OR "ödeme planı" OR "aylık ödeme"` |
+| tarih | `tarih OR "başlangıç tarihi" OR "bitiş tarihi" OR süre` |
+| detay | `detay OR içerik OR açıklama OR bilgi` |
+
+**FULLTEXT SYNTAX:**
+- Index adı: `'chunk_text_fulltext'`
+- Normal arama: `'kelime1 kelime2'` (AND implicit)
+- Fuzzy arama: `'kelime~'` (yazım hatalarını bulur)
+- OR operatörü: `'kelime1 OR kelime2'`
+- Phrase arama: `'"tam eşleşme ifade"'`
+
+**HIZLI MOD (Genel arama - dikkatli kullan!):**
+```cypher
+CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'fiyat OR tutar OR bedel~')
+YIELD node AS c, score
+WHERE score > 1.0
+RETURN c.text, score, c.fileName
+ORDER BY score DESC LIMIT 10
+```
+
+**FİLTRELİ MOD (Entity ile - ÖNERİLEN, ilişki adlarını ŞEMADAN al!):**
+```cypher
+CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'ödeme~ OR "ödeme planı"')
+YIELD node AS c, score
+WHERE score > 0.5
+MATCH (c)-[:ILIŞKI_ADI]->(d:Document)<-[:ILIŞKI_ADI]-(e:EntityNode)
+WHERE e.name CONTAINS 'değer'
+RETURN c.text, score, d.fileName
+ORDER BY score DESC LIMIT 10
+```
+
+⚠️ İlişki adlarını ŞEMADAN al!
+
+---
+
+### 💡 ARAMA STRATEJİSİ HATIRLATMASI
+Hangi arama yöntemini kullanacağına SEN karar ver:
+- **Metadata/sayısal veri** → Graph sorgusu (execute_cypher_query)
+- **Spesifik kelime araması** → Fulltext (execute_cypher_query + fulltext)
+- **Anlam/kavram araması** → Semantic (execute_cypher_query_with_embedding)
+
+⚠️ Genel bir soru sorulmuşsa (örn: "X hakkında ne bilgi var?") sonuçları değerlendirip EN UYGUN yöntemi seç.
 
 ---
 
