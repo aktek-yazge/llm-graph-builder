@@ -1549,8 +1549,63 @@ const FileTable: ForwardRefRenderFunction<ChildRef, FileTableProps> = (props, re
         }
       },
       reloadV2Files: () => reloadV2Files(),
+      
+      // Batch selection: İlk N dosyayı seç (chunking_status + embedding_status filtresiyle)
+      selectFirstN: (
+        n: number, 
+        statusFilter?: 'ready' | 'chunked' | 'pending' | 'all',
+        embeddingFilter?: 'pending' | 'completed' | 'all'
+      ) => {
+        // Tüm V2 dosyalarını al
+        let v2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+        
+        // Chunking status filtresi uygula
+        if (statusFilter && statusFilter !== 'all') {
+          v2Files = v2Files.filter((f) => f.chunking_status === statusFilter);
+        }
+        
+        // Embedding status filtresi uygula (batch takibi için)
+        if (embeddingFilter && embeddingFilter !== 'all') {
+          v2Files = v2Files.filter((f) => f.embedding_status === embeddingFilter);
+        }
+        
+        // İlk N dosyayı seç
+        const filesToSelect = v2Files.slice(0, n);
+        
+        // React Table row selection'ı güncelle
+        const newSelection: Record<string, boolean> = {};
+        filesToSelect.forEach((f) => {
+          newSelection[f.id] = true;
+        });
+        setRowSelection(newSelection);
+        
+        console.log(`📋 Selected ${filesToSelect.length} files (chunking: ${statusFilter || 'all'}, embedding: ${embeddingFilter || 'all'}, total: ${v2Files.length})`);
+        return filesToSelect.length;
+      },
+      
+      // Belirli status kombinasyonundaki dosya sayısını döndür
+      getV2FileCount: (
+        statusFilter?: 'ready' | 'chunked' | 'pending' | 'all',
+        embeddingFilter?: 'pending' | 'completed' | 'all'
+      ) => {
+        let v2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+        if (statusFilter && statusFilter !== 'all') {
+          v2Files = v2Files.filter((f) => f.chunking_status === statusFilter);
+        }
+        if (embeddingFilter && embeddingFilter !== 'all') {
+          v2Files = v2Files.filter((f) => f.embedding_status === embeddingFilter);
+        }
+        return v2Files.length;
+      },
+      
+      // Seçimi temizle
+      clearSelection: () => {
+        setRowSelection({});
+        setV2SelectedFileIds(new Set());
+        console.log('🧹 Selection cleared');
+      },
     }),
-    [table, v2SelectedFileIds, reloadV2Files]
+    [table, v2SelectedFileIds, reloadV2Files, filesData, setRowSelection]
   );
 
   useEffect(() => {
