@@ -50,6 +50,92 @@ read_finding("step_name", start_record={records_per_page}, end_record={records_p
 ```
 </common_tools>
 
+<skills_navigation>
+## 📚 SKILLS NAVIGATION - Geçmiş Sorguları Kullan
+
+Session içindeki TÜM sorguları (başarılı ve başarısız) görebilir ve yeniden kullanabilirsin.
+Her sorgu otomatik olarak kaydedilir - manuel kayıt gerekmez.
+
+### TOOLS
+
+**1. get_session_overview() - Session Genel Görünümü**
+Tüm soruları ve her soru için yapılan step'leri gösterir.
+Her step: durum (✅/❌), açıklama, ilk 2 sonuç preview.
+
+```python
+get_session_overview()
+```
+
+**2. search_skills(query, fuzzy_threshold=0.3) - Skill Arama**
+Geçmiş sorgularda fuzzy + fulltext arama. OR için | kullan.
+
+```python
+search_skills("kira kaybı | rent loss | kira zarar")
+```
+
+**3. read_step(step_id) - Step Detayı**
+Belirli bir step'in Cypher sorgusu + ilk 5 sonucunu gösterir.
+
+```python
+read_step(step_id=42)
+```
+
+**4. read_step_results(step_id, start, end) - Sonuç Pagination**
+Daha fazla sonuç görmek için.
+
+```python
+read_step_results(step_id=42, start=5, end=15)
+```
+
+### NE ZAMAN KULLANMALIYIM?
+
+**A. SORU ÖNCEKİLERLE İLGİLİ İSE → BAŞTA get_session_overview() ÇAĞIR**
+- "Bu belgede...", "Önceki...", "Aynı şirket...", "Onun..." gibi referanslar
+- Devam soruları, takip soruları
+
+**B. YENİ KONU İSE → DİREKT SORGUYA BAŞLAYABİLİRSİN**
+- Tamamen yeni bir şirket/konu
+- Önceki sorularla bağlantı yok
+
+**C. TAKILDIN MI? → GEÇMİŞ SKILLS'E BAK**
+- Birkaç sorgu denedin ama sonuç yok
+- İpucu almak için benzer geçmiş sorguları incele
+
+### ÖRNEK SENARYOLAR
+
+```
+SENARYO 1: Follow-up soru
+Kullanıcı Q1: "Akenerji'nin kira kaybı teminatı?"
+Agent: → Sorgu çalıştır, sonuç bul
+
+Kullanıcı Q2: "Bu belgede yangın teminatı da var mı?"
+Agent:
+  1. "bu belgede" referansı var → get_session_overview()
+  2. Q1'de hangi belge bulunmuş gör
+  3. O belge üzerinde filtreli sorgu yaz
+
+SENARYO 2: Yeni konu
+Kullanıcı Q1: "Migros'un toplam primleri?"
+Agent:
+  1. Yeni şirket → Direkt customer variations ara
+  2. Sorguları çalıştır
+
+SENARYO 3: Takıldın
+Agent: 3 sorgu denedi, hepsi boş döndü
+  1. search_skills("benzer_konu | alternatif_terim")
+  2. Geçmişte nasıl başarılı olunmuş gör
+  3. O stratejiyi uygula
+```
+
+### ⚠️ KRİTİK NOKTALAR
+
+1. **HER SORGU OTOMATİK KAYDEDİLİR** - Manuel kayıt yok
+2. **BAŞARISIZ SORGULAR DA KAYDEDİLİR** - Ne denediğini görebilirsin
+3. **GEÇMİŞ = REFERANS** - Başarılı sorguları örnek al
+4. **AYNI SORGUYU TEKRARLAMA** - Önce geçmişe bak
+
+</skills_navigation>
+
 <context_gathering>
 Goal: Keşifte bulunan TÜM entity varyasyonlarını cache'le ve sonraki sorgularda kullan.
 

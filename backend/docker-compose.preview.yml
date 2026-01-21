@@ -1,6 +1,14 @@
 # =============================================================================
+# DINKAL Erişim:
+#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
+#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
+#
 # WAT-MOTOR PREVIEW STACK
 # =============================================================================
+# DINKAL Erişim:
+#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
+#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
+#
 # Traefik entegrasyonu ile multi-tenant desteği
 # 
 # Erişim:
@@ -11,6 +19,10 @@
 # Lokal test için /etc/hosts:
 #   127.0.0.1   demoserver.yazge.aktekbilisim.com
 # =============================================================================
+# DINKAL Erişim:
+#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
+#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
+#
 
 services:
   # RabbitMQ - Message Broker
@@ -274,10 +286,156 @@ services:
       - traefik-public
     restart: always
 
+  # ===========================================================================
+  # DINKAL STACK
+  # ===========================================================================
+
+  # PostgreSQL - DINKAL Database
+  postgres-dinkal:
+    image: postgres:16-alpine
+    container_name: postgres-dinkal
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=Ekdmjweu483i
+      - POSTGRES_DB=llm_graph_builder
+    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    volumes:
+      - ~/postgres-data-dinkal:/var/lib/postgresql/data
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - dinkal
+      - observability
+    restart: always
+
+  # pgAdmin - DINKAL PostgreSQL Web UI
+  pgadmin-dinkal:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-dinkal
+    expose:
+      - "80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@dinkal.com
+      - PGADMIN_DEFAULT_PASSWORD=Dinkal!654*
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+      - SCRIPT_NAME=/dinkal/pgadmin
+    volumes:
+      - ../.devcontainer/pgadmin-dinkal/servers.json:/pgadmin4/servers.json:ro
+      - ../.devcontainer/pgadmin-dinkal/pgpass:/pgadmin4/pgpass:ro
+      - dinkal_pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres-dinkal
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.dinkal-pgadmin.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/dinkal/pgadmin`)"
+      - "traefik.http.routers.dinkal-pgadmin.entrypoints=web,websecure"
+      - "traefik.http.routers.dinkal-pgadmin.priority=20"
+      - "traefik.http.services.dinkal-pgadmin.loadbalancer.server.port=80"
+      - "traefik.http.routers.dinkal-pgadmin.middlewares="
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - dinkal
+      - observability
+      - traefik-public
+    restart: always
+
+  # Neo4j - DINKAL Graph Database
+  neo4j-dinkal:
+    image: neo4j:2025.07.1
+    container_name: neo4j-dinkal
+    restart: always
+    expose:
+      - "7474"
+      - "7687"
+    environment:
+      - NEO4J_AUTH=neo4j/Dinkal!654*
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_usage__report_enabled=false
+      - NEO4J_server_memory_heap_initial__size=2G
+      - NEO4J_server_memory_heap_max__size=4G
+      - NEO4J_server_memory_pagecache_size=2G
+      - NEO4J_dbms_memory_transaction_total_max=4G
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "4"
+    volumes:
+      - neo4j_data_dinkal:/data
+      - neo4j_plugins_dinkal:/plugins
+      - neo4j_import_dinkal:/var/lib/neo4j/import
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.dinkal-neo4j.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/dinkal/neo4j`)"
+      - "traefik.http.routers.dinkal-neo4j.entrypoints=web,websecure"
+      - "traefik.http.routers.dinkal-neo4j.priority=15"
+      - "traefik.http.services.dinkal-neo4j.loadbalancer.server.port=7474"
+      - "traefik.http.middlewares.strip-dinkal-neo4j.stripprefix.prefixes=/dinkal/neo4j"
+      - "traefik.http.routers.dinkal-neo4j.middlewares=strip-dinkal-neo4j"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - dinkal
+      - observability
+      - traefik-public
+
+  # Redis - DINKAL Cache
+  redis-dinkal:
+    image: redis:7-alpine
+    container_name: redis-dinkal
+    expose:
+      - "6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - dinkal_redis_data:/data
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dinkal
+      - observability
+    restart: always
+
 networks:
   wat:
     driver: bridge
     name: wat-network
+  dinkal:
+    driver: bridge
+    name: dinkal-network
   observability:
     external: true
     name: observability
@@ -286,8 +444,13 @@ networks:
     name: traefik-public
 
 volumes:
+  # WAT Volumes
   neo4j_data_wat:
   neo4j_plugins_wat:
   neo4j_import_wat:
-
-
+  # DINKAL Volumes
+  neo4j_data_dinkal:
+  neo4j_plugins_dinkal:
+  neo4j_import_dinkal:
+  dinkal_pgadmin_data:
+  dinkal_redis_data:

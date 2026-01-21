@@ -1773,6 +1773,135 @@ const Content: React.FC<ContentProps> = ({
                   }}
                   isDisabled={isReadOnlyUser || extractLoading}
                 />
+                <Menu.Divider />
+                <Menu.Item
+                  title='İlk 5 Ready Seç (Test için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(5, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 100 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(100, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 500 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(500, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 1000 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(1000, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 2000 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(2000, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 5000 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(5000, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 10000 Ready Seç (Chunking için)'
+                  onClick={() => {
+                    const total = childRef.current?.getV2FileCount?.('ready') || 0;
+                    const count = childRef.current?.selectFirstN(10000, 'ready');
+                    showNormalToast(`${count}/${total} ready dosya seçildi`);
+                  }}
+                />
+                <Menu.Divider />
+                <Menu.Item
+                  title='İlk 5 Henüz İşlenmemiş Seç (Test için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(5, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 100 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(100, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 500 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(500, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 1000 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(1000, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 2000 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(2000, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 5000 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(5000, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Item
+                  title='İlk 10000 Henüz İşlenmemiş Seç (Reset için)'
+                  onClick={() => {
+                    // Henüz reset edilmemiş: chunked + embedding completed
+                    const total = childRef.current?.getV2FileCount?.('chunked', 'completed') || 0;
+                    const count = childRef.current?.selectFirstN(10000, 'chunked', 'completed');
+                    showNormalToast(`${count}/${total} işlenmemiş dosya seçildi`);
+                  }}
+                />
+                <Menu.Divider />
+                <Menu.Item
+                  title='Seçimi Temizle'
+                  onClick={() => {
+                    childRef.current?.clearSelection();
+                    showNormalToast('Seçim temizlendi');
+                  }}
+                />
               </Menu.Items>
             </Menu>
             <SpotlightTarget id='generategraphbtn'>

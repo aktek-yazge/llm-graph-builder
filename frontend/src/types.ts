@@ -790,6 +790,13 @@ export interface ChildRef {
   getV2SelectedFileIds: () => number[];
   handleStartChunking: () => Promise<void>;
   handleCreateGraph: () => Promise<void>;
+  // Batch selection methods
+  // statusFilter: chunking_status değeri
+  // embeddingFilter: embedding_status değeri (opsiyonel, batch işlem takibi için)
+  selectFirstN: (n: number, statusFilter?: 'ready' | 'chunked' | 'pending' | 'all', embeddingFilter?: 'pending' | 'completed' | 'all') => number;
+  getV2FileCount: (statusFilter?: 'ready' | 'chunked' | 'pending' | 'all', embeddingFilter?: 'pending' | 'completed' | 'all') => number;
+  clearSelection: () => void;
+  reloadV2Files: () => Promise<void>;
 }
 export interface IconProps {
   isFullScreen?: boolean;

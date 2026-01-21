@@ -63,7 +63,7 @@ load_dotenv()
 print("\n" + "="*60)
 print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent.py)")
 print("="*60)
-_debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL", "REACT_TOOL_MODE"]
+_debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL"]
 for _key in _debug_keys:
     _val = os.environ.get(_key)
     if _val:
@@ -124,39 +124,31 @@ from src.shared.feedback import (
     LLM_JUDGE_ENABLED,
 )
 
-# Graph DSL - Ontology-driven query generation
-# LLM doğrudan Cypher yazmak yerine DSL üretir, DSL validate edilip Cypher'a derlenir
+# Session Blackboard - Skills-based query history navigation
 try:
-    from src.ontology_agent.graph_dsl import GraphDSL, QueryIntent
-    from src.ontology_agent.dsl_compiler import DSLCompiler, compile_dsl
-    from src.ontology_agent.dsl_validator import DSLValidator, SchemaInfo, validate_dsl
-    from src.ontology_agent.llm_cypher_generator import generate_cypher as llm_generate_cypher, LLMCompilationResult
-    GRAPH_DSL_AVAILABLE = True
-    LLM_CYPHER_AVAILABLE = True
-    logging.info("✅ Graph DSL modules imported")
-    logging.info("✅ LLM Cypher generator imported")
+    from src.shared.session_blackboard import (
+        store_step,
+        get_session_overview as bb_get_session_overview,
+        search_skills as bb_search_skills,
+        get_step_detail as bb_get_step_detail,
+        get_step_results as bb_get_step_results,
+        get_question_count,
+        get_step_count,
+        SESSION_BLACKBOARD_ENABLED,
+    )
+    from src.shared.skill_agent import schedule_skill_generation
+    logging.info("✅ Session Blackboard module imported")
 except ImportError as e:
-    logging.warning(f"⚠️ Graph DSL modules not available: {e}")
-    GRAPH_DSL_AVAILABLE = False
-    LLM_CYPHER_AVAILABLE = False
-    GraphDSL = None
-    QueryIntent = None
-    DSLCompiler = None
-    compile_dsl = None
-    DSLValidator = None
-    SchemaInfo = None
-    validate_dsl = None
-    llm_generate_cypher = None
-    LLMCompilationResult = None
-
-# DSL Compiler Mode: "llm" (GPT-5-mini) veya "rule" (DSLCompiler)
-# Default: llm - LLM-based generation
-DSL_COMPILER_MODE = os.getenv("DSL_COMPILER_MODE", "llm")
-
-# Tool Mode: "dsl" veya "cypher"
-# dsl (default): Model DSL üretir, DSL Cypher'a derlenir (önerilen)
-# cypher: Model doğrudan Cypher yazar (ileri düzey kullanıcılar için)
-REACT_TOOL_MODE = os.getenv("REACT_TOOL_MODE", "dsl")
+    logging.warning(f"⚠️ Session Blackboard module not available: {e}")
+    SESSION_BLACKBOARD_ENABLED = False
+    store_step = None
+    bb_get_session_overview = None
+    bb_search_skills = None
+    bb_get_step_detail = None
+    bb_get_step_results = None
+    get_question_count = None
+    get_step_count = None
+    schedule_skill_generation = None
 
 # Logging ayarları
 logger = logging.getLogger(__name__)
@@ -829,7 +821,7 @@ def get_mcp_server_config() -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     
     # ========== HTTP SERVERS - DEVRE DIŞI ==========
-    # Neo4j tool'ları custom olarak ekleniyor (execute_cypher_query, execute_graph_dsl)
+    # Neo4j tool'ları custom olarak ekleniyor (execute_cypher_query, execute_cypher_query_with_embedding)
 
     
     # ========== STDIO SERVERS (Hafif, Stateless) ==========
@@ -886,30 +878,7 @@ def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -
     
     Teknik detaylar yerine, kullanıcının anlayabileceği mesajlar döndürür.
     """
-    if tool_name == "execute_graph_dsl":
-        step_name = tool_args.get("step_name", "")
-        
-        # step_name'e göre farklı mesajlar
-        if "discover" in step_name.lower():
-            return "🔍 İlgili kayıtlar araştırılıyor..."
-        elif "find" in step_name.lower():
-            return "📊 Veritabanında eşleşmeler aranıyor..."
-        elif "embed" in step_name.lower() or "search" in step_name.lower():
-            return "📖 Belge içerikleri taranıyor..."
-        elif "entity" in step_name.lower() or "record" in step_name.lower():
-            return "📋 Kayıt bilgileri kontrol ediliyor..."
-        elif "document" in step_name.lower():
-            return "📄 Belgeler inceleniyor..."
-        elif "attribute" in step_name.lower() or "property" in step_name.lower():
-            return "🛡️ Özellik bilgileri aranıyor..."
-        elif "company" in step_name.lower() or "organization" in step_name.lower():
-            return "🏢 Organizasyon bilgileri kontrol ediliyor..."
-        elif "date" in step_name.lower():
-            return "📅 Tarih bilgileri alınıyor..."
-        else:
-            return "🔄 Bilgiler sorgulanıyor..."
-    
-    elif tool_name == "execute_cypher_query":
+    if tool_name == "execute_cypher_query":
         return "🔍 Veritabanında arama yapılıyor..."
     
     elif tool_name == "add_source":
@@ -1199,6 +1168,66 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         except Exception as e:
             _log(f"⚠️ Blackboard append error: {e}")
     
+    # Question number tracker for session blackboard
+    question_number_cache: dict = {"value": 0}
+    
+    def _get_question_number() -> int:
+        """Get current question number for this session."""
+        if question_number_cache["value"] == 0:
+            if get_question_count is not None:
+                question_number_cache["value"] = get_question_count(session_id) + 1
+            else:
+                question_number_cache["value"] = 1
+        return question_number_cache["value"]
+    
+    def _store_to_session_blackboard(
+        step_name: str,
+        cypher_query: str,
+        status: str,
+        record_count: int,
+        results: list,
+        query_type: str = "cypher",
+        execution_time_ms: int | None = None,
+    ) -> None:
+        """Store step to PostgreSQL session_blackboard and schedule skill generation."""
+        if not SESSION_BLACKBOARD_ENABLED or store_step is None:
+            return
+        
+        try:
+            question_num = _get_question_number()
+            step_num = tool_call_counter["value"]
+            
+            step_id = store_step(
+                session_id=session_id,
+                question_id=question_id,
+                question_text=user_question,
+                question_number=question_num,
+                step_number=step_num,
+                step_name=step_name,
+                cypher_query=cypher_query,
+                status=status,
+                record_count=record_count,
+                results=results,
+                query_type=query_type,
+                execution_time_ms=execution_time_ms,
+            )
+            
+            # Schedule async skill generation (fire and forget)
+            if step_id and schedule_skill_generation is not None:
+                schedule_skill_generation(
+                    step_id=step_id,
+                    question_text=user_question,
+                    cypher_query=cypher_query,
+                    status=status,
+                    record_count=record_count,
+                    result_preview=results[:2] if results else None,
+                )
+            
+            _log(f"📊 Session blackboard: Q{question_num} Step {step_num:02d} → {status}")
+            
+        except Exception as e:
+            _log(f"⚠️ Session blackboard store error: {e}")
+    
     # =========================================================================
     # PAGINATION HELPERS
     # =========================================================================
@@ -1290,6 +1319,27 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             
             _log(f"📁 Cypher: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
             _append_to_blackboard(step_name, record_count, status == "success", seq_num)
+            
+            # Store to PostgreSQL session blackboard
+            parsed_results = []
+            if records:
+                for r in records[:50]:  # Limit to 50 results for storage
+                    if isinstance(r, dict):
+                        parsed_results.append(r)
+                    elif isinstance(r, str):
+                        try:
+                            parsed_results.append({"raw": r[:500]})
+                        except:
+                            pass
+            
+            _store_to_session_blackboard(
+                step_name=step_name,
+                cypher_query=cypher,
+                status=status,
+                record_count=record_count,
+                results=parsed_results,
+                query_type="cypher",
+            )
             
             # Sonuç döndür
             if status == "success":
@@ -1408,6 +1458,27 @@ Lütfen sorguyu düzelt ve tekrar dene."""
             _log(f"📁 Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
             _append_to_blackboard(step_name, record_count, status == "success", seq_num)
             
+            # Store to PostgreSQL session blackboard
+            parsed_results = []
+            if records:
+                for r in records[:50]:  # Limit to 50 results for storage
+                    if isinstance(r, dict):
+                        parsed_results.append(r)
+                    elif isinstance(r, str):
+                        try:
+                            parsed_results.append({"raw": r[:500]})
+                        except:
+                            pass
+            
+            _store_to_session_blackboard(
+                step_name=step_name,
+                cypher_query=f"-- query_text: {query_text}\n{cypher}",
+                status=status,
+                record_count=record_count,
+                results=parsed_results,
+                query_type="embedding",
+            )
+            
             # Sonuç döndür
             if status == "success":
                 end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
@@ -1423,309 +1494,6 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         except Exception as e:
             _log(f"❌ Semantic search error: {e}", "error")
             return f'{{"error": "{str(e)}"}}'
-    
-    # =========================================================================
-    # EXECUTE GRAPH DSL TOOL - Ontology-Driven Query
-    # =========================================================================
-    @tool
-    async def execute_graph_dsl(dsl_json: str, step_name: str, compiler_mode: str = "") -> str:
-        """Graph DSL ile sorgu. dsl_json=JSON, compiler_mode=llm/rule. Detaylar prompt'ta."""
-        if not GRAPH_DSL_AVAILABLE:
-            return '{"error": "Graph DSL modülü yüklü değil. execute_cypher_query kullanın."}'
-        
-        mcp_read = mcp_tool_map.get("read_neo4j_cypher")
-        if not mcp_read:
-            return '{"error": "MCP read_neo4j_cypher tool not found"}'
-        
-        try:
-            # 1. DSL'i parse et
-            # Type assertion: GRAPH_DSL_AVAILABLE kontrolü yukarıda yapıldı
-            assert GraphDSL is not None, "GraphDSL should be available"
-            assert DSLCompiler is not None, "DSLCompiler should be available"
-            
-            try:
-                dsl = GraphDSL.from_json(dsl_json)
-            except Exception as parse_error:
-                return f"""❌ DSL Parse Hatası: {parse_error}
-
-DSL JSON formatı hatalı. Örnek format:
-{{
-    "intent": "find_by_property",
-    "start_node": "NodeLabel",
-    "filters": [{{"node": "NodeLabel", "property": "name", "operator": "contains", "value": "aranan_deger"}}],
-    "return_spec": {{"nodes": ["NodeLabel"], "properties": {{"NodeLabel": ["name"]}}}},
-    "limit": 10
-}}"""
-            
-            # 2. Basit validation
-            basic_errors = dsl.validate_basic()
-            if basic_errors:
-                return f"""❌ DSL Validation Hatası:
-{chr(10).join(f"  • {e}" for e in basic_errors)}
-
-Lütfen DSL'i düzelt ve tekrar dene."""
-            
-            # 3. Schema validation (global cache'den raw schema ile)
-            validation_warnings = []
-            try:
-                from src.ontology_agent.dsl_validator import create_validator_from_cache
-                
-                validator = create_validator_from_cache()
-                if validator:
-                    validation_result = validator.validate(dsl, auto_correct=True)
-                    
-                    if validation_result.errors:
-                        error_msgs = "\n".join(f"  • {e.message}" for e in validation_result.errors)
-                        suggestions = [e.suggestion for e in validation_result.errors if e.suggestion]
-                        suggestion_text = "\n".join(f"  💡 {s}" for s in suggestions) if suggestions else ""
-                        return f"""❌ Schema Validation Hatası:
-{error_msgs}
-{suggestion_text}
-
-Lütfen schema'ya uygun node/property/relationship kullanın."""
-                    
-                    if validation_result.warnings:
-                        validation_warnings = [w.message for w in validation_result.warnings]
-                    
-                    # Auto-corrected DSL varsa kullan
-                    if validation_result.validated_dsl:
-                        dsl = validation_result.validated_dsl
-                        _log("📋 DSL auto-corrected by validator")
-                    
-                    _log(f"📋 DSL validation: ✅ passed ({len(validation_result.errors)} errors, {len(validation_result.warnings)} warnings)")
-                else:
-                    _log("📋 DSL validation: skipped (no schema in cache)")
-            except Exception as val_error:
-                _log(f"📋 DSL validation: skipped ({val_error})", "warning")
-            
-            # 4. DSL'i Cypher'a derle - LLM veya Rule-based
-            # Compiler mode: parametre > env variable > default (llm)
-            effective_mode = compiler_mode if compiler_mode else DSL_COMPILER_MODE
-            
-            if effective_mode == "llm" and LLM_CYPHER_AVAILABLE and llm_generate_cypher:
-                # === LLM-BASED GENERATION (GPT-5-mini) ===
-                _log(f"🤖 Using LLM Cypher generator (gpt-5-mini)")
-                
-                # Schema bilgisini al (opsiyonel)
-                schema_info = None
-                try:
-                    raw_schema = get_raw_schema()
-                    if raw_schema:
-                        schema_info = str(raw_schema)[:2000]  # İlk 2000 karakter
-                except:
-                    pass
-                
-                # Parent span'ı geçir - Langfuse'da child generation olarak görünsün
-                parent_span = token_tracker._langfuse_parent_span if token_tracker else None
-                result = await llm_generate_cypher(dsl_json, schema_info, model="gpt-5-mini", parent_span=parent_span)
-                
-                cypher = result.cypher
-                params = result.params
-                
-                if not cypher:
-                    # LLM başarısız oldu, fallback to rule-based
-                    _log(f"⚠️ LLM failed, falling back to rule-based compiler")
-                    compiler = DSLCompiler()
-                    result = compiler.compile(dsl)
-                    cypher = result.cypher
-                    params = result.params
-                else:
-                    _log(f"🤖 LLM generated in {result.latency_ms:.0f}ms")
-            else:
-                # === RULE-BASED COMPILATION (DSLCompiler) ===
-                _log(f"📐 Using rule-based DSLCompiler")
-                compiler = DSLCompiler()
-                result = compiler.compile(dsl)
-                cypher = result.cypher
-                params = result.params
-            
-            _log(f"🔷 DSL → Cypher compiled ({effective_mode}):")
-            _log(f"   DSL intent: {dsl.intent}")
-            _log(f"   Cypher: {cypher[:200]}...")
-            if params:
-                _log(f"   Params: {params}")
-            if validation_warnings:
-                _log(f"   ⚠️ Warnings: {validation_warnings}")
-            
-            # 5. Parametreleri inline'a çevir
-            if params:
-                for param_name, param_value in params.items():
-                    if isinstance(param_value, str):
-                        cypher = cypher.replace(f"${param_name}", f"'{param_value}'")
-                    elif isinstance(param_value, (int, float)):
-                        cypher = cypher.replace(f"${param_name}", str(param_value))
-                    elif isinstance(param_value, list):
-                        list_str = "[" + ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in param_value) + "]"
-                        cypher = cypher.replace(f"${param_name}", list_str)
-            
-            # 6. Embedding mi yoksa normal sorgu mu?
-            if result.requires_embedding:
-                # === EMBEDDING QUERY ===
-                mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
-                if not mcp_embedding:
-                    return '{"error": "MCP embedding tool not found"}'
-                
-                query_text = result.query_text or ""
-                _log(f"🔍 DSL Semantic Search: '{query_text}'")
-                _log(f"   Cypher (with filters): {cypher[:300]}...")
-                
-                # MCP embedding tool çağır (multi-tenant)
-                result_data = await mcp_embedding.ainvoke({
-                    "query_text": query_text,
-                    "cypher_query": cypher,
-                    "db_url": os.environ.get("NEO4J_URI"),
-                    "db_username": os.environ.get("NEO4J_USERNAME"),
-                    "db_password": os.environ.get("NEO4J_PASSWORD"),
-                    "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
-                })
-                result_str = str(result_data) if result_data else ""
-                
-                # Hata kontrolü
-                is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
-                
-                # Kayıt sayısı
-                records = []
-                if result_str and not is_error:
-                    lines = [l.strip() for l in result_str.split('\n') if l.strip()]
-                    records = [l for l in lines if 'score' in l.lower() or l.startswith('(')]
-                record_count = len(records)
-                
-                # Status
-                if is_error:
-                    status = "failed"
-                elif record_count > 0:
-                    status = "success"
-                else:
-                    status = "empty"
-                
-                # Dosyaya kaydet
-                tool_call_counter["value"] += 1
-                seq_num = tool_call_counter["value"]
-                
-                file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(f"<dsl>\n{dsl_json}\n</dsl>\n\n")
-                    f.write(f"<semantic_search>\nQUERY: {query_text}\n</semantic_search>\n\n")
-                    f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
-                    f.write(f"<result>\n{result_str}\n</result>\n")
-                
-                _log(f"📁 DSL Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
-                _append_to_blackboard(step_name, record_count, status == "success", seq_num)
-                
-                if status == "success":
-                    parsed_records = _parse_records(result_str)
-                    if len(parsed_records) == 0:
-                        parsed_records = records
-                    
-                    end_idx = min(DEFAULT_RECORDS_PER_PAGE, len(parsed_records))
-                    paginated_result = _format_paginated_result(parsed_records, len(parsed_records), 0, end_idx, step_name)
-                    
-                    return f"""✅ {record_count} içerik bulundu (DSL Semantic Search).
-
-{paginated_result}
-
-📋 Kullanılan DSL filtreleri uygulandı:
-- Traversal: {len(dsl.traversal)} adım
-- Filters: {len(dsl.filters)} filtre
-
-⚠️ FALSE POSITIVE KONTROLÜ: Dönen chunk.text'lerde "{query_text}" geçiyor mu kontrol et!"""
-                elif status == "empty":
-                    return f"""❌ Semantic aramada sonuç bulunamadı.
-
-🔍 Aranan: "{query_text}"
-📋 DSL filtreleri: {len(dsl.filters)} filtre uygulandı
-💡 Öneriler:
-- Similarity threshold düşürülebilir (varsayılan: 0.75)
-- Filter'lar çok kısıtlayıcı olabilir
-- Farklı terimlerle arama yapılabilir"""
-                else:
-                    return f"❌ Hata: {result_str}"
-            
-            # === NORMAL CYPHER QUERY ===
-            # 🛡️ Guardrails: Cypher injection validation
-            if GUARDRAILS_ENABLED:
-                is_safe, sanitized_cypher, violations = validate_cypher_query(cypher)
-                if not is_safe:
-                    _log(f"⚠️ DSL-generated Cypher blocked: {violations}", "warning")
-                    return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
-                cypher = sanitized_cypher
-            
-            # Multi-tenant: Add db credentials from environment
-            result_data = await mcp_read.ainvoke({
-                "query": cypher,
-                "db_url": os.environ.get("NEO4J_URI"),
-                "db_username": os.environ.get("NEO4J_USERNAME"),
-                "db_password": os.environ.get("NEO4J_PASSWORD"),
-                "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
-            })
-            result_str = str(result_data) if result_data else ""
-            
-            # Hata kontrolü
-            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
-            
-            # Kayıtları parse et
-            records = _parse_records(result_str)
-            record_count = len(records)
-            
-            if record_count == 0 and result_str and not is_error:
-                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
-                records = lines
-                record_count = len(records)
-            
-            # Status
-            if is_error:
-                status = "failed"
-            elif record_count > 0:
-                status = "success"
-            else:
-                status = "empty"
-            
-            # Dosyaya kaydet
-            tool_call_counter["value"] += 1
-            seq_num = tool_call_counter["value"]
-            
-            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"<dsl>\n{dsl_json}\n</dsl>\n\n")
-                f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
-                f.write(f"<result>\n{result_str}\n</result>\n")
-            
-            _log(f"📁 DSL: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
-            _append_to_blackboard(f"DSL:{step_name}", record_count, status == "success", seq_num)
-            
-            # Sonuç döndür
-            warning_text = ""
-            if validation_warnings:
-                warning_text = f"\n⚠️ Uyarılar: {', '.join(validation_warnings)}"
-            
-            if status == "success":
-                end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
-                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
-                return f"✅ {record_count} kayıt bulundu.{warning_text}\n\n📋 Kullanılan Cypher:\n{cypher[:300]}...\n\n{paginated_result}"
-            elif status == "empty":
-                return f"""⚪ Sonuç bulunamadı (0 kayıt).{warning_text}
-
-📋 Kullanılan Cypher:
-{cypher}
-
-💡 Öneriler:
-- Filtre değerlerini kontrol et (büyük/küçük harf, yazım)
-- Farklı node'larda ara
-- Daha geniş bir arama dene (limit artır, filter gevşet)"""
-            else:
-                return f"""❌ Hata oluştu.{warning_text}
-
-📋 Kullanılan Cypher:
-{cypher}
-
-{result_str[:1000]}"""
-                
-        except Exception as e:
-            _log(f"❌ DSL error: {e}", "error")
-            import traceback
-            traceback.print_exc()
-            return f'{{"error": "{str(e)}"}}'
-    
     
     # =========================================================================
     # GET GUIDE TOOL
@@ -1876,29 +1644,127 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
         return f"{pagination_info}\n\n{result_lines}{more_info}"
     
     # =========================================================================
-    # TOOL MODE: DSL vs CYPHER
+    # SESSION BLACKBOARD SKILLS - Navigate query history
     # =========================================================================
-    # REACT_TOOL_MODE=dsl   → execute_graph_dsl (DSL → Cypher derleme)
-    # REACT_TOOL_MODE=cypher → execute_cypher_query + execute_cypher_query_with_embedding (doğrudan Cypher)
+    # These tools allow the agent to navigate through past queries,
+    # understand what was tried, and reuse successful findings.
     
-    base_tools = [add_source, read_finding]  # Her iki modda da ortak
+    @tool
+    def get_session_overview() -> str:
+        """
+        Session'daki tüm soruları ve stepleri gör.
+        Her step için: durum, açıklama, ilk 2 sonuç preview.
+        
+        NE ZAMAN KULLAN:
+        - Soru önceki sorularla İLGİLİ ise → BAŞTA çağır
+        - "bu belgede", "önceki", "aynı şirket" gibi referanslar varsa
+        - Birkaç sorgu denedin ama sonuç bulamadın → İpucu için
+        """
+        if not SESSION_BLACKBOARD_ENABLED or bb_get_session_overview is None:
+            return "⚠️ Session blackboard devre dışı."
+        
+        try:
+            result = bb_get_session_overview(session_id)
+            _log(f"📋 get_session_overview called")
+            return result
+        except Exception as e:
+            _log(f"❌ get_session_overview error: {e}", "error")
+            return f"⚠️ Session overview alınamadı: {str(e)}"
     
-    if REACT_TOOL_MODE == "cypher":
-        # CYPHER MODE: Model doğrudan Cypher yazar
-        # Primary tool'lar: execute_cypher_query, execute_cypher_query_with_embedding
-        tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
-        _log(f"🔧 TOOL MODE: cypher (direct Cypher queries)")
-    else:
-        # DSL MODE (default): Model DSL üretir, sistem Cypher'a derler
-        # Primary tool: execute_graph_dsl, fallback: execute_cypher_query
-        tools = [execute_cypher_query] + base_tools
-        if GRAPH_DSL_AVAILABLE:
-            tools.insert(0, execute_graph_dsl)  # DSL'i öne koy (önerilen yol)
-        _log(f"🔧 TOOL MODE: dsl (DSL → Cypher compilation)")
+    @tool
+    def search_skills(query: str, fuzzy_threshold: float = 0.3) -> str:
+        """
+        Geçmiş sorgularda ara. Fuzzy ve fulltext destekli.
+        OR aramaları için: "kira kaybı | rent loss | kira zarar"
+        
+        NE ZAMAN KULLAN:
+        - Belirli bir konunun daha önce aranıp aranmadığını kontrol et
+        - Benzer sorguların sonuçlarını bul
+        
+        Args:
+            query: Arama terimi (| ile OR destekli)
+            fuzzy_threshold: Benzerlik eşiği 0-1 (default: 0.3)
+        """
+        if not SESSION_BLACKBOARD_ENABLED or bb_search_skills is None:
+            return "⚠️ Session blackboard devre dışı."
+        
+        try:
+            result = bb_search_skills(session_id, query, fuzzy_threshold)
+            _log(f"🔍 search_skills: query='{query[:30]}'")
+            return result
+        except Exception as e:
+            _log(f"❌ search_skills error: {e}", "error")
+            return f"⚠️ Skills arama başarısız: {str(e)}"
+    
+    @tool
+    def read_step(step_id: int) -> str:
+        """
+        Belirli bir step'in detayını oku.
+        Cypher sorgusu + ilk 5 sonucu gösterir.
+        
+        NE ZAMAN KULLAN:
+        - Overview veya search'te gördüğün step'in detayına bak
+        - Hangi sorgunun ne sonuç verdiğini anla
+        
+        Args:
+            step_id: Step ID (overview veya search'ten al)
+        """
+        if not SESSION_BLACKBOARD_ENABLED or bb_get_step_detail is None:
+            return "⚠️ Session blackboard devre dışı."
+        
+        try:
+            result = bb_get_step_detail(step_id)
+            _log(f"📖 read_step: step_id={step_id}")
+            return result
+        except Exception as e:
+            _log(f"❌ read_step error: {e}", "error")
+            return f"⚠️ Step detayı alınamadı: {str(e)}"
+    
+    @tool
+    def read_step_results(step_id: int, start: int = 0, end: int = 10) -> str:
+        """
+        Step sonuçlarını pagination ile oku.
+        
+        NE ZAMAN KULLAN:
+        - read_step'te gördüğünden daha fazla sonuç lazım
+        
+        Args:
+            step_id: Step ID
+            start: Başlangıç index (0'dan başlar)
+            end: Bitiş index
+        """
+        if not SESSION_BLACKBOARD_ENABLED or bb_get_step_results is None:
+            return "⚠️ Session blackboard devre dışı."
+        
+        try:
+            result = bb_get_step_results(step_id, start, end)
+            _log(f"📊 read_step_results: step_id={step_id}, range={start}-{end}")
+            return result
+        except Exception as e:
+            _log(f"❌ read_step_results error: {e}", "error")
+            return f"⚠️ Step sonuçları alınamadı: {str(e)}"
+    
+    # =========================================================================
+    # TOOLS SETUP
+    # =========================================================================
+    # Primary tools: execute_cypher_query, execute_cypher_query_with_embedding
+    
+    # Base tools - her modda ortak
+    base_tools = [add_source, read_finding]
+    
+    # Session Blackboard Skills - opsiyonel, SESSION_BLACKBOARD_ENABLED=true ise aktif
+    if SESSION_BLACKBOARD_ENABLED:
+        skills_tools = [get_session_overview, search_skills, read_step, read_step_results]
+        base_tools = skills_tools + base_tools  # Skills tools önce gelsin
+        _log(f"📚 Session blackboard tools enabled ({len(skills_tools)} tools)")
+    
+    # Cypher query tools
+    tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
+    _log(f"🔧 Cypher query tools enabled")
     
     # MCP tool'larını filtrele - DISALLOW listesindekiler agent'a sunulmaz
-    # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar (execute_graph_dsl vb.) 
-    # bunları wrapper olarak kullanır. Model doğrudan çağırmamalı.
+    # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar bunları wrapper olarak kullanır.
+    # Model doğrudan çağırmamalı.
     # Yeni MCP tool'ları otomatik olarak agent'a eklenir, sadece engellemek istediklerinizi buraya ekleyin.
     AGENT_DISALLOWED_MCP_TOOLS = {
         "read_neo4j_cypher",              # Internal: execute_cypher_query kullanır
@@ -2127,25 +1993,14 @@ class ReactAgent:
         - Prompt'ta {{schema_info}} placeholder'ı değişken olarak compile edilir
         
         Domain:
-        - sigorta: Sigorta domain'i prompt'ları (DSL destekli)
-        - bakim: WAT Motor bakım prompt'ları (sadece Cypher)
-        
-        Tool Mode:
-        - REACT_TOOL_MODE=dsl → DSL araçları için talimatlar (sadece sigorta)
-        - REACT_TOOL_MODE=cypher → Doğrudan Cypher yazma talimatları
+        - sigorta: Sigorta domain'i prompt'ları
+        - bakim: WAT Motor bakım prompt'ları
         """
         # Domain'e göre prompt al
-        _log(f"📋 Domain: {self.domain}, Tool mode: {REACT_TOOL_MODE.upper()}")
+        _log(f"📋 Domain: {self.domain}")
         
-        # Bakım domain'i sadece Cypher mode destekler
-        effective_mode = REACT_TOOL_MODE
-        if self.domain == "bakim":
-            effective_mode = "cypher"  # Bakım domain'i için DSL desteklenmiyor
-            if REACT_TOOL_MODE == "dsl":
-                _log(f"⚠️ Bakım domain'i DSL desteklemiyor, cypher mode'a geçiliyor", "warning")
-        
-        # Domain ve mode'a göre prompt'ları al
-        prompts = get_domain_prompts(self.domain, effective_mode)
+        # Domain'e göre prompt'ları al (cypher mode)
+        prompts = get_domain_prompts(self.domain, "cypher")
         
         # Base prompt oluştur
         base_prompt = (

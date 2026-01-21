@@ -1246,7 +1246,8 @@ class FileProcessor:
                         "chunking_completed_at": datetime.now(timezone.utc),
                         "status": "uploaded",
                         "markdown_path": file_record.markdown_path,
-                        "reason": "Chunking completed successfully (markdown exists + Neo4j nodes)"
+                        "reason": "Chunking completed successfully (markdown exists + Neo4j nodes)",
+                        "celery_task_id": None  # Clear task ID on completion
                     })
                     logging.info(
                         f"✅ V2: Chunking completed (markdown exists + Neo4j nodes) for: {file_record.original_name} (ID: {file_record.id}) - DB update queued"
@@ -1666,7 +1667,8 @@ class FileProcessor:
                         "chunking_status": "chunked",
                         "chunking_completed_at": datetime.now(timezone.utc),
                         "status": "uploaded",  # Reset status so frontend can proceed
-                        "reason": "Chunking completed successfully (markdown created + Neo4j nodes)"
+                        "reason": "Chunking completed successfully (markdown created + Neo4j nodes)",
+                        "celery_task_id": None  # Clear task ID on completion
                     })
                     
                     logging.info(

@@ -6553,6 +6553,16 @@ async def reset_file_stage(
                     .all()
                 )
             elif stage == "chunking":
+                # ╔═══════════════════════════════════════════════════════════════════╗
+                # ║  CHUNKING RESET - TOPLU (ALL)                                      ║
+                # ║                                                                     ║
+                # ║  ⚠️  DİKKAT: graph_status="completed" olan dosyalar HARİÇ TUTULUYOR║
+                # ║      Bu dosyalarda entity'ler zaten var, yanlışlıkla silinmesin    ║
+                # ║                                                                     ║
+                # ║  📋 Completed dosyaları da reset etmek için:                       ║
+                # ║      Frontend'de batch seçim yapıp tekli reset API kullanın        ║
+                # ║      (Tekli reset entity'leri korur)                               ║
+                # ╚═══════════════════════════════════════════════════════════════════╝
                 # Reset files that need chunking reset (exclude graph_status="completed")
                 # Only reset files where graph creation is NOT completed
                 files_to_reset = (
@@ -7024,7 +7034,17 @@ async def reset_file_stage(
             )
 
         elif stage == "chunking":
-            # Reset chunking and graph (cascade)
+            # ╔═══════════════════════════════════════════════════════════════════╗
+            # ║  CHUNKING RESET - TEKLİ DOSYA                                      ║
+            # ║                                                                     ║
+            # ║  ⚠️  ÖNEMLİ: Bu reset sadece chunk'ları siler!                     ║
+            # ║      - Policy, Customer ve diğer entity node'ları KORUNUR          ║
+            # ║      - graph_status="completed" ise DEĞİŞMEZ (entity'ler var)      ║
+            # ║      - Sadece embedding_status reset edilir (yeni chunk'lar için)  ║
+            # ║                                                                     ║
+            # ║  📋 Kullanım: Chunk'ları yeniden oluşturmak istediğinizde          ║
+            # ║      (örn: sayfalama hatası, chunk boyutu değişikliği)             ║
+            # ╚═══════════════════════════════════════════════════════════════════╝
             # If chunking failed, reset to ready state (previous stage)
             if file_record.chunking_status == "failed":
                 # Chunking failed → go back to ready state

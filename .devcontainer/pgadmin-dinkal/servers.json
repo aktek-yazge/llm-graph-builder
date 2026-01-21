@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Dinkal PostgreSQL",
+      "Group": "Dinkal",
+      "Host": "postgres-dinkal",
+      "Port": 5432,
+      "MaintenanceDB": "llm_graph_builder",
+      "Username": "postgres",
+      "PassFile": "/pgadmin4/pgpass",
+      "SSLMode": "prefer"
+    }
+  }
+}
