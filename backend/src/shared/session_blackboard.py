@@ -539,9 +539,13 @@ def search_skills(
     query: str,
     fuzzy_threshold: float = 0.3,
     limit: int = 10,
+    include_global: bool = True,
 ) -> str:
     """
     Search skills with fuzzy and full-text support.
+    
+    First searches in current session, then in all sessions (global) if no results.
+    Only successful queries from other sessions are included in global search.
     
     Supports OR queries: "kira kaybi | rent loss | kira zarar"
     
@@ -550,6 +554,7 @@ def search_skills(
         query: Search query (supports | for OR)
         fuzzy_threshold: Similarity threshold for fuzzy match (0-1)
         limit: Maximum results
+        include_global: If True, search globally when session has no results
     
     Returns:
         Formatted search results
@@ -560,37 +565,62 @@ def search_skills(
     if not session_id or not query:
         return "⚠️ session_id ve query gerekli."
     
+    def _build_search_query(terms: list, fuzzy_threshold: float) -> tuple:
+        """Build search conditions and params."""
+        conditions = []
+        params = []
+        
+        for term in terms:
+            conditions.append(f"""
+                (
+                    similarity(COALESCE(skill_description, ''), %s) > %s OR
+                    similarity(COALESCE(question_text, ''), %s) > %s OR
+                    similarity(COALESCE(step_name, ''), %s) > %s OR
+                    search_vector @@ plainto_tsquery('simple', %s)
+                )
+            """)
+            params.extend([term, fuzzy_threshold, term, fuzzy_threshold, term, fuzzy_threshold, term])
+        
+        return " OR ".join(conditions) if conditions else "TRUE", params
+    
+    def _format_results(rows: list, query: str, is_global: bool = False) -> str:
+        """Format search results."""
+        source_label = "🌐 GLOBAL" if is_global else "📋 SESSION"
+        lines = [f"🔍 '{query}' için {len(rows)} sonuç ({source_label}):"]
+        lines.append("")
+        
+        for row in rows:
+            status_icon = "✅" if row['status'] == "success" else "❌" if row['status'] == "failed" else "⚪"
+            similarity = row['similarity_score'] or 0
+            
+            # Show session info for global results
+            session_marker = f" [S:{row['session_id'][:8]}]" if is_global and 'session_id' in row else ""
+            
+            lines.append(f"[{row['id']:03d}] Q{row['question_number']} Step {row['step_number']:02d}{session_marker}")
+            lines.append(f"  {status_icon} {row['step_name']}: {row['record_count']} kayıt (benzerlik: {similarity:.0%})")
+            
+            desc = row['skill_description'] or row['question_text'] or ""
+            if desc:
+                lines.append(f"  → {desc[:80]}{'...' if len(desc) > 80 else ''}")
+            lines.append("")
+        
+        lines.append("💡 Detay için: read_step(step_id=ID)")
+        
+        return "\n".join(lines)
+    
     try:
         init_blackboard_tables()
         
         # Parse OR queries
         terms = [t.strip() for t in query.split("|") if t.strip()]
+        where_clause, search_params = _build_search_query(terms, fuzzy_threshold)
         
         with _get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Build fuzzy + fulltext search
-                # Using pg_trgm similarity for fuzzy and tsvector for fulltext
-                
-                conditions = []
-                params = [session_id]
-                
-                for term in terms:
-                    # Fuzzy match on skill_description, question_text, step_name
-                    conditions.append(f"""
-                        (
-                            similarity(COALESCE(skill_description, ''), %s) > %s OR
-                            similarity(COALESCE(question_text, ''), %s) > %s OR
-                            similarity(COALESCE(step_name, ''), %s) > %s OR
-                            search_vector @@ plainto_tsquery('simple', %s)
-                        )
-                    """)
-                    params.extend([term, fuzzy_threshold, term, fuzzy_threshold, term, fuzzy_threshold, term])
-                
-                where_clause = " OR ".join(conditions) if conditions else "TRUE"
-                
+                # 1. First, search in current session
                 cur.execute(f"""
                     SELECT 
-                        id, question_id, question_text, question_number,
+                        id, session_id, question_id, question_text, question_number,
                         step_number, step_name, skill_description, 
                         status, record_count,
                         GREATEST(
@@ -602,31 +632,43 @@ def search_skills(
                     WHERE session_id = %s AND ({where_clause})
                     ORDER BY similarity_score DESC, created_at DESC
                     LIMIT %s
-                """, [terms[0] if terms else '', terms[0] if terms else '', terms[0] if terms else ''] + params + [limit])
+                """, [terms[0] if terms else '', terms[0] if terms else '', terms[0] if terms else '', session_id] + search_params + [limit])
                 
                 rows = cur.fetchall()
                 
-                if not rows:
+                if rows:
+                    return _format_results(rows, query, is_global=False)
+                
+                # 2. If no results in session and global search enabled, search globally
+                if not include_global:
                     return f"📭 '{query}' için sonuç bulunamadı."
                 
-                lines = [f"🔍 '{query}' için {len(rows)} sonuç:"]
-                lines.append("")
+                # Global search: only successful queries, exclude current session
+                cur.execute(f"""
+                    SELECT 
+                        id, session_id, question_id, question_text, question_number,
+                        step_number, step_name, skill_description, 
+                        status, record_count,
+                        GREATEST(
+                            similarity(COALESCE(skill_description, ''), %s),
+                            similarity(COALESCE(question_text, ''), %s),
+                            similarity(COALESCE(step_name, ''), %s)
+                        ) as similarity_score
+                    FROM session_blackboard
+                    WHERE session_id != %s 
+                      AND status = 'success'
+                      AND skill_description IS NOT NULL
+                      AND ({where_clause})
+                    ORDER BY similarity_score DESC, created_at DESC
+                    LIMIT %s
+                """, [terms[0] if terms else '', terms[0] if terms else '', terms[0] if terms else '', session_id] + search_params + [limit])
                 
-                for row in rows:
-                    status_icon = "✅" if row['status'] == "success" else "❌" if row['status'] == "failed" else "⚪"
-                    similarity = row['similarity_score'] or 0
-                    
-                    lines.append(f"[{row['id']:03d}] Q{row['question_number']} Step {row['step_number']:02d}")
-                    lines.append(f"  {status_icon} {row['step_name']}: {row['record_count']} kayıt (benzerlik: {similarity:.0%})")
-                    
-                    desc = row['skill_description'] or row['question_text'] or ""
-                    if desc:
-                        lines.append(f"  → {desc[:80]}{'...' if len(desc) > 80 else ''}")
-                    lines.append("")
+                global_rows = cur.fetchall()
                 
-                lines.append("💡 Detay için: read_step(step_id=ID)")
+                if global_rows:
+                    return _format_results(global_rows, query, is_global=True)
                 
-                return "\n".join(lines)
+                return f"📭 '{query}' için ne session'da ne de global'de sonuç bulunamadı."
                 
     except Exception as e:
         logger.error(f"❌ search_skills failed: {e}")

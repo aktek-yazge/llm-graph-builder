@@ -41,7 +41,7 @@ SKILL_AGENT_ENABLED = os.getenv("SKILL_AGENT_ENABLED", "true").lower() in ("true
 SKILL_AGENT_MODEL = os.getenv("SKILL_AGENT_MODEL", "gpt-4o-mini")
 
 # Skill generation prompt
-SKILL_PROMPT = """Sen bir sorgu analiz asistanısın. Verilen Cypher sorgusu ve sonuçlarını analiz edip kısa bir açıklama oluştur.
+SKILL_PROMPT = """Sen bir sorgu kataloglama asistanısın. Verilen Cypher sorgusunun AMACINI ve DURUMUNU kısa bir açıklamayla belirt.
 
 ## SORGU BİLGİLERİ
 
@@ -54,21 +54,31 @@ Cypher Sorgusu:
 
 Durum: {status} ({record_count} kayıt)
 
-Sonuç Önizleme:
-{result_preview}
-
 ## GÖREV
 
-Bu sorgu için şunları oluştur:
+⚠️ KRİTİK KURALLAR:
+- SONUÇ ÇIKARMA! Sonuçların içeriğini YORUMLAMA!
+- CEVAP VERME! Kullanıcının sorusuna cevap yazma!
+- Sadece sorgunun ne ARADIĞINI ve kaç kayıt DÖNDÜĞÜNÜ belirt.
+- Sonuçlarda gördüğün değerleri (şirket adı, tutar vb.) description'a YAZMA!
 
-1. **description**: Sorgunun ne yaptığını ve sonucunu açıklayan 1 cümle (Türkçe, max 100 karakter)
-   - Başarılı: Ne bulunduğunu belirt
-   - Başarısız: Neden başarısız olabileceğini belirt
+1. **description**: Sorgunun AMACINI ve DURUMUNU açıklayan 1 cümle (max 80 karakter)
+   - Başarılı: "[Ne arandı] araması. [X] kayıt bulundu."
+   - Başarısız: "[Ne arandı] araması. Sonuç yok."
+   
+   ✅ DOĞRU ÖRNEKLER:
+   - "Müşteri + poliçe + sigorta şirketi ilişkisi sorgusu. 3 kayıt bulundu."
+   - "Kira kaybı fulltext araması. 10 belge bulundu."
+   - "Customer node keşfi. Sonuç yok."
+   
+   ❌ YANLIŞ ÖRNEKLER (YAPMA!):
+   - "Akiş GYO'nun kira kaybı EUREKO'dan sağlanıyor." (SONUÇ ÇIKARMA!)
+   - "Sigorta şirketi Doğa Sigorta olarak bulundu." (YORUM YAPMA!)
 
 2. **tags**: İlgili anahtar kelimeler listesi (5-10 adet)
-   - Şirket/kişi isimleri
-   - Arama terimleri
-   - Veri tipleri (customer, policy, document vb.)
+   - Arama terimleri (kira kaybı, yangın vb.)
+   - Node tipleri (customer, policy, document vb.)
+   - Arama tipi (fulltext, semantic, keşif vb.)
 
 3. **intent**: Sorgunun amacı (şunlardan biri seç):
    - entity_search: Entity/kayıt arama
@@ -293,24 +303,33 @@ async def _call_anthropic_async(prompt: str, api_key: str) -> Optional[str]:
 
 
 def _create_basic_description(status: str, record_count: int, cypher_query: str) -> str:
-    """Create a basic description without LLM."""
+    """Create a basic description without LLM - NO INTERPRETATION!"""
     cypher_lower = cypher_query.lower()
     
+    # Determine query type
+    query_type = "Sorgu"
+    if "embedding" in cypher_lower or "vector" in cypher_lower:
+        query_type = "Semantic arama"
+    elif "fulltext" in cypher_lower or "queryNodes" in cypher_lower:
+        query_type = "Fulltext arama"
+    elif "contains" in cypher_lower:
+        query_type = "Metin arama"
+    elif "customer" in cypher_lower and "policy" in cypher_lower:
+        query_type = "Müşteri-poliçe ilişki sorgusu"
+    elif "customer" in cypher_lower:
+        query_type = "Müşteri keşfi"
+    elif "document" in cypher_lower or "chunk" in cypher_lower:
+        query_type = "Belge araması"
+    elif "insurancecompany" in cypher_lower:
+        query_type = "Sigorta şirketi sorgusu"
+    
+    # Format result
     if status == "success":
-        if "embedding" in cypher_lower or "vector" in cypher_lower:
-            return f"Semantic arama ile {record_count} içerik bulundu"
-        elif "contains" in cypher_lower or "ilike" in cypher_lower:
-            return f"Metin arama ile {record_count} kayıt bulundu"
-        elif "customer" in cypher_lower:
-            return f"Müşteri araması: {record_count} kayıt"
-        elif "document" in cypher_lower or "chunk" in cypher_lower:
-            return f"Belge araması: {record_count} kayıt"
-        else:
-            return f"Sorgu başarılı: {record_count} kayıt"
+        return f"{query_type}. {record_count} kayıt bulundu."
     elif status == "empty":
-        return "Sorgu sonuç döndürmedi - filtreler çok dar olabilir"
+        return f"{query_type}. Sonuç yok."
     else:
-        return "Sorgu başarısız - syntax veya bağlantı hatası olabilir"
+        return f"{query_type}. Hata oluştu."
 
 
 def _extract_basic_tags(question_text: str, cypher_query: str) -> List[str]:

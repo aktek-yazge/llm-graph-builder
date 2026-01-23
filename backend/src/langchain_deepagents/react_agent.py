@@ -1496,6 +1496,121 @@ Lütfen sorguyu düzelt ve tekrar dene."""
             return f'{{"error": "{str(e)}"}}'
     
     # =========================================================================
+    # EXPAND CHUNK CONTEXT TOOL - Window Expansion
+    # =========================================================================
+    @tool
+    async def expand_chunk_context(document_name: str, positions: str, window_size: int = 2) -> str:
+        """Chunk pozisyonlarının etrafındaki context'i genişlet. Kesilmiş tablo/liste tamamlamak için kullan.
+        
+        Args:
+            document_name: Belge adı (fileName)
+            positions: Pozisyon listesi (virgülle ayrılmış, örn: "5,8,12")
+            window_size: Her yöne kaç chunk genişlet (varsayılan: 2)
+        
+        Ne zaman kullan:
+            - Arama sonucunda tablo/liste kesilmiş görünüyorsa
+            - "devamı var" gibi ifadeler varsa
+            - Daha fazla context gerekiyorsa
+        """
+        mcp_cypher = mcp_tool_map.get("read_neo4j_cypher")
+        if not mcp_cypher:
+            return '{"error": "MCP read_neo4j_cypher tool not found"}'
+        
+        try:
+            # Parse positions
+            pos_list = [int(p.strip()) for p in positions.split(",") if p.strip().isdigit()]
+            if not pos_list:
+                return "❌ Geçersiz pozisyon listesi. Örnek: '5,8,12'"
+            
+            # Merge overlapping positions
+            def merge_positions(positions: list, window: int) -> list:
+                """Overlapping pozisyonları birleştir"""
+                if not positions:
+                    return []
+                positions = sorted(set(positions))
+                ranges = []
+                current_start = positions[0] - window
+                current_end = positions[0] + window
+                
+                for pos in positions[1:]:
+                    new_start = pos - window
+                    new_end = pos + window
+                    if new_start <= current_end + 1:
+                        current_end = max(current_end, new_end)
+                    else:
+                        ranges.append((max(1, current_start), current_end))
+                        current_start = new_start
+                        current_end = new_end
+                
+                ranges.append((max(1, current_start), current_end))
+                return ranges
+            
+            merged_ranges = merge_positions(pos_list, window_size)
+            
+            results = []
+            for start_pos, end_pos in merged_ranges:
+                # Her range için chunk'ları getir
+                cypher = f"""
+                MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+                WHERE d.fileName = $document
+                AND c.position >= $start_pos AND c.position <= $end_pos
+                RETURN c.position as position, c.text as text
+                ORDER BY c.position
+                """
+                
+                result = await mcp_cypher.ainvoke({
+                    "query": cypher,
+                    "params": {
+                        "document": document_name,
+                        "start_pos": start_pos,
+                        "end_pos": end_pos
+                    },
+                    "db_url": os.environ.get("NEO4J_URI"),
+                    "db_username": os.environ.get("NEO4J_USERNAME"),
+                    "db_password": os.environ.get("NEO4J_PASSWORD"),
+                    "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+                })
+                
+                result_str = str(result) if result else ""
+                
+                # Parse chunks
+                chunks = _parse_records(result_str)
+                if chunks:
+                    combined_text = "\n\n---\n\n".join([
+                        f"[Pos {c.get('position', '?')}]\n{c.get('text', '')}" 
+                        for c in chunks if isinstance(c, dict)
+                    ])
+                    results.append({
+                        "range": f"{start_pos}-{end_pos}",
+                        "original_positions": [p for p in pos_list if start_pos <= p <= end_pos],
+                        "chunk_count": len(chunks),
+                        "text": combined_text
+                    })
+            
+            if not results:
+                return f"⚪ '{document_name}' belgesinde pozisyon {positions} için chunk bulunamadı."
+            
+            # Format output
+            output = f"📦 **Genişletilmiş Context** (window_size={window_size})\n"
+            output += f"📄 Belge: {document_name}\n"
+            output += f"📍 Orijinal pozisyonlar: {positions}\n\n"
+            
+            for r in results:
+                output += f"### Range: {r['range']} ({r['chunk_count']} chunk)\n"
+                output += f"Orijinal: {r['original_positions']}\n\n"
+                output += r['text'][:3000]  # Limit text length
+                if len(r['text']) > 3000:
+                    output += "\n\n... (devamı kısaltıldı)"
+                output += "\n\n"
+            
+            _log(f"📦 expand_chunk_context: {document_name}, positions={positions}, ranges={len(results)}")
+            return output
+            
+        except Exception as e:
+            _log(f"❌ expand_chunk_context error: {e}", "error")
+            return f'{{"error": "{str(e)}"}}'
+    
+    # =========================================================================
     # GET GUIDE TOOL
     # =========================================================================
     # @tool
@@ -1672,25 +1787,31 @@ Lütfen sorguyu düzelt ve tekrar dene."""
             return f"⚠️ Session overview alınamadı: {str(e)}"
     
     @tool
-    def search_skills(query: str, fuzzy_threshold: float = 0.3) -> str:
+    def search_skills(query: str, fuzzy_threshold: float = 0.3, include_global: bool = True) -> str:
         """
         Geçmiş sorgularda ara. Fuzzy ve fulltext destekli.
         OR aramaları için: "kira kaybı | rent loss | kira zarar"
         
+        ÖNCE bu session'da arar, bulamazsa TÜM SESSION'LARDA (global) arar.
+        Global aramada sadece BAŞARILI sorgular gösterilir.
+        
         NE ZAMAN KULLAN:
         - Belirli bir konunun daha önce aranıp aranmadığını kontrol et
         - Benzer sorguların sonuçlarını bul
+        - Daha önce başarılı olan stratejileri öğren
         
         Args:
             query: Arama terimi (| ile OR destekli)
             fuzzy_threshold: Benzerlik eşiği 0-1 (default: 0.3)
+            include_global: Global arama yap (default: True)
         """
         if not SESSION_BLACKBOARD_ENABLED or bb_search_skills is None:
             return "⚠️ Session blackboard devre dışı."
         
         try:
-            result = bb_search_skills(session_id, query, fuzzy_threshold)
-            _log(f"🔍 search_skills: query='{query[:30]}'")
+            result = bb_search_skills(session_id, query, fuzzy_threshold, include_global=include_global)
+            scope = "session+global" if include_global else "session"
+            _log(f"🔍 search_skills: query='{query[:30]}' scope={scope}")
             return result
         except Exception as e:
             _log(f"❌ search_skills error: {e}", "error")
@@ -1758,9 +1879,9 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         base_tools = skills_tools + base_tools  # Skills tools önce gelsin
         _log(f"📚 Session blackboard tools enabled ({len(skills_tools)} tools)")
     
-    # Cypher query tools
-    tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
-    _log(f"🔧 Cypher query tools enabled")
+    # Cypher query tools + chunk expansion
+    tools = [execute_cypher_query, execute_cypher_query_with_embedding, expand_chunk_context] + base_tools
+    _log(f"🔧 Cypher query tools enabled (+ expand_chunk_context)")
     
     # MCP tool'larını filtrele - DISALLOW listesindekiler agent'a sunulmaz
     # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar bunları wrapper olarak kullanır.
@@ -2768,9 +2889,23 @@ class ReactAgent:
                         msg_type = type(message).__name__
                         
                         # 🔍 DEBUG: Her mesaj tipini logla
-                        content_preview = str(getattr(message, "content", ""))[:100]
+                        content = getattr(message, "content", "")
+                        content_preview = str(content)[:100]
                         has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
                         _log(f"📨 [MSG] Type: {msg_type}, HasToolCalls: {has_tool_calls}, Content: {content_preview}...")
+                        
+                        # 🧠 Extended Thinking içeriğini logla (Claude)
+                        if msg_type == "AIMessage" and isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "thinking":
+                                    thinking_text = block.get("thinking", "")
+                                    if thinking_text:
+                                        # İlk 500 karakteri göster
+                                        thinking_preview = thinking_text[:500].replace("\n", " ")
+                                        _log(f"🧠 [THINKING] {thinking_preview}...")
+                                        # Skill mention kontrolü
+                                        if "skill" in thinking_text.lower() or "search_skills" in thinking_text.lower() or "geçmiş" in thinking_text.lower():
+                                            _log(f"🔍 [THINKING SKILL] Agent skill'lerden bahsediyor!")
                         
                         # AIMessage'dan token kullanımı çıkar
                         if msg_type == "AIMessage":

@@ -61,13 +61,13 @@ Kullanıcının bahsettiği kavramın farklı versiyonlarını OR ile birleştir
 **FULLTEXT SYNTAX:**
 - Index adı: `'chunk_text_fulltext'`
 - Normal arama: `'kelime1 kelime2'` (AND implicit)
-- Fuzzy arama: `'kelime~'` (yazım hatalarını bulur)
 - OR operatörü: `'kelime1 OR kelime2'`
 - Phrase arama: `'"tam eşleşme ifade"'`
+- Fuzzy arama: `'kelime~'` ⚠️ **DİKKATLİ KULLAN** - Gürültülü sonuç verebilir!
 
-**HIZLI MOD (Genel arama - dikkatli kullan!):**
+**ÖNERİLEN KULLANIM (Normal + OR):**
 ```cypher
-CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'fiyat OR tutar OR bedel~')
+CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'terim1 OR terim2 OR "tam ifade"')
 YIELD node AS c, score
 WHERE score > 1.0
 RETURN c.text, score, c.fileName
@@ -76,7 +76,7 @@ ORDER BY score DESC LIMIT 10
 
 **FİLTRELİ MOD (Entity ile - ÖNERİLEN, ilişki adlarını ŞEMADAN al!):**
 ```cypher
-CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'ödeme~ OR "ödeme planı"')
+CALL db.index.fulltext.queryNodes('chunk_text_fulltext', 'terim1 OR terim2')
 YIELD node AS c, score
 WHERE score > 0.5
 MATCH (c)-[:ILIŞKI_ADI]->(d:Document)<-[:ILIŞKI_ADI]-(e:EntityNode)
@@ -85,17 +85,31 @@ RETURN c.text, score, d.fileName
 ORDER BY score DESC LIMIT 10
 ```
 
+⚠️ **FUZZY (~) DİKKAT:** Alakasız sonuçlar getirebilir! Sadece kullanıcı yazım hatası yaptığını düşünüyorsan kullan.
 ⚠️ İlişki adlarını ŞEMADAN al!
 
 ---
 
-### 💡 ARAMA STRATEJİSİ HATIRLATMASI
-Hangi arama yöntemini kullanacağına SEN karar ver:
-- **Metadata/sayısal veri** → Graph sorgusu (execute_cypher_query)
-- **Spesifik kelime araması** → Fulltext (execute_cypher_query + fulltext)
-- **Anlam/kavram araması** → Semantic (execute_cypher_query_with_embedding)
+### 💡 ARAMA STRATEJİSİ - HANGİ YÖNTEM NE ZAMAN?
 
-⚠️ Genel bir soru sorulmuşsa (örn: "X hakkında ne bilgi var?") sonuçları değerlendirip EN UYGUN yöntemi seç.
+| Soru Tipi | Yöntem | Neden? |
+|-----------|--------|--------|
+| **Kavramsal** ("X nedir?", "X hakkında bilgi") | **SEMANTIC** | Anlam bazlı eşleşme, tablo/liste bulur |
+| **Spesifik terim** (tarih, kod, numara, isim) | **FULLTEXT** | Kesin kelime eşleşmesi gerekir |
+| **Var mı/yok mu soruları** | **FULLTEXT** | Keyword araması daha kesin |
+| **Detay/liste/tablo istekleri** | **SEMANTIC** | Yapısal veriyi iyi bulur |
+
+**KARAR AĞACI:**
+```
+SORU ANALİZİ:
+├── Tarih, kod, numara, özel isim → FULLTEXT
+├── "var mı?", "mevcut mu?" → FULLTEXT  
+├── "nedir?", "neler?", "nasıl?" → SEMANTIC
+├── Tablo/liste/detay istiyor → SEMANTIC
+└── Emin değilsen → ÖNCE SEMANTIC, sonuç yoksa FULLTEXT
+```
+
+⚠️ **FUZZY (~) UYARISI:** Gürültülü sonuç verebilir! Sadece yazım hatası olasılığı varsa kullan.
 
 ---
 
@@ -141,6 +155,41 @@ execute_cypher_query_with_embedding(
 ```
 
 ⚠️ İlişki ve node adlarını ŞEMADAN al! (CHUNK_REL, DOC_REL, EntityNode örnektir)
+
+---
+
+### expand_chunk_context(document_name, positions, window_size) - CONTEXT GENİŞLETME
+**NE ZAMAN:** 
+- Arama sonucunda tablo/liste kesilmiş görünüyorsa
+- "devamı var", "..." gibi ifadeler varsa
+- Chunk'ın etrafındaki context'i görmek istiyorsan
+
+**PARAMETRELER:**
+- `document_name`: Belge adı (fileName) - Arama sonucundan al
+- `positions`: Chunk pozisyonları, virgülle ayrılmış (örn: "5,8,12")
+- `window_size`: Her yöne kaç chunk genişlet (varsayılan: 2)
+
+**ÖRNEK KULLANIM:**
+```python
+# Arama sonucunda pos:45 ve pos:47 bulundu, arası kesilmiş
+expand_chunk_context(
+    document_name="2024 POLİÇELER_Şirket_Poliçe.pdf",
+    positions="45,47",
+    window_size=2
+)
+# Sonuç: pos 43-49 arası tüm chunk'lar birleşik döner
+```
+
+**NE ZAMAN KULLANMA:**
+- ❌ Arama sonucu zaten yeterli bilgi içeriyorsa
+- ❌ Sadece merak ettiğin için (gereksiz token harcaması)
+- ❌ Her arama sonucunda otomatik olarak
+
+**NE ZAMAN KULLAN:**
+- ✅ Tablo ortasından kesilmiş görünüyorsa
+- ✅ Cümle yarım kalmışsa
+- ✅ "devamı sonraki sayfada" gibi ifadeler varsa
+- ✅ Kullanıcı "daha fazla detay" istiyorsa
 
 </tool_usage>
 """
