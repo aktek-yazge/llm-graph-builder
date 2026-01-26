@@ -199,12 +199,12 @@ services:
       - preview
     restart: always
 
-# Preview ortamı network'ü (root docker-compose.preview.yml'de tanımlı)
+# Preview ortamı network'ü (backend/docker-compose.preview.yml'de tanımlı)
 # Docker Compose network adını project_name + network_name olarak oluşturur
 networks:
   preview:
     external: true
-    name: llm-graph-builder_preview
+    name: backend_preview
 
 volumes:
   output_data:
