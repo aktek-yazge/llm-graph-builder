@@ -1,0 +1,162 @@
+# =============================================================================
+# SHARED SERVICES - Tüm Projeler İçin Ortak Altyapı
+# =============================================================================
+# Traefik, RabbitMQ, MCP Inspector gibi paylaşımlı servisler
+#
+# KULLANIM:
+#   docker compose -p shared -f docker-compose.shared.yml up -d
+#
+# ERİŞİM:
+#   Traefik Dashboard:  http://localhost:8090/dashboard/
+#   RabbitMQ:           http://dev.local/rabbitmq
+#   MCP Inspector:      http://dev.local/mcp-inspector
+#
+# Lokal test için /etc/hosts:
+#   127.0.0.1   dev.local
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # TRAEFIK - Reverse Proxy & Load Balancer
+  # ===========================================================================
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik-dev
+    restart: always
+    command:
+      # API ve Dashboard
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      # Docker provider - container label'larını dinle
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=wat-dev-network"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Logging
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+    ports:
+      - "80:80"       # HTTP
+      - "443:443"     # HTTPS
+      - "8090:8080"   # Traefik Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - wat-dev-network
+      - dinkal-dev-network
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dev.local`) && PathPrefix(`/traefik`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+
+  # ===========================================================================
+  # RABBITMQ - Message Broker
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-dev
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
+    restart: unless-stopped
+    networks:
+      - wat-dev-network
+      - dinkal-dev-network
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rabbitmq.rule=Host(`dev.local`) && PathPrefix(`/rabbitmq`)"
+      - "traefik.http.routers.rabbitmq.entrypoints=web"
+      - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
+      - "traefik.http.middlewares.strip-rabbitmq.stripprefix.prefixes=/rabbitmq"
+      - "traefik.http.routers.rabbitmq.middlewares=strip-rabbitmq"
+
+  # ===========================================================================
+  # MCP INSPECTOR
+  # ===========================================================================
+  mcp-inspector:
+    image: ghcr.io/modelcontextprotocol/inspector:latest
+    container_name: mcp-inspector
+    ports:
+      - "6274:6274" # MCP Inspector UI
+      - "6277:6277" # MCP Inspector API
+    environment:
+      - HOST=0.0.0.0
+      - PORT=6274
+    restart: unless-stopped
+    networks:
+      - wat-dev-network
+      - dinkal-dev-network
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-inspector.rule=Host(`dev.local`) && PathPrefix(`/mcp-inspector`)"
+      - "traefik.http.routers.mcp-inspector.entrypoints=web"
+      - "traefik.http.routers.mcp-inspector.priority=20"
+      - "traefik.http.services.mcp-inspector.loadbalancer.server.port=6274"
+      - "traefik.http.middlewares.strip-mcp-inspector.stripprefix.prefixes=/mcp-inspector"
+      - "traefik.http.routers.mcp-inspector.middlewares=strip-mcp-inspector"
+
+  # ===========================================================================
+  # MCP NEO4J CYPHER - Graph Query Server
+  # ===========================================================================
+  mcp-neo4j-cypher:
+    build:
+      context: ../mcp-servers/mcp-neo4j-cypher
+      dockerfile: Dockerfile
+    container_name: mcp-neo4j-cypher
+    restart: always
+    ports:
+      - "8002:8002"
+    environment:
+      - NEO4J_URI=bolt://neo4j-wat:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=Watmotor!654*
+      - NEO4J_DATABASE=neo4j
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8002
+      - NEO4J_TRANSPORT=http
+      - NEO4J_MCP_SERVER_HOST=0.0.0.0
+      - NEO4J_MCP_SERVER_PORT=8002
+      - NEO4J_MCP_SERVER_PATH=/mcp/
+      - NEO4J_NAMESPACE=
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,devcontainer
+      - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
+      - NEO4J_READ_TIMEOUT=30
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - wat-dev-network
+      - dinkal-dev-network
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-cypher.rule=Host(`dev.local`) && PathPrefix(`/mcp`)"
+      - "traefik.http.routers.mcp-cypher.entrypoints=web"
+      - "traefik.http.services.mcp-cypher.loadbalancer.server.port=8002"
+
+networks:
+  wat-dev-network:
+    external: true
+    name: wat-dev-network
+  dinkal-dev-network:
+    external: true
+    name: dinkal-dev-network
+  akkok-sicil-dev-network:
+    external: true
+    name: akkok-sicil-dev-network

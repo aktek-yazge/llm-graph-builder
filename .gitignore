@@ -205,3 +205,4 @@ backend/src/workflow/fastagent.jsonl
 backend/fastagent.jsonl
 backend/fastagent.config.yaml
 llm_graph_builder_backup.sql
+*.pdf

@@ -3,15 +3,23 @@ WORKDIR /workspace
 EXPOSE 8000
 EXPOSE 5173
 
+# Use faster mirror for ARM (Aliyun is 28x faster than default ports.ubuntu.com)
+RUN sed -i 's|ports.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+    sed -i 's|ports.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+
 # Install Python 3.13 and pip properly
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update && \
-    apt-get install -y python3.13 python3.13-venv python3.13-dev python3-pip && \
+    apt-get install -y \
+        python3.13 \
+        python3.13-venv \
+        python3.13-dev && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
-    python3.13 -m pip install --upgrade pip --break-system-packages
+    python3.13 -m ensurepip && \
+    python3.13 -m pip install --upgrade pip setuptools wheel
 
 # Install dependencies and clean up in one layer
 RUN apt-get update && \

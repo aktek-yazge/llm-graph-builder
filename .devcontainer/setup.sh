@@ -3,33 +3,36 @@ set -e
 
 echo "🚀 Full-Stack DevContainer kurulum başlıyor..."
 
-# Python environment hazırlığı
+# Python environment hazırlığı (uv ile pyproject.toml kullanarak)
 echo "🐍 Python environment hazırlanıyor..."
 cd /workspace/backend
 
-# Cache kontrolü - hash ve paket varlığını kontrol et
-REQUIREMENTS_HASH=$(sha256sum requirements.txt 2>/dev/null | cut -d' ' -f1 || echo "")
-CACHE_FILE="/root/.cache/pip/requirements_hash"
-INSTALLED_PACKAGES=$(pip list --format=freeze | wc -l)
+# Cache kontrolü - pyproject.toml hash ve paket varlığını kontrol et
+PYPROJECT_HASH=$(sha256sum pyproject.toml 2>/dev/null | cut -d' ' -f1 || echo "")
+CACHE_FILE="/root/.cache/uv/pyproject_hash"
+INSTALLED_PACKAGES=$(python3 -m pip list --format=freeze 2>/dev/null | wc -l)
+
+# Cache dizinini oluştur
+mkdir -p /root/.cache/uv
 
 # Cache geçerli mi kontrol et: hash eşleşmeli + en az 50 paket yüklü olmalı
-if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$REQUIREMENTS_HASH" ] && [ "$INSTALLED_PACKAGES" -gt "50" ]; then
+if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$PYPROJECT_HASH" ] && [ "$INSTALLED_PACKAGES" -gt "50" ]; then
     echo "✅ Python paketleri cache'den kullanılıyor ($INSTALLED_PACKAGES paket mevcut)"
 else
-    if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$REQUIREMENTS_HASH" ]; then
+    if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$PYPROJECT_HASH" ]; then
         echo "⚠️  Hash eşleşiyor ama paketler eksik ($INSTALLED_PACKAGES/~250). Yeniden yükleniyor..."
     else
-        echo "📦 Requirements değişti veya cache yok. Python paketleri yükleniyor..."
+        echo "📦 pyproject.toml değişti veya cache yok. Python paketleri yükleniyor..."
     fi
     
-    # pip upgrade atlayıp direkt requirements yükle - sistem paketlerini ignore et
-    if [ -f "requirements.txt" ]; then
-        python3 -m pip install -r requirements.txt --break-system-packages --ignore-installed
-        echo "$REQUIREMENTS_HASH" > "$CACHE_FILE"
-        FINAL_COUNT=$(pip list --format=freeze | wc -l)
+    # uv ile pyproject.toml'dan paketleri yükle
+    if [ -f "pyproject.toml" ]; then
+        uv pip install -e . --system --python /usr/bin/python3.13
+        echo "$PYPROJECT_HASH" > "$CACHE_FILE"
+        FINAL_COUNT=$(python3 -m pip list --format=freeze 2>/dev/null | wc -l)
         echo "✅ Python paketleri yüklendi ve cache'lendi ($FINAL_COUNT paket)"
     else
-        echo "⚠️  requirements.txt bulunamadı"
+        echo "⚠️  pyproject.toml bulunamadı"
     fi
 fi
 

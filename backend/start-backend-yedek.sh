@@ -100,9 +100,9 @@ echo ""
 export PYTHONPATH="$SCRIPT_DIR:$PROJECT_ROOT"
 export ENV=development
 # Use the same postgres database as celery_worker (override edilmemişse)
-export QUEUE_DB_URL="${QUEUE_DB_URL:-postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder}"
-export CELERY_BROKER_URL="${CELERY_BROKER_URL:-amqp://guest:guest@3.76.55.209:5672//}"
-export CELERY_RESULT_BACKEND="${CELERY_RESULT_BACKEND:-db+postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder}"
+export QUEUE_DB_URL="${QUEUE_DB_URL:-postgresql://postgres:Ekdmjweu483i@18.153.150.114:5432/llm_graph_builder}"
+export CELERY_BROKER_URL="${CELERY_BROKER_URL:-amqp://guest:guest@18.153.150.114:5672//}"
+export CELERY_RESULT_BACKEND="${CELERY_RESULT_BACKEND:-db+postgresql://postgres:Ekdmjweu483i@18.153.150.114:5432/llm_graph_builder}"
 
 
 
@@ -127,7 +127,7 @@ export CELERY_RESULT_BACKEND="${CELERY_RESULT_BACKEND:-db+postgresql://postgres:
 # else
 #     MCP_PORT="${MCP_HTTP_PORT:-8002}"
 #     MCP_CONTAINER_NAME="mcp-neo4j-cypher"
-#     DEFAULT_NEO4J_URI="bolt://3.76.55.209:7688"
+#     DEFAULT_NEO4J_URI="bolt://18.153.150.114:7688"
 #     DEFAULT_NEO4J_USER="neo4j"
 #     DEFAULT_NEO4J_PASS="qwerty5555"
 # fi
