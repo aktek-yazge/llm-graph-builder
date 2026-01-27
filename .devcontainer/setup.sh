@@ -9,11 +9,12 @@ cd /workspace/backend
 
 # Cache kontrolü - pyproject.toml hash ve paket varlığını kontrol et
 PYPROJECT_HASH=$(sha256sum pyproject.toml 2>/dev/null | cut -d' ' -f1 || echo "")
-CACHE_FILE="/root/.cache/uv/pyproject_hash"
+CACHE_DIR="/workspace/.devcontainer/.cache"
+CACHE_FILE="$CACHE_DIR/pyproject_hash"
 INSTALLED_PACKAGES=$(python3 -m pip list --format=freeze 2>/dev/null | wc -l)
 
-# Cache dizinini oluştur
-mkdir -p /root/.cache/uv
+# Cache dizinini oluştur (workspace içinde - rebuild'de korunur)
+mkdir -p "$CACHE_DIR"
 
 # Cache geçerli mi kontrol et: hash eşleşmeli + en az 50 paket yüklü olmalı
 if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$PYPROJECT_HASH" ] && [ "$INSTALLED_PACKAGES" -gt "50" ]; then
