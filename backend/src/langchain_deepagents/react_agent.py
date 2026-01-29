@@ -1,7 +1,7 @@
 """
 ReAct Agent with Multi-Provider Support (OpenAI & Anthropic)
 
-Bu modül, OpenAI (GPT-5, GPT-4o) ve Anthropic (Claude Opus 4.5, Sonnet) 
+Bu modül, OpenAI (GPT-5, GPT-4o) ve Anthropic (Claude Opus 4.5, Sonnet)
 modellerini destekleyen, Prompt Caching optimizasyonlu ReAct agent sağlar.
 
 Desteklenen Modeller:
@@ -57,12 +57,13 @@ from datetime import datetime
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ============ DEBUG: Environment Variables Check ============
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent.py)")
-print("="*60)
+print("=" * 60)
 _debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL"]
 for _key in _debug_keys:
     _val = os.environ.get(_key)
@@ -77,7 +78,7 @@ for _key in _debug_keys:
         print(f"  ✅ {_key}: {_masked}")
     else:
         print(f"  ❌ {_key}: NOT SET")
-print("="*60 + "\n")
+print("=" * 60 + "\n")
 # ============================================================
 
 # Context for logging (Grafana/Loki)
@@ -100,6 +101,9 @@ from src.shared.langfuse_client import (
 
 # Query-level Semantic Cache
 from src.shared.query_cache import get_query_cache, get_cache_metrics
+
+# Merkezi Domain Registry
+from src.config.domains import get_valid_domains, is_valid_domain, get_domain_config
 
 # Guardrails - LLM output validation
 from src.shared.guardrails import (
@@ -137,6 +141,7 @@ try:
         SESSION_BLACKBOARD_ENABLED,
     )
     from src.shared.skill_agent import schedule_skill_generation
+
     logging.info("✅ Session Blackboard module imported")
 except ImportError as e:
     logging.warning(f"⚠️ Session Blackboard module not available: {e}")
@@ -177,9 +182,11 @@ def _log(msg: str, level: str = "info"):
 # TOKEN TRACKING
 # ============================================================================
 
+
 @dataclass
 class StepStats:
     """Tek bir aşamanın istatistikleri"""
+
     step_name: str
     step_type: str  # "llm_call", "tool_call", "tool_result"
     input_tokens: int = 0
@@ -196,8 +203,9 @@ class StepStats:
 @dataclass
 class TokenTracker:
     """Token kullanımını takip eder"""
+
     steps: List[StepStats] = field(default_factory=list)
-    
+
     # Kümülatif sayaçlar
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -205,28 +213,37 @@ class TokenTracker:
     total_cache_creation_tokens: int = 0  # cache_creation - yeni cache'lenen tokenlar
     total_llm_calls: int = 0
     total_tool_calls: int = 0
-    
+
     # Model adı (maliyet hesabı için) - add_llm_step ile set edilir
     model_name: str = "unknown"
-    
+
     # Langfuse parent span referansı (tool span'ları bağlamak için)
     _langfuse_parent_span: Any = field(default=None, repr=False)
     _langfuse_parent_span_id: Optional[str] = field(default=None, repr=False)
     # Tool spans - tool_call_id ile key'lenir (aynı tool birden fazla kez çağrılabilir)
     _tool_spans: Dict[str, Any] = field(default_factory=dict, repr=False)
-    
+
     def set_langfuse_parent(self, span: Any):
         """Langfuse parent span'ı set et - tool span'ları bu span'a bağlanır"""
         self._langfuse_parent_span = span
-        self._langfuse_parent_span_id = getattr(span, 'id', None)
-    
-    def add_llm_step(self, step_name: str, input_tokens: int, output_tokens: int, 
-                     cached_tokens: int = 0, cache_creation_tokens: int = 0,
-                     reasoning_tokens: int = 0, duration_ms: float = 0, 
-                     session_id: str = "", model: str = "unknown", 
-                     llm_input: Any = None, llm_output: Any = None):
+        self._langfuse_parent_span_id = getattr(span, "id", None)
+
+    def add_llm_step(
+        self,
+        step_name: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        duration_ms: float = 0,
+        session_id: str = "",
+        model: str = "unknown",
+        llm_input: Any = None,
+        llm_output: Any = None,
+    ):
         """LLM çağrısı istatistiği ekle
-        
+
         Args:
             step_name: Step adı
             input_tokens: Input token sayısı
@@ -242,7 +259,7 @@ class TokenTracker:
         """
         # Model adını sakla (maliyet hesabı için)
         self.model_name = model
-        
+
         step = StepStats(
             step_name=step_name,
             step_type="llm_call",
@@ -250,17 +267,17 @@ class TokenTracker:
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
             cache_creation_tokens=cache_creation_tokens,
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
         )
         self.steps.append(step)
-        
+
         # Kümülatif güncelle
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.total_cached_tokens += cached_tokens
         self.total_cache_creation_tokens += cache_creation_tokens
         self.total_llm_calls += 1
-        
+
         # Cache durumu analizi
         cache_pct = round(cached_tokens / max(input_tokens, 1) * 100, 1)
         if cached_tokens > 0:
@@ -269,7 +286,7 @@ class TokenTracker:
             cache_status = f"📝 CACHE WRITE"
         else:
             cache_status = "🔴 CACHE MISS"
-        
+
         # Log token kullanımı (reasoning tokens dahil)
         session_info = f"[Session: {session_id[:8]}]" if session_id else ""
         _log(f"📊 [TOKEN] {session_info} {step_name}")
@@ -280,8 +297,10 @@ class TokenTracker:
         _log(f"   ├─ Cache Read: {cached_tokens:,} tokens ({cache_status})")
         if cache_creation_tokens > 0:
             _log(f"   ├─ Cache Creation: {cache_creation_tokens:,} tokens (yeni cache)")
-        _log(f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cache_read={self.total_cached_tokens:,} cache_create={self.total_cache_creation_tokens:,}")
-        
+        _log(
+            f"   └─ Kümülatif: in={self.total_input_tokens:,} out={self.total_output_tokens:,} cache_read={self.total_cached_tokens:,} cache_create={self.total_cache_creation_tokens:,}"
+        )
+
         # 📊 Langfuse'a gönder - PARENT SPAN altında child generation olarak
         try:
             if self._langfuse_parent_span:
@@ -306,12 +325,14 @@ class TokenTracker:
                 # - Claude: cache_read_input_tokens, cache_creation_input_tokens
                 # - OpenAI: input_cached_tokens
                 # uncached_input = toplam input - cache_read - cache_creation
-                uncached_input = max(0, input_tokens - cached_tokens - cache_creation_tokens)
-                
+                uncached_input = max(
+                    0, input_tokens - cached_tokens - cache_creation_tokens
+                )
+
                 # Model tipine göre doğru alan isimlerini belirle
                 model_lower = model.lower()
                 is_anthropic = "claude" in model_lower
-                
+
                 if is_anthropic:
                     # Anthropic Claude - Langfuse Settings > Models > claude-opus-4-5 Pricing'e göre:
                     # - input: uncached input tokens (tam fiyat)
@@ -367,10 +388,12 @@ class TokenTracker:
                 )
         except Exception as e:
             _log(f"⚠️ Langfuse logging failed: {e}", "warning")
-    
-    def add_tool_call(self, tool_name: str, params: Dict[str, Any], tool_call_id: str = ""):
+
+    def add_tool_call(
+        self, tool_name: str, params: Dict[str, Any], tool_call_id: str = ""
+    ):
         """Tool çağrısı ekle
-        
+
         Args:
             tool_name: Tool adı
             params: Tool parametreleri
@@ -381,35 +404,39 @@ class TokenTracker:
             step_name=f"tool_{tool_name}",
             step_type="tool_call",
             tool_name=tool_name,
-            tool_params=params  # Tam parametreler
+            tool_params=params,  # Tam parametreler
         )
         self.steps.append(step)
         self.total_tool_calls += 1
-        
+
         # Log için kısaltılmış preview
         _log(f"🔧 [TOOL CALL] {tool_name}")
         for k, v in params.items():
             v_str = str(v)
             log_val = v_str[:100] + "..." if len(v_str) > 100 else v_str
             _log(f"   ├─ {k}: {log_val}")
-        
+
         # Input boyutunu hesapla (tiktoken ile gerçek token sayısı)
         import json
+
         try:
             import tiktoken
-            encoding = tiktoken.encoding_for_model("gpt-4")  # GPT-4/5 için aynı encoding
+
+            encoding = tiktoken.encoding_for_model(
+                "gpt-4"
+            )  # GPT-4/5 için aynı encoding
         except Exception:
             encoding = None
-        
+
         input_str = json.dumps(params, ensure_ascii=False) if params else ""
         input_chars = len(input_str)
-        
+
         # Gerçek token sayısı (tiktoken) veya yaklaşık (fallback)
         if encoding:
             input_tokens = len(encoding.encode(input_str))
         else:
             input_tokens = input_chars // 4  # Fallback: yaklaşık hesap
-        
+
         # Langfuse span başlat - parent span üzerinden child span oluştur
         try:
             if self._langfuse_parent_span:
@@ -423,18 +450,22 @@ class TokenTracker:
                         "step_type": "tool_call",
                         "input_chars": input_chars,  # 📊 Input karakter sayısı
                         "input_tokens": input_tokens,  # 📊 Gerçek input token (tiktoken)
-                    }
+                    },
                 )
                 # Span'ı tool_call_id ile sakla (aynı tool birden fazla kez çağrılabilir)
                 span_key = tool_call_id if tool_call_id else tool_name
                 self._tool_spans[span_key] = span
-                _log(f"📊 Langfuse tool span started: {tool_name} (key={span_key[:8] if span_key else 'none'})")
+                _log(
+                    f"📊 Langfuse tool span started: {tool_name} (key={span_key[:8] if span_key else 'none'})"
+                )
         except Exception as e:
             _log(f"⚠️ Langfuse tool span failed: {e}", "warning")
-    
-    def add_tool_result(self, tool_name: str, result: str, success: bool = True, tool_call_id: str = ""):
+
+    def add_tool_result(
+        self, tool_name: str, result: str, success: bool = True, tool_call_id: str = ""
+    ):
         """Tool sonucu ekle
-        
+
         Args:
             tool_name: Tool adı
             result: Tool sonucu
@@ -445,10 +476,10 @@ class TokenTracker:
             step_name=f"tool_{tool_name}_result",
             step_type="tool_result",
             tool_name=tool_name,
-            tool_result_preview=result  # TAM sonuç (limit yok)
+            tool_result_preview=result,  # TAM sonuç (limit yok)
         )
         self.steps.append(step)
-        
+
         # Log - 3 durum: success (✅), empty (⚪), failed (❌)
         if "⚪" in result:
             status = "⚪"
@@ -457,28 +488,29 @@ class TokenTracker:
         else:
             status = "❌"
         _log(f"📥 [TOOL RESULT] {status} {tool_name}")
-        
+
         # Langfuse span'ı bitir - TAM sonuçla
         try:
             # Span'ı tool_call_id ile bul (yoksa tool_name ile dene - backward compat)
             span_key = tool_call_id if tool_call_id else tool_name
             span = self._tool_spans.get(span_key)
-            
+
             if span:
                 try:
                     # Output boyutunu hesapla (tiktoken ile gerçek token sayısı)
                     try:
                         import tiktoken
+
                         encoding = tiktoken.encoding_for_model("gpt-4")
                     except Exception:
                         encoding = None
-                    
+
                     output_chars = len(result)
                     if encoding:
                         output_tokens = len(encoding.encode(result))
                     else:
                         output_tokens = output_chars // 4  # Fallback
-                    
+
                     # Output olarak sonucu ekle
                     span.update(
                         output=result,  # TAM sonuç
@@ -487,26 +519,26 @@ class TokenTracker:
                             "status": status,
                             "output_chars": output_chars,  # 📊 Output karakter sayısı
                             "output_tokens": output_tokens,  # 📊 Gerçek output token (LLM'e gidecek)
-                        }
+                        },
                     )
                 except Exception as update_err:
                     _log(f"⚠️ Langfuse span update failed: {update_err}", "warning")
-                
+
                 # Span'ı kapat
                 span.end()
                 del self._tool_spans[span_key]
                 _log(f"📊 Langfuse tool span ended: {tool_name} ({status})")
         except Exception as e:
             _log(f"⚠️ Langfuse tool span end failed: {e}", "warning")
-        
+
         # Sonucu satır satır göster (max 5 satır - sadece log için)
-        lines = result.split('\n')[:5]
+        lines = result.split("\n")[:5]
         for line in lines:
             if line.strip():
                 _log(f"   │ {line[:120]}")
-        if len(result.split('\n')) > 5:
+        if len(result.split("\n")) > 5:
             _log(f"   │ ... ({len(result.split(chr(10)))} satır)")
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """İstatistik özeti döndür"""
         return {
@@ -516,41 +548,43 @@ class TokenTracker:
             "total_cached_tokens": self.total_cached_tokens,  # cache_read
             "total_cache_creation_tokens": self.total_cache_creation_tokens,  # cache_creation
             "total_tokens": self.total_input_tokens + self.total_output_tokens,
-            "cache_hit_rate": round(self.total_cached_tokens / max(self.total_input_tokens, 1) * 100, 1),
+            "cache_hit_rate": round(
+                self.total_cached_tokens / max(self.total_input_tokens, 1) * 100, 1
+            ),
             "total_llm_calls": self.total_llm_calls,
             "total_tool_calls": self.total_tool_calls,
             "steps": len(self.steps),
-            "estimated_cost_usd": self._estimate_cost(self.model_name)
+            "estimated_cost_usd": self._estimate_cost(self.model_name),
         }
-    
+
     def _estimate_cost(self, model: str = "unknown") -> float:
         """Tahmini maliyet hesapla
-        
+
         OpenAI Fiyatları: https://platform.openai.com/docs/pricing
         Anthropic Fiyatları: https://www.anthropic.com/pricing
-        
+
         GPT-5 Standard (per 1M tokens):
         - Input: $1.25
         - Cached Input (read): $0.125 (10x cheaper!)
         - Output: $10.00
-        
+
         GPT-4o Standard (per 1M tokens):
         - Input: $2.50
         - Cached Input (read): $1.25
         - Output: $10.00
-        
+
         Claude Opus 4.5 (per 1M tokens):
         - Input: $15.00
         - Cache Read: $1.50 (10x cheaper!)
         - Cache Creation: $18.75 (25% more expensive!)
         - Output: $75.00
-        
+
         Claude Sonnet 4.5 (per 1M tokens):
         - Input: $3.00
         - Cache Read: $0.30
         - Cache Creation: $3.75
         - Output: $15.00
-        
+
         Claude 3.5 Sonnet (per 1M tokens):
         - Input: $3.00
         - Cache Read: $0.30
@@ -558,7 +592,7 @@ class TokenTracker:
         - Output: $15.00
         """
         model_lower = model.lower()
-        
+
         # Claude Opus 4.5
         if "claude-opus-4" in model_lower or "claude-opus-4-5" in model_lower:
             input_price = 15.00
@@ -566,7 +600,11 @@ class TokenTracker:
             cache_creation_price = 18.75  # %25 pahalı
             output_price = 75.00
         # Claude Sonnet 4.5 / 3.5
-        elif "claude-sonnet" in model_lower or "claude-3-5-sonnet" in model_lower or "claude-3.5-sonnet" in model_lower:
+        elif (
+            "claude-sonnet" in model_lower
+            or "claude-3-5-sonnet" in model_lower
+            or "claude-3.5-sonnet" in model_lower
+        ):
             input_price = 3.00
             cache_read_price = 0.30
             cache_creation_price = 3.75
@@ -587,7 +625,9 @@ class TokenTracker:
         elif "gpt-5" in model_lower:
             input_price = 1.25
             cache_read_price = 0.125
-            cache_creation_price = 1.25  # GPT-5 için cache creation ücretsiz (normal input fiyatı)
+            cache_creation_price = (
+                1.25  # GPT-5 için cache creation ücretsiz (normal input fiyatı)
+            )
             output_price = 10.00
         # OpenAI diğer (gpt-4o, o1, o3, vb.)
         else:
@@ -595,18 +635,26 @@ class TokenTracker:
             cache_read_price = 1.25
             cache_creation_price = 2.50  # Normal input fiyatı
             output_price = 10.00
-        
+
         # uncached_input = toplam - cache_read - cache_creation
-        uncached_input = self.total_input_tokens - self.total_cached_tokens - self.total_cache_creation_tokens
+        uncached_input = (
+            self.total_input_tokens
+            - self.total_cached_tokens
+            - self.total_cache_creation_tokens
+        )
         uncached_input = max(0, uncached_input)  # Negatif olmaması için
-        
+
         input_cost = uncached_input * input_price / 1_000_000
         cache_read_cost = self.total_cached_tokens * cache_read_price / 1_000_000
-        cache_creation_cost = self.total_cache_creation_tokens * cache_creation_price / 1_000_000
+        cache_creation_cost = (
+            self.total_cache_creation_tokens * cache_creation_price / 1_000_000
+        )
         output_cost = self.total_output_tokens * output_price / 1_000_000
-        
-        return round(input_cost + cache_read_cost + cache_creation_cost + output_cost, 6)
-    
+
+        return round(
+            input_cost + cache_read_cost + cache_creation_cost + output_cost, 6
+        )
+
     def print_summary(self, session_id: str = ""):
         """Özeti logla"""
         summary = self.get_summary()
@@ -622,10 +670,12 @@ class TokenTracker:
         _log(f"   Input Token: {summary['total_input_tokens']:,}")
         _log(f"   Output Token: {summary['total_output_tokens']:,}")
         _log(f"   Cache Read Token: {summary['total_cached_tokens']:,} (10x ucuz)")
-        _log(f"   Cache Creation Token: {summary['total_cache_creation_tokens']:,} (%25 pahalı)")
-        
+        _log(
+            f"   Cache Creation Token: {summary['total_cache_creation_tokens']:,} (%25 pahalı)"
+        )
+
         # Cache durumu açıklaması (Organization bazlı - session'dan bağımsız)
-        cache_rate = summary['cache_hit_rate']
+        cache_rate = summary["cache_hit_rate"]
         if cache_rate >= 70:
             cache_emoji = "🟢"
             cache_note = "Mükemmel! Prompt Caching çalışıyor."
@@ -635,21 +685,23 @@ class TokenTracker:
         else:
             cache_emoji = "🔴"
             cache_note = "Cache miss! Prompt içeriği veya sırası değişmiş olabilir."
-        
+
         _log(f"   Cache Hit Rate: {cache_rate}% {cache_emoji}")
         _log(f"   └─ Not: {cache_note}")
         _log("-" * 70)
         _log(f"   Toplam Token: {summary['total_tokens']:,}")
         _log(f"   Tahmini Maliyet: ${summary['estimated_cost_usd']:.6f}")
         _log("=" * 70)
-        
+
         # Model'e göre Prompt Caching bilgisi
-        model_name = summary.get('model', 'unknown').lower()
+        model_name = summary.get("model", "unknown").lower()
         if "claude" in model_name:
             _log("ℹ️  Anthropic Claude Prompt Caching Bilgisi:")
             _log("   • Cache ORGANIZATION bazlı - aynı org içinde paylaşılır")
             _log("   • Session ID'den BAĞIMSIZ - farklı session'lar cache'i paylaşır")
-            _log("   • Exact match gerekli: System prompt + Tools + prefix %100 aynı olmalı")
+            _log(
+                "   • Exact match gerekli: System prompt + Tools + prefix %100 aynı olmalı"
+            )
             _log("   • Cache TTL: 5 dakika (ephemeral), 1 saat (extended + ek maliyet)")
             _log("   • Minimum cache: 1024 token")
             _log(f"   • Model: {summary.get('model', 'claude')}")
@@ -681,7 +733,7 @@ try:
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
     from langchain_core.tools import tool
     from langchain_community.callbacks import get_openai_callback
-    
+
     LANGCHAIN_AVAILABLE = True
     logging.info("✅ LangChain Agent imports successful")
 except ImportError as e:
@@ -698,6 +750,7 @@ except ImportError as e:
 # Anthropic Claude import
 try:
     from langchain_anthropic import ChatAnthropic, convert_to_anthropic_tool  # type: ignore
+
     ANTHROPIC_AVAILABLE = True
     logging.info("✅ LangChain Anthropic (Claude) imported")
 except ImportError as e:
@@ -710,6 +763,7 @@ except ImportError as e:
 # https://docs.langchain.com/oss/python/integrations/middleware/anthropic
 try:
     from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware  # type: ignore
+
     ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE = True
     logging.info("✅ AnthropicPromptCachingMiddleware imported")
 except ImportError as e:
@@ -723,6 +777,7 @@ if TYPE_CHECKING:
 
 try:
     from langchain_mcp_adapters.client import MultiServerMCPClient  # type: ignore
+
     MCP_AVAILABLE = True
     logging.info("✅ LangChain MCP Adapters imported")
 except ImportError as e:
@@ -732,7 +787,11 @@ except ImportError as e:
 
 # Redis LLM Semantic Cache import
 if TYPE_CHECKING:
-    from src.shared.redis_cache import setup_semantic_cache, is_cache_available, get_cache_stats as get_redis_cache_stats
+    from src.shared.redis_cache import (
+        setup_semantic_cache,
+        is_cache_available,
+        get_cache_stats as get_redis_cache_stats,
+    )
 
 try:
     from src.shared.redis_cache import (
@@ -741,6 +800,7 @@ try:
         get_cache_stats as get_redis_cache_stats,
         REDIS_CACHE_ENABLED,
     )
+
     REDIS_CACHE_IMPORTED = True
 except ImportError as e:
     logging.warning(f"⚠️ Redis cache module not available: {e}")
@@ -768,24 +828,24 @@ DEFAULT_RECORDS_PER_PAGE = int(os.environ.get("DEFAULT_RECORDS_PER_PAGE", "5"))
 def _check_uv_installed() -> bool:
     """
     uv/uvx kurulu olup olmadığını kontrol et.
-    
+
     uvx = uv tool run - Python paketlerini indirip çalıştırır (npx benzeri)
-    
+
     Returns:
         True: uvx kullanılabilir
         False: uvx kurulu değil
     """
     import shutil
-    
+
     uvx_path = shutil.which("uvx")
     if uvx_path:
         return True
-    
+
     # uvx yoksa uv'yi kontrol et (uvx = uv tool run)
     uv_path = shutil.which("uv")
     if uv_path:
         return True
-    
+
     return False
 
 
@@ -796,7 +856,9 @@ if not _UV_AVAILABLE and MCP_STDIO_ENABLED:
     logging.warning("=" * 70)
     logging.warning("⚠️  UV/UVX KURULU DEĞİL!")
     logging.warning("=" * 70)
-    logging.warning("   Stdio MCP sunucuları (time, sequential-thinking) kullanılamayacak.")
+    logging.warning(
+        "   Stdio MCP sunucuları (time, sequential-thinking) kullanılamayacak."
+    )
     logging.warning("   ")
     logging.warning("   Kurmak için:")
     logging.warning("   curl -LsSf https://astral.sh/uv/install.sh | sh")
@@ -811,60 +873,64 @@ if not _UV_AVAILABLE and MCP_STDIO_ENABLED:
 def get_mcp_server_config() -> Dict[str, Any]:
     """
     MCP server konfigürasyonu - Sadece Stdio
-    
+
     HTTP Transport: Devre dışı (Neo4j tool'ları custom olarak ekleniyor)
     Stdio Transport: Hafif/Stateless tool'lar (Time, Sequential Thinking)
-    
+
     Stdio sunucuları için uv/uvx gereklidir.
     Devre dışı bırakmak için: MCP_STDIO_ENABLED=false
     """
     config: Dict[str, Any] = {}
-    
+
     # ========== HTTP SERVERS - DEVRE DIŞI ==========
     # Neo4j tool'ları custom olarak ekleniyor (execute_cypher_query, execute_cypher_query_with_embedding)
 
-    
     # ========== STDIO SERVERS (Hafif, Stateless) ==========
     # uvx (Python) gerektirir - MCP_STDIO_ENABLED=false ile devre dışı bırakılabilir
     # uvx = uv tool run (pip paketlerini çalıştırır)
-    
+
     # uv kurulu değilse stdio'yu atla
     if not _UV_AVAILABLE:
         logging.warning("⚠️ Stdio MCP sunucuları atlandı (uv/uvx kurulu değil)")
         return config
-    
+
     # Neo4j MCP server (internal kullanım - agent'a sunulmaz, custom tool'lar kullanır)
-    config.update({
-        "neo4j-database": {
-            "url": f"http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/",
-            "transport": "streamable_http",
-        },
-    })
-    
-    if MCP_STDIO_ENABLED:
-        config.update({
-            # 🕐 Time Server - Zaman ve timezone işlemleri
-            # https://github.com/modelcontextprotocol/servers/tree/main/src/time
-            # Tools: get_current_time, convert_time
-            "time": {
-                "command": "uvx",
-                "args": ["mcp-server-time", "--local-timezone=Europe/Istanbul"],
-                "transport": "stdio",
+    config.update(
+        {
+            "neo4j-database": {
+                "url": f"http://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}/mcp/",
+                "transport": "streamable_http",
             },
-            
-            # 🧠 Sequential Thinking - Adım adım düşünme ve problem çözme
-            # https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
-            # Tools: sequentialthinking
-            # "sequential-thinking": {
-            #     "command": "npx",
-            #     "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-            #     "transport": "stdio",
-            # }
-        })
-        logging.info(f"📡 MCP Config: neo4j-database (internal) + time + sequential-thinking")
+        }
+    )
+
+    if MCP_STDIO_ENABLED:
+        config.update(
+            {
+                # 🕐 Time Server - Zaman ve timezone işlemleri
+                # https://github.com/modelcontextprotocol/servers/tree/main/src/time
+                # Tools: get_current_time, convert_time
+                "time": {
+                    "command": "uvx",
+                    "args": ["mcp-server-time", "--local-timezone=Europe/Istanbul"],
+                    "transport": "stdio",
+                },
+                # 🧠 Sequential Thinking - Adım adım düşünme ve problem çözme
+                # https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
+                # Tools: sequentialthinking
+                # "sequential-thinking": {
+                #     "command": "npx",
+                #     "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+                #     "transport": "stdio",
+                # }
+            }
+        )
+        logging.info(
+            f"📡 MCP Config: neo4j-database (internal) + time + sequential-thinking"
+        )
     else:
         logging.info(f"📡 MCP Config: Empty (stdio disabled)")
-    
+
     return config
 
 
@@ -872,46 +938,49 @@ def get_mcp_server_config() -> Dict[str, Any]:
 # USER-FRIENDLY MESSAGES FOR STREAMING
 # ============================================================================
 
-def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
+
+def _get_user_friendly_tool_message(
+    tool_name: str, tool_args: Dict[str, Any]
+) -> Optional[str]:
     """
     Tool çağrıları için kullanıcı dostu mesaj oluştur.
-    
+
     Teknik detaylar yerine, kullanıcının anlayabileceği mesajlar döndürür.
     """
     if tool_name == "execute_cypher_query":
         return "🔍 Veritabanında arama yapılıyor..."
-    
+
     elif tool_name == "add_source":
         return "📎 Kaynak belgeler ekleniyor..."
-    
+
     elif tool_name == "read_neo4j_cypher":
         return "📊 Grafik veritabanı sorgulanıyor..."
-    
+
     elif tool_name == "read_neo4j_cypher_with_embedding":
         return "🧠 Semantik arama yapılıyor..."
-    
+
     # ========== STDIO MCP TOOLS ==========
     # Time Server tools
     elif tool_name == "get_current_time":
         timezone = tool_args.get("timezone", "UTC")
         return f"🕐 {timezone} için güncel saat alınıyor..."
-    
+
     elif tool_name == "convert_time":
         return "🕐 Saat dönüşümü yapılıyor..."
-    
+
     # Sequential Thinking tools
     elif tool_name == "sequentialthinking":
         return "🧠 Adım adım düşünme süreci başlatılıyor..."
-    
+
     elif tool_name == "create_thinking_session":
         return "🧠 Düşünme oturumu oluşturuluyor..."
-    
+
     elif tool_name == "add_thought":
         return "💭 Düşünce ekleniyor..."
-    
+
     elif tool_name == "get_thinking_summary":
         return "📝 Düşünce özeti hazırlanıyor..."
-    
+
     else:
         # Bilinmeyen tool - generic mesaj
         return None
@@ -921,25 +990,27 @@ def _get_user_friendly_tool_message(tool_name: str, tool_args: Dict[str, Any]) -
 _session_result_counters: Dict[str, int] = {}
 
 
-def _get_user_friendly_result_message(tool_content: str, result_status: str, session_id: str = "") -> Optional[str]:
+def _get_user_friendly_result_message(
+    tool_content: str, result_status: str, session_id: str = ""
+) -> Optional[str]:
     """
     Tool sonuçları için kullanıcı dostu, süreç odaklı mesaj oluştur.
-    
+
     Teknik detaylar (kayıt sayıları) yerine, doğal akış mesajları döndürür.
     """
     global _session_result_counters
-    
+
     if result_status == "success":
         # Session için sayacı artır
         if session_id not in _session_result_counters:
             _session_result_counters[session_id] = 0
         _session_result_counters[session_id] += 1
         step_num = _session_result_counters[session_id]
-        
+
         # Chunk sonucu (embedding arama) - özel mesaj
         if "chunk" in tool_content.lower() or "text:" in tool_content.lower():
             return "📖 İlgili belge içerikleri bulundu"
-        
+
         # Adım numarasına göre farklı mesajlar
         if step_num == 1:
             return "💡 Bazı ipuçlarına ulaştım, detaylı arıyorum..."
@@ -953,17 +1024,17 @@ def _get_user_friendly_result_message(tool_content: str, result_status: str, ses
             return "📝 Sonuçları değerlendiriyorum..."
         elif step_num >= 6:
             return "✨ Yanıtınızı hazırlıyorum..."
-        
+
         return None
-    
+
     elif result_status == "empty":
         # Boş sonuç - sessiz kal, agent devam edecek
         return None
-    
+
     elif result_status == "failed":
         # Hata durumu - sessiz kal, agent düzeltmeye çalışacak
         return None
-    
+
     return None
 
 
@@ -995,47 +1066,47 @@ def _clear_session_sources(question_id: str):
 def _generate_file_links_markdown(file_names: set) -> str:
     """fileName'lerden markdown formatında dosya linkleri oluşturur"""
     import urllib.parse
-    
+
     if not file_names:
         return ""
-    
+
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
     markdown_section = "\n\n## 📎 Kaynak Belgeler\n\n"
-    
+
     for file_name in sorted(file_names):
         try:
             encoded_file_name = urllib.parse.quote(file_name, safe="", encoding="utf-8")
             file_url = f"{base_url}/files/{encoded_file_name}"
-            
+
             # Dosya adını kısalt (çok uzunsa)
             display_name = file_name
             if len(display_name) > 60:
                 display_name = display_name[:57] + "..."
-            
+
             # Markdown link
             markdown_section += f"- 📄 [{display_name}]({file_url})\n"
         except Exception as e:
             _log(f"❌ fileName markdown hatası: {e}", "error")
             continue
-    
+
     return markdown_section
 
 
 def _generate_page_links_markdown(page_links: set) -> str:
     """Page link'lerden markdown formatında görsel linkler oluşturur"""
     import urllib.parse
-    
+
     if not page_links:
         return ""
-    
+
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
     markdown_section = "\n\n## 📄 İlgili Sayfa Görselleri\n\n"
-    
+
     for page_link in sorted(page_links):
         try:
             encoded_page_link = urllib.parse.quote(page_link, safe="", encoding="utf-8")
             image_url = f"{base_url}/images/{encoded_page_link}"
-            
+
             page_info = "Sayfa Görseli"
             if "_page_" in page_link:
                 try:
@@ -1043,13 +1114,13 @@ def _generate_page_links_markdown(page_links: set) -> str:
                     page_info = f"Sayfa {page_num}"
                 except:
                     pass
-            
+
             # Markdown image
             markdown_section += f"![{page_info}]({image_url})\n\n"
         except Exception as e:
             _log(f"❌ page_link markdown hatası: {e}", "error")
             continue
-    
+
     return markdown_section
 
 
@@ -1113,36 +1184,45 @@ DYNAMIC_SUFFIX_TEMPLATE = """
 # TOOL DEFINITIONS
 # ============================================================================
 
-def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_question: str = "", token_tracker: Optional['TokenTracker'] = None):
+
+def create_react_tools(
+    mcp_tools: List,
+    session_id: str,
+    question_id: str,
+    user_question: str = "",
+    token_tracker: Optional["TokenTracker"] = None,
+):
     """
     ReAct agent için tool'ları oluşturur.
-    
+
     Args:
         mcp_tools: MCP'den alınan tool listesi
         session_id: Oturum ID'si
-        question_id: Soru ID'si  
+        question_id: Soru ID'si
         user_question: Kullanıcının sorduğu orijinal soru
         token_tracker: Token tracking için (Langfuse parent span erişimi)
-    
+
     Returns:
         Tool listesi
     """
     if not LANGCHAIN_AVAILABLE or tool is None:
         return []
-    
+
     # MCP tool'larını isimle eşle
     mcp_tool_map = {t.name: t for t in mcp_tools}
-    
+
     # Findings dizinini hazırla
-    findings_base = os.path.join(os.getcwd(), "agent_findings", "react", session_id, question_id)
+    findings_base = os.path.join(
+        os.getcwd(), "agent_findings", "react", session_id, question_id
+    )
     os.makedirs(findings_base, exist_ok=True)
-    
+
     # Tool çağrı sıra numarası (aynı anda çağrılan tool'lar aynı sayıyı alır)
     tool_call_counter = {"value": 0}  # Mutable container for closure
-    
+
     # Blackboard dosyası
     blackboard_path = os.path.join(findings_base, "_blackboard.txt")
-    
+
     def _init_blackboard():
         if os.path.exists(blackboard_path):
             _log(f"📋 Blackboard: {blackboard_path}")
@@ -1157,20 +1237,22 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             _log(f"📋 Blackboard: {blackboard_path}")
         except Exception as e:
             _log(f"⚠️ Blackboard init error: {e}")
-    
+
     _init_blackboard()
-    
-    def _append_to_blackboard(step_name: str, record_count: int, success: bool, seq_num: int = 0):
+
+    def _append_to_blackboard(
+        step_name: str, record_count: int, success: bool, seq_num: int = 0
+    ):
         try:
             status = "✅" if success else "❌"
             with open(blackboard_path, "a", encoding="utf-8") as f:
                 f.write(f"{status} [{seq_num:02d}] {step_name}: {record_count} kayıt\n")
         except Exception as e:
             _log(f"⚠️ Blackboard append error: {e}")
-    
+
     # Question number tracker for session blackboard
     question_number_cache: dict = {"value": 0}
-    
+
     def _get_question_number() -> int:
         """Get current question number for this session."""
         if question_number_cache["value"] == 0:
@@ -1179,7 +1261,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             else:
                 question_number_cache["value"] = 1
         return question_number_cache["value"]
-    
+
     def _store_to_session_blackboard(
         step_name: str,
         cypher_query: str,
@@ -1192,11 +1274,11 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         """Store step to PostgreSQL session_blackboard and schedule skill generation."""
         if not SESSION_BLACKBOARD_ENABLED or store_step is None:
             return
-        
+
         try:
             question_num = _get_question_number()
             step_num = tool_call_counter["value"]
-            
+
             step_id = store_step(
                 session_id=session_id,
                 question_id=question_id,
@@ -1211,7 +1293,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 query_type=query_type,
                 execution_time_ms=execution_time_ms,
             )
-            
+
             # Schedule async skill generation (fire and forget)
             if step_id and schedule_skill_generation is not None:
                 schedule_skill_generation(
@@ -1222,39 +1304,44 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                     record_count=record_count,
                     result_preview=results[:2] if results else None,
                 )
-            
-            _log(f"📊 Session blackboard: Q{question_num} Step {step_num:02d} → {status}")
-            
+
+            _log(
+                f"📊 Session blackboard: Q{question_num} Step {step_num:02d} → {status}"
+            )
+
         except Exception as e:
             _log(f"⚠️ Session blackboard store error: {e}")
-    
+
     # =========================================================================
     # PAGINATION HELPERS
     # =========================================================================
     def _parse_records(result_str: str) -> List[str]:
         """Sonuç string'inden kayıtları parse et - (R:N){...} formatı"""
         import re
+
         # Her kayıt (R:N){ ile başlıyor
-        record_pattern = r'\(R:\d+\)\{[^}]*(?:\{[^}]*\}[^}]*)*\}'
+        record_pattern = r"\(R:\d+\)\{[^}]*(?:\{[^}]*\}[^}]*)*\}"
         records = re.findall(record_pattern, result_str, re.DOTALL)
         return records
-    
-    def _format_paginated_result(records: List[str], total_count: int, start: int, end: int, step_name: str) -> str:
+
+    def _format_paginated_result(
+        records: List[str], total_count: int, start: int, end: int, step_name: str
+    ) -> str:
         """Pagination bilgisi ile sonuç formatla"""
         shown_records = records[start:end]
         shown_count = len(shown_records)
-        
+
         result_lines = "\n".join(shown_records)
-        
+
         pagination_info = f"📊 Gösterilen: {start}-{start + shown_count} / Toplam: {total_count} kayıt"
-        
+
         if end < total_count:
-            more_info = f"\n\n💡 Daha fazla görmek için: read_finding(\"{step_name}\", start_record={end}, end_record={min(end + DEFAULT_RECORDS_PER_PAGE, total_count)})"
+            more_info = f'\n\n💡 Daha fazla görmek için: read_finding("{step_name}", start_record={end}, end_record={min(end + DEFAULT_RECORDS_PER_PAGE, total_count)})'
         else:
             more_info = ""
-        
+
         return f"{pagination_info}\n\n{result_lines}{more_info}"
-    
+
     # =========================================================================
     # EXECUTE CYPHER QUERY TOOL
     # =========================================================================
@@ -1264,7 +1351,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
         mcp_read = mcp_tool_map.get("read_neo4j_cypher")
         if not mcp_read:
             return '{"error": "MCP read_neo4j_cypher tool not found"}'
-        
+
         try:
             # 🛡️ Guardrails: Cypher injection validation
             if GUARDRAILS_ENABLED:
@@ -1273,7 +1360,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                     _log(f"⚠️ Cypher blocked: {violations}", "warning")
                     return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
                 cypher = sanitized_cypher
-            
+
             # Multi-tenant: Add db credentials from environment
             db_params = {
                 "query": cypher,
@@ -1284,20 +1371,26 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             }
             result = await mcp_read.ainvoke(db_params)
             result_str = str(result) if result else ""
-            
+
             # Hata kontrolü
-            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
-            
+            is_error = (
+                "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+            )
+
             # Kayıtları parse et
             records = _parse_records(result_str)
             record_count = len(records)
-            
+
             # Eğer parse edilemezse eski yönteme fallback
             if record_count == 0 and result_str and not is_error:
-                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
+                lines = [
+                    l.strip()
+                    for l in result_str.split("\n")
+                    if l.strip() and l.strip().startswith("(")
+                ]
                 records = lines
                 record_count = len(records)
-            
+
             # 3 durum: success (kayıt var), empty (kayıt yok), failed (hata var)
             if is_error:
                 status = "failed"
@@ -1305,21 +1398,25 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 status = "success"
             else:
                 status = "empty"
-            
+
             # Sıra numarasını artır ve dosya ismine ekle
             tool_call_counter["value"] += 1
             seq_num = tool_call_counter["value"]
-            
+
             # Dosyaya TÜM sonucu kaydet (pagination için)
             # Format: 01_step_name_status.txt (sıralı görünüm için)
-            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
+            file_path = os.path.join(
+                findings_base, f"{seq_num:02d}_{step_name}_{status}.txt"
+            )
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query>\n{cypher}\n</query>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
-            
-            _log(f"📁 Cypher: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+
+            _log(
+                f"📁 Cypher: [{seq_num:02d}] {step_name} → {record_count} records ({status})"
+            )
             _append_to_blackboard(step_name, record_count, status == "success", seq_num)
-            
+
             # Store to PostgreSQL session blackboard
             parsed_results = []
             if records:
@@ -1331,7 +1428,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                             parsed_results.append({"raw": r[:500]})
                         except:
                             pass
-            
+
             _store_to_session_blackboard(
                 step_name=step_name,
                 cypher_query=cypher,
@@ -1340,11 +1437,13 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 results=parsed_results,
                 query_type="cypher",
             )
-            
+
             # Sonuç döndür
             if status == "success":
                 end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
-                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
+                paginated_result = _format_paginated_result(
+                    records, record_count, 0, end_idx, step_name
+                )
                 return f"✅ {record_count} kayıt bulundu.\n\n{paginated_result}"
             elif status == "empty":
                 return f"⚪ Sonuç bulunamadı (0 kayıt). Farklı bir strateji dene."
@@ -1352,21 +1451,23 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
                 return f"""❌ Hata oluştu.
 
 {result_str[:1000]}"""
-                
+
         except Exception as e:
             _log(f"❌ Cypher error: {e}", "error")
             return f'{{"error": "{str(e)}"}}'
-    
+
     # =========================================================================
     # EXECUTE CYPHER QUERY WITH EMBEDDING TOOL - Semantic Search
     # =========================================================================
     @tool
-    async def execute_cypher_query_with_embedding(query_text: str, cypher: str, step_name: str) -> str:
+    async def execute_cypher_query_with_embedding(
+        query_text: str, cypher: str, step_name: str
+    ) -> str:
         """Vector index ile semantik arama. query_text=kavram, cypher=$embedding_vector içermeli. Detaylar prompt'ta."""
         mcp_embedding = mcp_tool_map.get("read_neo4j_cypher_with_embedding")
         if not mcp_embedding:
             return '{"error": "MCP read_neo4j_cypher_with_embedding tool not found"}'
-        
+
         try:
             # Validate: $embedding_vector parametresi zorunlu
             if "$embedding_vector" not in cypher:
@@ -1402,7 +1503,7 @@ execute_cypher_query_with_embedding(
 
 ⚠️ NOT: İlişki adları (PART_OF, HAS_DOCUMENT vb.) ve node label'ları (Entity) ŞEMAYA GÖRE DEĞİŞİR!
 Lütfen sorguyu düzelt ve tekrar dene."""
-            
+
             # 🛡️ Guardrails: Cypher injection validation
             if GUARDRAILS_ENABLED:
                 is_safe, sanitized_cypher, violations = validate_cypher_query(cypher)
@@ -1410,32 +1511,40 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                     _log(f"⚠️ Cypher blocked: {violations}", "warning")
                     return f'{{"error": "Query rejected for security: {", ".join(violations[:2])}"}}'
                 cypher = sanitized_cypher
-            
+
             # Multi-tenant: Add db credentials from environment
-            result = await mcp_embedding.ainvoke({
-                "query_text": query_text,
-                "cypher_query": cypher,
-                "params": {},
-                "db_url": os.environ.get("NEO4J_URI"),
-                "db_username": os.environ.get("NEO4J_USERNAME"),
-                "db_password": os.environ.get("NEO4J_PASSWORD"),
-                "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
-            })
+            result = await mcp_embedding.ainvoke(
+                {
+                    "query_text": query_text,
+                    "cypher_query": cypher,
+                    "params": {},
+                    "db_url": os.environ.get("NEO4J_URI"),
+                    "db_username": os.environ.get("NEO4J_USERNAME"),
+                    "db_password": os.environ.get("NEO4J_PASSWORD"),
+                    "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+                }
+            )
             result_str = str(result) if result else ""
-            
+
             # Hata kontrolü
-            is_error = "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
-            
+            is_error = (
+                "HATA:" in result_str or "ERROR:" in result_str or "❌" in result_str
+            )
+
             # Kayıtları parse et
             records = _parse_records(result_str)
             record_count = len(records)
-            
+
             # Eğer parse edilemezse eski yönteme fallback
             if record_count == 0 and result_str and not is_error:
-                lines = [l.strip() for l in result_str.split('\n') if l.strip() and l.strip().startswith('(')]
+                lines = [
+                    l.strip()
+                    for l in result_str.split("\n")
+                    if l.strip() and l.strip().startswith("(")
+                ]
                 records = lines
                 record_count = len(records)
-            
+
             # Status belirleme
             if is_error:
                 status = "failed"
@@ -1443,21 +1552,25 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 status = "success"
             else:
                 status = "empty"
-            
+
             # Sıra numarasını artır ve dosya ismine ekle
             tool_call_counter["value"] += 1
             seq_num = tool_call_counter["value"]
-            
+
             # Dosyaya TÜM sonucu kaydet
-            file_path = os.path.join(findings_base, f"{seq_num:02d}_{step_name}_{status}.txt")
+            file_path = os.path.join(
+                findings_base, f"{seq_num:02d}_{step_name}_{status}.txt"
+            )
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"<query_text>\n{query_text}\n</query_text>\n\n")
                 f.write(f"<cypher>\n{cypher}\n</cypher>\n\n")
                 f.write(f"<result>\n{result_str}\n</result>\n")
-            
-            _log(f"📁 Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})")
+
+            _log(
+                f"📁 Semantic: [{seq_num:02d}] {step_name} → {record_count} records ({status})"
+            )
             _append_to_blackboard(step_name, record_count, status == "success", seq_num)
-            
+
             # Store to PostgreSQL session blackboard
             parsed_results = []
             if records:
@@ -1469,7 +1582,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                             parsed_results.append({"raw": r[:500]})
                         except:
                             pass
-            
+
             _store_to_session_blackboard(
                 step_name=step_name,
                 cypher_query=f"-- query_text: {query_text}\n{cypher}",
@@ -1478,11 +1591,13 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 results=parsed_results,
                 query_type="embedding",
             )
-            
+
             # Sonuç döndür
             if status == "success":
                 end_idx = min(DEFAULT_RECORDS_PER_PAGE, record_count)
-                paginated_result = _format_paginated_result(records, record_count, 0, end_idx, step_name)
+                paginated_result = _format_paginated_result(
+                    records, record_count, 0, end_idx, step_name
+                )
                 return f"✅ Semantic search: {record_count} sonuç bulundu.\n\n{paginated_result}"
             elif status == "empty":
                 return f"⚪ Semantic search sonuç bulunamadı. Farklı query_text dene veya threshold'u düşür (0.75 → 0.6)."
@@ -1490,23 +1605,25 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 return f"""❌ Semantic search hatası.
 
 {result_str[:1000]}"""
-                
+
         except Exception as e:
             _log(f"❌ Semantic search error: {e}", "error")
             return f'{{"error": "{str(e)}"}}'
-    
+
     # =========================================================================
     # EXPAND CHUNK CONTEXT TOOL - Window Expansion
     # =========================================================================
     @tool
-    async def expand_chunk_context(document_name: str, positions: str, window_size: int = 2) -> str:
+    async def expand_chunk_context(
+        document_name: str, positions: str, window_size: int = 2
+    ) -> str:
         """Chunk pozisyonlarının etrafındaki context'i genişlet. Kesilmiş tablo/liste tamamlamak için kullan.
-        
+
         Args:
             document_name: Belge adı (fileName)
             positions: Pozisyon listesi (virgülle ayrılmış, örn: "5,8,12")
             window_size: Her yöne kaç chunk genişlet (varsayılan: 2)
-        
+
         Ne zaman kullan:
             - Arama sonucunda tablo/liste kesilmiş görünüyorsa
             - "devamı var" gibi ifadeler varsa
@@ -1515,13 +1632,15 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         mcp_cypher = mcp_tool_map.get("read_neo4j_cypher")
         if not mcp_cypher:
             return '{"error": "MCP read_neo4j_cypher tool not found"}'
-        
+
         try:
             # Parse positions
-            pos_list = [int(p.strip()) for p in positions.split(",") if p.strip().isdigit()]
+            pos_list = [
+                int(p.strip()) for p in positions.split(",") if p.strip().isdigit()
+            ]
             if not pos_list:
                 return "❌ Geçersiz pozisyon listesi. Örnek: '5,8,12'"
-            
+
             # Merge overlapping positions
             def merge_positions(positions: list, window: int) -> list:
                 """Overlapping pozisyonları birleştir"""
@@ -1531,7 +1650,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 ranges = []
                 current_start = positions[0] - window
                 current_end = positions[0] + window
-                
+
                 for pos in positions[1:]:
                     new_start = pos - window
                     new_end = pos + window
@@ -1541,12 +1660,12 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                         ranges.append((max(1, current_start), current_end))
                         current_start = new_start
                         current_end = new_end
-                
+
                 ranges.append((max(1, current_start), current_end))
                 return ranges
-            
+
             merged_ranges = merge_positions(pos_list, window_size)
-            
+
             results = []
             for start_pos, end_pos in merged_ranges:
                 # Her range için chunk'ları getir
@@ -1557,59 +1676,70 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 RETURN c.position as position, c.text as text
                 ORDER BY c.position
                 """
-                
-                result = await mcp_cypher.ainvoke({
-                    "query": cypher,
-                    "params": {
-                        "document": document_name,
-                        "start_pos": start_pos,
-                        "end_pos": end_pos
-                    },
-                    "db_url": os.environ.get("NEO4J_URI"),
-                    "db_username": os.environ.get("NEO4J_USERNAME"),
-                    "db_password": os.environ.get("NEO4J_PASSWORD"),
-                    "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
-                })
-                
+
+                result = await mcp_cypher.ainvoke(
+                    {
+                        "query": cypher,
+                        "params": {
+                            "document": document_name,
+                            "start_pos": start_pos,
+                            "end_pos": end_pos,
+                        },
+                        "db_url": os.environ.get("NEO4J_URI"),
+                        "db_username": os.environ.get("NEO4J_USERNAME"),
+                        "db_password": os.environ.get("NEO4J_PASSWORD"),
+                        "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+                    }
+                )
+
                 result_str = str(result) if result else ""
-                
+
                 # Parse chunks
                 chunks = _parse_records(result_str)
                 if chunks:
-                    combined_text = "\n\n---\n\n".join([
-                        f"[Pos {c.get('position', '?')}]\n{c.get('text', '')}" 
-                        for c in chunks if isinstance(c, dict)
-                    ])
-                    results.append({
-                        "range": f"{start_pos}-{end_pos}",
-                        "original_positions": [p for p in pos_list if start_pos <= p <= end_pos],
-                        "chunk_count": len(chunks),
-                        "text": combined_text
-                    })
-            
+                    combined_text = "\n\n---\n\n".join(
+                        [
+                            f"[Pos {c.get('position', '?')}]\n{c.get('text', '')}"
+                            for c in chunks
+                            if isinstance(c, dict)
+                        ]
+                    )
+                    results.append(
+                        {
+                            "range": f"{start_pos}-{end_pos}",
+                            "original_positions": [
+                                p for p in pos_list if start_pos <= p <= end_pos
+                            ],
+                            "chunk_count": len(chunks),
+                            "text": combined_text,
+                        }
+                    )
+
             if not results:
                 return f"⚪ '{document_name}' belgesinde pozisyon {positions} için chunk bulunamadı."
-            
+
             # Format output
             output = f"📦 **Genişletilmiş Context** (window_size={window_size})\n"
             output += f"📄 Belge: {document_name}\n"
             output += f"📍 Orijinal pozisyonlar: {positions}\n\n"
-            
+
             for r in results:
                 output += f"### Range: {r['range']} ({r['chunk_count']} chunk)\n"
                 output += f"Orijinal: {r['original_positions']}\n\n"
-                output += r['text'][:3000]  # Limit text length
-                if len(r['text']) > 3000:
+                output += r["text"][:3000]  # Limit text length
+                if len(r["text"]) > 3000:
                     output += "\n\n... (devamı kısaltıldı)"
                 output += "\n\n"
-            
-            _log(f"📦 expand_chunk_context: {document_name}, positions={positions}, ranges={len(results)}")
+
+            _log(
+                f"📦 expand_chunk_context: {document_name}, positions={positions}, ranges={len(results)}"
+            )
             return output
-            
+
         except Exception as e:
             _log(f"❌ expand_chunk_context error: {e}", "error")
             return f'{{"error": "{str(e)}"}}'
-    
+
     # =========================================================================
     # GET GUIDE TOOL
     # =========================================================================
@@ -1617,22 +1747,22 @@ Lütfen sorguyu düzelt ve tekrar dene."""
     # def get_guide(topic: str) -> str:
     #     """
     #     Strateji rehberi al.
-        
+
     #     Topics:
     #     - KESIF: Entity varyasyon bulma
     #     - ICERIK: Chunk/embedding arama
     #     - METADATA: İlişki takibi
     #     - CYPHER_RULES: Sorgu yazım kuralları
     #     - FALSE_POSITIVE: Embedding doğrulama
-        
+
     #     Args:
     #         topic: Rehber konusu
-        
+
     #     Returns:
     #         Rehber içeriği
     #     """
     #     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
-        
+
     #     topic_lower = topic.lower().replace("_", "")
     #     topic_map = {
     #         "kesif": "kesif.md",
@@ -1649,22 +1779,22 @@ Lütfen sorguyu düzelt ve tekrar dene."""
     #         "final_cevap": "final_cevap.md",
     #         "cevap": "final_cevap.md",
     #     }
-        
+
     #     filename = topic_map.get(topic_lower)
     #     if not filename:
     #         available = ", ".join(["KESIF", "ICERIK", "METADATA", "FALSE_POSITIVE", "CYPHER_RULES"])
     #         return f"❌ Bilinmeyen rehber: {topic}. Mevcut: {available}"
-        
+
     #     guide_path = os.path.join(prompts_dir, filename)
     #     if not os.path.exists(guide_path):
     #         return f"❌ Rehber bulunamadı: {guide_path}"
-        
+
     #     with open(guide_path, "r", encoding="utf-8") as f:
     #         content = f.read()
-        
+
     #     _log(f"📖 Guide loaded: {topic}")
     #     return content
-    
+
     # =========================================================================
     # ADD SOURCE TOOL
     # =========================================================================
@@ -1672,7 +1802,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
     def add_source(source_type: str, value: str) -> str:
         """Kaynak ekle. source_type=document/page, value=dosya_adı. Detaylar prompt'ta."""
         sources = _get_session_sources(question_id)
-        
+
         if source_type == "document":
             sources["documents"].add(value)
             _log(f"📎 Document: {value}")
@@ -1683,7 +1813,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
             return f"✅ Sayfa kaynağı eklendi: {value}"
         else:
             return f"❌ Geçersiz source_type. 'document' veya 'page' olmalı."
-    
+
     # =========================================================================
     # READ FINDING TOOL - Pagination destekli sonuç okuma
     # =========================================================================
@@ -1692,16 +1822,16 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         step_name: str,
         result_type: str = "success",
         start_record: int = 0,
-        end_record: int = 0
+        end_record: int = 0,
     ) -> str:
         """Sorgu sonuçlarının devamını oku. Pagination için start_record/end_record kullan."""
         import re
         import glob as glob_module
-        
+
         # Sıra numaralı dosya formatını destekle: NN_step_name_status.txt
         pattern = os.path.join(findings_base, f"*_{step_name}_{result_type}.txt")
         matching_files = glob_module.glob(pattern)
-        
+
         if not matching_files:
             # Eski format da dene (backward compatibility)
             file_path = os.path.join(findings_base, f"{step_name}_{result_type}.txt")
@@ -1709,67 +1839,73 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 return f"❌ Dosya bulunamadı: {step_name}_{result_type}.txt"
         else:
             file_path = matching_files[0]  # İlk eşleşen dosyayı al
-        
+
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
-        
+
         # Result kısmını ayıkla
         result_match = content.find("<result>")
         result_end = content.find("</result>")
-        
+
         if result_match == -1 or result_end == -1:
             return f"❌ Sonuç formatı geçersiz"
-        
-        result_content = content[result_match + 8:result_end]
-        
+
+        result_content = content[result_match + 8 : result_end]
+
         # Kayıtları parse et
         records = _parse_records(result_content)
         total_records = len(records)
-        
+
         if total_records == 0:
             # Parse edilemezse eski yönteme fallback
-            lines = [l.strip() for l in result_content.split('\n') if l.strip() and l.strip().startswith('(')]
+            lines = [
+                l.strip()
+                for l in result_content.split("\n")
+                if l.strip() and l.strip().startswith("(")
+            ]
             records = lines
             total_records = len(records)
-        
+
         if total_records == 0:
             return f"❌ Kayıt bulunamadı"
-        
+
         # Pagination uygula
         effective_end = end_record if end_record > 0 else total_records
         effective_end = min(effective_end, total_records)
-        
+
         if start_record >= total_records:
             return f"❌ Başlangıç kayıt numarası ({start_record}) toplam kayıt sayısından ({total_records}) büyük"
-        
+
         selected_records = records[start_record:effective_end]
-        
+
         result_lines = "\n".join(selected_records)
-        
+
         pagination_info = f"✅ 📊 Gösterilen: {start_record}-{effective_end} / Toplam: {total_records} kayıt"
-        
+
         if effective_end < total_records:
             next_end = min(effective_end + DEFAULT_RECORDS_PER_PAGE, total_records)
-            more_info = f"\n\n💡 Sonraki sayfa: read_finding(\"{step_name}\", start_record={effective_end}, end_record={next_end})"
+            more_info = f'\n\n💡 Sonraki sayfa: read_finding("{step_name}", start_record={effective_end}, end_record={next_end})'
         else:
             more_info = "\n\n✅ Tüm kayıtlar gösterildi."
-        
-        _log(f"📖 read_finding: {step_name} [{start_record}-{effective_end}/{total_records}]")
-        
+
+        _log(
+            f"📖 read_finding: {step_name} [{start_record}-{effective_end}/{total_records}]"
+        )
+
         return f"{pagination_info}\n\n{result_lines}{more_info}"
-    
+
     # =========================================================================
     # SESSION BLACKBOARD SKILLS - Navigate query history
     # =========================================================================
     # These tools allow the agent to navigate through past queries,
     # understand what was tried, and reuse successful findings.
-    
+
     @tool
     def get_session_overview() -> str:
         """
         Session'daki tüm soruları ve stepleri gör.
         Her step için: durum, açıklama, ilk 2 sonuç preview.
-        
+
         NE ZAMAN KULLAN:
         - Soru önceki sorularla İLGİLİ ise → BAŞTA çağır
         - "bu belgede", "önceki", "aynı şirket" gibi referanslar varsa
@@ -1777,7 +1913,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         """
         if not SESSION_BLACKBOARD_ENABLED or bb_get_session_overview is None:
             return "⚠️ Session blackboard devre dışı."
-        
+
         try:
             result = bb_get_session_overview(session_id)
             _log(f"📋 get_session_overview called")
@@ -1785,21 +1921,23 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         except Exception as e:
             _log(f"❌ get_session_overview error: {e}", "error")
             return f"⚠️ Session overview alınamadı: {str(e)}"
-    
+
     @tool
-    def search_skills(query: str, fuzzy_threshold: float = 0.3, include_global: bool = True) -> str:
+    def search_skills(
+        query: str, fuzzy_threshold: float = 0.3, include_global: bool = True
+    ) -> str:
         """
         Geçmiş sorgularda ara. Fuzzy ve fulltext destekli.
         OR aramaları için: "kira kaybı | rent loss | kira zarar"
-        
+
         ÖNCE bu session'da arar, bulamazsa TÜM SESSION'LARDA (global) arar.
         Global aramada sadece BAŞARILI sorgular gösterilir.
-        
+
         NE ZAMAN KULLAN:
         - Belirli bir konunun daha önce aranıp aranmadığını kontrol et
         - Benzer sorguların sonuçlarını bul
         - Daha önce başarılı olan stratejileri öğren
-        
+
         Args:
             query: Arama terimi (| ile OR destekli)
             fuzzy_threshold: Benzerlik eşiği 0-1 (default: 0.3)
@@ -1807,32 +1945,34 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         """
         if not SESSION_BLACKBOARD_ENABLED or bb_search_skills is None:
             return "⚠️ Session blackboard devre dışı."
-        
+
         try:
-            result = bb_search_skills(session_id, query, fuzzy_threshold, include_global=include_global)
+            result = bb_search_skills(
+                session_id, query, fuzzy_threshold, include_global=include_global
+            )
             scope = "session+global" if include_global else "session"
             _log(f"🔍 search_skills: query='{query[:30]}' scope={scope}")
             return result
         except Exception as e:
             _log(f"❌ search_skills error: {e}", "error")
             return f"⚠️ Skills arama başarısız: {str(e)}"
-    
+
     @tool
     def read_step(step_id: int) -> str:
         """
         Belirli bir step'in detayını oku.
         Cypher sorgusu + ilk 5 sonucu gösterir.
-        
+
         NE ZAMAN KULLAN:
         - Overview veya search'te gördüğün step'in detayına bak
         - Hangi sorgunun ne sonuç verdiğini anla
-        
+
         Args:
             step_id: Step ID (overview veya search'ten al)
         """
         if not SESSION_BLACKBOARD_ENABLED or bb_get_step_detail is None:
             return "⚠️ Session blackboard devre dışı."
-        
+
         try:
             result = bb_get_step_detail(step_id)
             _log(f"📖 read_step: step_id={step_id}")
@@ -1840,15 +1980,15 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         except Exception as e:
             _log(f"❌ read_step error: {e}", "error")
             return f"⚠️ Step detayı alınamadı: {str(e)}"
-    
+
     @tool
     def read_step_results(step_id: int, start: int = 0, end: int = 10) -> str:
         """
         Step sonuçlarını pagination ile oku.
-        
+
         NE ZAMAN KULLAN:
         - read_step'te gördüğünden daha fazla sonuç lazım
-        
+
         Args:
             step_id: Step ID
             start: Başlangıç index (0'dan başlar)
@@ -1856,7 +1996,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         """
         if not SESSION_BLACKBOARD_ENABLED or bb_get_step_results is None:
             return "⚠️ Session blackboard devre dışı."
-        
+
         try:
             result = bb_get_step_results(step_id, start, end)
             _log(f"📊 read_step_results: step_id={step_id}, range={start}-{end}")
@@ -1864,41 +2004,52 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         except Exception as e:
             _log(f"❌ read_step_results error: {e}", "error")
             return f"⚠️ Step sonuçları alınamadı: {str(e)}"
-    
+
     # =========================================================================
     # TOOLS SETUP
     # =========================================================================
     # Primary tools: execute_cypher_query, execute_cypher_query_with_embedding
-    
+
     # Base tools - her modda ortak
     base_tools = [add_source, read_finding]
-    
+
     # Session Blackboard Skills - opsiyonel, SESSION_BLACKBOARD_ENABLED=true ise aktif
     if SESSION_BLACKBOARD_ENABLED:
-        skills_tools = [get_session_overview, search_skills, read_step, read_step_results]
+        skills_tools = [
+            get_session_overview,
+            search_skills,
+            read_step,
+            read_step_results,
+        ]
         base_tools = skills_tools + base_tools  # Skills tools önce gelsin
         _log(f"📚 Session blackboard tools enabled ({len(skills_tools)} tools)")
-    
+
     # Cypher query tools + chunk expansion
-    tools = [execute_cypher_query, execute_cypher_query_with_embedding, expand_chunk_context] + base_tools
+    tools = [
+        execute_cypher_query,
+        execute_cypher_query_with_embedding,
+        expand_chunk_context,
+    ] + base_tools
     _log(f"🔧 Cypher query tools enabled (+ expand_chunk_context)")
-    
+
     # MCP tool'larını filtrele - DISALLOW listesindekiler agent'a sunulmaz
     # Neden: Bu tool'lar internal kullanım içindir, custom tool'lar bunları wrapper olarak kullanır.
     # Model doğrudan çağırmamalı.
     # Yeni MCP tool'ları otomatik olarak agent'a eklenir, sadece engellemek istediklerinizi buraya ekleyin.
     AGENT_DISALLOWED_MCP_TOOLS = {
-        "read_neo4j_cypher",              # Internal: execute_cypher_query kullanır
-        "read_neo4j_cypher_with_embedding", # Internal: execute_cypher_query_with_embedding kullanır
+        "read_neo4j_cypher",  # Internal: execute_cypher_query kullanır
+        "read_neo4j_cypher_with_embedding",  # Internal: execute_cypher_query_with_embedding kullanır
     }
     agent_mcp_tools = [t for t in mcp_tools if t.name not in AGENT_DISALLOWED_MCP_TOOLS]
-    
+
     for mcp_tool in agent_mcp_tools:
         tools.append(mcp_tool)
-    
+
     custom_count = len(tools) - len(agent_mcp_tools)
-    _log(f"🔧 Total tools: {len(tools)} (custom: {custom_count}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})")
-    
+    _log(
+        f"🔧 Total tools: {len(tools)} (custom: {custom_count}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})"
+    )
+
     return tools
 
 
@@ -1906,35 +2057,43 @@ Lütfen sorguyu düzelt ve tekrar dene."""
 # REACT AGENT CLASS
 # ============================================================================
 
+
 class ReactAgent:
     """
     Multi-Provider ReAct Agent - OpenAI ve Anthropic Desteği
-    
+
     Özellikler:
     - OpenAI (GPT-5, GPT-4o, o1, o3) ve Anthropic (Claude Opus 4.5, Sonnet) desteği
     - Prompt Caching optimizasyonu (hem OpenAI hem Anthropic)
     - Extended Thinking desteği (GPT-5: reasoning_effort, Claude: thinking budget)
     - Paralel tool çağrıları
     - Streaming response
-    
+
     Model Seçimi (Environment Variables):
         REACT_MODEL=gpt-5                    → OpenAI GPT-5
         REACT_MODEL=claude-opus-4-5          → Anthropic Claude Opus 4.5
         REACT_MODEL=claude-sonnet-4-5        → Anthropic Claude Sonnet 4.5
-    
+
     Extended Thinking:
         GPT-5:  REACT_REASONING_EFFORT=low|medium|high
         Claude: REACT_THINKING_BUDGET=10000 (token sayısı, 0=kapalı)
-    
+
     API Keys:
         OPENAI_API_KEY     → OpenAI modelleri için
         ANTHROPIC_API_KEY  → Claude modelleri için
     """
-    
-    # Geçerli domain'ler
-    VALID_DOMAINS = {"sigorta", "bakim"}
-    
-    def __init__(self, graph, model_name: Optional[str] = None, reasoning_effort: Optional[str] = None, domain: Optional[str] = None):
+
+    # Geçerli domain'ler (merkezi registry'den)
+    # NOT: Yeni domain eklemek için src/config/domains.py dosyasını düzenleyin
+    VALID_DOMAINS = get_valid_domains()
+
+    def __init__(
+        self,
+        graph,
+        model_name: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        domain: Optional[str] = None,
+    ):
         """
         Args:
             graph: Neo4j graph connection
@@ -1947,32 +2106,34 @@ class ReactAgent:
             domain: Prompt domain'i. ZORUNLU parametre.
                 - "sigorta": Sigorta poliçeleri, müşteriler, teminatlar
                 - "bakim": WAT Motor bakım/arıza yönetimi (CMMS)
-        
+
         Raises:
             ValueError: domain parametresi belirtilmemişse veya geçersizse
         """
-        # Domain validation - ZORUNLU
+        # Domain validation - ZORUNLU (merkezi registry'den)
         if domain is None:
             raise ValueError(
-                f"domain parametresi zorunlu. Geçerli değerler: {self.VALID_DOMAINS}"
+                f"domain parametresi zorunlu. Geçerli değerler: {get_valid_domains()}"
             )
-        if domain not in self.VALID_DOMAINS:
+        if not is_valid_domain(domain):
             raise ValueError(
-                f"Geçersiz domain: '{domain}'. Geçerli değerler: {self.VALID_DOMAINS}"
+                f"Geçersiz domain: '{domain}'. Geçerli değerler: {get_valid_domains()}"
             )
         self.domain = domain
-        
+
         self.graph = graph
         self.model_name = model_name or os.environ.get("REACT_MODEL", "gpt-5")
-        self.reasoning_effort = reasoning_effort or os.environ.get("REACT_REASONING_EFFORT", "low")
+        self.reasoning_effort = reasoning_effort or os.environ.get(
+            "REACT_REASONING_EFFORT", "low"
+        )
         self.agent: Optional[Dict[str, Any]] = None
         self.mcp_client: Optional[Any] = None
         self.mcp_tools: Optional[List[Any]] = None
         self._schema_cache: Dict[str, str] = {}
         self.redis_cache_active = False
-        
+
         _log(f"🔧 ReactAgent initialized: domain={domain}, model={self.model_name}")
-        
+
         # Redis LLM Semantic Cache kurulumu
         if REDIS_CACHE_IMPORTED and REDIS_CACHE_ENABLED and setup_semantic_cache:
             try:
@@ -1982,12 +2143,12 @@ class ReactAgent:
                     logging.info("✅ Redis LLM Semantic Cache aktif (ReactAgent)")
             except Exception as e:
                 logging.warning(f"⚠️ Redis cache setup failed: {e}")
-    
+
     def _get_schema_for_session(self, session_id: str) -> str:
         """Session için şema bilgisini al (cache'li)"""
         if session_id in self._schema_cache:
             return self._schema_cache[session_id]
-        
+
         try:
             database_url = self._get_neo4j_url()
             schema = get_cached_schema(database_url, self.graph)
@@ -1996,93 +2157,111 @@ class ReactAgent:
         except Exception as e:
             _log(f"⚠️ Schema fetch error: {e}", "warning")
             return ""
-    
+
     def _get_neo4j_url(self) -> str:
         """Neo4j URL'ini al - sunucu başlangıcıyla aynı format kullan"""
         # NOT: Sunucu başlangıcında sadece neo4j_uri kullanılıyor (database eklenmeden)
         # Cache key eşleşmesi için aynı formatı kullanmalıyız
         return os.getenv("NEO4J_URI", "")
-    
-    def _get_conversation_history(self, session_id: str, cache_enabled: bool = True) -> List[Dict[str, Any]]:
+
+    def _get_conversation_history(
+        self, session_id: str, cache_enabled: bool = True
+    ) -> List[Dict[str, Any]]:
         """
         PostgreSQL'den conversation history al.
-        
+
         Anthropic Prompt Caching için:
         - Son human mesajına cache_control eklenir
         - Claude otomatik olarak önceki cache'lenmiş prefix'i kullanır
         - https://docs.langchain.com/oss/python/integrations/chat/anthropic#incremental-caching-in-conversational-applications
-        
+
         Args:
             session_id: Session identifier
             cache_enabled: True ise son human mesajına cache_control ekler
-            
+
         Returns:
             List of message dicts with cache_control on last human message
         """
         if not session_id:
             return []
-        
+
         # History limit: 100 mesaj (Anthropic cache için yeterli context)
         HISTORY_LIMIT = 100
-        
+
         try:
-            from src.shared.postgres_chat_history import create_postgres_chat_message_history
-            
+            from src.shared.postgres_chat_history import (
+                create_postgres_chat_message_history,
+            )
+
             conversation_history = create_postgres_chat_message_history(
                 session_id=session_id, write_access=True
             )
-            
+
             if conversation_history and hasattr(conversation_history, "messages"):
                 messages: List[Dict[str, Any]] = []
                 recent_messages = (
-                    conversation_history.messages[-HISTORY_LIMIT:] 
-                    if len(conversation_history.messages) > HISTORY_LIMIT 
+                    conversation_history.messages[-HISTORY_LIMIT:]
+                    if len(conversation_history.messages) > HISTORY_LIMIT
                     else conversation_history.messages
                 )
-                
+
                 # Son human mesajın index'ini bul (cache_control için)
                 last_human_idx = -1
                 for i in range(len(recent_messages) - 1, -1, -1):
-                    if hasattr(recent_messages[i], "type") and recent_messages[i].type == "human":
+                    if (
+                        hasattr(recent_messages[i], "type")
+                        and recent_messages[i].type == "human"
+                    ):
                         last_human_idx = i
                         break
-                
+
                 for idx, msg in enumerate(recent_messages):
                     if hasattr(msg, "content"):
-                        role = "user" if (hasattr(msg, "type") and msg.type == "human") else "assistant"
+                        role = (
+                            "user"
+                            if (hasattr(msg, "type") and msg.type == "human")
+                            else "assistant"
+                        )
                         content = str(msg.content) if msg.content else ""
-                        
+
                         # Cache-enabled format: content as list for cache_control support
                         if cache_enabled and role == "user":
                             # Son human mesajına cache_control ekle
-                            content_block: Dict[str, Any] = {"type": "text", "text": content}
+                            content_block: Dict[str, Any] = {
+                                "type": "text",
+                                "text": content,
+                            }
                             if idx == last_human_idx:
                                 content_block["cache_control"] = {"type": "ephemeral"}
                             messages.append({"role": role, "content": [content_block]})
                         else:
                             # Assistant mesajları veya cache disabled: basit format
                             messages.append({"role": role, "content": content})
-                
-                _log(f"📜 History: {len(messages)} msgs (limit: {HISTORY_LIMIT}, cache: {cache_enabled})")
+
+                _log(
+                    f"📜 History: {len(messages)} msgs (limit: {HISTORY_LIMIT}, cache: {cache_enabled})"
+                )
                 return messages
         except Exception as e:
             _log(f"⚠️ History fetch error: {e}", "warning")
-        
+
         return []
-    
+
     def _save_to_history(self, session_id: str, role: str, content: str) -> None:
         """PostgreSQL'e mesaj kaydet"""
         if not session_id:
             return
-        
+
         try:
-            from src.shared.postgres_chat_history import create_postgres_chat_message_history
+            from src.shared.postgres_chat_history import (
+                create_postgres_chat_message_history,
+            )
             from langchain_core.messages import HumanMessage, AIMessage
-            
+
             conversation_history = create_postgres_chat_message_history(
                 session_id=session_id, write_access=True
             )
-            
+
             if conversation_history:
                 if role == "Human":
                     conversation_history.add_message(HumanMessage(content=content))
@@ -2090,7 +2269,7 @@ class ReactAgent:
                     conversation_history.add_message(AIMessage(content=content))
         except Exception as e:
             _log(f"⚠️ History save error: {e}", "warning")
-    
+
     def _get_langfuse_prompt_name(self) -> str:
         """Domain'e göre Langfuse prompt adını döndür."""
         # Domain bazlı Langfuse prompt isimleri
@@ -2099,42 +2278,46 @@ class ReactAgent:
             "bakim": "react-agent-wat-motor",
         }
         return prompt_names.get(self.domain, LANGFUSE_PROMPT_NAME)
-    
+
     def _build_system_prompt(self, schema_info: str, session_id: str = "") -> str:
         """
         Cache-optimized system prompt oluştur.
-        
+
         Prompt Caching için:
         - Sabit prefix (instructions + schema) → Cache'lenir
         - Dinamik suffix ayrı tutulur
-        
+
         Langfuse Prompt Management:
         - Domain'e göre farklı Langfuse prompt kullanılır
         - Langfuse erişilemezse kod içindeki prompt fallback olarak kullanılır
         - Prompt'ta {{schema_info}} placeholder'ı değişken olarak compile edilir
-        
+
         Domain:
         - sigorta: Sigorta domain'i prompt'ları
         - bakim: WAT Motor bakım prompt'ları
         """
         # Domain'e göre prompt al
         _log(f"📋 Domain: {self.domain}")
-        
+
         # Domain'e göre prompt'ları al (cypher mode)
         prompts = get_domain_prompts(self.domain, "cypher")
-        
+
         # Base prompt oluştur
         base_prompt = (
-            prompts["system_base"] +
-            prompts["tool_usage"] +
-            prompts.get("thinking_guide", "") +
-            prompts["content"]
+            prompts["system_base"]
+            + prompts["tool_usage"]
+            + prompts.get("thinking_guide", "")
+            + prompts["content"]
         )
-        
+
         # Pagination placeholder'larını değerlerle değiştir
-        base_prompt = base_prompt.replace("{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE))
-        base_prompt = base_prompt.replace("{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2))
-        
+        base_prompt = base_prompt.replace(
+            "{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE)
+        )
+        base_prompt = base_prompt.replace(
+            "{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2)
+        )
+
         # 1. Langfuse'dan prompt al (opsiyonel override)
         langfuse_prompt_name = self._get_langfuse_prompt_name()
         langfuse_prompt = get_prompt(
@@ -2143,35 +2326,43 @@ class ReactAgent:
             label=LANGFUSE_PROMPT_LABEL,
             fallback=base_prompt,  # Fallback: kod içindeki prompt
         )
-        
+
         if langfuse_prompt:
             try:
                 # Langfuse prompt'u compile et - {{schema_info}} → gerçek şema
                 compiled_prompt = langfuse_prompt.compile(schema_info=schema_info)
-                
+
                 # Pagination placeholder'larını Langfuse prompt'unda da değiştir
-                compiled_prompt = compiled_prompt.replace("{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE))
-                compiled_prompt = compiled_prompt.replace("{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2))
-                
+                compiled_prompt = compiled_prompt.replace(
+                    "{records_per_page}", str(DEFAULT_RECORDS_PER_PAGE)
+                )
+                compiled_prompt = compiled_prompt.replace(
+                    "{records_per_page_double}", str(DEFAULT_RECORDS_PER_PAGE * 2)
+                )
+
                 # Version bilgisini logla
-                version = getattr(langfuse_prompt, 'version', 'unknown')
-                labels = getattr(langfuse_prompt, 'labels', [])
-                _log(f"📋 Langfuse prompt loaded: {langfuse_prompt_name} v{version} {labels}")
-                
+                version = getattr(langfuse_prompt, "version", "unknown")
+                labels = getattr(langfuse_prompt, "labels", [])
+                _log(
+                    f"📋 Langfuse prompt loaded: {langfuse_prompt_name} v{version} {labels}"
+                )
+
                 return compiled_prompt
-                
+
             except Exception as e:
-                _log(f"⚠️ Langfuse prompt compile failed: {e}, using fallback", "warning")
-        
+                _log(
+                    f"⚠️ Langfuse prompt compile failed: {e}, using fallback", "warning"
+                )
+
         # 2. Fallback: Kod içindeki prompt
         _log(f"📋 Using fallback prompt for domain: {self.domain}")
         full_prompt = base_prompt + schema_info
         return full_prompt
-    
+
     def _ensure_prompt_in_langfuse(self) -> bool:
         """
         Langfuse'da prompt yoksa oluştur (migration/bootstrap için).
-        
+
         Bu metod sadece ilk kurulumda veya migration sırasında çağrılmalı.
         Normal kullanımda Langfuse UI tercih edilir.
         """
@@ -2181,17 +2372,17 @@ class ReactAgent:
             prompt_type=LANGFUSE_PROMPT_TYPE,
             label=LANGFUSE_PROMPT_LABEL,
         )
-        
+
         if existing:
             _log(f"📋 Langfuse prompt already exists: {LANGFUSE_PROMPT_NAME}")
             return True
-        
+
         # Prompt yok, oluştur
         # NOT: {{schema_info}} placeholder olarak kalmalı
         # Cypher mode için tam prompt
         full_base_prompt = SHARED_SYSTEM_BASE + CYPHER_TOOL_USAGE + SHARED_CONTENT
         prompt_with_placeholder = full_base_prompt + "{{schema_info}}"
-        
+
         success = create_prompt(
             name=LANGFUSE_PROMPT_NAME,
             prompt=prompt_with_placeholder,
@@ -2202,44 +2393,44 @@ class ReactAgent:
                 "description": "ReAct Agent system prompt for Neo4j graph queries",
             },
         )
-        
+
         if success:
             _log(f"✅ Langfuse prompt created: {LANGFUSE_PROMPT_NAME}")
         else:
             _log(f"⚠️ Failed to create Langfuse prompt, will use fallback", "warning")
-        
+
         return success
-    
+
     def _build_messages(
-        self, 
-        system_prompt: str, 
-        conversation_history: List[Dict[str, str]], 
-        user_question: str
+        self,
+        system_prompt: str,
+        conversation_history: List[Dict[str, str]],
+        user_question: str,
     ) -> List[Dict[str, str]]:
         """
         Prompt Caching için optimize edilmiş mesaj listesi oluştur.
-        
+
         Yapı:
         1. System message (cached prefix + schema)
         2. Conversation history (dinamik)
         3. User question (dinamik)
         """
         messages = [{"role": "system", "content": system_prompt}]
-        
+
         # Conversation history ekle
         for msg in conversation_history:
             messages.append(msg)
-        
+
         # User question ekle
         messages.append({"role": "user", "content": user_question})
-        
+
         return messages
-    
+
     async def _create_agent(self, schema_info: str, session_id: str):
         """ReAct agent oluştur"""
         if not LANGCHAIN_AVAILABLE or create_agent is None:
             raise ImportError("LangChain not available")
-        
+
         # MCP client başlat
         # langchain-mcp-adapters 0.1.0+ API: context manager kullanılmıyor
         if self.mcp_client is None:
@@ -2253,34 +2444,36 @@ class ReactAgent:
             tool_count = len(self.mcp_tools) if self.mcp_tools else 0
             tool_names = [t.name for t in self.mcp_tools] if self.mcp_tools else []
             _log(f"✅ MCP connected, {tool_count} tools available: {tool_names}")
-        
+
         # System prompt oluştur (cache-optimized, Langfuse Prompt Management)
         system_prompt = self._build_system_prompt(schema_info, session_id)
         _log(f"📜 System prompt: {len(system_prompt)} chars")
-        
+
         # Debug: Tam prompt'u loga yaz (limitsiz)
         # _log(f"📜 [FULL SYSTEM PROMPT START]\n{system_prompt}\n📜 [FULL SYSTEM PROMPT END]")
-        
+
         # Debug: Tam prompt'u dosyaya yaz
-        prompt_log_path = os.path.join(os.getcwd(), "agent_findings", "react", "_system_prompt.txt")
+        prompt_log_path = os.path.join(
+            os.getcwd(), "agent_findings", "react", "_system_prompt.txt"
+        )
         try:
             with open(prompt_log_path, "w", encoding="utf-8") as f:
                 f.write(system_prompt)
             _log(f"📝 System prompt saved: {prompt_log_path}")
         except Exception as e:
             _log(f"⚠️ Prompt save error: {e}", "warning")
-        
+
         # Model oluştur
         model = self._create_model()
-        
+
         # Middleware
         middleware = []
         if ModelCallLimitMiddleware is not None:
             middleware.append(ModelCallLimitMiddleware(run_limit=25))
-        
+
         # Agent'ı önce MCP tools olmadan oluştur - tool'lar stream_query_response'da eklenir
         # çünkü her soru için farklı question_id ile tool'lar oluşturulmalı
-        
+
         return {
             "model": model,
             "system_prompt": system_prompt,
@@ -2288,76 +2481,82 @@ class ReactAgent:
             "middleware": middleware,
             "schema_info": schema_info,
         }
-    
+
     def _create_model(self) -> Any:
         """
         Model instance oluştur.
-        
+
         Desteklenen modeller:
         - OpenAI: gpt-5, gpt-4o, gpt-4-turbo, o1-*, o3-* vb.
         - Anthropic: claude-opus-4-5, claude-sonnet-4-5, claude-3-5-sonnet, claude-3-opus vb.
-        
+
         Model seçimi REACT_MODEL env variable ile yapılır:
         - REACT_MODEL=gpt-5                    → OpenAI GPT-5
         - REACT_MODEL=claude-opus-4-5          → Anthropic Claude Opus 4.5
         - REACT_MODEL=claude-sonnet-4-5        → Anthropic Claude Sonnet 4.5
-        
+
         Extended Thinking (Reasoning):
         - GPT-5: REACT_REASONING_EFFORT=low|medium|high
         - Claude: REACT_THINKING_BUDGET=10000 (token sayısı, 0=kapalı)
         """
         from langchain_openai import ChatOpenAI
         from pydantic import SecretStr
-        
+
         actual_model = self.model_name
         if ":" in self.model_name:
             actual_model = self.model_name.split(":", 1)[1]
-        
+
         # ========== ANTHROPIC CLAUDE ==========
         if actual_model.lower().startswith("claude"):
             if not ANTHROPIC_AVAILABLE or ChatAnthropic is None:
-                raise ImportError("langchain-anthropic paketi kurulu değil. `uv add langchain-anthropic` ile kurun.")
-            
+                raise ImportError(
+                    "langchain-anthropic paketi kurulu değil. `uv add langchain-anthropic` ile kurun."
+                )
+
             anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not anthropic_api_key:
                 raise ValueError("ANTHROPIC_API_KEY environment variable gerekli.")
-            
+
             # Claude Extended Thinking (budget_tokens ile kontrol edilir)
             # REACT_THINKING_BUDGET=10000 → 10K token thinking bütçesi
             # REACT_THINKING_BUDGET=0 → Extended thinking kapalı
             thinking_budget = int(os.environ.get("REACT_THINKING_BUDGET", "10000"))
-            
+
             # Claude model parametreleri
             model_kwargs: dict[str, Any] = {
                 "model": actual_model,
                 "api_key": SecretStr(anthropic_api_key),
                 "max_tokens": 16384,  # Claude için max output token
             }
-            
+
             # Extended thinking etkinleştir (budget > 0 ise)
             if thinking_budget > 0:
                 model_kwargs["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": thinking_budget,
                 }
-                _log(f"🔧 Model: {actual_model} (Claude), extended_thinking={thinking_budget} tokens")
+                _log(
+                    f"🔧 Model: {actual_model} (Claude), extended_thinking={thinking_budget} tokens"
+                )
             else:
                 _log(f"🔧 Model: {actual_model} (Claude), extended_thinking=disabled")
-            
+
             # 📦 Anthropic Prompt Caching
             # https://docs.langchain.com/oss/python/integrations/chat/anthropic#prompt-caching
             # NOT: beta_cache parametresi deprecate edildi, artık cache_control ile yapılıyor
             # Tool caching için bind_tools kullanılacak (create_agent'da)
-            
+
             return ChatAnthropic(**model_kwargs)
-        
+
         # ========== OPENAI GPT ==========
         openai_api_key = os.environ.get("OPENAI_API_KEY")
-        
+
         # GPT-5 için reasoning_effort + summary
         # summary: "auto" | "concise" | "detailed" - düşünce süreçlerini gösterir
         if "gpt-5" in actual_model.lower() and self.reasoning_effort:
-            _log(f"🔧 Model: {actual_model} (OpenAI), reasoning={self.reasoning_effort}, summary=auto")
+            _log(
+                f"🔧 Model: {actual_model} (OpenAI), reasoning={self.reasoning_effort}, summary=auto"
+            )
             return ChatOpenAI(
                 model=actual_model,
                 api_key=SecretStr(openai_api_key) if openai_api_key else None,
@@ -2369,73 +2568,78 @@ class ReactAgent:
                 model=actual_model,
                 api_key=SecretStr(openai_api_key) if openai_api_key else None,
             )
-    
+
     async def stream_query_response(
-        self, 
-        question: str, 
-        session_id: str = "", 
+        self,
+        question: str,
+        session_id: str = "",
         question_id: str = "",
         user_id: Optional[str] = None,  # Langfuse User Tracking
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         ReAct Agent ile streaming cevap üret.
-        
+
         Args:
             question: Kullanıcı sorusu
             session_id: Oturum ID'si
             question_id: Soru ID'si
             user_id: Kullanıcı ID (email) - Langfuse User Tracking için
-        
+
         Yields:
             Streaming response chunks
         """
         import time
         import uuid
-        
+
         # Question ID - tam ID log için, kısa ID dosya path'leri için
         original_question_id = question_id
         if not question_id:
             original_question_id = str(uuid.uuid4())
         short_question_id = original_question_id[:8]
-        
+
         # Logging context'i set et (Grafana/Loki için) - TAM ID
         set_request_context(session_id=session_id, question_id=original_question_id)
-        
+
         # Session sources temizle - kısa ID
         _clear_session_sources(short_question_id)
-        
+
         # Token tracking başlat
         token_tracker = TokenTracker()
         _log(f"\n{'='*60}")
         _log(f"🚀 [REACT] Yeni sorgu: {question[:80]}...")
-        _log(f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {short_question_id}")
+        _log(
+            f"   Session: {session_id[:8] if session_id else 'N/A'}, Question: {short_question_id}"
+        )
         _log(f"{'='*60}")
-        
+
         # 📊 Langfuse session & trace başlat
         # Sessions: Tüm trace'ler aynı session altında gruplanır
         # See: https://langfuse.com/docs/observability/features/sessions
         langfuse_trace = None
         langfuse_session_ctx = None
         langfuse = get_langfuse()
-        
+
         if langfuse:
             try:
                 # 1. Session context'i başlat - tüm child trace'ler bu session'a bağlanır
                 # user_id: Gerçek kullanıcı email/ID kullanılır (Langfuse User Tracking için)
                 # See: https://langfuse.com/docs/observability/features/users
                 from langfuse import propagate_attributes
+
                 effective_user_id = user_id or (session_id[:8] if session_id else None)
                 langfuse_session_ctx = propagate_attributes(
                     session_id=session_id,
                     user_id=effective_user_id,
                     metadata={
                         "question_id": original_question_id,
-                    }
+                    },
                 )
                 langfuse_session_ctx.__enter__()
-                _log(f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user_id param: {user_id}, effective_user_id: {effective_user_id}")
-                
+                _log(
+                    f"📊 Langfuse session started: {session_id[:8] if session_id else 'N/A'}, user_id param: {user_id}, effective_user_id: {effective_user_id}"
+                )
+
                 # 2. Ana span başlat (Langfuse SDK - propagate_attributes context'i içinde)
                 # NOT: propagate_attributes session/user bilgisini set ediyor
                 # Bu context içindeki tüm span'lar otomatik olarak trace'e eklenir
@@ -2448,52 +2652,60 @@ class ReactAgent:
                         "question_id": original_question_id,
                         "session_id": session_id,
                         "user_id": effective_user_id,
-                    }
+                    },
                 )
-                trace_id = getattr(langfuse_trace, 'id', 'unknown')
+                trace_id = getattr(langfuse_trace, "id", "unknown")
                 _log(f"📊 Langfuse span started: {trace_id}")
-                
+
                 # TokenTracker'a parent span'ı bağla (tool span'ları bu span'a child olarak eklenir)
                 token_tracker.set_langfuse_parent(langfuse_trace)
             except Exception as e:
                 _log(f"⚠️ Langfuse session/trace start failed: {e}", "warning")
-        
+
         # 🎯 Query Cache check - benzer sorular için cache'den cevap dön
         try:
             query_cache = get_query_cache()
             cached_response = await query_cache.get_similar(question, session_id)
-            
+
             if cached_response:
-                _log(f"🎯 CACHE HIT! Similarity: {cached_response.get('similarity', 0):.3f}")
-                
+                _log(
+                    f"🎯 CACHE HIT! Similarity: {cached_response.get('similarity', 0):.3f}"
+                )
+
                 # Cache hit metrikleri
                 cache_metrics = get_cache_metrics()
-                
+
                 # Langfuse'a cache hit logla
                 if langfuse_trace:
                     try:
                         # Langfuse SDK: span.update() ile cache hit bilgisi ekle, sonra end()
                         langfuse_trace.update(
-                            output={"response": cached_response["response"], "cache_hit": True},
+                            output={
+                                "response": cached_response["response"],
+                                "cache_hit": True,
+                            },
                             metadata={
                                 "cache_hit": True,
                                 "similarity": cached_response.get("similarity", 0),
                                 "cache_hit_rate": cache_metrics.hit_rate,
                                 "total_time_seconds": 0.1,
-                            }
+                            },
                         )
                         langfuse_trace.end()
                         flush_langfuse()
                         _log(f"📊 Langfuse span (cache hit) completed")
                     except Exception as cache_trace_err:
-                        _log(f"⚠️ Langfuse cache span failed: {cache_trace_err}", "warning")
-                
+                        _log(
+                            f"⚠️ Langfuse cache span failed: {cache_trace_err}",
+                            "warning",
+                        )
+
                 # Cache'den gelen cevabı döndür
                 yield {
                     "type": "cache_hit",
                     "content": f"🎯 Cache hit (similarity: {cached_response.get('similarity', 0):.2f})",
                 }
-                
+
                 # Frontend için message_chunk gönder (chat ekranında görünsün)
                 cached_content = cached_response["response"]
                 yield {
@@ -2503,11 +2715,13 @@ class ReactAgent:
                     "is_final_answer": True,
                     "session_id": session_id,
                 }
-                
+
                 yield {
                     "type": "final_response",
                     "content": cached_content,
-                    "sources": cached_response.get("sources", {"documents": [], "pages": []}),
+                    "sources": cached_response.get(
+                        "sources", {"documents": [], "pages": []}
+                    ),
                     "metrics": {
                         "total_time": 0.1,  # Cache hit çok hızlı
                         "tool_calls": 0,
@@ -2524,18 +2738,18 @@ class ReactAgent:
                     "timestamp": datetime.now().isoformat(),
                 }
                 return  # Cache hit - agent çalıştırma
-                
+
         except Exception as cache_error:
             _log(f"⚠️ Cache check error: {cache_error}", "warning")
-        
+
         # Timing
         total_start = time.time()
         llm_step_count = 0
-        
+
         try:
             # Session sayacını sıfırla (kullanıcı dostu mesajlar için)
             _reset_session_result_counter(session_id)
-            
+
             # Başlangıç
             yield {
                 "type": "thinking_step",
@@ -2543,7 +2757,7 @@ class ReactAgent:
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat(),
             }
-            
+
             # Şema al
             schema_info = self._get_schema_for_session(session_id)
             if not schema_info:
@@ -2553,23 +2767,23 @@ class ReactAgent:
                     "session_id": session_id,
                 }
                 return
-            
+
             yield {
                 "type": "thinking_step",
                 "message": "📊 Veritabanı yapısı yüklendi",
                 "session_id": session_id,
             }
-            
+
             # History al
             conversation_history = self._get_conversation_history(session_id)
             self._save_to_history(session_id, "Human", question)
-            
+
             # Agent config al veya oluştur
             if self.agent is None:
                 self.agent = await self._create_agent(schema_info, session_id)
-            
+
             agent_config = self.agent
-            
+
             # Tool'ları oluştur (her soru için yeni question_id ile)
             if self.mcp_tools is None:
                 yield {
@@ -2578,15 +2792,15 @@ class ReactAgent:
                     "session_id": session_id,
                 }
                 return
-            
+
             react_tools = create_react_tools(
                 self.mcp_tools,
                 session_id[:8] if session_id else "default",
                 short_question_id,
                 user_question=question,
-                token_tracker=token_tracker
+                token_tracker=token_tracker,
             )
-            
+
             # Gerçek agent'ı oluştur
             if create_agent is None:
                 yield {
@@ -2595,16 +2809,21 @@ class ReactAgent:
                     "session_id": session_id,
                 }
                 return
-            
+
             # 📚 Few-shot learning: User message'a ekle (System prompt'u değiştirmeden)
             # ⚠️ CACHE İÇİN ÖNEMLİ: System prompt SABİT kalmalı, few-shot user message'da olmalı
             few_shot_examples: List[Dict[str, Any]] = []
             few_shot_prompt: str = ""  # User message'a eklenecek
-            
+
             # Her soru için orijinal system_prompt kullan (cache için SABİT)
-            original_system_prompt = agent_config.get("original_system_prompt") or agent_config["system_prompt"]
-            final_system_prompt = original_system_prompt  # ⚠️ DEĞİŞTİRME - Cache için sabit
-            
+            original_system_prompt = (
+                agent_config.get("original_system_prompt")
+                or agent_config["system_prompt"]
+            )
+            final_system_prompt = (
+                original_system_prompt  # ⚠️ DEĞİŞTİRME - Cache için sabit
+            )
+
             if FEEDBACK_ENABLED and FEEDBACK_FEW_SHOT_ENABLED and question:
                 try:
                     # Başarılı örnekler
@@ -2614,41 +2833,49 @@ class ReactAgent:
                         min_score=1,
                         similarity_threshold=0.75,
                     )
-                    
+
                     # Düzeltilmiş hatalar (learning from mistakes)
                     corrections = get_corrections_for_fewshot(
                         question=question,
                         limit=2,
                         similarity_threshold=0.70,
                     )
-                    
+
                     if few_shot_examples or corrections:
-                        few_shot_prompt = format_few_shot_prompt(few_shot_examples, corrections)
+                        few_shot_prompt = format_few_shot_prompt(
+                            few_shot_examples, corrections
+                        )
                         # ⚠️ ESKİ: final_system_prompt = final_system_prompt + "\n\n" + few_shot_prompt
                         # ✅ YENİ: few_shot_prompt user message'a eklenecek (aşağıda)
-                        _log(f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme (user message'a eklenecek)")
-                        
+                        _log(
+                            f"📚 Few-shot: {len(few_shot_examples)} örnek, {len(corrections)} düzeltme (user message'a eklenecek)"
+                        )
+
                         # Few-shot içeriğini logla (ilk 1000 karakter)
                         _log(f"📋 Few-shot strateji: {few_shot_prompt[:1000]}...")
                     else:
                         _log(f"📚 Few-shot: 0 örnek bulundu (threshold: 0.75)")
                 except Exception as e:
                     _log(f"⚠️ Few-shot examples error: {e}", "warning")
-            
+
             # 🔧 Her sorgu için YENİ middleware instance oluştur
             # (cached middleware'in run_model_call_count'u sıfırlanmıyor!)
             query_middleware = []
             if ModelCallLimitMiddleware is not None:
                 query_middleware.append(ModelCallLimitMiddleware(run_limit=25))
-            
+
             # 📦 Anthropic Prompt Caching Middleware - Cache için ZORUNLU!
             # https://docs.langchain.com/oss/python/integrations/middleware/anthropic
             actual_model = self.model_name
             if ":" in self.model_name:
                 actual_model = self.model_name.split(":", 1)[1]
-            
+
             is_claude = actual_model.lower().startswith("claude")
-            if is_claude and ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE and AnthropicPromptCachingMiddleware is not None:
+            if (
+                is_claude
+                and ANTHROPIC_CACHING_MIDDLEWARE_AVAILABLE
+                and AnthropicPromptCachingMiddleware is not None
+            ):
                 try:
                     # AnthropicPromptCachingMiddleware otomatik olarak:
                     # - System prompt'u cache'ler
@@ -2661,25 +2888,37 @@ class ReactAgent:
                     query_middleware.append(caching_middleware)
                     _log(f"📦 AnthropicPromptCachingMiddleware added (ttl=5m)")
                 except Exception as cache_mw_err:
-                    _log(f"⚠️ AnthropicPromptCachingMiddleware failed: {cache_mw_err}", "warning")
-            
+                    _log(
+                        f"⚠️ AnthropicPromptCachingMiddleware failed: {cache_mw_err}",
+                        "warning",
+                    )
+
             model_for_agent = agent_config["model"]
             tools_for_agent = react_tools
             system_prompt_for_agent: Any = final_system_prompt
-            
+
             # 🔍 DEBUG: System prompt hash'ini logla - cache için SABİT olmalı!
             import hashlib
+
             prompt_hash = hashlib.md5(final_system_prompt.encode()).hexdigest()[:12]
             _log(f"🔍 [CACHE DEBUG] System prompt hash: {prompt_hash}")
-            _log(f"🔍 [CACHE DEBUG] System prompt length: {len(final_system_prompt)} chars")
-            _log(f"🔍 [CACHE DEBUG] System prompt first 200: {final_system_prompt[:200]}...")
-            _log(f"🔍 [CACHE DEBUG] System prompt last 200: ...{final_system_prompt[-200:]}")
-            
+            _log(
+                f"🔍 [CACHE DEBUG] System prompt length: {len(final_system_prompt)} chars"
+            )
+            _log(
+                f"🔍 [CACHE DEBUG] System prompt first 200: {final_system_prompt[:200]}..."
+            )
+            _log(
+                f"🔍 [CACHE DEBUG] System prompt last 200: ...{final_system_prompt[-200:]}"
+            )
+
             # Cache uygunluk kontrolü için değişkenler
             cache_eligible = True
             cache_warning: str | None = None
-            estimated_prompt_tokens = len(final_system_prompt) // 4  # Ortalama ~4 karakter = 1 token
-            
+            estimated_prompt_tokens = (
+                len(final_system_prompt) // 4
+            )  # Ortalama ~4 karakter = 1 token
+
             if actual_model.lower().startswith("claude"):
                 # Claude için prompt caching:
                 # 1. Tool caching: bind_tools ile cache_control
@@ -2687,15 +2926,18 @@ class ReactAgent:
                 # NOT: bind_tools cache için, ama create_agent'a da tools geçmeli (graph için)
                 # ⚠️ ÖNEMLİ: convert_to_anthropic_tool KULLANMA! bind_tools zaten dönüşümü yapıyor.
                 #    Manuel dönüşüm cache mekanizmasını bozuyor.
-                
+
                 # 📊 Minimum Token Kontrolü (Anthropic Cache Limitations)
                 # - Claude Opus 4.5: minimum 4096 token
                 # - Claude Sonnet 4.5/4: minimum 1024 token
                 # - Claude Haiku 4.5: minimum 4096 token
                 is_opus = "opus" in actual_model.lower()
-                is_haiku_45 = "haiku-4-5" in actual_model.lower() or "haiku-4.5" in actual_model.lower()
+                is_haiku_45 = (
+                    "haiku-4-5" in actual_model.lower()
+                    or "haiku-4.5" in actual_model.lower()
+                )
                 min_tokens_required = 4096 if (is_opus or is_haiku_45) else 1024
-                
+
                 if estimated_prompt_tokens < min_tokens_required:
                     cache_eligible = False
                     cache_warning = (
@@ -2705,8 +2947,10 @@ class ReactAgent:
                     )
                     _log(cache_warning, "warning")
                 else:
-                    _log(f"✅ Cache uyumlu: ~{estimated_prompt_tokens} token >= {min_tokens_required} minimum")
-                
+                    _log(
+                        f"✅ Cache uyumlu: ~{estimated_prompt_tokens} token >= {min_tokens_required} minimum"
+                    )
+
                 # 📊 Langfuse'a cache eligibility metadata'sı ekle
                 if langfuse_trace:
                     try:
@@ -2720,10 +2964,15 @@ class ReactAgent:
                                 "cache_warning": cache_warning,
                             }
                         )
-                        _log(f"📊 Langfuse cache metadata updated: eligible={cache_eligible}")
+                        _log(
+                            f"📊 Langfuse cache metadata updated: eligible={cache_eligible}"
+                        )
                     except Exception as lf_err:
-                        _log(f"⚠️ Langfuse cache metadata update failed: {lf_err}", "warning")
-                
+                        _log(
+                            f"⚠️ Langfuse cache metadata update failed: {lf_err}",
+                            "warning",
+                        )
+
                 try:
                     # Tool'ları cache için işaretle (orijinal LangChain tool'ları kullan)
                     model_for_agent = agent_config["model"].bind_tools(
@@ -2733,12 +2982,14 @@ class ReactAgent:
                     # ⚠️ tools_for_agent hala react_tools olmalı - create_agent graph için gerekli!
                     # bind_tools sadece cache için, agent'ın tool node'u tools listesine bakıyor
                     tools_for_agent = react_tools
-                    _log(f"📦 Anthropic tool caching enabled ({len(react_tools)} tools)")
-                    
+                    _log(
+                        f"📦 Anthropic tool caching enabled ({len(react_tools)} tools)"
+                    )
+
                     # 🔍 DEBUG: Tool isimlerini logla
-                    tool_names = [getattr(t, 'name', 'unknown') for t in react_tools]
+                    tool_names = [getattr(t, "name", "unknown") for t in react_tools]
                     _log(f"🔍 [CACHE DEBUG] Tool names: {tool_names}")
-                    
+
                     # System prompt'u cache için işaretle
                     # SystemMessage ile content block formatı kullan
                     if SystemMessage is not None:
@@ -2752,30 +3003,47 @@ class ReactAgent:
                             ]
                         )
                         _log(f"📦 Anthropic system prompt caching enabled (ephemeral)")
-                    
+
                 except Exception as cache_err:
-                    _log(f"⚠️ Anthropic caching setup failed: {cache_err}, using default", "warning")
+                    _log(
+                        f"⚠️ Anthropic caching setup failed: {cache_err}, using default",
+                        "warning",
+                    )
                     model_for_agent = agent_config["model"]
                     tools_for_agent = react_tools
                     system_prompt_for_agent = final_system_prompt
-            
+
             # 🔍 DEBUG: Agent oluşturma öncesi kontrol
             _log(f"🔍 [CACHE DEBUG] Creating agent with:")
-            _log(f"🔍 [CACHE DEBUG]   - model_for_agent type: {type(model_for_agent).__name__}")
+            _log(
+                f"🔍 [CACHE DEBUG]   - model_for_agent type: {type(model_for_agent).__name__}"
+            )
             _log(f"🔍 [CACHE DEBUG]   - tools_for_agent count: {len(tools_for_agent)}")
-            _log(f"🔍 [CACHE DEBUG]   - system_prompt_for_agent type: {type(system_prompt_for_agent).__name__}")
+            _log(
+                f"🔍 [CACHE DEBUG]   - system_prompt_for_agent type: {type(system_prompt_for_agent).__name__}"
+            )
             if isinstance(system_prompt_for_agent, str):
-                _log(f"🔍 [CACHE DEBUG]   - system_prompt hash: {hashlib.md5(system_prompt_for_agent.encode()).hexdigest()[:12]}")
+                _log(
+                    f"🔍 [CACHE DEBUG]   - system_prompt hash: {hashlib.md5(system_prompt_for_agent.encode()).hexdigest()[:12]}"
+                )
             else:
                 # SystemMessage ise content'i hash'le
-                content = getattr(system_prompt_for_agent, 'content', None)
+                content = getattr(system_prompt_for_agent, "content", None)
                 if content:
                     if isinstance(content, list) and len(content) > 0:
-                        text = content[0].get('text', '') if isinstance(content[0], dict) else str(content[0])
-                        _log(f"🔍 [CACHE DEBUG]   - SystemMessage content hash: {hashlib.md5(text.encode()).hexdigest()[:12]}")
+                        text = (
+                            content[0].get("text", "")
+                            if isinstance(content[0], dict)
+                            else str(content[0])
+                        )
+                        _log(
+                            f"🔍 [CACHE DEBUG]   - SystemMessage content hash: {hashlib.md5(text.encode()).hexdigest()[:12]}"
+                        )
                     else:
-                        _log(f"🔍 [CACHE DEBUG]   - SystemMessage content: {str(content)[:100]}")
-            
+                        _log(
+                            f"🔍 [CACHE DEBUG]   - SystemMessage content: {str(content)[:100]}"
+                        )
+
             agent = create_agent(
                 model=model_for_agent,
                 tools=tools_for_agent,
@@ -2783,26 +3051,28 @@ class ReactAgent:
                 middleware=query_middleware,  # Her sorguda yeni instance
                 name="react_agent",
             )
-            
+
             # Messages oluştur - unused but kept for reference
             _ = self._build_messages(
-                agent_config["system_prompt"],
-                conversation_history,
-                question
+                agent_config["system_prompt"], conversation_history, question
             )
-            
+
             # Sadece user messages'ı agent'a gönder (system prompt zaten agent'ta)
             # Anthropic Incremental Cache: Yeni soru mesajı da cache_control ile işaretlenmeli
             # Bu sayede bu soru da cache'e eklenir ve sonraki sorularda okunur
             is_claude = actual_model.lower().startswith("claude")
-            
+
             # 📚 Few-shot'u user message'a ekle (cache'i bozmamak için system prompt'ta DEĞİL)
             # Few-shot varsa question'ın önüne ekle
             user_question_with_context = question
             if few_shot_prompt:
-                user_question_with_context = f"{few_shot_prompt}\n\n---\n\n**Kullanıcı Sorusu:**\n{question}"
-                _log(f"📚 Few-shot user message'a eklendi ({len(few_shot_prompt)} chars)")
-            
+                user_question_with_context = (
+                    f"{few_shot_prompt}\n\n---\n\n**Kullanıcı Sorusu:**\n{question}"
+                )
+                _log(
+                    f"📚 Few-shot user message'a eklendi ({len(few_shot_prompt)} chars)"
+                )
+
             if is_claude:
                 # Cache-enabled format: content as list with cache_control
                 new_user_message: Dict[str, Any] = {
@@ -2813,14 +3083,17 @@ class ReactAgent:
                             "text": user_question_with_context,
                             "cache_control": {"type": "ephemeral"},
                         }
-                    ]
+                    ],
                 }
             else:
                 # Non-Claude models: simple format
-                new_user_message = {"role": "user", "content": user_question_with_context}
-            
+                new_user_message = {
+                    "role": "user",
+                    "content": user_question_with_context,
+                }
+
             agent_input: Dict[str, Any] = {"messages": [new_user_message]}
-            
+
             # History varsa ekle
             # NOT: History'deki son human mesajın cache_control'ü var,
             # ama yeni soru "en son" human mesaj olduğu için onun cache_control'ü önemli
@@ -2828,218 +3101,340 @@ class ReactAgent:
                 # History'den cache_control'ü kaldır (yeni soru artık "son" mesaj)
                 history_for_input = []
                 for msg in conversation_history:
-                    if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    if msg.get("role") == "user" and isinstance(
+                        msg.get("content"), list
+                    ):
                         # User mesajından cache_control'ü kaldır
                         cleaned_content = []
                         for block in msg["content"]:
                             if isinstance(block, dict):
-                                block_copy = {k: v for k, v in block.items() if k != "cache_control"}
+                                block_copy = {
+                                    k: v
+                                    for k, v in block.items()
+                                    if k != "cache_control"
+                                }
                                 cleaned_content.append(block_copy)
                             else:
                                 cleaned_content.append(block)
-                        history_for_input.append({"role": "user", "content": cleaned_content})
+                        history_for_input.append(
+                            {"role": "user", "content": cleaned_content}
+                        )
                     else:
                         history_for_input.append(msg)
-                
+
                 agent_input["messages"] = history_for_input + [new_user_message]
-            
+
             yield {
                 "type": "thinking_step",
                 "message": "🧠 Soru analiz ediliyor...",
                 "session_id": session_id,
             }
-            
+
             # Streaming
             response_text = ""
             tool_call_count = 0
             logged_msg_ids: set[Any] = set()
             pending_tool_names: Dict[str, str] = {}  # tool_call_id -> tool_name
-            collected_graph_facts: List[str] = []  # Hallucination check için tool sonuçları
-            
+            collected_graph_facts: List[str] = (
+                []
+            )  # Hallucination check için tool sonuçları
+
             # 📚 Tool calls collection for feedback/learning
             collected_tool_calls: List[Dict[str, Any]] = []
-            pending_tool_inputs: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> {tool_name, tool_input, start_time}
-            
+            pending_tool_inputs: Dict[str, Dict[str, Any]] = (
+                {}
+            )  # tool_call_id -> {tool_name, tool_input, start_time}
+
             # 📊 Langfuse için: LLM'e giden tüm context'i biriktir
-            accumulated_tool_results: List[Dict[str, Any]] = []  # [{tool_name, input, output}, ...]
-            
+            accumulated_tool_results: List[Dict[str, Any]] = (
+                []
+            )  # [{tool_name, input, output}, ...]
+
             chunk_count = 0
             async for chunk in agent.astream(agent_input, stream_mode="updates"):  # type: ignore[arg-type]
                 chunk_count += 1
-                
+
                 # 🔍 DEBUG: Her chunk'ı logla
                 if isinstance(chunk, dict):
                     for node_name, node_output in chunk.items():
-                        _log(f"🔄 [CHUNK {chunk_count}] Node: {node_name}, Keys: {list(node_output.keys()) if isinstance(node_output, dict) else type(node_output).__name__}")
-                
+                        _log(
+                            f"🔄 [CHUNK {chunk_count}] Node: {node_name}, Keys: {list(node_output.keys()) if isinstance(node_output, dict) else type(node_output).__name__}"
+                        )
+
                 if not isinstance(chunk, dict):
                     continue
-                
+
                 for node_name, node_output in chunk.items():
                     if not isinstance(node_output, dict):
                         continue
-                    
+
                     messages_out = node_output.get("messages", [])
                     for message in messages_out:
-                        msg_id = getattr(message, "id", None) or hash(str(getattr(message, "content", ""))[:100])
+                        msg_id = getattr(message, "id", None) or hash(
+                            str(getattr(message, "content", ""))[:100]
+                        )
                         if msg_id in logged_msg_ids:
                             continue
                         logged_msg_ids.add(msg_id)
-                        
+
                         msg_type = type(message).__name__
-                        
+
                         # 🔍 DEBUG: Her mesaj tipini logla
                         content = getattr(message, "content", "")
                         content_preview = str(content)[:100]
-                        has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
-                        _log(f"📨 [MSG] Type: {msg_type}, HasToolCalls: {has_tool_calls}, Content: {content_preview}...")
-                        
+                        has_tool_calls = (
+                            hasattr(message, "tool_calls") and message.tool_calls
+                        )
+                        _log(
+                            f"📨 [MSG] Type: {msg_type}, HasToolCalls: {has_tool_calls}, Content: {content_preview}..."
+                        )
+
                         # 🧠 Extended Thinking içeriğini logla (Claude)
                         if msg_type == "AIMessage" and isinstance(content, list):
                             for block in content:
-                                if isinstance(block, dict) and block.get("type") == "thinking":
+                                if (
+                                    isinstance(block, dict)
+                                    and block.get("type") == "thinking"
+                                ):
                                     thinking_text = block.get("thinking", "")
                                     if thinking_text:
                                         # İlk 500 karakteri göster
-                                        thinking_preview = thinking_text[:500].replace("\n", " ")
+                                        thinking_preview = thinking_text[:500].replace(
+                                            "\n", " "
+                                        )
                                         _log(f"🧠 [THINKING] {thinking_preview}...")
                                         # Skill mention kontrolü
-                                        if "skill" in thinking_text.lower() or "search_skills" in thinking_text.lower() or "geçmiş" in thinking_text.lower():
-                                            _log(f"🔍 [THINKING SKILL] Agent skill'lerden bahsediyor!")
-                        
+                                        if (
+                                            "skill" in thinking_text.lower()
+                                            or "search_skills" in thinking_text.lower()
+                                            or "geçmiş" in thinking_text.lower()
+                                        ):
+                                            _log(
+                                                f"🔍 [THINKING SKILL] Agent skill'lerden bahsediyor!"
+                                            )
+
                         # AIMessage'dan token kullanımı çıkar
                         if msg_type == "AIMessage":
                             usage_metadata = getattr(message, "usage_metadata", None)
-                            response_metadata = getattr(message, "response_metadata", None)
-                            
+                            response_metadata = getattr(
+                                message, "response_metadata", None
+                            )
+
                             input_tokens = 0
                             output_tokens = 0
                             cached_tokens = 0  # cache_read
                             cache_creation_tokens = 0  # cache_creation
                             reasoning_tokens = 0  # GPT-5 reasoning token sayısı
-                            
+
                             # 📦 Anthropic Cache Verification Logging
                             # https://docs.langchain.com/oss/python/integrations/chat/anthropic#caching-tools
                             if usage_metadata:
-                                input_details = usage_metadata.get("input_token_details", {})
+                                input_details = usage_metadata.get(
+                                    "input_token_details", {}
+                                )
                                 if input_details and isinstance(input_details, dict):
-                                    cache_creation_tokens = input_details.get("cache_creation", 0)
+                                    cache_creation_tokens = input_details.get(
+                                        "cache_creation", 0
+                                    )
                                     cache_read = input_details.get("cache_read", 0)
-                                    ephemeral_5m = input_details.get("ephemeral_5m_input_tokens", 0)
-                                    ephemeral_1h = input_details.get("ephemeral_1h_input_tokens", 0)
-                                    
+                                    ephemeral_5m = input_details.get(
+                                        "ephemeral_5m_input_tokens", 0
+                                    )
+                                    ephemeral_1h = input_details.get(
+                                        "ephemeral_1h_input_tokens", 0
+                                    )
+
                                     # Cache durumu özeti
                                     if cache_creation_tokens > 0 or cache_read > 0:
-                                        cache_status = "✅ CACHE_HIT" if cache_read > 0 else "📝 CACHE_WRITE"
-                                        _log(f"📦 [CACHE] {cache_status} | creation: {cache_creation_tokens}, read: {cache_read}, ephemeral_5m: {ephemeral_5m}")
-                                        
+                                        cache_status = (
+                                            "✅ CACHE_HIT"
+                                            if cache_read > 0
+                                            else "📝 CACHE_WRITE"
+                                        )
+                                        _log(
+                                            f"📦 [CACHE] {cache_status} | creation: {cache_creation_tokens}, read: {cache_read}, ephemeral_5m: {ephemeral_5m}"
+                                        )
+
                                         # Tool cache çalışıyor mu?
                                         if cache_read > 0:
-                                            _log(f"✅ [CACHE VERIFIED] System prompt + Tool definitions reading from cache ({cache_read} tokens)")
+                                            _log(
+                                                f"✅ [CACHE VERIFIED] System prompt + Tool definitions reading from cache ({cache_read} tokens)"
+                                            )
                                         elif cache_creation_tokens > 0:
-                                            _log(f"📝 [CACHE CREATED] System prompt + Tool definitions cached ({cache_creation_tokens} tokens)")
-                                
+                                            _log(
+                                                f"📝 [CACHE CREATED] System prompt + Tool definitions cached ({cache_creation_tokens} tokens)"
+                                            )
+
                                 # Full debug log
                                 _log(f"🔍 [DEBUG] usage_metadata: {usage_metadata}")
-                            
+
                             if response_metadata:
                                 # Sadece token ile ilgili kısımları logla
-                                token_related = {k: v for k, v in response_metadata.items() 
-                                               if 'token' in k.lower() or 'usage' in k.lower() or 'cache' in k.lower()}
+                                token_related = {
+                                    k: v
+                                    for k, v in response_metadata.items()
+                                    if "token" in k.lower()
+                                    or "usage" in k.lower()
+                                    or "cache" in k.lower()
+                                }
                                 if token_related:
-                                    _log(f"🔍 [DEBUG] response_metadata (token): {token_related}")
-                            
+                                    _log(
+                                        f"🔍 [DEBUG] response_metadata (token): {token_related}"
+                                    )
+
                             # usage_metadata varsa (LangChain 0.3+)
                             if usage_metadata:
                                 input_tokens = usage_metadata.get("input_tokens", 0)
                                 output_tokens = usage_metadata.get("output_tokens", 0)
-                                
+
                                 # OpenAI cached tokens - input_token_details içinde
-                                input_details = usage_metadata.get("input_token_details", {})
+                                input_details = usage_metadata.get(
+                                    "input_token_details", {}
+                                )
                                 if input_details and isinstance(input_details, dict):
                                     # OpenAI GPT-5 format: cache_read (not cached_tokens!)
                                     cached_tokens = input_details.get("cache_read", 0)
                                     # Fallback: eski format
                                     if cached_tokens == 0:
-                                        cached_tokens = input_details.get("cached_tokens", 0)
-                                
+                                        cached_tokens = input_details.get(
+                                            "cached_tokens", 0
+                                        )
+
                                 # GPT-5 reasoning tokens - output_token_details içinde
-                                output_details = usage_metadata.get("output_token_details", {})
+                                output_details = usage_metadata.get(
+                                    "output_token_details", {}
+                                )
                                 if output_details and isinstance(output_details, dict):
-                                    reasoning_tokens = output_details.get("reasoning", 0)
-                                
+                                    reasoning_tokens = output_details.get(
+                                        "reasoning", 0
+                                    )
+
                                 # Anthropic format
                                 if cached_tokens == 0:
-                                    cached_tokens = usage_metadata.get("cache_read_input_tokens", 0)
-                            
+                                    cached_tokens = usage_metadata.get(
+                                        "cache_read_input_tokens", 0
+                                    )
+
                             # response_metadata'dan da bakılabilir
-                            if (input_tokens == 0 or cached_tokens == 0) and response_metadata:
+                            if (
+                                input_tokens == 0 or cached_tokens == 0
+                            ) and response_metadata:
                                 token_usage = response_metadata.get("token_usage", {})
                                 if token_usage:
                                     if input_tokens == 0:
-                                        input_tokens = token_usage.get("prompt_tokens", 0)
+                                        input_tokens = token_usage.get(
+                                            "prompt_tokens", 0
+                                        )
                                     if output_tokens == 0:
-                                        output_tokens = token_usage.get("completion_tokens", 0)
-                                    
+                                        output_tokens = token_usage.get(
+                                            "completion_tokens", 0
+                                        )
+
                                     # OpenAI API format: prompt_tokens_details.cached_tokens
-                                    prompt_details = token_usage.get("prompt_tokens_details", {})
-                                    if prompt_details and isinstance(prompt_details, dict):
-                                        cached_tokens = prompt_details.get("cached_tokens", 0)
-                            
+                                    prompt_details = token_usage.get(
+                                        "prompt_tokens_details", {}
+                                    )
+                                    if prompt_details and isinstance(
+                                        prompt_details, dict
+                                    ):
+                                        cached_tokens = prompt_details.get(
+                                            "cached_tokens", 0
+                                        )
+
                             if input_tokens > 0 or output_tokens > 0:
                                 llm_step_count += 1
-                                
+
                                 # LLM output - AI mesajının içeriği
                                 # GPT-5 reasoning response: content = [{'type': 'reasoning', 'summary': [...]}, {'type': 'text', 'text': '...'}]
                                 llm_output_data = None
                                 reasoning_summary = None
                                 text_content = None
-                                
+
                                 if hasattr(message, "content") and message.content:
                                     content = message.content
-                                    
+
                                     # GPT-5 reasoning format: content liste olabilir
                                     if isinstance(content, list):
                                         for item in content:
                                             if isinstance(item, dict):
                                                 if item.get("type") == "reasoning":
                                                     # Reasoning summary - düşünce süreci
-                                                    reasoning_summary = item.get("summary", [])
+                                                    reasoning_summary = item.get(
+                                                        "summary", []
+                                                    )
                                                 elif item.get("type") == "text":
                                                     # Metin cevabı
                                                     text_content = item.get("text", "")
                                     elif isinstance(content, str):
                                         text_content = content
-                                    
+
                                     llm_output_data = {
                                         "text": text_content,
-                                        "reasoning_summary": reasoning_summary if reasoning_summary else None,
-                                        "tool_calls": [
-                                            {"name": tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown"),
-                                             "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})}
-                                            for tc in (message.tool_calls or [])
-                                        ] if hasattr(message, "tool_calls") and message.tool_calls else None
+                                        "reasoning_summary": (
+                                            reasoning_summary
+                                            if reasoning_summary
+                                            else None
+                                        ),
+                                        "tool_calls": (
+                                            [
+                                                {
+                                                    "name": (
+                                                        tc.get("name", "unknown")
+                                                        if isinstance(tc, dict)
+                                                        else getattr(
+                                                            tc, "name", "unknown"
+                                                        )
+                                                    ),
+                                                    "args": (
+                                                        tc.get("args", {})
+                                                        if isinstance(tc, dict)
+                                                        else getattr(tc, "args", {})
+                                                    ),
+                                                }
+                                                for tc in (message.tool_calls or [])
+                                            ]
+                                            if hasattr(message, "tool_calls")
+                                            and message.tool_calls
+                                            else None
+                                        ),
                                     }
-                                elif hasattr(message, "tool_calls") and message.tool_calls:
+                                elif (
+                                    hasattr(message, "tool_calls")
+                                    and message.tool_calls
+                                ):
                                     llm_output_data = {
                                         "tool_calls": [
-                                            {"name": tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown"),
-                                             "args": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})}
+                                            {
+                                                "name": (
+                                                    tc.get("name", "unknown")
+                                                    if isinstance(tc, dict)
+                                                    else getattr(tc, "name", "unknown")
+                                                ),
+                                                "args": (
+                                                    tc.get("args", {})
+                                                    if isinstance(tc, dict)
+                                                    else getattr(tc, "args", {})
+                                                ),
+                                            }
                                             for tc in message.tool_calls
                                         ]
                                     }
-                                
+
                                 # 📊 Langfuse için: Tam context oluştur (soru + önceki tool sonuçları)
                                 llm_input_data: Dict[str, Any] = {
                                     "question": question,
                                     "step": llm_step_count,
                                 }
-                                
+
                                 # Tool sonuçları varsa ekle (LLM'in gördüğü context)
                                 if accumulated_tool_results:
-                                    llm_input_data["previous_tool_results"] = accumulated_tool_results.copy()
-                                    llm_input_data["tool_count"] = len(accumulated_tool_results)
-                                
+                                    llm_input_data["previous_tool_results"] = (
+                                        accumulated_tool_results.copy()
+                                    )
+                                    llm_input_data["tool_count"] = len(
+                                        accumulated_tool_results
+                                    )
+
                                 token_tracker.add_llm_step(
                                     step_name=f"llm_step_{llm_step_count}",
                                     input_tokens=input_tokens,
@@ -3052,84 +3447,133 @@ class ReactAgent:
                                     llm_input=llm_input_data,
                                     llm_output=llm_output_data,
                                 )
-                        
+
                         # Tool calls
                         if hasattr(message, "tool_calls") and message.tool_calls:
                             for tc in message.tool_calls:
                                 tool_call_count += 1
-                                tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                                tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                                tool_call_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                                
+                                tool_name = (
+                                    tc.get("name", "unknown")
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "name", "unknown")
+                                )
+                                tool_args = (
+                                    tc.get("args", {})
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "args", {})
+                                )
+                                tool_call_id = (
+                                    tc.get("id", "")
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "id", "")
+                                )
+
                                 # Token tracker'a ekle (tool_call_id ile - Langfuse span'ı için)
-                                token_tracker.add_tool_call(tool_name, tool_args, tool_call_id)
-                                
+                                token_tracker.add_tool_call(
+                                    tool_name, tool_args, tool_call_id
+                                )
+
                                 # Tool call ID'yi sakla (result için)
                                 if tool_call_id:
                                     pending_tool_names[tool_call_id] = tool_name
                                     # 📚 Feedback için tool input'u sakla
                                     pending_tool_inputs[tool_call_id] = {
                                         "tool_name": tool_name,
-                                        "tool_input": json.dumps(tool_args, ensure_ascii=False) if tool_args else "",
+                                        "tool_input": (
+                                            json.dumps(tool_args, ensure_ascii=False)
+                                            if tool_args
+                                            else ""
+                                        ),
                                         "start_time": time.time(),
                                     }
-                                
+
                                 # Kullanıcıya TEKNIK OLMAYAN, anlaşılır mesaj göster
-                                thinking_msg = _get_user_friendly_tool_message(tool_name, tool_args)
-                                
+                                thinking_msg = _get_user_friendly_tool_message(
+                                    tool_name, tool_args
+                                )
+
                                 if thinking_msg:
                                     yield {
                                         "type": "thinking_step",
                                         "message": thinking_msg,
                                         "session_id": session_id,
                                     }
-                        
+
                         # Tool results
                         if msg_type == "ToolMessage":
                             tool_content = getattr(message, "content", "")
                             tool_call_id = getattr(message, "tool_call_id", "")
                             tool_name = pending_tool_names.get(tool_call_id, "unknown")
-                            
+
                             # Durum kontrolü: success (✅), empty (⚪), failed (❌)
                             if "✅" in tool_content:
                                 result_status = "success"
                                 # 🔍 Hallucination check için başarılı sonuçları topla
                                 if GUARDRAILS_HALLUCINATION_CHECK and tool_content:
-                                    collected_graph_facts.append(str(tool_content)[:2000])
+                                    collected_graph_facts.append(
+                                        str(tool_content)[:2000]
+                                    )
                             elif "⚪" in tool_content:
                                 result_status = "empty"
                             else:
                                 result_status = "failed"
-                            
+
                             # Token tracker'a ekle (tool_call_id ile - Langfuse span'ı bulmak için)
-                            token_tracker.add_tool_result(tool_name, str(tool_content), result_status == "success", tool_call_id)
-                            
+                            token_tracker.add_tool_result(
+                                tool_name,
+                                str(tool_content),
+                                result_status == "success",
+                                tool_call_id,
+                            )
+
                             # 📚 Feedback için tool call'ı kaydet
                             if tool_call_id and tool_call_id in pending_tool_inputs:
                                 pending_info = pending_tool_inputs[tool_call_id]
-                                duration_ms = int((time.time() - pending_info.get("start_time", time.time())) * 1000)
-                                collected_tool_calls.append({
-                                    "tool_name": pending_info.get("tool_name", tool_name),
-                                    "tool_input": pending_info.get("tool_input", ""),
-                                    "tool_output": str(tool_content),
-                                    "duration_ms": duration_ms,
-                                    "success": result_status == "success",
-                                })
-                                
+                                duration_ms = int(
+                                    (
+                                        time.time()
+                                        - pending_info.get("start_time", time.time())
+                                    )
+                                    * 1000
+                                )
+                                collected_tool_calls.append(
+                                    {
+                                        "tool_name": pending_info.get(
+                                            "tool_name", tool_name
+                                        ),
+                                        "tool_input": pending_info.get(
+                                            "tool_input", ""
+                                        ),
+                                        "tool_output": str(tool_content),
+                                        "duration_ms": duration_ms,
+                                        "success": result_status == "success",
+                                    }
+                                )
+
                                 # 📊 Langfuse için: Tool sonucunu accumulated context'e ekle
                                 # Output'u 2000 karakterle sınırla (çok uzun olmasın)
                                 output_preview = str(tool_content)[:2000]
                                 if len(str(tool_content)) > 2000:
-                                    output_preview += f"... ({len(str(tool_content))} karakter)"
-                                accumulated_tool_results.append({
-                                    "tool": pending_info.get("tool_name", tool_name),
-                                    "input": pending_info.get("tool_input", "")[:500],  # Input özeti
-                                    "output": output_preview,
-                                    "status": result_status,
-                                })
-                            
+                                    output_preview += (
+                                        f"... ({len(str(tool_content))} karakter)"
+                                    )
+                                accumulated_tool_results.append(
+                                    {
+                                        "tool": pending_info.get(
+                                            "tool_name", tool_name
+                                        ),
+                                        "input": pending_info.get("tool_input", "")[
+                                            :500
+                                        ],  # Input özeti
+                                        "output": output_preview,
+                                        "status": result_status,
+                                    }
+                                )
+
                             # Kullanıcıya dostu sonuç mesajı göster
-                            result_msg = _get_user_friendly_result_message(tool_content, result_status, session_id)
+                            result_msg = _get_user_friendly_result_message(
+                                tool_content, result_status, session_id
+                            )
                             if result_msg:
                                 yield {
                                     "type": "thinking_step",
@@ -3137,23 +3581,39 @@ class ReactAgent:
                                     "result_type": result_status,
                                     "session_id": session_id,
                                 }
-                        
+
                         # Final content
-                        if msg_type == "AIMessage" and hasattr(message, "content") and message.content:
-                            has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
+                        if (
+                            msg_type == "AIMessage"
+                            and hasattr(message, "content")
+                            and message.content
+                        ):
+                            has_tool_calls = (
+                                hasattr(message, "tool_calls") and message.tool_calls
+                            )
                             if not has_tool_calls:
                                 # Bu final cevap
                                 new_content = message.content
                                 if isinstance(new_content, list):
-                                    new_content = " ".join([
-                                        c.get("text", "") if isinstance(c, dict) else str(c)
-                                        for c in new_content
-                                    ])
-                                
+                                    new_content = " ".join(
+                                        [
+                                            (
+                                                c.get("text", "")
+                                                if isinstance(c, dict)
+                                                else str(c)
+                                            )
+                                            for c in new_content
+                                        ]
+                                    )
+
                                 if new_content and new_content != response_text:
-                                    delta = new_content[len(response_text):] if len(new_content) > len(response_text) else new_content
+                                    delta = (
+                                        new_content[len(response_text) :]
+                                        if len(new_content) > len(response_text)
+                                        else new_content
+                                    )
                                     response_text = new_content
-                                    
+
                                     if delta.strip():
                                         yield {
                                             "type": "message_chunk",
@@ -3162,12 +3622,12 @@ class ReactAgent:
                                             "is_final_answer": True,
                                             "session_id": session_id,
                                         }
-            
+
             # Final mesaj
             if response_text:
                 # Kaynakları al
                 sources = _get_session_sources(short_question_id)
-                
+
                 # 🛡️ Guardrails: Output validation (PII masking)
                 if GUARDRAILS_ENABLED:
                     sanitized_response, validation_info = validate_output(
@@ -3176,71 +3636,87 @@ class ReactAgent:
                         check_cypher=False,  # Cypher zaten tool'da kontrol edildi
                     )
                     if validation_info.get("pii_masked", 0) > 0:
-                        _log(f"🔒 PII masked in response: {validation_info['pii_masked']} items")
+                        _log(
+                            f"🔒 PII masked in response: {validation_info['pii_masked']} items"
+                        )
                     response_text = sanitized_response
-                
+
                 # 🔍 Guardrails: Hallucination detection
                 hallucination_warning = ""
                 if GUARDRAILS_HALLUCINATION_CHECK and collected_graph_facts:
                     try:
                         # Graph facts'ı dict listesine dönüştür
-                        graph_facts_list = [{"content": fact} for fact in collected_graph_facts]
-                        
+                        graph_facts_list = [
+                            {"content": fact} for fact in collected_graph_facts
+                        ]
+
                         is_valid, confidence, issues = check_hallucination(
                             response=response_text,
                             graph_facts=graph_facts_list,
                             threshold=0.7,
                         )
-                        
+
                         if not is_valid:
-                            _log(f"⚠️ Hallucination risk detected! Confidence: {confidence:.2f}, Issues: {issues}", "warning")
-                            
+                            _log(
+                                f"⚠️ Hallucination risk detected! Confidence: {confidence:.2f}, Issues: {issues}",
+                                "warning",
+                            )
+
                             # Kullanıcıya uyarı ekle
                             hallucination_warning = "\n\n---\n⚠️ **Doğrulama Notu:** Bu cevapta bazı bilgiler veritabanından tam olarak doğrulanamamıştır. Lütfen kritik kararlar için kaynak belgelerden teyit ediniz."
-                            
+
                             # Langfuse'a logla
                             if langfuse_trace:
                                 try:
-                                    langfuse_trace.update(metadata={
-                                        "hallucination_detected": True,
-                                        "hallucination_confidence": confidence,
-                                        "hallucination_issues": issues[:3],
-                                    })
+                                    langfuse_trace.update(
+                                        metadata={
+                                            "hallucination_detected": True,
+                                            "hallucination_confidence": confidence,
+                                            "hallucination_issues": issues[:3],
+                                        }
+                                    )
                                 except:
                                     pass
                         else:
-                            _log(f"✅ Hallucination check passed (confidence: {confidence:.2f})")
+                            _log(
+                                f"✅ Hallucination check passed (confidence: {confidence:.2f})"
+                            )
                     except Exception as hallucination_error:
-                        _log(f"⚠️ Hallucination check error: {hallucination_error}", "warning")
-                
+                        _log(
+                            f"⚠️ Hallucination check error: {hallucination_error}",
+                            "warning",
+                        )
+
                 # Markdown formatında kaynakları cevaba ekle
                 final_response = response_text
-                
+
                 # Dosya linkleri ekle
                 if sources["documents"]:
                     file_markdown = _generate_file_links_markdown(sources["documents"])
                     final_response += file_markdown
                     _log(f"📎 {len(sources['documents'])} belge kaynağı eklendi")
-                
+
                 # Sayfa görselleri ekle
                 if sources["pages"]:
                     page_markdown = _generate_page_links_markdown(sources["pages"])
                     final_response += page_markdown
                     _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi")
-                
+
                 # Hallucination uyarısı ekle
                 if hallucination_warning:
                     final_response += hallucination_warning
-                
+
                 # Markdown kaynakları stream et (message_chunk olarak)
                 source_markdown = ""
                 if sources["documents"]:
-                    source_markdown += _generate_file_links_markdown(sources["documents"])
+                    source_markdown += _generate_file_links_markdown(
+                        sources["documents"]
+                    )
                 if sources["pages"]:
                     source_markdown += _generate_page_links_markdown(sources["pages"])
                 if hallucination_warning:
                     source_markdown += hallucination_warning
-                
+
                 if source_markdown:
                     yield {
                         "type": "message_chunk",
@@ -3249,15 +3725,15 @@ class ReactAgent:
                         "is_final_answer": True,
                         "session_id": session_id,
                     }
-                
+
                 self._save_to_history(session_id, "AI", final_response)
-                
+
                 total_time = time.time() - total_start
-                
+
                 # İstatistik özetini logla
                 token_tracker.print_summary(session_id=session_id)
                 token_stats = token_tracker.get_summary()
-                
+
                 # 💾 Query cache'e yaz - sonraki benzer sorular için
                 try:
                     query_cache = get_query_cache()
@@ -3273,7 +3749,7 @@ class ReactAgent:
                     )
                 except Exception as cache_write_error:
                     _log(f"⚠️ Cache write error: {cache_write_error}", "warning")
-                
+
                 # 🧑‍⚖️ LLM-as-Judge: Background task olarak çalıştır (kullanıcıyı bekletme)
                 async def _run_llm_judge_background(
                     bb_dir: str,
@@ -3294,42 +3770,58 @@ class ReactAgent:
                             question_id=q_id,
                             similarity_threshold=0.95,
                         )
-                        
+
                         if result.get("skipped_duplicate"):
                             _log(f"⏭️ [BG] LLM-Judge: Duplicate skipped")
                         elif result.get("evaluated"):
                             judge_score = result.get("overall_score", 0.5)
                             is_correct = judge_score >= 0.7
-                            _log(f"🧑‍⚖️ [BG] LLM-Judge: score={judge_score:.2f}, correct={is_correct}")
-                            
+                            _log(
+                                f"🧑‍⚖️ [BG] LLM-Judge: score={judge_score:.2f}, correct={is_correct}"
+                            )
+
                             # Her sorgu için kısa değerlendirme
                             for qe in result.get("query_evaluations", [])[:3]:
-                                _log(f"   {qe.get('verdict', '?')} {qe.get('step', '?')}: {qe.get('short_note', '')}")
-                            
+                                _log(
+                                    f"   {qe.get('verdict', '?')} {qe.get('step', '?')}: {qe.get('short_note', '')}"
+                                )
+
                             if result.get("strategy"):
                                 strategy = result["strategy"]
                                 # Strateji dict (yeni format) veya string (eski format) olabilir
                                 if isinstance(strategy, dict):
                                     summary = strategy.get("summary", "")
-                                    _log(f"   📋 Strateji: {summary[:100]}..." if len(summary) > 100 else f"   📋 Strateji: {summary}")
+                                    _log(
+                                        f"   📋 Strateji: {summary[:100]}..."
+                                        if len(summary) > 100
+                                        else f"   📋 Strateji: {summary}"
+                                    )
                                 else:
                                     strategy_str = str(strategy)
-                                    _log(f"   📋 Strateji: {strategy_str[:100]}..." if len(strategy_str) > 100 else f"   📋 Strateji: {strategy_str}")
-                            
+                                    _log(
+                                        f"   📋 Strateji: {strategy_str[:100]}..."
+                                        if len(strategy_str) > 100
+                                        else f"   📋 Strateji: {strategy_str}"
+                                    )
+
                             if result.get("feedback_id"):
                                 _log(f"   📝 Feedback: {result['feedback_id'][:8]}...")
-                            
+
                             # Langfuse'a score kaydet
                             if lf and lf_trace:
                                 try:
-                                    trace_id = lf_trace.id if hasattr(lf_trace, 'id') else None
+                                    trace_id = (
+                                        lf_trace.id if hasattr(lf_trace, "id") else None
+                                    )
                                     if trace_id:
                                         try:
                                             lf.create_score(  # type: ignore[union-attr]
                                                 trace_id=trace_id,
                                                 name="llm_judge_score",
                                                 value=judge_score,
-                                                comment=result.get("strategy", "")[:500],
+                                                comment=result.get("strategy", "")[
+                                                    :500
+                                                ],
                                                 data_type="NUMERIC",
                                             )
                                         except AttributeError:
@@ -3337,16 +3829,20 @@ class ReactAgent:
                                                 trace_id=trace_id,
                                                 name="llm_judge_score",
                                                 value=judge_score,
-                                                comment=result.get("strategy", "")[:500],
+                                                comment=result.get("strategy", "")[
+                                                    :500
+                                                ],
                                             )
                                 except Exception:
                                     pass
                     except Exception as e:
                         _log(f"⚠️ [BG] LLM-Judge error: {e}", "warning")
-                
+
                 # Background task başlat (kullanıcıyı bekletmez)
                 if FEEDBACK_ENABLED and LLM_JUDGE_ENABLED and collected_tool_calls:
-                    blackboard_dir = get_blackboard_dir(session_id, original_question_id)
+                    blackboard_dir = get_blackboard_dir(
+                        session_id, original_question_id
+                    )
                     asyncio.create_task(
                         _run_llm_judge_background(
                             bb_dir=blackboard_dir,
@@ -3359,7 +3855,7 @@ class ReactAgent:
                         )
                     )
                     _log(f"🚀 LLM-Judge started in background")
-                
+
                 # 📊 Langfuse span sonlandır
                 cache_stats = get_cache_metrics().to_dict()
                 if langfuse_trace:
@@ -3377,19 +3873,24 @@ class ReactAgent:
                                 "cached_tokens": token_stats["total_cached_tokens"],
                                 "cache_hit_rate": token_stats["cache_hit_rate"],
                                 "estimated_cost_usd": token_stats["estimated_cost_usd"],
-                                "sources_count": len(sources["documents"]) + len(sources["pages"]),
-                                "query_cache_hit_rate": cache_stats.get("hit_rate_percent", 0),
+                                "sources_count": len(sources["documents"])
+                                + len(sources["pages"]),
+                                "query_cache_hit_rate": cache_stats.get(
+                                    "hit_rate_percent", 0
+                                ),
                                 "llm_judge": "background",  # LLM-Judge runs in background
-                            }
+                            },
                         )
                         # Span'ı kapat
                         langfuse_trace.end()
                         # Langfuse async flush
                         flush_langfuse()
-                        _log(f"📊 Langfuse span completed: {tool_call_count} tool calls logged")
+                        _log(
+                            f"📊 Langfuse span completed: {tool_call_count} tool calls logged"
+                        )
                     except Exception as e:
                         _log(f"⚠️ Langfuse span update failed: {e}", "warning")
-                
+
                 yield {
                     "type": "final_response",
                     "content": final_response,
@@ -3409,7 +3910,11 @@ class ReactAgent:
                         "estimated_cost_usd": token_stats["estimated_cost_usd"],
                         "hallucination_warning": bool(hallucination_warning),
                         "redis_cache_active": self.redis_cache_active,
-                        "few_shot_examples_used": len(few_shot_examples) if 'few_shot_examples' in dir() else 0,
+                        "few_shot_examples_used": (
+                            len(few_shot_examples)
+                            if "few_shot_examples" in dir()
+                            else 0
+                        ),
                         "llm_judge": "background",  # LLM-Judge runs in background
                     },
                     # 📚 Tool calls for feedback learning
@@ -3425,15 +3930,16 @@ class ReactAgent:
                     "message": "Cevap oluşturulamadı.",
                     "session_id": session_id,
                 }
-                
+
         except Exception as e:
             _log(f"❌ Stream error: {e}", "error")
             import traceback
+
             traceback.print_exc()
-            
+
             # Hata durumunda da istatistikleri göster
             token_tracker.print_summary(session_id=session_id)
-            
+
             # 📊 Langfuse span hata ile sonlandır
             if langfuse_trace:
                 try:
@@ -3451,7 +3957,7 @@ class ReactAgent:
                     flush_langfuse()
                 except Exception as lf_error:
                     _log(f"⚠️ Langfuse error span failed: {lf_error}", "warning")
-            
+
             yield {
                 "type": "error",
                 "message": f"Bir hata oluştu: {str(e)}",
@@ -3462,13 +3968,15 @@ class ReactAgent:
             if langfuse_session_ctx:
                 try:
                     langfuse_session_ctx.__exit__(None, None, None)
-                    _log(f"📊 Langfuse session ended: {session_id[:8] if session_id else 'N/A'}")
+                    _log(
+                        f"📊 Langfuse session ended: {session_id[:8] if session_id else 'N/A'}"
+                    )
                 except Exception as e:
                     _log(f"⚠️ Langfuse session end failed: {e}", "warning")
-            
+
             # Logging context'i temizle
             clear_request_context()
-    
+
     async def close(self):
         """Kaynakları temizle"""
         # langchain-mcp-adapters 0.1.0+ artık context manager kullanmıyor
@@ -3486,36 +3994,43 @@ _react_session_access_times: Dict[str, datetime] = {}
 
 # Cache limitleri
 REACT_SESSION_MAX_COUNT = int(os.environ.get("REACT_SESSION_MAX_COUNT", "50"))
-REACT_SESSION_MAX_AGE_HOURS = float(os.environ.get("REACT_SESSION_MAX_AGE_HOURS", "2.0"))
+REACT_SESSION_MAX_AGE_HOURS = float(
+    os.environ.get("REACT_SESSION_MAX_AGE_HOURS", "2.0")
+)
 
 
 def _cleanup_old_react_sessions():
     """Eski session'ları temizle"""
     global _react_session_agents, _react_session_access_times
-    
+
     now = datetime.now()
     max_age = REACT_SESSION_MAX_AGE_HOURS * 3600  # saniye
-    
+
     sessions_to_remove = []
     for session_id, access_time in _react_session_access_times.items():
         age = (now - access_time).total_seconds()
         if age > max_age:
             sessions_to_remove.append(session_id)
-    
+
     # LRU: Limit aşılırsa en eski session'ları da temizle
-    while len(_react_session_agents) - len(sessions_to_remove) > REACT_SESSION_MAX_COUNT:
+    while (
+        len(_react_session_agents) - len(sessions_to_remove) > REACT_SESSION_MAX_COUNT
+    ):
         if not _react_session_access_times:
             break
-        oldest_session = min(_react_session_access_times.keys(), key=lambda k: _react_session_access_times[k])
+        oldest_session = min(
+            _react_session_access_times.keys(),
+            key=lambda k: _react_session_access_times[k],
+        )
         if oldest_session not in sessions_to_remove:
             sessions_to_remove.append(oldest_session)
-    
+
     for session_id in sessions_to_remove:
         if session_id in _react_session_agents:
             del _react_session_agents[session_id]
         if session_id in _react_session_access_times:
             del _react_session_access_times[session_id]
-    
+
     if sessions_to_remove:
         _log(f"React cache cleanup: {len(sessions_to_remove)} sessions removed")
 
@@ -3523,12 +4038,12 @@ def _cleanup_old_react_sessions():
 def clear_react_session_agent(session_id: str):
     """Belirli bir session'ın agent'ını temizle"""
     global _react_session_agents, _react_session_access_times
-    
+
     if session_id in _react_session_agents:
         del _react_session_agents[session_id]
     if session_id in _react_session_access_times:
         del _react_session_access_times[session_id]
-    
+
     _log(f"React session {session_id[:8]} cleared")
 
 
@@ -3541,36 +4056,36 @@ async def get_or_create_react_session_agent(
 ) -> ReactAgent:
     """
     Session bazlı ReactAgent al veya oluştur.
-    
+
     Her session için tek agent instance tutulur - MCP bağlantısı reuse edilir.
-    
+
     Args:
         session_id: Session identifier
         model: LLM model adı
         graph: Neo4j graph connection
         reasoning_effort: GPT-5 reasoning effort
         domain: Prompt domain'i (ZORUNLU). Geçerli değerler: sigorta, bakim
-    
+
     Returns:
         ReactAgent instance
-    
+
     Raises:
         ValueError: domain parametresi belirtilmemişse veya geçersizse
     """
     global _react_session_agents, _react_session_access_times
-    
+
     # Cleanup
     _cleanup_old_react_sessions()
-    
+
     # Session key: session_id + domain (farklı domain'ler farklı agent'lar)
     cache_key = f"{session_id}:{domain}"
-    
+
     # Mevcut agent varsa döndür
     if cache_key in _react_session_agents:
         _react_session_access_times[cache_key] = datetime.now()
         _log(f"React session {session_id[:8]} (domain={domain}): reusing cached agent")
         return _react_session_agents[cache_key]
-    
+
     # Yeni agent oluştur (domain validation constructor'da yapılır)
     agent = ReactAgent(
         graph=graph,
@@ -3578,11 +4093,13 @@ async def get_or_create_react_session_agent(
         reasoning_effort=reasoning_effort,
         domain=domain,
     )
-    
+
     _react_session_agents[cache_key] = agent
     _react_session_access_times[cache_key] = datetime.now()
-    
-    _log(f"React session {session_id[:8]} (domain={domain}): new agent created (cache={len(_react_session_agents)})")
+
+    _log(
+        f"React session {session_id[:8]} (domain={domain}): new agent created (cache={len(_react_session_agents)})"
+    )
     return agent
 
 
@@ -3600,6 +4117,7 @@ def get_react_session_stats() -> Dict[str, Any]:
 # MAIN STREAMING FUNCTION
 # ============================================================================
 
+
 async def stream_react_agent_response(
     question: str,
     model: Optional[str] = None,
@@ -3613,9 +4131,9 @@ async def stream_react_agent_response(
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     ReAct Agent ile streaming cevap üret.
-    
+
     Multi-provider desteği: OpenAI (GPT-5, GPT-4o) ve Anthropic (Claude Opus 4.5, Sonnet)
-    
+
     Args:
         question: Kullanıcının sorusu
         model: LLM modeli. Desteklenen modeller:
@@ -3632,17 +4150,17 @@ async def stream_react_agent_response(
             - "sigorta": Sigorta poliçeleri, müşteriler, teminatlar
             - "bakim": WAT Motor bakım/arıza yönetimi (CMMS)
         **kwargs: Ek parametreler
-    
+
     Environment Variables:
         REACT_MODEL: Model seçimi (gpt-5, claude-opus-4-5 vb.)
         REACT_REASONING_EFFORT: GPT-5 reasoning seviyesi (low, medium, high)
         REACT_THINKING_BUDGET: Claude extended thinking token bütçesi (default: 10000)
         OPENAI_API_KEY: OpenAI API key
         ANTHROPIC_API_KEY: Anthropic API key
-    
+
     Yields:
         Dict: Streaming chunk'ları
-    
+
     Raises:
         ValueError: domain parametresi belirtilmemişse veya geçersizse
     """
@@ -3655,7 +4173,7 @@ async def stream_react_agent_response(
             "timestamp": datetime.now().isoformat(),
         }
         return
-    
+
     if not session_id:
         yield {
             "type": "error",
@@ -3664,41 +4182,41 @@ async def stream_react_agent_response(
             "timestamp": datetime.now().isoformat(),
         }
         return
-    
-    # Domain validation - hatayı yield ile döndür
+
+    # Domain validation - hatayı yield ile döndür (merkezi registry'den)
     if not domain:
         yield {
             "type": "error",
-            "message": f"domain parametresi zorunlu. Geçerli değerler: {ReactAgent.VALID_DOMAINS}",
+            "message": f"domain parametresi zorunlu. Geçerli değerler: {get_valid_domains()}",
             "status": "missing_domain",
             "timestamp": datetime.now().isoformat(),
         }
         return
-    
-    if domain not in ReactAgent.VALID_DOMAINS:
+
+    if not is_valid_domain(domain):
         yield {
             "type": "error",
-            "message": f"Geçersiz domain: '{domain}'. Geçerli değerler: {ReactAgent.VALID_DOMAINS}",
+            "message": f"Geçersiz domain: '{domain}'. Geçerli değerler: {get_valid_domains()}",
             "status": "invalid_domain",
             "timestamp": datetime.now().isoformat(),
         }
         return
-    
+
     try:
         # Session bazlı agent al veya oluştur
         agent = await get_or_create_react_session_agent(
             session_id, model, graph, reasoning_effort, domain
         )
-        
+
         async for chunk in agent.stream_query_response(
             question=question,
             session_id=session_id,
             question_id=question_id,
             user_id=user_id,  # Langfuse User Tracking için
-            **kwargs
+            **kwargs,
         ):
             yield chunk
-    
+
     except Exception as e:
         logging.error(f"ReAct Agent streaming failed: {e}", exc_info=True)
         yield {
@@ -3714,16 +4232,16 @@ async def stream_react_agent_response(
 # FACTORY FUNCTION
 # ============================================================================
 
+
 def create_react_agent(graph, **kwargs) -> ReactAgent:
     """
     ReactAgent factory function.
-    
+
     Args:
         graph: Neo4j graph connection
         **kwargs: ReactAgent constructor arguments
-    
+
     Returns:
         ReactAgent instance
     """
     return ReactAgent(graph, **kwargs)
-

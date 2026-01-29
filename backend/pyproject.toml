@@ -90,4 +90,43 @@ dependencies = [
     "anthropic>=0.75.0",
     "transformers>=4.57.3",
     "accelerate>=1.12.0",
+    "langchain-docling>=0.2.0",
 ]
+
+[tool.pylint.messages_control]
+disable = [
+    "C0114",  # missing-module-docstring
+    "C0115",  # missing-class-docstring
+    "C0116",  # missing-function-docstring
+    "W0612",  # unused-variable
+    "W0611",  # unused-import
+    "W0613",  # unused-argument
+    "W0621",  # redefined-outer-name
+    "W0702",  # bare-except
+    "W0703",  # broad-except
+    "W0707",  # raise-missing-from
+    "W0719",  # broad-exception-raised
+    "W1203",  # logging-fstring-interpolation
+    "W0401",  # wildcard-import
+    "W0614",  # unused-wildcard-import
+    "R0801",  # duplicate-code
+    "R0902",  # too-many-instance-attributes
+    "R0903",  # too-few-public-methods
+    "R0913",  # too-many-arguments
+    "R0914",  # too-many-locals
+    "R0915",  # too-many-statements
+    "E0401",  # import-error
+    "C0301",  # line-too-long
+    "C0103",  # invalid-name
+    "W0622",  # redefined-builtin
+    "W0201",  # attribute-defined-outside-init
+    "C0411",  # wrong-import-order
+    "W0404",  # reimported
+    "W0640",  # cell-var-from-loop
+]
+
+[tool.pylint.format]
+max-line-length = 200
+
+[tool.pylint.basic]
+good-names = ["i", "j", "k", "e", "f", "id", "db", "llm", "qa"]

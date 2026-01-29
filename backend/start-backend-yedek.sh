@@ -2,12 +2,15 @@
 # Start Backend API Server (local development)
 # 
 # Kullanım:
-#   ./start-backend-yedek.sh [sigorta|bakim]
+#   ./start-backend-yedek.sh [domain]
 #
 # Örnekler:
-#   ./start-backend-yedek.sh           # Default: sigorta
-#   ./start-backend-yedek.sh sigorta   # Sigorta ortamı
-#   ./start-backend-yedek.sh bakim     # WAT Motor bakım ortamı
+#   ./start-backend-yedek.sh              # Default: sigorta
+#   ./start-backend-yedek.sh sigorta      # Sigorta ortamı
+#   ./start-backend-yedek.sh bakim        # WAT Motor bakım ortamı
+#   ./start-backend-yedek.sh akkok-sicil  # Akkok Sicil ortamı
+#
+# NOT: Domain listesi src/config/domains.py'den okunur (merkezi registry)
 
 # Determine project root (directory containing this script)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -18,10 +21,29 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 # ==============================
 DOMAIN="${1:-sigorta}"
 
-# Domain validation
-if [[ "$DOMAIN" != "sigorta" && "$DOMAIN" != "bakim" ]]; then
+# Domain validation - Merkezi registry'den (src/config/domains.py)
+# Python modülünden geçerli domain listesini al
+VALID_DOMAINS=$(cd "$SCRIPT_DIR" && python -c "from src.config.domains import get_valid_domains; print(' '.join(sorted(get_valid_domains())))" 2>/dev/null)
+
+# Eğer Python çağrısı başarısız olursa, fallback listesi kullan
+if [[ -z "$VALID_DOMAINS" ]]; then
+    echo "⚠️  Merkezi domain registry okunamadı, fallback kullanılıyor"
+    VALID_DOMAINS="sigorta bakim akkok-sicil"
+fi
+
+# Domain geçerli mi kontrol et
+DOMAIN_VALID=false
+for valid_domain in $VALID_DOMAINS; do
+    if [[ "$DOMAIN" == "$valid_domain" ]]; then
+        DOMAIN_VALID=true
+        break
+    fi
+done
+
+if [[ "$DOMAIN_VALID" == "false" ]]; then
     echo "❌ Geçersiz domain: $DOMAIN"
-    echo "   Kullanım: ./start-backend-yedek.sh [sigorta|bakim]"
+    echo "   Geçerli domain'ler: $VALID_DOMAINS"
+    echo "   Kullanım: ./start-backend-yedek.sh [domain]"
     exit 1
 fi
 

@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "/usr/bin/python3",
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.typeCheckingMode": "off"
+}

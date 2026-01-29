@@ -1,5 +1,5 @@
 {
-  "python.defaultInterpreterPath": "/workspace/backend/.venv/bin/python",
+  "python.defaultInterpreterPath": "/workspace/mcp-servers/mcp-neo4j-cypher/.venv/bin/python",
   "python.analysis.extraPaths": [
     "${workspaceFolder}/src"
   ],

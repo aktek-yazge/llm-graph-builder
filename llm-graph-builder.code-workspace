@@ -9,25 +9,41 @@
       "path": "backend"
     },
     {
+      "name": "Celery Worker",
+      "path": "celery_worker"
+    },
+    {
       "name": "Frontend",
       "path": "frontend"
     },
     {
       "name": "MCP Neo4j Cypher",
       "path": "mcp-servers/mcp-neo4j-cypher"
-    },
-    {
-      "name": "Observability",
-      "path": "observability"
     }
   ],
   "settings": {
     "python.terminal.activateEnvironment": true,
-    "python.analysis.autoImportCompletions": true,
-    "python.analysis.typeCheckingMode": "basic",
-    "python.analysis.useLibraryCodeForTypes": true,
-    "cursorpyright.analysis.autoImportCompletions": true,
-    "cursorpyright.analysis.typeCheckingMode": "basic",
-    "cursorpyright.analysis.useLibraryCodeForTypes": true
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    },
+    "python.analysis.extraPaths": [
+      "/workspace/backend/src",
+      "/workspace/celery_worker/src",
+      "/workspace/mcp-servers/mcp-neo4j-cypher/src"
+    ],
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.black-formatter"
+    }
+  },
+  "launch": {
+    "configurations": [],
+    "compounds": []
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.black-formatter"
+    ]
   }
 }

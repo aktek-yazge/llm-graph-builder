@@ -1,15 +1,22 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/celery_worker/.venv/bin/python",
+  "python.defaultInterpreterPath": "/workspace/celery_worker/.venv/bin/python",
   "python.analysis.extraPaths": [
-    "${workspaceFolder}/celery_worker/src",
-    "${workspaceFolder}/backend/src"
+    "${workspaceFolder}/src",
+    "/workspace/backend/src"
   ],
-  "python.analysis.venvPath": "${workspaceFolder}/celery_worker",
+  "python.analysis.venvPath": "${workspaceFolder}",
   "python.analysis.venv": ".venv",
   "python.analysis.autoImportCompletions": true,
-  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.typeCheckingMode": "off",
   "python.analysis.useLibraryCodeForTypes": true,
-  "python.terminal.activateEnvironment": true
+  "python.terminal.activateEnvironment": true,
+  "basedpyright.analysis.typeCheckingMode": "off",
+  "basedpyright.analysis.diagnosticMode": "openFilesOnly",
+  "cursorpyright.analysis.autoImportCompletions": true,
+  "cursorpyright.analysis.extraPaths": [
+    "${workspaceFolder}/src",
+    "/workspace/backend/src"
+  ],
+  "cursorpyright.analysis.typeCheckingMode": "off",
+  "cursorpyright.analysis.useLibraryCodeForTypes": true
 }
-
-

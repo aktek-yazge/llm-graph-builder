@@ -11,13 +11,13 @@ Kullanım:
     export LANGFUSE_PUBLIC_KEY="pk-..."
     export LANGFUSE_SECRET_KEY="sk-..."
     export LANGFUSE_HOST="http://localhost:3101"
-    
+
     # Sigorta domain'i - Cypher mode (varsayılan)
     python scripts/migrate_prompt_to_langfuse.py --domain sigorta
-    
+
     # Sigorta domain'i - DSL mode
     python scripts/migrate_prompt_to_langfuse.py --domain sigorta --mode dsl
-    
+
     # Bakım domain'i (WAT Motor) - sadece Cypher
     python scripts/migrate_prompt_to_langfuse.py --domain bakim
 
@@ -34,94 +34,62 @@ Notlar:
 import os
 import sys
 import argparse
+from src.shared.langfuse_client import get_langfuse, create_prompt, get_prompt
+
+# Merkezi Domain Registry - tüm domain tanımlamaları burada
+from src.config.domains import get_domain_configs_dict
+
+# Prompt yükleyici - merkezi registry kullanır
+from src.langchain_deepagents.prompts import get_domain_prompts
+from dotenv import load_dotenv
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
 load_dotenv()
 
-from src.shared.langfuse_client import get_langfuse, create_prompt, get_prompt
-
-
 # =============================================================================
-# DOMAIN CONFIGURATIONS
+# DOMAIN CONFIGURATIONS (Merkezi registry'den)
 # =============================================================================
-
-DOMAIN_CONFIGS = {
-    "sigorta": {
-        "description": "Sigorta poliçeleri, müşteriler, teminatlar",
-        "modes": ["cypher"],  # DSL kaldırıldı - sadece Cypher
-        "default_mode": "cypher",
-        "vector_index": "vector",
-        "fulltext_index": "chunk_text_fulltext",
-        "prompt_name_template": "react-agent-sigorta",
-        "labels": ["production", "sigorta"],
-    },
-    "bakim": {
-        "description": "WAT Motor bakım/arıza yönetimi",
-        "modes": ["cypher"],
-        "default_mode": "cypher",
-        "vector_index": "task_embedding_index",
-        "fulltext_index": None,
-        "prompt_name_template": "react-agent-wat-motor",
-        "labels": ["production", "bakim", "wat-motor"],
-    },
-}
+# NOT: Yeni domain eklemek için src/config/domains.py dosyasını düzenleyin
+DOMAIN_CONFIGS = get_domain_configs_dict()
 
 
 def load_domain_prompts(domain: str):
     """
     Domain'e göre prompt modüllerini yükle.
-    
+    (Merkezi registry üzerinden)
+
     Args:
-        domain: "sigorta" veya "bakim"
-        
+        domain: Domain adı (src/config/domains.py'de tanımlı)
+
     Returns:
         Dict of prompt components
     """
-    if domain == "sigorta":
-        from src.langchain_deepagents.prompts.sigorta import (
-            SHARED_SYSTEM_BASE,
-            CYPHER_TOOL_USAGE,
-            SHARED_CONTENT,
-        )
-        return {
-            "base": SHARED_SYSTEM_BASE,
-            "cypher_tools": CYPHER_TOOL_USAGE,
-            "content": SHARED_CONTENT,
-        }
-    elif domain == "bakim":
-        from src.langchain_deepagents.prompts.bakim import (
-            WAT_SYSTEM_BASE,
-            WAT_TOOL_USAGE,
-            WAT_CONTENT,
-        )
-        return {
-            "base": WAT_SYSTEM_BASE,
-            "cypher_tools": WAT_TOOL_USAGE,
-            "content": WAT_CONTENT,
-        }
-    else:
-        raise ValueError(f"Bilinmeyen domain: {domain}. Geçerli: {list(DOMAIN_CONFIGS.keys())}")
+    prompts = get_domain_prompts(domain)
+    return {
+        "base": prompts["system_base"],
+        "cypher_tools": prompts["tool_usage"],
+        "content": prompts["content"],
+    }
 
 
-def build_prompt_template(domain: str, mode: str) -> str:
+def build_prompt_template(domain: str, mode: str = "cypher") -> str:  # noqa: ARG001
     """
     Domain'e göre prompt template oluştur.
-    
+
     Args:
-        domain: "sigorta" veya "bakim"
-        mode: "cypher" (sadece cypher destekleniyor)
-        
+        domain: Domain adı (src/config/domains.py'de tanımlı)
+        mode: "cypher" (sadece cypher destekleniyor, ileride DSL eklenebilir)
+
     Returns:
         Tam prompt template ({{schema_info}} placeholder ile)
     """
     prompts = load_domain_prompts(domain)
-    
+
     # Cypher mode - tüm domain'ler için
     base_prompt = prompts["base"] + prompts["cypher_tools"] + prompts["content"]
-    
+
     # Schema placeholder ekle
     return base_prompt + "{{schema_info}}"
 
@@ -149,34 +117,34 @@ Tool'lar:
 Örnekler:
   python scripts/migrate_prompt_to_langfuse.py --domain sigorta   # sigorta
   python scripts/migrate_prompt_to_langfuse.py --domain bakim     # bakım (wat motor)
-        """
+        """,
     )
     parser.add_argument(
         "--domain",
         choices=list(DOMAIN_CONFIGS.keys()),
         default="sigorta",
-        help="Domain: sigorta (varsayılan) veya bakim"
+        help="Domain: sigorta (varsayılan) veya bakim",
     )
     parser.add_argument(
         "--name",
         default=None,
-        help="Özel prompt adı (varsayılan: domain'e göre otomatik)"
+        help="Özel prompt adı (varsayılan: domain'e göre otomatik)",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Domain config al
     domain_config = DOMAIN_CONFIGS[args.domain]
-    
+
     # Prompt adı
     if args.name:
         prompt_name = args.name
     else:
         prompt_name = domain_config["prompt_name_template"]
-    
+
     prompt_type = "text"
     prompt_labels = domain_config["labels"] + ["cypher"]
-    
+
     print("=" * 60)
     print("🚀 Langfuse Prompt Migration Script (Multi-Domain)")
     print("=" * 60)
@@ -186,40 +154,42 @@ Tool'lar:
     if domain_config.get("fulltext_index"):
         print(f"   → Fulltext Index: {domain_config['fulltext_index']}")
     print(f"   → Vector Index: {domain_config['vector_index']}")
-    
+
     # Ortam değişkenlerini kontrol et
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
     host = os.environ.get("LANGFUSE_HOST", "http://localhost:3101")
-    
+
     if not public_key or not secret_key:
-        print("\n❌ LANGFUSE_PUBLIC_KEY ve LANGFUSE_SECRET_KEY ortam değişkenleri gerekli!")
+        print(
+            "\n❌ LANGFUSE_PUBLIC_KEY ve LANGFUSE_SECRET_KEY ortam değişkenleri gerekli!"
+        )
         print("\nÖrnek:")
         print('  export LANGFUSE_PUBLIC_KEY="pk-..."')
         print('  export LANGFUSE_SECRET_KEY="sk-..."')
         print('  export LANGFUSE_HOST="http://localhost:3101"')
         sys.exit(1)
-    
+
     print(f"\n📡 Langfuse Host: {host}")
     print(f"📋 Prompt Name: {prompt_name}")
     print(f"🏷️ Labels: {prompt_labels}")
-    
+
     # Langfuse bağlantısını test et
     langfuse = get_langfuse()
     if not langfuse:
         print("❌ Langfuse bağlantısı kurulamadı!")
         sys.exit(1)
-    
+
     print("✅ Langfuse bağlantısı başarılı")
-    
+
     # Prompt template oluştur
     prompt_template = build_prompt_template(args.domain, "cypher")
     print(f"📏 Template uzunluğu: {len(prompt_template)} karakter")
-    
+
     # Token tahmini (~4 char = 1 token)
     estimated_tokens = len(prompt_template) // 4
     print(f"📊 Tahmini token sayısı: ~{estimated_tokens}")
-    
+
     # Mevcut prompt var mı kontrol et
     print(f"\n🔍 Mevcut prompt kontrol ediliyor: {prompt_name}")
     existing = get_prompt(
@@ -227,23 +197,28 @@ Tool'lar:
         prompt_type=prompt_type,
         label=prompt_labels[0] if prompt_labels else "production",
     )
-    
+
     if existing:
-        version = getattr(existing, 'version', 'unknown')
+        version = getattr(existing, "version", "unknown")
         print(f"⚠️ Prompt zaten mevcut: {prompt_name} (v{version})")
-        
+
         response = input("\nMevcut prompt'u güncellemek ister misiniz? (y/N): ")
-        if response.lower() != 'y':
+        if response.lower() != "y":
             print("❌ İşlem iptal edildi.")
             sys.exit(0)
-        
+
         print("📝 Prompt güncellenecek...")
     else:
         print(f"📝 Yeni prompt oluşturulacak: {prompt_name}")
-    
+
     # Tools listesi
-    tools = ["execute_cypher_query", "execute_cypher_query_with_embedding", "add_source", "read_finding"]
-    
+    tools = [
+        "execute_cypher_query",
+        "execute_cypher_query_with_embedding",
+        "add_source",
+        "read_finding",
+    ]
+
     # Prompt oluştur/güncelle
     success = create_prompt(
         name=prompt_name,
@@ -257,11 +232,11 @@ Tool'lar:
             "vector_index": domain_config["vector_index"],
             "fulltext_index": domain_config.get("fulltext_index"),
             "usage": f"Bu prompt, {args.domain} domain'i için kullanılır. "
-                     "schema_info placeholder'ı runtime'da gerçek veritabanı şeması ile değiştirilir.",
+            "schema_info placeholder'ı runtime'da gerçek veritabanı şeması ile değiştirilir.",
             "tools": tools,
         },
     )
-    
+
     if success:
         print("\n" + "=" * 60)
         print("✅ Prompt başarıyla Langfuse'a yüklendi!")

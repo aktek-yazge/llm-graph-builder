@@ -1,6 +1,4 @@
 {
-  "venvPath": ".",
-  "venv": ".venv",
   "pythonVersion": "3.13",
   "typeCheckingMode": "off",
   "reportArgumentType": false,
@@ -11,13 +9,7 @@
   "reportOptionalSubscript": false,
   "reportOptionalIterable": false,
   "reportUnusedImport": false,
-  "executionEnvironments": [
-    {
-      "root": ".",
-      "extraPaths": ["src", "../backend/src"]
-    }
-  ],
-  "include": ["src"],
-  "exclude": ["**/__pycache__", "**/.venv", "**/node_modules", "**/tests"]
+  "include": [],
+  "exclude": ["**"]
 }
 

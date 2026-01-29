@@ -3,8 +3,34 @@ set -e
 
 echo "🚀 Full-Stack DevContainer kurulum başlıyor..."
 
+# Python venv'leri oluştur (her proje için ayrı)
+echo "🐍 Python venv'leri oluşturuluyor..."
+
+# Backend venv
+if [ ! -f "/workspace/backend/.venv/bin/python" ] || [ ! -x "/workspace/backend/.venv/bin/python" ]; then
+    echo "  📦 Backend venv oluşturuluyor..."
+    cd /workspace/backend
+    uv venv .venv --python 3.13 2>/dev/null || python3.13 -m venv .venv
+fi
+
+# Celery Worker venv
+if [ ! -f "/workspace/celery_worker/.venv/bin/python" ] || [ ! -x "/workspace/celery_worker/.venv/bin/python" ]; then
+    echo "  📦 Celery Worker venv oluşturuluyor..."
+    cd /workspace/celery_worker
+    uv venv .venv --python 3.13 2>/dev/null || python3.13 -m venv .venv
+fi
+
+# MCP Neo4j Cypher venv
+if [ ! -f "/workspace/mcp-servers/mcp-neo4j-cypher/.venv/bin/python" ] || [ ! -x "/workspace/mcp-servers/mcp-neo4j-cypher/.venv/bin/python" ]; then
+    echo "  📦 MCP Neo4j Cypher venv oluşturuluyor..."
+    cd /workspace/mcp-servers/mcp-neo4j-cypher
+    uv venv .venv --python 3.12 2>/dev/null || python3.12 -m venv .venv
+fi
+
+echo "✅ Python venv'leri hazır"
+
 # Python environment hazırlığı (uv ile pyproject.toml kullanarak)
-echo "🐍 Python environment hazırlanıyor..."
+echo "🐍 Python paketleri hazırlanıyor..."
 cd /workspace/backend
 
 # Cache kontrolü - pyproject.toml hash ve paket varlığını kontrol et

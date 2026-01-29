@@ -21,18 +21,14 @@
     "source.organizeImports": "explicit"
   },
   "cSpell.enabled": false,
-  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python",
-  "[python]": {
-    "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python"
-  },
   "python.analysis.extraPaths": [
     "${workspaceFolder}/backend/src",
     "${workspaceFolder}/celery_worker/src",
     "${workspaceFolder}/backend/mcp-servers/mcp-neo4j-cypher/src"
   ],
   "python.analysis.autoImportCompletions": true,
-  "python.analysis.typeCheckingMode": "basic",
-  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.useLibraryCodeForTypes": true,
   "python.analysis.stubPath": "${workspaceFolder}/typings",
   "python.analysis.venvPath": "${workspaceFolder}",
@@ -50,13 +46,22 @@
     }
   ],
   "cursorpyright.analysis.autoImportCompletions": true,
-  "cursorpyright.analysis.diagnosticMode": "workspace",
   "cursorpyright.analysis.extraPaths": [
     "${workspaceFolder}/backend/src",
     "${workspaceFolder}/celery_worker/src",
     "${workspaceFolder}/backend/mcp-servers/mcp-neo4j-cypher/src"
   ],
   "cursorpyright.analysis.stubPath": "${workspaceFolder}/typings",
-  "cursorpyright.analysis.typeCheckingMode": "basic",
-  "cursorpyright.analysis.useLibraryCodeForTypes": true
+  "cursorpyright.analysis.typeCheckingMode": "off",
+  "cursorpyright.analysis.diagnosticMode": "openFilesOnly",
+  "cursorpyright.analysis.useLibraryCodeForTypes": true,
+  "basedpyright.analysis.typeCheckingMode": "off",
+  "basedpyright.analysis.diagnosticMode": "openFilesOnly",
+  "pylint.enabled": true,
+  "pylint.args": [
+    "--disable=C,R,W",
+    "--disable=E1101,E1102,E1123,E1124,E1125,E1126,E1136"
+  ],
+  "python.linting.pylintEnabled": true,
+  "python.linting.enabled": true
 }

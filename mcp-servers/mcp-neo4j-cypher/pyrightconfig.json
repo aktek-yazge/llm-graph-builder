@@ -1,4 +1,23 @@
 {
-    "venvPath": ".",
-    "venv": ".venv"
-} 
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "off",
+  "reportArgumentType": false,
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportGeneralTypeIssues": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalSubscript": false,
+  "reportOptionalIterable": false,
+  "reportUnusedImport": false,
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ],
+  "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.venv", "**/node_modules", "**/tests"]
+}
+

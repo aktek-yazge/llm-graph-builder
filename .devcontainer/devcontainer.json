@@ -25,7 +25,15 @@
         "redhat.vscode-yaml",
         "ms-vscode-remote.remote-containers"
       ],
-      "settings": {}
+      "settings": {
+        "python.defaultInterpreterPath": "/workspace/backend/.venv/bin/python",
+        "python.terminal.activateEnvironment": true,
+        "python.analysis.extraPaths": [
+          "/workspace/backend/src",
+          "/workspace/celery_worker/src",
+          "/workspace/mcp-servers/mcp-neo4j-cypher/src"
+        ]
+      }
     }
   },
   "forwardPorts": [

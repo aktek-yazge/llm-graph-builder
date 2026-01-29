@@ -1,24 +1,23 @@
 {
   "venvPath": ".",
   "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportGeneralTypeIssues": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalSubscript": false,
+  "reportOptionalIterable": false,
+  "reportArgumentType": false,
+  "reportUnusedImport": false,
   "executionEnvironments": [
     {
       "root": ".",
-      "pythonVersion": "3.13",
-      "pythonPlatform": "Darwin",
-      "extraPaths": [
-        "src"
-      ]
+      "extraPaths": ["src"]
     }
   ],
-  "include": [
-    "**"
-  ],
-  "exclude": [
-    "**/__pycache__",
-    "**/.venv",
-    "**/node_modules",
-    "**/tests"
-  ]
+  "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.venv", "**/node_modules", "**/tests"]
 }
 
