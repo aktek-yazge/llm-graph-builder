@@ -41,9 +41,7 @@ export PYTHONPATH="$SCRIPT_DIR"
 export ENV=development
 # Fix for Mac fork safety with prefork pool
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
-export QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder
-export CELERY_BROKER_URL=amqp://guest:guest@3.76.55.209:5672//
-export CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@3.76.55.209:5432/llm_graph_builder
+# PostgreSQL/RabbitMQ bağlantıları (.env'den gelir - fallback yok, eksikse hata verir)
 
 # Neo4j Timeout & Performance Settings
 # Uzak Neo4j sunucuları için timeout değerleri artırıldı

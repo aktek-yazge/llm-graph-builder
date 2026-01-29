@@ -12,10 +12,10 @@ services:
     environment:
       - PYTHONPATH=/code
       - ENV=production
-      - QUEUE_DB_PATH=/code/backend/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres:5432/llm_graph_builder
+      # Database/Broker bağlantıları .env'den gelir
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
       # OpenTelemetry - Observability entegrasyonu
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
       - OTEL_SERVICE_NAME=llm-graph-builder-backend
@@ -52,8 +52,8 @@ services:
       - "5672:5672"
       - "15672:15672"
     environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     labels:
       - "logging=alloy"
@@ -273,5 +273,3 @@ volumes:
   neo4j_import_prod_2:
   llm-graph-output-prod:
   redis_data_prod:
-
-

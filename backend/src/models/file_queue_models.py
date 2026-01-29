@@ -124,9 +124,11 @@ class UploadedFile(Base):
     auto_process = Column(
         Boolean, default=False, nullable=False
     )  # Auto start chunking and graph creation after image extraction
-    
+
     # Celery task tracking for cancellation/reset
-    celery_task_id = Column(String(100), nullable=True, index=True)  # Current active Celery task ID
+    celery_task_id = Column(
+        String(100), nullable=True, index=True
+    )  # Current active Celery task ID
 
     # Add composite indexes for common queries
     __table_args__ = (
@@ -150,11 +152,13 @@ class UploadedFile(Base):
             print(f"Error calculating hash for {file_path}: {e}")
             return None
 
-    def update_status(self, new_status: FileStatus, error_message: str = None, reason: str = None):
+    def update_status(
+        self, new_status: FileStatus, error_message: str = None, reason: str = None
+    ):
         """Update file status with appropriate timestamps"""
         self.status = new_status
         self.updated_at = datetime.utcnow()
-        
+
         if reason:
             self.reason = reason
 
@@ -179,7 +183,7 @@ class FileQueueDatabase:
         else:
             self.db_path = Path(db_path)
             self.db_url = f"sqlite:///{self.db_path}"
-            
+
         # Pool configuration for PostgreSQL
         # pool_size: Number of connections to keep open
         # max_overflow: Maximum overflow connections allowed
@@ -190,19 +194,21 @@ class FileQueueDatabase:
             # Backend chat server için pool ayarları
             # Celery worker'lar ayrı process'lerde çalışıyor
             pool_config = {
-                "pool_size": 3,            # Base connections for backend
-                "max_overflow": 5,         # Extra when needed (total: 8)
-                "pool_timeout": 30,        # Wait up to 30s for connection
-                "pool_recycle": 300,       # Recycle connections every 5 min
-                "pool_pre_ping": True,     # Check connection health before use
+                "pool_size": 3,  # Base connections for backend
+                "max_overflow": 5,  # Extra when needed (total: 8)
+                "pool_timeout": 30,  # Wait up to 30s for connection
+                "pool_recycle": 300,  # Recycle connections every 5 min
+                "pool_pre_ping": True,  # Check connection health before use
             }
             logging.info(f"✅ PostgreSQL pool: size=3, max_overflow=5, total_max=8")
-        
+
         self.engine = create_engine(
             self.db_url,
             # connect_args={"check_same_thread": False}, # Only for SQLite
             echo=False,
-            poolclass=StaticPool if "sqlite" in self.db_url else None, # StaticPool for SQLite
+            poolclass=(
+                StaticPool if "sqlite" in self.db_url else None
+            ),  # StaticPool for SQLite
             **pool_config,
         )
         self.SessionLocal = sessionmaker(
@@ -225,7 +231,7 @@ class FileQueueDatabase:
             # Check if column exists
             with self.engine.connect() as conn:
                 # Check if column exists (works for both SQLite and PostgreSQL)
-                db_url = getattr(self, 'db_url', str(self.engine.url))
+                db_url = getattr(self, "db_url", str(self.engine.url))
                 if "sqlite" in db_url:
                     # SQLite specific: Check if column exists
                     result = conn.execute(
@@ -235,11 +241,13 @@ class FileQueueDatabase:
                 else:
                     # PostgreSQL specific: Check if column exists
                     result = conn.execute(
-                        text("""
+                        text(
+                            """
                             SELECT column_name 
                             FROM information_schema.columns 
                             WHERE table_name = 'uploaded_files' AND column_name = 'auto_process'
-                        """)
+                        """
+                        )
                     ).fetchall()
                     column_names = [row[0] for row in result] if result else []
 
@@ -267,7 +275,7 @@ class FileQueueDatabase:
             # Check if column exists
             with self.engine.connect() as conn:
                 # Check if column exists (works for both SQLite and PostgreSQL)
-                db_url = getattr(self, 'db_url', str(self.engine.url))
+                db_url = getattr(self, "db_url", str(self.engine.url))
                 if "sqlite" in db_url:
                     # SQLite specific: Check if column exists
                     result = conn.execute(
@@ -277,11 +285,13 @@ class FileQueueDatabase:
                 else:
                     # PostgreSQL specific: Check if column exists
                     result = conn.execute(
-                        text("""
+                        text(
+                            """
                             SELECT column_name 
                             FROM information_schema.columns 
                             WHERE table_name = 'uploaded_files' AND column_name = 'reason'
-                        """)
+                        """
+                        )
                     ).fetchall()
                     column_names = [row[0] for row in result] if result else []
 
@@ -291,9 +301,7 @@ class FileQueueDatabase:
                     )
                     # Add column
                     conn.execute(
-                        text(
-                            "ALTER TABLE uploaded_files ADD COLUMN reason TEXT"
-                        )
+                        text("ALTER TABLE uploaded_files ADD COLUMN reason TEXT")
                     )
                     conn.commit()
                     logging.info("✅ Migration completed: reason column added")
@@ -307,7 +315,7 @@ class FileQueueDatabase:
         """Add celery_task_id column to uploaded_files table if it doesn't exist"""
         try:
             with self.engine.connect() as conn:
-                db_url = getattr(self, 'db_url', str(self.engine.url))
+                db_url = getattr(self, "db_url", str(self.engine.url))
                 if "sqlite" in db_url:
                     result = conn.execute(
                         text("PRAGMA table_info(uploaded_files)")
@@ -315,11 +323,13 @@ class FileQueueDatabase:
                     column_names = [row[1] for row in result]
                 else:
                     result = conn.execute(
-                        text("""
+                        text(
+                            """
                             SELECT column_name 
                             FROM information_schema.columns 
                             WHERE table_name = 'uploaded_files' AND column_name = 'celery_task_id'
-                        """)
+                        """
+                        )
                     ).fetchall()
                     column_names = [row[0] for row in result] if result else []
 
@@ -447,9 +457,7 @@ class FileQueueDatabase:
         db = self.get_db_session()
         try:
             return (
-                db.query(UploadedFile)
-                .filter(UploadedFile.filename == filename)
-                .first()
+                db.query(UploadedFile).filter(UploadedFile.filename == filename).first()
             )
         finally:
             db.close()
@@ -485,15 +493,19 @@ class FileQueueDatabase:
         db = self.get_db_session()
         try:
             # Sadece gerekli kolonları çek (çok daha hızlı!)
-            results = db.query(
-                UploadedFile.id,
-                UploadedFile.status,
-                UploadedFile.upload_status,
-                UploadedFile.chunking_status,
-                UploadedFile.graph_status,
-                UploadedFile.embedding_status
-            ).order_by(UploadedFile.created_at.desc()).all()
-            
+            results = (
+                db.query(
+                    UploadedFile.id,
+                    UploadedFile.status,
+                    UploadedFile.upload_status,
+                    UploadedFile.chunking_status,
+                    UploadedFile.graph_status,
+                    UploadedFile.embedding_status,
+                )
+                .order_by(UploadedFile.created_at.desc())
+                .all()
+            )
+
             return [
                 {
                     "id": r.id,
@@ -502,22 +514,26 @@ class FileQueueDatabase:
                     "chunking_status": r.chunking_status,
                     "graph_status": r.graph_status,
                     "embedding_status": r.embedding_status,
-                    "_detail": False
+                    "_detail": False,
                 }
                 for r in results
             ]
         finally:
             db.close()
 
-    def get_files_with_details(self, limit: int = 100, offset: int = 0) -> List[UploadedFile]:
+    def get_files_with_details(
+        self, limit: int = 100, offset: int = 0
+    ) -> List[UploadedFile]:
         """Get files with full details (paginated)"""
         db = self.get_db_session()
         try:
-            return db.query(UploadedFile)\
-                .order_by(UploadedFile.created_at.desc())\
-                .offset(offset)\
-                .limit(limit)\
+            return (
+                db.query(UploadedFile)
+                .order_by(UploadedFile.created_at.desc())
+                .offset(offset)
+                .limit(limit)
                 .all()
+            )
         finally:
             db.close()
 
@@ -525,14 +541,16 @@ class FileQueueDatabase:
         """Get files by specific IDs (for filtered views)"""
         db = self.get_db_session()
         try:
-            return db.query(UploadedFile)\
-                .filter(UploadedFile.id.in_(file_ids))\
-                .all()
+            return db.query(UploadedFile).filter(UploadedFile.id.in_(file_ids)).all()
         finally:
             db.close()
 
     def update_file_status(
-        self, file_id: int, new_status: FileStatus, error_message: str = None, reason: str = None
+        self,
+        file_id: int,
+        new_status: FileStatus,
+        error_message: str = None,
+        reason: str = None,
     ) -> bool:
         """Update file status"""
         db = self.get_db_session()
@@ -690,8 +708,8 @@ def get_file_queue_db(db_path: str = None) -> FileQueueDatabase:
 
     if _db_instance is None:
         # Check environment variable for full URL first (PostgreSQL)
-        db_url = os.getenv("QUEUE_DB_URL")
-        
+        db_url = os.getenv("POSTGRES_URL")
+
         if not db_url:
             if db_path is None:
                 # Check environment variable first
@@ -702,11 +720,11 @@ def get_file_queue_db(db_path: str = None) -> FileQueueDatabase:
                     # Default path: backend/queue.db
                     current_dir = Path(__file__).parent.parent.parent  # backend/
                     db_path = current_dir / "queue.db"
-            
+
             # SQLite fallback
             _db_instance = FileQueueDatabase(db_path=str(db_path))
         else:
             # PostgreSQL or other URL based DB
             _db_instance = FileQueueDatabase(db_url=db_url)
-            
+
     return _db_instance

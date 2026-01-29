@@ -31,6 +31,9 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=wat-dev-network"
+      # File provider - devcontainer için dinamik routing
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+      - "--providers.file.watch=true"
       # Entrypoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
@@ -38,32 +41,37 @@ services:
       - "--log.level=DEBUG"
       - "--accesslog=true"
     ports:
-      - "80:80"       # HTTP
-      - "443:443"     # HTTPS
-      - "8090:8080"   # Traefik Dashboard
+      - "80:80" # HTTP
+      - "443:443" # HTTPS
+      - "8090:8080" # Traefik Dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_dynamic_config:/etc/traefik
     networks:
       - wat-dev-network
       - dinkal-dev-network
       - akkok-sicil-dev-network
+      - traefik-public
+      - observability
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.dashboard.rule=Host(`dev.local`) && PathPrefix(`/traefik`)"
-      - "traefik.http.routers.dashboard.service=api@internal"
+      # Traefik Dashboard: traefik.dev.local (subdomain gerekli - path prefix desteklemiyor)
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.dev.local`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
 
   # ===========================================================================
   # RABBITMQ - Message Broker
   # ===========================================================================
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: rabbitmq-dev
+    container_name: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
     environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_USER=rabbitmq
+      - RABBITMQ_DEFAULT_PASS=RabbitMQ!654*
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     restart: unless-stopped
     networks:
@@ -72,11 +80,10 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.rabbitmq.rule=Host(`dev.local`) && PathPrefix(`/rabbitmq`)"
+      # RabbitMQ Management: rabbitmq.dev.local (subdomain gerekli - path prefix desteklemiyor)
+      - "traefik.http.routers.rabbitmq.rule=Host(`rabbitmq.dev.local`)"
       - "traefik.http.routers.rabbitmq.entrypoints=web"
       - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
-      - "traefik.http.middlewares.strip-rabbitmq.stripprefix.prefixes=/rabbitmq"
-      - "traefik.http.routers.rabbitmq.middlewares=strip-rabbitmq"
 
   # ===========================================================================
   # MCP INSPECTOR
@@ -97,12 +104,10 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.mcp-inspector.rule=Host(`dev.local`) && PathPrefix(`/mcp-inspector`)"
+      # MCP Inspector: mcp-inspector.dev.local (subdomain - path prefix desteklemiyor)
+      - "traefik.http.routers.mcp-inspector.rule=Host(`mcp-inspector.dev.local`)"
       - "traefik.http.routers.mcp-inspector.entrypoints=web"
-      - "traefik.http.routers.mcp-inspector.priority=20"
       - "traefik.http.services.mcp-inspector.loadbalancer.server.port=6274"
-      - "traefik.http.middlewares.strip-mcp-inspector.stripprefix.prefixes=/mcp-inspector"
-      - "traefik.http.routers.mcp-inspector.middlewares=strip-mcp-inspector"
 
   # ===========================================================================
   # MCP NEO4J CYPHER - Graph Query Server
@@ -135,7 +140,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -X POST http://localhost:8002/mcp/ -H ''Content-Type: application/json'' -H ''Accept: application/json, text/event-stream'' -H ''mcp-session-id: healthcheck'' -d ''{"jsonrpc":"2.0","id":1,"method":"tools/list"}'' | grep -q ''"result"'' || exit 1',
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -150,6 +159,10 @@ services:
       - "traefik.http.routers.mcp-cypher.entrypoints=web"
       - "traefik.http.services.mcp-cypher.loadbalancer.server.port=8002"
 
+volumes:
+  traefik_dynamic_config:
+    name: traefik_dynamic_config
+
 networks:
   wat-dev-network:
     external: true
@@ -160,3 +173,9 @@ networks:
   akkok-sicil-dev-network:
     external: true
     name: akkok-sicil-dev-network
+  traefik-public:
+    external: true
+    name: traefik-public
+  observability:
+    external: true
+    name: observability

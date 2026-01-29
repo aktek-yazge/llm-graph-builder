@@ -1,13 +1,25 @@
-# Docker Compose for Celery Workers - LOCAL/DEV Environment
-# 
-# Bu dosya DEV ortamı için - Docker network içindeki RabbitMQ ve PostgreSQL'e bağlanır
-# .env dosyasını kullanır (rabbitmq-dev, postgres-dev hostnames)
+# =============================================================================
+# CELERY WORKER - Dev Stack (Multi-tenant Template)
+# =============================================================================
 #
-# Usage:
-#   docker-compose up -d                        # Start all services
-#   docker-compose up -d --scale main_worker=3  # Scale main workers
-#   docker-compose logs -f main_worker          # View logs
-#   docker-compose build celery_base            # Rebuild image
+# Kullanım:
+#   docker compose -p {firma} -f docker-compose.yml up -d
+#
+# Örnek:
+#   docker compose -p akkok-sicil -f docker-compose.yml up -d
+#
+# Erişim:
+#   Flower: http://dev.local/{firma}/flower
+#
+# NOT: Dev ortamında .devcontainer/docker-compose.{firma}.yml kullanılabilir
+#      Bu dosya celery worker'ları ayrı yönetmek için.
+#
+# Gerekli .env değişkenleri:
+#   - POSTGRES_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND
+#   - NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE
+#   - REDIS_URL
+#
+# =============================================================================
 
 services:
   # ============================================
@@ -19,21 +31,18 @@ services:
       dockerfile: Dockerfile
     image: celery-worker:latest
     profiles:
-      - build-only  # Never runs, only builds image
+      - build-only
 
   # ============================================
   # MAIN WORKER - Chunking, Graph, Embeddings
   # ============================================
   main_worker:
     image: celery-worker:latest
-    container_name: celery-main-worker-dev
-    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
-    # autoscale: min 8, max 64 process
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
       --pool=prefork
-      --autoscale=16,4
+      --autoscale=8,2
       -Q celery
       -E
       -n main-worker@%h
@@ -46,18 +55,30 @@ services:
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
     volumes:
-      - ${OUTPUT_VOLUME:-output_data}:/app/output
-      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
+      - celery_output:/app/output
+      - ./src:/app/src
     deploy:
       resources:
         limits:
-          memory: 16g
+          memory: 8g
           cpus: "4"
         reservations:
-          memory: 6g
+          memory: 2g
           cpus: "1"
     healthcheck:
-      test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-m",
+          "celery",
+          "-A",
+          "src.celery_app",
+          "inspect",
+          "ping",
+          "-d",
+          "celery@$$HOSTNAME",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -68,7 +89,7 @@ services:
         max-size: "100m"
         max-file: "5"
     networks:
-      - dev
+      - internal
     restart: unless-stopped
 
   # ============================================
@@ -76,8 +97,6 @@ services:
   # ============================================
   db_writer:
     image: celery-worker:latest
-    container_name: celery-db-writer-dev
-    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
@@ -95,7 +114,7 @@ services:
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
     volumes:
-      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
+      - ./src:/app/src
     deploy:
       resources:
         limits:
@@ -105,7 +124,19 @@ services:
           memory: 512m
           cpus: "0.5"
     healthcheck:
-      test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-m",
+          "celery",
+          "-A",
+          "src.celery_app",
+          "inspect",
+          "ping",
+          "-d",
+          "celery@$$HOSTNAME",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -116,63 +147,14 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - dev
+      - internal
     restart: unless-stopped
-
-  # ============================================
-  # NEO4J WRITER - Neo4j Writes
-  # ============================================
-  # ⚠️ DISABLED: main_worker doğrudan Neo4j'ye yazıyor
-  # Gelecekte queue-based yazma istenirse comment'leri kaldırın
-  # neo4j_writer:
-  #   image: celery-worker:latest
-  #   container_name: celery-neo4j-writer-dev
-  #   # prefork: Docker/Linux için
-  #   command: >
-  #     python -m celery -A src.celery_app worker
-  #     --loglevel=${LOG_LEVEL:-info}
-  #     --pool=prefork
-  #     --concurrency=${WRITER_CONCURRENCY:-2}
-  #     -Q neo4j_write
-  #     -E
-  #     -n neo4j-writer@%h
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     - PYTHONPATH=/app
-  #     - ENV=${ENV:-development}
-  #     - LANG=C.UTF-8
-  #     - LC_ALL=C.UTF-8
-  #     - PYTHONIOENCODING=utf-8
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 4g
-  #         cpus: "2"
-  #       reservations:
-  #         memory: 1g
-  #         cpus: "0.5"
-  #   healthcheck:
-  #     test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 30s
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "50m"
-  #       max-file: "3"
-  #   networks:
-  #     - dev
-  #   restart: unless-stopped
 
   # ============================================
   # FLOWER - Monitoring Dashboard
   # ============================================
   flower:
     image: mher/flower
-    container_name: celery-flower-dev
     command: celery flower --port=5555
     env_file:
       - .env
@@ -193,14 +175,14 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - dev
+      - internal
     restart: unless-stopped
 
-# Dev ortamı network'ü (rabbitmq-dev, postgres-dev ile aynı)
+# Network - firma bazlı (project name ile oluşur)
 networks:
-  dev:
+  internal:
     external: true
-    name: workspace_llm-graph-builder_net
+    name: ${COMPOSE_PROJECT_NAME}-dev-network
 
 volumes:
-  output_data:
+  celery_output:

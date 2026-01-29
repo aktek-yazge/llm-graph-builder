@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Celery Workers in Docker - DEV Environment
 # Uses docker-compose.yml with .env
-# Connects to rabbitmq-dev, postgres-dev in dev Docker network
+# Connects to rabbitmq, postgres-dev in dev Docker network
 #
 # Usage: ./start-docker.sh [service_name]
 # Examples:
@@ -29,7 +29,7 @@ if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
     echo "❌ Error: Network '$NETWORK_NAME' not found!"
     echo ""
     echo "   Please ensure the dev environment is running:"
-    echo "   - rabbitmq-dev and postgres-dev should be running"
+    echo "   - rabbitmq and postgres-dev should be running"
     echo ""
     exit 1
 fi

@@ -2271,13 +2271,13 @@ class ReactAgent:
             _log(f"⚠️ History save error: {e}", "warning")
 
     def _get_langfuse_prompt_name(self) -> str:
-        """Domain'e göre Langfuse prompt adını döndür."""
-        # Domain bazlı Langfuse prompt isimleri
-        prompt_names = {
-            "sigorta": "react-agent-sigorta",
-            "bakim": "react-agent-wat-motor",
-        }
-        return prompt_names.get(self.domain, LANGFUSE_PROMPT_NAME)
+        """Domain'e göre Langfuse prompt adını döndür (merkezi registry'den)."""
+        try:
+            domain_config = get_domain_config(self.domain)
+            return domain_config.prompt_name_template
+        except ValueError:
+            # Domain bulunamazsa default kullan
+            return LANGFUSE_PROMPT_NAME
 
     def _build_system_prompt(self, schema_info: str, session_id: str = "") -> str:
         """

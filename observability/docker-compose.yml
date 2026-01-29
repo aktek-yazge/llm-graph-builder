@@ -130,14 +130,16 @@ services:
     image: grafana/grafana:10.3.1
     container_name: grafana
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Docker volumes - host bind mount yok
       - grafana-data:/var/lib/grafana
+      - grafana-provisioning:/etc/grafana/provisioning
+      - grafana-dashboards:/var/lib/grafana/dashboards
     expose:
       - "3000"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`grafana.local`)"
+      # Grafana: grafana.dev.local
+      - "traefik.http.routers.grafana.rule=Host(`grafana.dev.local`)"
       - "traefik.http.routers.grafana.entrypoints=web"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
     environment:
@@ -152,9 +154,7 @@ services:
     networks:
       - observability
       - traefik-public
-    depends_on:
-      - loki
-      - tempo
+    # depends_on kaldırıldı - bağımsız başlatılabilir
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 10s
@@ -176,6 +176,10 @@ volumes:
     name: observability-tempo-data
   grafana-data:
     name: observability-grafana-data
+  grafana-provisioning:
+    name: observability-grafana-provisioning
+  grafana-dashboards:
+    name: observability-grafana-dashboards
   alloy-data:
     name: observability-alloy-data
   redis-stack-data:

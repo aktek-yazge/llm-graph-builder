@@ -52,7 +52,7 @@ class SchemaVersionManager:
         if db_url:
             self.db_url = db_url
         else:
-            self.db_url = os.getenv("QUEUE_DB_URL")
+            self.db_url = os.getenv("POSTGRES_URL")
             
             if not self.db_url:
                 from pathlib import Path

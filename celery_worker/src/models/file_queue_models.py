@@ -628,7 +628,7 @@ def get_file_queue_db(db_path: str = None) -> FileQueueDatabase:
 
     if _db_instance is None:
         # Check environment variable for full URL first (PostgreSQL)
-        db_url = os.getenv("QUEUE_DB_URL")
+        db_url = os.getenv("POSTGRES_URL")
         
         if not db_url:
             if db_path is None:

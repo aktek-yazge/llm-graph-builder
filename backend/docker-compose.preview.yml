@@ -1,72 +1,75 @@
 # =============================================================================
-# DINKAL Erişim:
-#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
-#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
-#
-# WAT-MOTOR PREVIEW STACK
+# PREVIEW STACK - Multi-tenant Template
 # =============================================================================
-# DINKAL Erişim:
-#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
-#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
 #
-# Traefik entegrasyonu ile multi-tenant desteği
-# 
-# Erişim:
-#   Frontend:  http://demoserver.yazge.aktekbilisim.com/wat
-#   Backend:   http://demoserver.yazge.aktekbilisim.com/wat/server
-#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/wat-neo4j
+# Kullanım:
+#   docker compose -p {firma} -f docker-compose.preview.yml up -d
 #
-# Lokal test için /etc/hosts:
-#   127.0.0.1   demoserver.yazge.aktekbilisim.com
+# Örnek:
+#   docker compose -p abc -f docker-compose.preview.yml up -d
+#   docker compose -p dinkal -f docker-compose.preview.yml up -d
+#
+# Erişim (Traefik subdomain routing):
+#   Frontend:  https://{firma}.yazge.aktekbilisim.com
+#   Backend:   https://{firma}.yazge.aktekbilisim.com/server
+#   Neo4j:     https://{firma}.yazge.aktekbilisim.com/neo4j
+#   pgAdmin:   https://{firma}.yazge.aktekbilisim.com/pgadmin
+#   RabbitMQ:  https://{firma}.yazge.aktekbilisim.com/rabbitmq
+#
+# Gerekli .env değişkenleri:
+#   - TENANT_DOMAIN (örn: abc.yazge.aktekbilisim.com)
+#   - POSTGRES_PASSWORD
+#   - NEO4J_PASSWORD
+#   - RABBITMQ_USER, RABBITMQ_PASSWORD
+#   - OPENAI_API_KEY
+#   - POSTGRES_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND
+#   - NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE
+#
 # =============================================================================
-# DINKAL Erişim:
-#   Neo4j:     http://demoserver.yazge.aktekbilisim.com/dinkal/neo4j
-#   pgAdmin:   http://demoserver.yazge.aktekbilisim.com/dinkal/pgadmin
-#
 
 services:
   # RabbitMQ - Message Broker
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: rabbitmq-wat
     expose:
       - "5672"
       - "15672"
     environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     labels:
       - "logging=alloy"
       - "traefik.enable=true"
-      # RabbitMQ Management UI
-      - "traefik.http.routers.rabbitmq-wat.rule=Host(`rabbitmq-wat.local`)"
-      - "traefik.http.routers.rabbitmq-wat.entrypoints=web"
-      - "traefik.http.services.rabbitmq-wat.loadbalancer.server.port=15672"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-rabbitmq.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/rabbitmq`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-rabbitmq.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-rabbitmq.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-rabbitmq.loadbalancer.server.port=15672"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-rabbitmq.stripprefix.prefixes=/rabbitmq"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-rabbitmq.middlewares=${COMPOSE_PROJECT_NAME}-strip-rabbitmq"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - wat
+      - internal
       - observability
       - traefik-public
     restart: always
 
   # PostgreSQL - Database
   postgres:
-    image: postgres:16-alpine
-    container_name: postgres-wat
+    image: ankane/pgvector:v0.5.1
     expose:
       - "5432"
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=Ekdmjweu483i
-      - POSTGRES_DB=llm_graph_builder
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-llm_graph_builder}
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
-      - ~/postgres-data-wat:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     labels:
       - "logging=alloy"
     logging:
@@ -75,32 +78,201 @@ services:
         max-size: "500m"
         max-file: "10"
     networks:
-      - wat
+      - internal
       - observability
     restart: always
 
-  # Backend - WAT servisi
+  # pgAdmin - PostgreSQL Web UI
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    expose:
+      - "80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@local.com}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+      - SCRIPT_NAME=/pgadmin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-pgadmin.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/pgadmin`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-pgadmin.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-pgadmin.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-pgadmin.loadbalancer.server.port=80"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - internal
+      - observability
+      - traefik-public
+    restart: always
+
+  # Redis - Cache
+  redis:
+    image: redis/redis-stack-server:7.4.0-v2
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+    networks:
+      - internal
+      - observability
+    restart: always
+
+  # Neo4j - Graph Database
+  neo4j:
+    image: neo4j:2025.07.1
+    restart: always
+    expose:
+      - "7474"
+      - "7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_usage__report_enabled=false
+      - NEO4J_server_memory_heap_initial__size=2G
+      - NEO4J_server_memory_heap_max__size=4G
+      - NEO4J_server_memory_pagecache_size=2G
+      - NEO4J_dbms_memory_transaction_total_max=4G
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "4"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_plugins:/plugins
+      - neo4j_import:/var/lib/neo4j/import
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-neo4j.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/neo4j`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-neo4j.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-neo4j.priority=15"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-neo4j.loadbalancer.server.port=7474"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-neo4j.stripprefix.prefixes=/neo4j"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-redirect-neo4j.redirectregex.regex=^(https?://[^/]+/neo4j)$$"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-redirect-neo4j.redirectregex.replacement=$${1}/browser/"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-redirect-neo4j.redirectregex.permanent=false"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-neo4j.middlewares=${COMPOSE_PROJECT_NAME}-redirect-neo4j,${COMPOSE_PROJECT_NAME}-strip-neo4j"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - internal
+      - observability
+      - traefik-public
+
+  # MCP Neo4j Cypher Server
+  mcp-neo4j-cypher:
+    build:
+      context: ../mcp-servers/mcp-neo4j-cypher
+      dockerfile: Dockerfile
+    restart: always
+    expose:
+      - "8002"
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8002
+      - NEO4J_TRANSPORT=http
+      - NEO4J_MCP_SERVER_HOST=0.0.0.0
+      - NEO4J_MCP_SERVER_PORT=8002
+      - NEO4J_MCP_SERVER_PATH=/mcp/
+      - NEO4J_NAMESPACE=
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,backend
+      - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
+      - NEO4J_READ_TIMEOUT=30
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../mcp-servers/mcp-neo4j-cypher/src:/app/src
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-mcp.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/mcp`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-mcp.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-mcp.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-mcp.loadbalancer.server.port=8002"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-mcp.stripprefix.prefixes=/mcp"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-mcp.middlewares=${COMPOSE_PROJECT_NAME}-strip-mcp"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+      - observability
+      - traefik-public
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -X POST http://localhost:8002/mcp/ -H ''Content-Type: application/json'' -H ''Accept: application/json, text/event-stream'' -H ''mcp-session-id: healthcheck'' -d ''{"jsonrpc":"2.0","id":1,"method":"tools/list"}'' | grep -q ''"result"'' || exit 1',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Backend
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     env_file:
       - .env
-    container_name: backend-wat
     expose:
       - "8000"
     environment:
       - PYTHONPATH=/code
       - ENV=preview
-      # Neo4j bağlantısı - URI internal Docker, diğerleri .env'den
-      - NEO4J_URI=bolt://neo4j-wat:7687
-      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
-      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
-      - QUEUE_DB_PATH=/code/sqlite-data/queue.db
-      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq-wat:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
+      # Database/Broker bağlantıları .env'den gelir
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - REDIS_URL=${REDIS_URL}
+      - REDIS_SEMANTIC_URL=${REDIS_SEMANTIC_URL}
       # Neo4j Timeout ayarları
       - NEO4J_CONNECTION_TIMEOUT=60
       - NEO4J_READ_TIMEOUT=300
@@ -109,39 +281,33 @@ services:
       # MCP Server bağlantısı
       - MCP_HTTP_HOST=mcp-neo4j-cypher
       - MCP_HTTP_PORT=8002
-      # OpenTelemetry - Observability entegrasyonu
+      # OpenTelemetry
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
       - OTEL_SERVICE_NAME=llm-graph-builder-backend
       - OTEL_ENVIRONMENT=preview
     volumes:
-      # TÜM BACKEND KLASÖRÜ MOUNT - /code'u override et
       - .:/code
       - /code/.venv
-      - ~/sqlite-db:/code/sqlite-data
-      - ~/llm-graph-output:/code/output
+      - backend_output:/code/output
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Logs klasörü - Alloy tarafından okunacak
       - ./logs:/code/logs
-      # Agent findings - Agent araştırma sonuçları
       - ./agent_findings:/code/agent_findings
     labels:
       - "logging=alloy"
       - "traefik.enable=true"
-      # API routing - /wat/server prefix ile (HTTP + HTTPS)
-      - "traefik.http.routers.backend-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat/server`)"
-      - "traefik.http.routers.backend-wat.entrypoints=web,websecure"
-      - "traefik.http.routers.backend-wat.priority=20"
-      - "traefik.http.services.backend-wat.loadbalancer.server.port=8000"
-      # Strip /wat/server prefix (backend / bekliyor)
-      - "traefik.http.middlewares.strip-wat-server.stripprefix.prefixes=/wat/server"
-      - "traefik.http.routers.backend-wat.middlewares=strip-wat-server"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-backend.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/server`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-backend.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-backend.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-backend.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-server.stripprefix.prefixes=/server"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-backend.middlewares=${COMPOSE_PROJECT_NAME}-strip-server"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - wat
+      - internal
       - observability
       - traefik-public
     extra_hosts:
@@ -151,110 +317,143 @@ services:
       - rabbitmq
       - postgres
       - neo4j
+      - redis
 
-  # Neo4j - Graph Database
-  neo4j:
-    image: neo4j:2025.07.1
-    container_name: neo4j-wat
-    restart: always
-    expose:
-      - "7474"
-      - "7687"
+  # Celery Main Worker - Chunking, Graph, Embeddings
+  celery-main-worker:
+    build:
+      context: ../celery_worker
+      dockerfile: Dockerfile
+    env_file:
+      - ../celery_worker/.env
+    command: >
+      python -m celery -A src.celery_app worker
+      --loglevel=info
+      --pool=prefork
+      --autoscale=16,4
+      -Q celery
+      -E
+      -n main-worker@%h
     environment:
-      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password}
-      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
-      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
-      - NEO4J_dbms_usage__report_enabled=false
-      - NEO4J_server_memory_heap_initial__size=2G
-      - NEO4J_server_memory_heap_max__size=4G
-      - NEO4J_server_memory_pagecache_size=2G
-      - NEO4J_dbms_memory_transaction_total_max=4G
-      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
-      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
-      - NEO4J_apoc_export_file_enabled=true
-      - NEO4J_apoc_import_file_enabled=true
-      - NEO4J_apoc_import_file_use__neo4j__config=true
-      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
+      - PYTHONPATH=/app
+      - ENV=preview
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - REDIS_URL=${REDIS_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+    volumes:
+      - celery_output:/app/output
+      - ../celery_worker/src:/app/src
     deploy:
       resources:
         limits:
-          memory: 8g
+          memory: 16g
           cpus: "4"
-    volumes:
-      - neo4j_data_wat:/data
-      - neo4j_plugins_wat:/plugins
-      - neo4j_import_wat:/var/lib/neo4j/import
     labels:
       - "logging=alloy"
-      # Neo4j dışarıdan erişime kapalı - sadece internal network
-      - "traefik.enable=false"
     logging:
       driver: "json-file"
       options:
-        max-size: "500m"
-        max-file: "10"
+        max-size: "100m"
+        max-file: "5"
     networks:
-      - wat
+      - internal
       - observability
-      - traefik-public
-
-  # MCP Neo4j Cypher Server
-  mcp-neo4j-cypher:
-    build:
-      context: ../mcp-servers/mcp-neo4j-cypher
-      dockerfile: Dockerfile
-    container_name: mcp-neo4j-cypher-wat
     restart: always
-    expose:
-      - "8002"
+    depends_on:
+      - rabbitmq
+      - postgres
+      - neo4j
+
+  # Celery DB Writer - PostgreSQL Writes
+  celery-db-writer:
+    build:
+      context: ../celery_worker
+      dockerfile: Dockerfile
+    env_file:
+      - ../celery_worker/.env
+    command: >
+      python -m celery -A src.celery_app worker
+      --loglevel=info
+      --pool=prefork
+      --concurrency=2
+      -Q db_write
+      -E
+      -n db-writer@%h
     environment:
-      # URI must be internal Docker network, password from .env
-      - NEO4J_URI=bolt://neo4j-wat:7687
-      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
-      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
-      - MCP_TRANSPORT=http
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=8002
-      - NEO4J_TRANSPORT=http
-      - NEO4J_MCP_SERVER_HOST=0.0.0.0
-      - NEO4J_MCP_SERVER_PORT=8002
-      - NEO4J_MCP_SERVER_PATH=/mcp/
-      - NEO4J_NAMESPACE=
-      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher-wat,mcp-neo4j-cypher,backend-wat
-      - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
-      - NEO4J_READ_TIMEOUT=30
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - PYTHONPATH=/app
+      - ENV=preview
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
     volumes:
-      - ../mcp-servers/mcp-neo4j-cypher/src:/app/src
+      - ../celery_worker/src:/app/src
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2"
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - internal
+      - observability
+    restart: always
+    depends_on:
+      - rabbitmq
+      - postgres
+
+  # Flower - Celery Monitoring Dashboard
+  flower:
+    image: mher/flower
+    command: celery flower --port=5555
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - FLOWER_PORT=5555
+      - FLOWER_BASIC_AUTH=${FLOWER_AUTH:-admin:admin}
+      - FLOWER_UNAUTHENTICATED_API=true
+    expose:
+      - "5555"
     labels:
       - "logging=alloy"
       - "traefik.enable=true"
-      - "traefik.http.routers.mcp-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat/mcp`)"
-      - "traefik.http.routers.mcp-wat.entrypoints=web,websecure"
-      - "traefik.http.routers.mcp-wat.priority=20"
-      - "traefik.http.services.mcp-wat.loadbalancer.server.port=8002"
-      - "traefik.http.middlewares.strip-wat-mcp.stripprefix.prefixes=/wat/mcp"
-      - "traefik.http.routers.mcp-wat.middlewares=strip-wat-mcp"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/flower`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-flower.loadbalancer.server.port=5555"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-flower.stripprefix.prefixes=/flower"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.middlewares=${COMPOSE_PROJECT_NAME}-strip-flower"
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
+        max-size: "50m"
         max-file: "3"
     networks:
-      - wat
+      - internal
       - observability
       - traefik-public
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8002/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'mcp-session-id: healthcheck' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}' | grep -q '\"result\"' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+    restart: always
+    depends_on:
+      - rabbitmq
 
-  # Frontend - WAT servisi
+  # Frontend
   frontend:
     build:
       context: ../frontend
@@ -263,179 +462,31 @@ services:
         - DEPLOYMENT_ENV=preview
     env_file:
       - ../frontend/.env
-    container_name: frontend-wat
     expose:
       - "5173"
     labels:
       - "logging=alloy"
       - "traefik.enable=true"
-      # Frontend - /wat path ile (HTTP + HTTPS)
-      # NOT: strip-prefix KALDIRILDI - Vite base: '/wat/' ile çalışıyor
-      - "traefik.http.routers.frontend-wat.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/wat`)"
-      - "traefik.http.routers.frontend-wat.entrypoints=web,websecure"
-      - "traefik.http.routers.frontend-wat.priority=10"
-      - "traefik.http.services.frontend-wat.loadbalancer.server.port=5173"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.rule=Host(`${TENANT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-frontend.priority=10"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-frontend.loadbalancer.server.port=5173"
     logging:
       driver: "json-file"
       options:
         max-size: "500m"
         max-file: "10"
     networks:
-      - wat
+      - internal
       - observability
       - traefik-public
     restart: always
-
-  # ===========================================================================
-  # DINKAL STACK
-  # ===========================================================================
-
-  # PostgreSQL - DINKAL Database
-  postgres-dinkal:
-    image: postgres:16-alpine
-    container_name: postgres-dinkal
-    expose:
-      - "5432"
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=Ekdmjweu483i
-      - POSTGRES_DB=llm_graph_builder
-    command: postgres -c max_connections=200 -c shared_buffers=256MB
-    volumes:
-      - ~/postgres-data-dinkal:/var/lib/postgresql/data
-    labels:
-      - "logging=alloy"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-    networks:
-      - dinkal
-      - observability
-    restart: always
-
-  # pgAdmin - DINKAL PostgreSQL Web UI
-  pgadmin-dinkal:
-    image: dpage/pgadmin4:latest
-    container_name: pgadmin-dinkal
-    expose:
-      - "80"
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@dinkal.com
-      - PGADMIN_DEFAULT_PASSWORD=Dinkal!654*
-      - PGADMIN_CONFIG_SERVER_MODE=False
-      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
-      - SCRIPT_NAME=/dinkal/pgadmin
-    volumes:
-      - ../.devcontainer/pgadmin-dinkal/servers.json:/pgadmin4/servers.json:ro
-      - ../.devcontainer/pgadmin-dinkal/pgpass:/pgadmin4/pgpass:ro
-      - dinkal_pgadmin_data:/var/lib/pgadmin
     depends_on:
-      - postgres-dinkal
-    labels:
-      - "logging=alloy"
-      - "traefik.enable=true"
-      - "traefik.http.routers.dinkal-pgadmin.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/dinkal/pgadmin`)"
-      - "traefik.http.routers.dinkal-pgadmin.entrypoints=web,websecure"
-      - "traefik.http.routers.dinkal-pgadmin.priority=20"
-      - "traefik.http.services.dinkal-pgadmin.loadbalancer.server.port=80"
-      - "traefik.http.routers.dinkal-pgadmin.middlewares="
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-    networks:
-      - dinkal
-      - observability
-      - traefik-public
-    restart: always
-
-  # Neo4j - DINKAL Graph Database
-  neo4j-dinkal:
-    image: neo4j:2025.07.1
-    container_name: neo4j-dinkal
-    restart: always
-    expose:
-      - "7474"
-      - "7687"
-    environment:
-      - NEO4J_AUTH=neo4j/Dinkal!654*
-      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
-      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
-      - NEO4J_dbms_usage__report_enabled=false
-      - NEO4J_server_memory_heap_initial__size=2G
-      - NEO4J_server_memory_heap_max__size=4G
-      - NEO4J_server_memory_pagecache_size=2G
-      - NEO4J_dbms_memory_transaction_total_max=4G
-      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
-      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
-      - NEO4J_apoc_export_file_enabled=true
-      - NEO4J_apoc_import_file_enabled=true
-      - NEO4J_apoc_import_file_use__neo4j__config=true
-      - NEO4J_server_jvm_additional=--add-modules=jdk.incubator.vector
-    deploy:
-      resources:
-        limits:
-          memory: 8g
-          cpus: "4"
-    volumes:
-      - neo4j_data_dinkal:/data
-      - neo4j_plugins_dinkal:/plugins
-      - neo4j_import_dinkal:/var/lib/neo4j/import
-    labels:
-      - "logging=alloy"
-      - "traefik.enable=true"
-      - "traefik.http.routers.dinkal-neo4j.rule=Host(`demoserver.yazge.aktekbilisim.com`) && PathPrefix(`/dinkal/neo4j`)"
-      - "traefik.http.routers.dinkal-neo4j.entrypoints=web,websecure"
-      - "traefik.http.routers.dinkal-neo4j.priority=15"
-      - "traefik.http.services.dinkal-neo4j.loadbalancer.server.port=7474"
-      - "traefik.http.middlewares.strip-dinkal-neo4j.stripprefix.prefixes=/dinkal/neo4j"
-      - "traefik.http.routers.dinkal-neo4j.middlewares=strip-dinkal-neo4j"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-    networks:
-      - dinkal
-      - observability
-      - traefik-public
-
-  # Redis - DINKAL Cache
-  redis-dinkal:
-    image: redis:7-alpine
-    container_name: redis-dinkal
-    expose:
-      - "6379"
-    command: redis-server --save 60 1 --loglevel warning
-    volumes:
-      - dinkal_redis_data:/data
-    labels:
-      - "logging=alloy"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - dinkal
-      - observability
-    restart: always
+      - backend
 
 networks:
-  wat:
+  internal:
     driver: bridge
-    name: wat-network
-  dinkal:
-    driver: bridge
-    name: dinkal-network
   observability:
     external: true
     name: observability
@@ -444,13 +495,11 @@ networks:
     name: traefik-public
 
 volumes:
-  # WAT Volumes
-  neo4j_data_wat:
-  neo4j_plugins_wat:
-  neo4j_import_wat:
-  # DINKAL Volumes
-  neo4j_data_dinkal:
-  neo4j_plugins_dinkal:
-  neo4j_import_dinkal:
-  dinkal_pgadmin_data:
-  dinkal_redis_data:
+  postgres_data:
+  pgadmin_data:
+  redis_data:
+  neo4j_data:
+  neo4j_plugins:
+  neo4j_import:
+  backend_output:
+  celery_output:

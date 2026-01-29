@@ -7,6 +7,11 @@
 #
 # ERİŞİM:
 #   Neo4j:    http://dev.local/akkok-sicil/neo4j
+#   pgAdmin:  http://dev.local/akkok-sicil/pgadmin
+#
+# NOT: Backend/Frontend devcontainer içinden manuel başlatılır:
+#   ./start-backend-yedek.sh akkok-sicil
+#   Traefik routing docker-compose.dev.yml'de tanımlı
 # =============================================================================
 
 services:
@@ -46,12 +51,17 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
+      # Ana router - tüm neo4j istekleri için
       - "traefik.http.routers.akkok-sicil-neo4j.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/neo4j`)"
       - "traefik.http.routers.akkok-sicil-neo4j.entrypoints=web"
       - "traefik.http.routers.akkok-sicil-neo4j.priority=15"
       - "traefik.http.services.akkok-sicil-neo4j.loadbalancer.server.port=7474"
       - "traefik.http.middlewares.strip-akkok-sicil-neo4j.stripprefix.prefixes=/akkok-sicil/neo4j"
-      - "traefik.http.routers.akkok-sicil-neo4j.middlewares=strip-akkok-sicil-neo4j"
+      # Redirect: /akkok-sicil/neo4j → /akkok-sicil/neo4j/browser/
+      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.regex=^(https?://[^/]+/akkok-sicil/neo4j)/?$$"
+      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.replacement=$${1}/browser/"
+      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.permanent=false"
+      - "traefik.http.routers.akkok-sicil-neo4j.middlewares=neo4j-add-browser,strip-akkok-sicil-neo4j"
 
   # ===========================================================================
   # AKKOK-SİCİL - Redis Cache
@@ -108,6 +118,132 @@ services:
     networks:
       - akkok-sicil-dev-network
 
+  # ===========================================================================
+  # AKKOK-SİCİL - pgAdmin (PostgreSQL Yönetim Aracı)
+  # ===========================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: akkok-sicil-pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@akkok.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - SCRIPT_NAME=/akkok-sicil/pgadmin
+    expose:
+      - "80"
+    volumes:
+      - akkok_sicil_pgadmin_data:/var/lib/pgadmin
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
+    restart: always
+    networks:
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.akkok-sicil-pgadmin.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/pgadmin`)"
+      - "traefik.http.routers.akkok-sicil-pgadmin.entrypoints=web"
+      - "traefik.http.routers.akkok-sicil-pgadmin.priority=15"
+      - "traefik.http.services.akkok-sicil-pgadmin.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # AKKOK-SİCİL - Celery Main Worker
+  # ===========================================================================
+  celery-main-worker:
+    build:
+      context: ../celery_worker
+      dockerfile: Dockerfile
+    container_name: akkok-sicil-celery-main
+    command: >
+      python -m celery -A src.celery_app worker
+      --loglevel=info
+      --pool=prefork
+      --autoscale=8,2
+      -Q celery
+      -E
+      -n main-worker@%h
+    env_file:
+      - ../backend/.env.akkok-sicil
+    environment:
+      - PYTHONPATH=/app
+      - ENV=development
+    volumes:
+      - akkok_sicil_celery_output:/app/output
+      # Dev'de src mount devcontainer path sorunu yaratır, image içindeki kod kullanılır
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "2"
+    restart: unless-stopped
+    networks:
+      - akkok-sicil-dev-network
+    depends_on:
+      - postgres
+      - neo4j
+      - redis
+
+  # ===========================================================================
+  # AKKOK-SİCİL - Celery DB Writer
+  # ===========================================================================
+  celery-db-writer:
+    build:
+      context: ../celery_worker
+      dockerfile: Dockerfile
+    container_name: akkok-sicil-celery-db
+    command: >
+      python -m celery -A src.celery_app worker
+      --loglevel=info
+      --pool=prefork
+      --concurrency=2
+      -Q db_write
+      -E
+      -n db-writer@%h
+    env_file:
+      - ../backend/.env.akkok-sicil
+    environment:
+      - PYTHONPATH=/app
+      - ENV=development
+    # Dev'de src mount devcontainer path sorunu yaratır, image içindeki kod kullanılır
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1"
+    restart: unless-stopped
+    networks:
+      - akkok-sicil-dev-network
+    depends_on:
+      - postgres
+
+  # ===========================================================================
+  # AKKOK-SİCİL - Flower (Celery Monitoring)
+  # ===========================================================================
+  flower:
+    image: mher/flower
+    container_name: akkok-sicil-flower
+    command: celery flower --port=5555
+    env_file:
+      - ../backend/.env.akkok-sicil
+    environment:
+      - FLOWER_PORT=5555
+      - FLOWER_BASIC_AUTH=admin:admin
+      - FLOWER_UNAUTHENTICATED_API=true
+    expose:
+      - "5555"
+    restart: unless-stopped
+    networks:
+      - akkok-sicil-dev-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.akkok-sicil-flower.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/flower`)"
+      - "traefik.http.routers.akkok-sicil-flower.entrypoints=web"
+      - "traefik.http.routers.akkok-sicil-flower.priority=15"
+      - "traefik.http.services.akkok-sicil-flower.loadbalancer.server.port=5555"
+      - "traefik.http.middlewares.strip-akkok-sicil-flower.stripprefix.prefixes=/akkok-sicil/flower"
+      - "traefik.http.routers.akkok-sicil-flower.middlewares=strip-akkok-sicil-flower"
+
 volumes:
   akkok_sicil_neo4j_data:
     name: akkok_sicil_neo4j_data
@@ -119,6 +255,10 @@ volumes:
     name: akkok_sicil_postgres_data
   akkok_sicil_redis_data:
     name: akkok_sicil_redis_data
+  akkok_sicil_pgadmin_data:
+    name: akkok_sicil_pgadmin_data
+  akkok_sicil_celery_output:
+    name: akkok_sicil_celery_output
 
 networks:
   akkok-sicil-dev-network:

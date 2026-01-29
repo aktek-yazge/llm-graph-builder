@@ -6,14 +6,20 @@
 # KULLANIM:
 #   Bu dosya VS Code DevContainer tarafından otomatik kullanılır.
 #
-# TAM BAŞLATMA SIRASI:
-#   cd .devcontainer
-#   docker compose -p shared -f docker-compose.shared.yml up -d        # Önce paylaşımlı
-#   docker compose -p akkok-sicil -f docker-compose.akkok-sicil.yml up -d  # Sonra firma
+# BACKEND/FRONTEND BAŞLATMA:
+#   cd /workspace/backend && ./start-backend-yedek.sh akkok-sicil
+#   cd /workspace/frontend && yarn dev
+#
+# ERİŞİM (Traefik routing - tümü aynı devcontainer:8000/5173'e gider):
+#   WAT:         dev.local/wat/server         dev.local/wat/ui
+#   AKKOK-SİCİL: dev.local/akkok-sicil/server dev.local/akkok-sicil/ui
+#   DINKAL:      dev.local/dinkal/server      dev.local/dinkal/ui
+#
+# NOT: Aynı anda sadece bir müşteri çalıştırılabilir (aynı port kullanılıyor)
 #
 # MEVCUT COMPOSE DOSYALARI:
 #   docker-compose.shared.yml      → Traefik, RabbitMQ, MCP Inspector, MCP Neo4j
-#   docker-compose.wat.yml         → WAT firma servisleri
+#   docker-compose.wat.yml         → WAT firma servisleri (Neo4j, PostgreSQL, Redis)
 #   docker-compose.dinkal.yml      → DINKAL firma servisleri
 #   docker-compose.akkok-sicil.yml → AKKOK-SİCİL firma servisleri
 #   docker-compose.dev.yml         → DevContainer (bu dosya)
@@ -25,9 +31,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: devcontainer
-    ports:
-      - "8000:8000" # Backend API (direct access)
-      - "5173:5173" # Frontend Vite (direct access)
+    # Portlar Traefik üzerinden routing yapılıyor, host'a açmaya gerek yok
+    # Direct access gerekirse: docker exec -it devcontainer bash
+    expose:
+      - "8000"
+      - "5173"
     volumes:
       - ../:/workspace:cached # Full workspace mount
       - backend_pip_cache:/root/.cache/pip # Python cache
@@ -35,22 +43,21 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
     environment:
       - PYTHONPATH=/workspace/backend
-      # Neo4j bağlantısı
-      - NEO4J_URI=bolt://neo4j-wat:7687
+      # Neo4j bağlantısı (servis adı kullanılır, .env'den override edilir)
+      - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USERNAME=neo4j
       - NEO4J_PASSWORD=Watmotor!654*
       - NEO4J_DATABASE=neo4j
-      # PostgreSQL bağlantısı
-      - QUEUE_DB_URL=postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
-      # Celery/RabbitMQ
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq-dev:5672//
-      - CELERY_RESULT_BACKEND=db+postgresql://postgres:Ekdmjweu483i@postgres-wat:5432/llm_graph_builder
+      # Database/Broker bağlantıları (.env'den gelir)
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
       # MCP Server
       - MCP_HTTP_HOST=mcp-neo4j-cypher
       - MCP_HTTP_PORT=8002
       # Redis Cache
-      - REDIS_URL=redis://redis-wat:6379
-      - REDIS_SEMANTIC_URL=redis://redis-wat:6379
+      - REDIS_URL=redis://redis:6379
+      - REDIS_SEMANTIC_URL=redis://redis:6379
       - REDIS_CACHE_ENABLED=true
       # OpenTelemetry
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
@@ -71,20 +78,51 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      # Backend API routing - /wat/server prefix
+      # =========================================================================
+      # WAT - Backend & Frontend Routing
+      # =========================================================================
       - "traefik.http.routers.wat-backend.rule=Host(`dev.local`) && PathPrefix(`/wat/server`)"
       - "traefik.http.routers.wat-backend.entrypoints=web"
       - "traefik.http.routers.wat-backend.priority=20"
       - "traefik.http.services.wat-backend.loadbalancer.server.port=8000"
       - "traefik.http.middlewares.strip-wat-server.stripprefix.prefixes=/wat/server"
       - "traefik.http.routers.wat-backend.middlewares=strip-wat-server"
-      # Frontend routing - /wat/ui path
       - "traefik.http.routers.wat-frontend.rule=Host(`dev.local`) && PathPrefix(`/wat/ui`)"
       - "traefik.http.routers.wat-frontend.entrypoints=web"
       - "traefik.http.routers.wat-frontend.priority=15"
       - "traefik.http.services.wat-frontend.loadbalancer.server.port=5173"
       - "traefik.http.middlewares.strip-wat-ui.stripprefix.prefixes=/wat/ui"
       - "traefik.http.routers.wat-frontend.middlewares=strip-wat-ui"
+      # =========================================================================
+      # AKKOK-SİCİL - Backend & Frontend Routing
+      # =========================================================================
+      - "traefik.http.routers.akkok-sicil-backend.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/server`)"
+      - "traefik.http.routers.akkok-sicil-backend.entrypoints=web"
+      - "traefik.http.routers.akkok-sicil-backend.priority=20"
+      - "traefik.http.services.akkok-sicil-backend.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.strip-akkok-sicil-server.stripprefix.prefixes=/akkok-sicil/server"
+      - "traefik.http.routers.akkok-sicil-backend.middlewares=strip-akkok-sicil-server"
+      - "traefik.http.routers.akkok-sicil-frontend.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/ui`)"
+      - "traefik.http.routers.akkok-sicil-frontend.entrypoints=web"
+      - "traefik.http.routers.akkok-sicil-frontend.priority=15"
+      - "traefik.http.services.akkok-sicil-frontend.loadbalancer.server.port=5173"
+      - "traefik.http.middlewares.strip-akkok-sicil-ui.stripprefix.prefixes=/akkok-sicil/ui"
+      - "traefik.http.routers.akkok-sicil-frontend.middlewares=strip-akkok-sicil-ui"
+      # =========================================================================
+      # DINKAL - Backend & Frontend Routing
+      # =========================================================================
+      - "traefik.http.routers.dinkal-backend.rule=Host(`dev.local`) && PathPrefix(`/dinkal/server`)"
+      - "traefik.http.routers.dinkal-backend.entrypoints=web"
+      - "traefik.http.routers.dinkal-backend.priority=20"
+      - "traefik.http.services.dinkal-backend.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.strip-dinkal-server.stripprefix.prefixes=/dinkal/server"
+      - "traefik.http.routers.dinkal-backend.middlewares=strip-dinkal-server"
+      - "traefik.http.routers.dinkal-frontend.rule=Host(`dev.local`) && PathPrefix(`/dinkal/ui`)"
+      - "traefik.http.routers.dinkal-frontend.entrypoints=web"
+      - "traefik.http.routers.dinkal-frontend.priority=15"
+      - "traefik.http.services.dinkal-frontend.loadbalancer.server.port=5173"
+      - "traefik.http.middlewares.strip-dinkal-ui.stripprefix.prefixes=/dinkal/ui"
+      - "traefik.http.routers.dinkal-frontend.middlewares=strip-dinkal-ui"
 
 volumes:
   frontend_node_modules:

@@ -1,17 +1,28 @@
 # =============================================================================
-# Docker Compose for Celery Workers - WAT Environment
+# CELERY WORKER - Preview Stack (Multi-tenant Template)
 # =============================================================================
-# Traefik entegrasyonu ile multi-tenant desteği
-# 
+#
+# Kullanım:
+#   docker compose -p {firma} -f docker-compose.preview.yml up -d
+#
+# Örnek:
+#   docker compose -p dinkal -f docker-compose.preview.yml up -d
+#
 # Erişim:
-#   Flower:  http://flower-wat.local
+#   Flower: https://{firma}.yazge.aktekbilisim.com/flower
 #
-# Usage:
-#   docker-compose -f docker-compose.preview.yml --env-file .preview.env up -d
-#   docker-compose -f docker-compose.preview.yml logs -f main_worker
-#   docker-compose -f docker-compose.preview.yml down
+# NOT: Bu compose backend/docker-compose.preview.yml ile birlikte kullanılabilir
+#      veya backend compose'undaki celery servisleri kullanılabilir.
+#      Bu dosya sadece celery worker'ları ayrı yönetmek istenirse kullanılır.
 #
-# Kısa yol: ./start-docker-preview.sh
+# Gerekli .env değişkenleri:
+#   - TENANT_DOMAIN
+#   - POSTGRES_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND
+#   - NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE
+#   - REDIS_URL
+#   - OPENAI_API_KEY
+#
+# =============================================================================
 
 services:
   # ============================================
@@ -23,58 +34,81 @@ services:
       dockerfile: Dockerfile
     image: celery-worker:latest
     profiles:
-      - build-only  # Never runs, only builds image
+      - build-only
 
   # ============================================
   # MAIN WORKER - Chunking, Graph, Embeddings
   # ============================================
   main_worker:
     image: celery-worker:latest
-    container_name: celery-main-worker-wat
-    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
-    # concurrency: Başlangıç worker sayısı (Flower'dan artırılabilir/azaltılabilir)
-    # Flower UI: Workers > Worker Name > Pool > Grow/Shrink butonları
-    # NOT: autoscale KULLANMA - Flower'dan yapılan değişiklikler kalıcı olsun
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
       --pool=prefork
-      --concurrency=12
+      --autoscale=16,4
       -Q celery
       -E
       -n main-worker@%h
     env_file:
-      - .preview.env
+      - .env
     environment:
       - PYTHONPATH=/app
-      - ENV=${ENV:-preview}
+      - ENV=preview
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
+      # Database/Broker bağlantıları .env'den gelir
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - REDIS_URL=${REDIS_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
     volumes:
-      - ${OUTPUT_VOLUME:-output_data}:/app/output
-      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
+      - celery_output:/app/output
+      - ./src:/app/src
     deploy:
       resources:
         limits:
-          memory: 24g
-          cpus: "10"
+          memory: 16g
+          cpus: "8"
         reservations:
-          memory: 8g
-          cpus: "4"
+          memory: 4g
+          cpus: "2"
     healthcheck:
-      test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-m",
+          "celery",
+          "-A",
+          "src.celery_app",
+          "inspect",
+          "ping",
+          "-d",
+          "celery@$$HOSTNAME",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "100m"
         max-file: "5"
     networks:
-      - wat
+      - internal
+      - observability
     restart: always
 
   # ============================================
@@ -82,117 +116,91 @@ services:
   # ============================================
   db_writer:
     image: celery-worker:latest
-    container_name: celery-db-writer-wat
-    # prefork: Docker/Linux için - Flower'dan Grow/Shrink destekler
     command: >
       python -m celery -A src.celery_app worker
       --loglevel=${LOG_LEVEL:-info}
       --pool=prefork
-      --concurrency=${WRITER_CONCURRENCY:-4}
+      --concurrency=${WRITER_CONCURRENCY:-2}
       -Q db_write
       -E
       -n db-writer@%h
     env_file:
-      - .preview.env
+      - .env
     environment:
       - PYTHONPATH=/app
-      - ENV=${ENV:-preview}
+      - ENV=preview
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
+      - POSTGRES_URL=${POSTGRES_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
     volumes:
-      - ./src:/app/src  # DEV: Kod değişiklikleri için (restart gerekir)
+      - ./src:/app/src
     deploy:
       resources:
         limits:
-          memory: 8g
-          cpus: "4"
-        reservations:
-          memory: 2g
+          memory: 4g
           cpus: "2"
+        reservations:
+          memory: 1g
+          cpus: "0.5"
     healthcheck:
-      test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-m",
+          "celery",
+          "-A",
+          "src.celery_app",
+          "inspect",
+          "ping",
+          "-d",
+          "celery@$$HOSTNAME",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+    labels:
+      - "logging=alloy"
     logging:
       driver: "json-file"
       options:
         max-size: "50m"
         max-file: "3"
     networks:
-      - wat
+      - internal
+      - observability
     restart: always
-
-  # ============================================
-  # NEO4J WRITER - Neo4j Writes
-  # ============================================
-  # ⚠️ DISABLED: Şu an kullanılmıyor - main_worker doğrudan Neo4j'ye yazıyor
-  # Gelecekte queue-based yazma istenirse comment'leri kaldırın
-  # neo4j_writer:
-  #   image: celery-worker:latest
-  #   container_name: celery-neo4j-writer
-  #   # prefork: Flower'dan Grow/Shrink destekler (Linux/Docker için)
-  #   command: >
-  #     python -m celery -A src.celery_app worker
-  #     --loglevel=${LOG_LEVEL:-info}
-  #     --pool=${CELERY_POOL:-prefork}
-  #     --concurrency=${WRITER_CONCURRENCY:-2}
-  #     -Q neo4j_write
-  #     -E
-  #     -n neo4j-writer@%h
-  #   env_file:
-  #     - .preview.env
-  #   environment:
-  #     - PYTHONPATH=/app
-  #     - ENV=${ENV:-preview}
-  #     - LANG=C.UTF-8
-  #     - LC_ALL=C.UTF-8
-  #     - PYTHONIOENCODING=utf-8
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 4g
-  #         cpus: "2"
-  #       reservations:
-  #         memory: 1g
-  #         cpus: "0.5"
-  #   healthcheck:
-  #     test: ["CMD", "python", "-m", "celery", "-A", "src.celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 30s
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "50m"
-  #       max-file: "3"
-  #   networks:
-  #     - preview
-  #   restart: unless-stopped
 
   # ============================================
   # FLOWER - Monitoring Dashboard
   # ============================================
   flower:
     image: mher/flower
-    container_name: celery-flower-wat
     command: celery flower --port=5555
-    env_file:
-      - .preview.env
     environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
       - FLOWER_PORT=5555
       - FLOWER_BASIC_AUTH=${FLOWER_AUTH:-admin:admin}
       - FLOWER_UNAUTHENTICATED_API=true
     expose:
       - "5555"
     labels:
+      - "logging=alloy"
       - "traefik.enable=true"
-      - "traefik.http.routers.flower-wat.rule=Host(`flower-wat.local`)"
-      - "traefik.http.routers.flower-wat.entrypoints=web"
-      - "traefik.http.services.flower-wat.loadbalancer.server.port=5555"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/flower`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.entrypoints=web,websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.priority=20"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-flower.loadbalancer.server.port=5555"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-strip-flower.stripprefix.prefixes=/flower"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-flower.middlewares=${COMPOSE_PROJECT_NAME}-strip-flower"
     deploy:
       resources:
         limits:
@@ -204,19 +212,21 @@ services:
         max-size: "50m"
         max-file: "3"
     networks:
-      - wat
+      - internal
+      - observability
       - traefik-public
     restart: always
 
-# WAT network (backend docker-compose.preview.yml'de tanımlı)
 networks:
-  wat:
+  internal:
     external: true
-    name: wat-network
+    name: ${COMPOSE_PROJECT_NAME}_internal
+  observability:
+    external: true
+    name: observability
   traefik-public:
     external: true
     name: traefik-public
 
 volumes:
-  output_data:
-
+  celery_output:

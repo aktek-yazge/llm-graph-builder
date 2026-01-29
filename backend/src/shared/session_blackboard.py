@@ -44,7 +44,9 @@ from psycopg2.extras import RealDictCursor, Json
 logger = logging.getLogger(__name__)
 
 # Configuration
-SESSION_BLACKBOARD_ENABLED = os.getenv("SESSION_BLACKBOARD_ENABLED", "true").lower() in ("true", "1", "yes")
+SESSION_BLACKBOARD_ENABLED = os.getenv(
+    "SESSION_BLACKBOARD_ENABLED", "true"
+).lower() in ("true", "1", "yes")
 SESSION_BLACKBOARD_TTL_HOURS = int(os.getenv("SESSION_BLACKBOARD_TTL_HOURS", "24"))
 
 # Global connection pool
@@ -57,38 +59,43 @@ _bb_tables_initialized = False
 # DATABASE CONNECTION
 # =============================================================================
 
+
 def _get_bb_pool() -> pool.ThreadedConnectionPool:
     """Get or create PostgreSQL connection pool for session blackboard"""
     global _bb_pool
-    
+
     if _bb_pool is None:
         with _bb_pool_lock:
             if _bb_pool is None:
-                db_url = os.getenv(
-                    "QUEUE_DB_URL",
-                    "postgresql://postgres:postgres@localhost:5432/llm_graph_builder"
-                )
-                
+                db_url = os.getenv("POSTGRES_URL")
+                if not db_url:
+                    raise ValueError("POSTGRES_URL environment variable is required")
+
                 try:
                     from urllib.parse import urlparse, unquote
+
                     parsed = urlparse(db_url)
-                    
-                    decoded_password = unquote(parsed.password) if parsed.password else 'postgres'
-                    
+
+                    decoded_password = (
+                        unquote(parsed.password) if parsed.password else "postgres"
+                    )
+
                     _bb_pool = pool.ThreadedConnectionPool(
                         minconn=1,
                         maxconn=5,
-                        host=parsed.hostname or 'localhost',
+                        host=parsed.hostname or "localhost",
                         port=parsed.port or 5432,
-                        user=parsed.username or 'postgres',
+                        user=parsed.username or "postgres",
                         password=decoded_password,
-                        database=parsed.path.lstrip('/') or 'llm_graph_builder'
+                        database=parsed.path.lstrip("/") or "llm_graph_builder",
                     )
-                    logger.info(f"✅ Session blackboard pool created: {parsed.hostname}:{parsed.port}")
+                    logger.info(
+                        f"✅ Session blackboard pool created: {parsed.hostname}:{parsed.port}"
+                    )
                 except Exception as e:
                     logger.error(f"❌ Session blackboard pool creation failed: {e}")
                     raise
-    
+
     return _bb_pool
 
 
@@ -110,10 +117,10 @@ def _get_connection():
 def init_blackboard_tables():
     """Create session_blackboard table with pg_trgm extension"""
     global _bb_tables_initialized
-    
+
     if _bb_tables_initialized:
         return
-    
+
     with _get_connection() as conn:
         with conn.cursor() as cur:
             # Enable pg_trgm extension for fuzzy search
@@ -122,9 +129,10 @@ def init_blackboard_tables():
                 logger.info("✅ pg_trgm extension enabled")
             except Exception as e:
                 logger.warning(f"⚠️ pg_trgm extension failed (may already exist): {e}")
-            
+
             # Main blackboard table
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS session_blackboard (
                     id SERIAL PRIMARY KEY,
                     session_id VARCHAR(100) NOT NULL,
@@ -158,10 +166,12 @@ def init_blackboard_tables():
                     
                     CONSTRAINT unique_session_step UNIQUE (session_id, question_id, step_number)
                 );
-            """)
-            
+            """
+            )
+
             # Indexes
-            cur.execute("""
+            cur.execute(
+                """
                 -- Session lookup
                 CREATE INDEX IF NOT EXISTS idx_bb_session 
                 ON session_blackboard(session_id, created_at DESC);
@@ -173,36 +183,46 @@ def init_blackboard_tables():
                 -- Status filter
                 CREATE INDEX IF NOT EXISTS idx_bb_status 
                 ON session_blackboard(session_id, status);
-            """)
-            
+            """
+            )
+
             # Full-text search index
             try:
-                cur.execute("""
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_bb_fts 
                     ON session_blackboard USING GIN (search_vector);
-                """)
+                """
+                )
             except Exception as e:
                 logger.warning(f"⚠️ FTS index creation skipped: {e}")
-            
+
             # Fuzzy search indexes (pg_trgm)
             try:
-                cur.execute("""
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_bb_skill_trgm 
                     ON session_blackboard USING GIN (skill_description gin_trgm_ops);
-                """)
-                cur.execute("""
+                """
+                )
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_bb_question_trgm 
                     ON session_blackboard USING GIN (question_text gin_trgm_ops);
-                """)
-                cur.execute("""
+                """
+                )
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_bb_step_trgm 
                     ON session_blackboard USING GIN (step_name gin_trgm_ops);
-                """)
+                """
+                )
             except Exception as e:
                 logger.warning(f"⚠️ Trigram index creation skipped: {e}")
-            
+
             # Trigger to auto-update search_vector
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE OR REPLACE FUNCTION bb_search_vector_update() RETURNS trigger AS $$
                 BEGIN
                     NEW.search_vector := 
@@ -213,18 +233,21 @@ def init_blackboard_tables():
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql;
-            """)
-            
+            """
+            )
+
             try:
-                cur.execute("""
+                cur.execute(
+                    """
                     DROP TRIGGER IF EXISTS bb_search_vector_trigger ON session_blackboard;
                     CREATE TRIGGER bb_search_vector_trigger
                     BEFORE INSERT OR UPDATE ON session_blackboard
                     FOR EACH ROW EXECUTE FUNCTION bb_search_vector_update();
-                """)
+                """
+                )
             except Exception as e:
                 logger.warning(f"⚠️ Search vector trigger creation skipped: {e}")
-    
+
     _bb_tables_initialized = True
     logger.info("✅ Session blackboard tables ready")
 
@@ -233,9 +256,11 @@ def init_blackboard_tables():
 # DATA MODELS
 # =============================================================================
 
+
 @dataclass
 class BlackboardStep:
     """A single step in the blackboard"""
+
     id: int
     session_id: str
     question_id: str
@@ -259,6 +284,7 @@ class BlackboardStep:
 @dataclass
 class QuestionSummary:
     """Summary of a question with its steps"""
+
     question_id: str
     question_text: str
     question_number: int
@@ -271,6 +297,7 @@ class QuestionSummary:
 # =============================================================================
 # CORE FUNCTIONS
 # =============================================================================
+
 
 def store_step(
     session_id: str,
@@ -288,9 +315,9 @@ def store_step(
 ) -> Optional[int]:
     """
     Store a query step in the blackboard.
-    
+
     Called after EVERY cypher query (both successful and failed).
-    
+
     Args:
         session_id: Session identifier
         question_id: Question identifier
@@ -304,27 +331,28 @@ def store_step(
         results: List of result records
         query_type: 'cypher' or 'embedding'
         execution_time_ms: Query execution time
-    
+
     Returns:
         ID of the inserted row, or None if failed
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return None
-    
+
     if not session_id or not question_id:
         logger.warning("⚠️ store_step: session_id and question_id required")
         return None
-    
+
     try:
         init_blackboard_tables()
-        
+
         # Prepare results: first 2 for preview, all for full
         results = results or []
         result_preview = results[:2] if results else []
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO session_blackboard (
                         session_id, question_id, question_text, question_number,
                         step_number, step_name, cypher_query, query_type,
@@ -343,29 +371,37 @@ def store_step(
                         full_results = EXCLUDED.full_results,
                         execution_time_ms = EXCLUDED.execution_time_ms
                     RETURNING id
-                """, (
-                    session_id,
-                    question_id,
-                    question_text,
-                    question_number,
-                    step_number,
-                    step_name,
-                    cypher_query,
-                    query_type,
-                    status,
-                    record_count,
-                    Json(result_preview),
-                    Json(results),
-                    execution_time_ms,
-                ))
-                
+                """,
+                    (
+                        session_id,
+                        question_id,
+                        question_text,
+                        question_number,
+                        step_number,
+                        step_name,
+                        cypher_query,
+                        query_type,
+                        status,
+                        record_count,
+                        Json(result_preview),
+                        Json(results),
+                        execution_time_ms,
+                    ),
+                )
+
                 row = cur.fetchone()
                 step_id = row[0] if row else None
-                
-                status_icon = "✅" if status == "success" else "❌" if status == "failed" else "⚪"
-                logger.info(f"📋 Blackboard step stored: [{step_number:02d}] {status_icon} {step_name} ({record_count} records)")
+
+                status_icon = (
+                    "✅"
+                    if status == "success"
+                    else "❌" if status == "failed" else "⚪"
+                )
+                logger.info(
+                    f"📋 Blackboard step stored: [{step_number:02d}] {status_icon} {step_name} ({record_count} records)"
+                )
                 return step_id
-                
+
     except Exception as e:
         logger.error(f"❌ store_step failed: {e}")
         return None
@@ -379,37 +415,40 @@ def update_skill_description(
 ) -> bool:
     """
     Update skill description for a step (called by Skill Agent async).
-    
+
     Args:
         step_id: Step ID
         skill_description: Human-readable description
         skill_tags: List of relevant tags
         intent: Query intent classification
-    
+
     Returns:
         True if successful
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return False
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE session_blackboard
                     SET skill_description = %s,
                         skill_tags = %s,
                         intent = %s
                     WHERE id = %s
-                """, (skill_description, skill_tags, intent, step_id))
-                
+                """,
+                    (skill_description, skill_tags, intent, step_id),
+                )
+
                 updated = cur.rowcount > 0
                 if updated:
                     logger.info(f"📝 Skill description updated for step {step_id}")
                 return updated
-                
+
     except Exception as e:
         logger.error(f"❌ update_skill_description failed: {e}")
         return False
@@ -418,34 +457,35 @@ def update_skill_description(
 def get_session_overview(session_id: str) -> str:
     """
     Get formatted overview of all questions and steps in session.
-    
+
     Returns a formatted string like:
-    
+
     📋 SESSION OVERVIEW (3 soru, 8 step)
-    
+
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     Q1: "Akis GYO'nun kira kaybi teminati?"
-    
+
       [01] ✅ customer_variations: 3 kayit
            → Musteri varyasyonlari bulundu
            Preview: {fileName: "policy_001.pdf"}
-    
+
       [02] ❌ find_insurer: 0 kayit
            → Dogrudan arama basarisiz
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return "⚠️ Session blackboard devre dışı."
-    
+
     if not session_id:
         return "⚠️ session_id gerekli."
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # Get all steps ordered by question and step number
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT 
                         id, session_id, question_id, question_text, question_number,
                         step_number, step_name, skill_description, skill_tags, intent,
@@ -454,81 +494,97 @@ def get_session_overview(session_id: str) -> str:
                     FROM session_blackboard
                     WHERE session_id = %s
                     ORDER BY question_number ASC, step_number ASC
-                """, (session_id,))
-                
+                """,
+                    (session_id,),
+                )
+
                 rows = cur.fetchall()
-                
+
                 if not rows:
                     return "📋 Session'da henüz sorgu yapılmadı."
-                
+
                 # Group by question
                 questions: Dict[str, QuestionSummary] = {}
                 for row in rows:
-                    qid = row['question_id']
+                    qid = row["question_id"]
                     if qid not in questions:
                         questions[qid] = QuestionSummary(
                             question_id=qid,
-                            question_text=row['question_text'] or "",
-                            question_number=row['question_number'],
+                            question_text=row["question_text"] or "",
+                            question_number=row["question_number"],
                         )
-                    
+
                     step = BlackboardStep(
-                        id=row['id'],
-                        session_id=row['session_id'],
-                        question_id=row['question_id'],
-                        question_text=row['question_text'] or "",
-                        question_number=row['question_number'],
-                        step_number=row['step_number'],
-                        step_name=row['step_name'],
-                        skill_description=row['skill_description'],
-                        skill_tags=row['skill_tags'] or [],
-                        intent=row['intent'],
-                        cypher_query=row['cypher_query'],
-                        query_type=row['query_type'],
-                        status=row['status'],
-                        record_count=row['record_count'],
-                        result_preview=row['result_preview'] or [],
-                        execution_time_ms=row['execution_time_ms'],
-                        created_at=row['created_at'],
+                        id=row["id"],
+                        session_id=row["session_id"],
+                        question_id=row["question_id"],
+                        question_text=row["question_text"] or "",
+                        question_number=row["question_number"],
+                        step_number=row["step_number"],
+                        step_name=row["step_name"],
+                        skill_description=row["skill_description"],
+                        skill_tags=row["skill_tags"] or [],
+                        intent=row["intent"],
+                        cypher_query=row["cypher_query"],
+                        query_type=row["query_type"],
+                        status=row["status"],
+                        record_count=row["record_count"],
+                        result_preview=row["result_preview"] or [],
+                        execution_time_ms=row["execution_time_ms"],
+                        created_at=row["created_at"],
                     )
-                    
+
                     questions[qid].steps.append(step)
                     questions[qid].total_steps += 1
                     if step.status == "success":
                         questions[qid].successful_steps += 1
                     else:
                         questions[qid].failed_steps += 1
-                
+
                 # Format output
                 total_questions = len(questions)
                 total_steps = sum(q.total_steps for q in questions.values())
-                
-                lines = [f"📋 SESSION OVERVIEW ({total_questions} soru, {total_steps} step)"]
-                
+
+                lines = [
+                    f"📋 SESSION OVERVIEW ({total_questions} soru, {total_steps} step)"
+                ]
+
                 for q in sorted(questions.values(), key=lambda x: x.question_number):
                     lines.append("")
                     lines.append("━" * 50)
-                    lines.append(f"Q{q.question_number}: \"{q.question_text[:100]}{'...' if len(q.question_text) > 100 else ''}\"")
+                    lines.append(
+                        f"Q{q.question_number}: \"{q.question_text[:100]}{'...' if len(q.question_text) > 100 else ''}\""
+                    )
                     lines.append("")
-                    
+
                     for step in q.steps:
-                        status_icon = "✅" if step.status == "success" else "❌" if step.status == "failed" else "⚪"
-                        lines.append(f"  [{step.step_number:02d}] {status_icon} {step.step_name}: {step.record_count} kayıt")
-                        
+                        status_icon = (
+                            "✅"
+                            if step.status == "success"
+                            else "❌" if step.status == "failed" else "⚪"
+                        )
+                        lines.append(
+                            f"  [{step.step_number:02d}] {status_icon} {step.step_name}: {step.record_count} kayıt"
+                        )
+
                         # Skill description or default
                         desc = step.skill_description or f"Step {step.step_number}"
-                        lines.append(f"       → {desc[:80]}{'...' if len(desc) > 80 else ''}")
-                        
+                        lines.append(
+                            f"       → {desc[:80]}{'...' if len(desc) > 80 else ''}"
+                        )
+
                         # Preview (first 2 results)
                         if step.result_preview:
                             for i, preview in enumerate(step.result_preview[:2]):
                                 preview_str = _format_preview(preview)
-                                lines.append(f"       Preview: {preview_str[:100]}{'...' if len(preview_str) > 100 else ''}")
-                        
+                                lines.append(
+                                    f"       Preview: {preview_str[:100]}{'...' if len(preview_str) > 100 else ''}"
+                                )
+
                         lines.append("")
-                
+
                 return "\n".join(lines)
-                
+
     except Exception as e:
         logger.error(f"❌ get_session_overview failed: {e}")
         return f"⚠️ Overview alınamadı: {str(e)}"
@@ -543,82 +599,107 @@ def search_skills(
 ) -> str:
     """
     Search skills with fuzzy and full-text support.
-    
+
     First searches in current session, then in all sessions (global) if no results.
     Only successful queries from other sessions are included in global search.
-    
+
     Supports OR queries: "kira kaybi | rent loss | kira zarar"
-    
+
     Args:
         session_id: Session identifier
         query: Search query (supports | for OR)
         fuzzy_threshold: Similarity threshold for fuzzy match (0-1)
         limit: Maximum results
         include_global: If True, search globally when session has no results
-    
+
     Returns:
         Formatted search results
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return "⚠️ Session blackboard devre dışı."
-    
+
     if not session_id or not query:
         return "⚠️ session_id ve query gerekli."
-    
+
     def _build_search_query(terms: list, fuzzy_threshold: float) -> tuple:
         """Build search conditions and params."""
         conditions = []
         params = []
-        
+
         for term in terms:
-            conditions.append(f"""
+            conditions.append(
+                f"""
                 (
                     similarity(COALESCE(skill_description, ''), %s) > %s OR
                     similarity(COALESCE(question_text, ''), %s) > %s OR
                     similarity(COALESCE(step_name, ''), %s) > %s OR
                     search_vector @@ plainto_tsquery('simple', %s)
                 )
-            """)
-            params.extend([term, fuzzy_threshold, term, fuzzy_threshold, term, fuzzy_threshold, term])
-        
+            """
+            )
+            params.extend(
+                [
+                    term,
+                    fuzzy_threshold,
+                    term,
+                    fuzzy_threshold,
+                    term,
+                    fuzzy_threshold,
+                    term,
+                ]
+            )
+
         return " OR ".join(conditions) if conditions else "TRUE", params
-    
+
     def _format_results(rows: list, query: str, is_global: bool = False) -> str:
         """Format search results."""
         source_label = "🌐 GLOBAL" if is_global else "📋 SESSION"
         lines = [f"🔍 '{query}' için {len(rows)} sonuç ({source_label}):"]
         lines.append("")
-        
+
         for row in rows:
-            status_icon = "✅" if row['status'] == "success" else "❌" if row['status'] == "failed" else "⚪"
-            similarity = row['similarity_score'] or 0
-            
+            status_icon = (
+                "✅"
+                if row["status"] == "success"
+                else "❌" if row["status"] == "failed" else "⚪"
+            )
+            similarity = row["similarity_score"] or 0
+
             # Show session info for global results
-            session_marker = f" [S:{row['session_id'][:8]}]" if is_global and 'session_id' in row else ""
-            
-            lines.append(f"[{row['id']:03d}] Q{row['question_number']} Step {row['step_number']:02d}{session_marker}")
-            lines.append(f"  {status_icon} {row['step_name']}: {row['record_count']} kayıt (benzerlik: {similarity:.0%})")
-            
-            desc = row['skill_description'] or row['question_text'] or ""
+            session_marker = (
+                f" [S:{row['session_id'][:8]}]"
+                if is_global and "session_id" in row
+                else ""
+            )
+
+            lines.append(
+                f"[{row['id']:03d}] Q{row['question_number']} Step {row['step_number']:02d}{session_marker}"
+            )
+            lines.append(
+                f"  {status_icon} {row['step_name']}: {row['record_count']} kayıt (benzerlik: {similarity:.0%})"
+            )
+
+            desc = row["skill_description"] or row["question_text"] or ""
             if desc:
                 lines.append(f"  → {desc[:80]}{'...' if len(desc) > 80 else ''}")
             lines.append("")
-        
+
         lines.append("💡 Detay için: read_step(step_id=ID)")
-        
+
         return "\n".join(lines)
-    
+
     try:
         init_blackboard_tables()
-        
+
         # Parse OR queries
         terms = [t.strip() for t in query.split("|") if t.strip()]
         where_clause, search_params = _build_search_query(terms, fuzzy_threshold)
-        
+
         with _get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. First, search in current session
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT 
                         id, session_id, question_id, question_text, question_number,
                         step_number, step_name, skill_description, 
@@ -632,19 +713,29 @@ def search_skills(
                     WHERE session_id = %s AND ({where_clause})
                     ORDER BY similarity_score DESC, created_at DESC
                     LIMIT %s
-                """, [terms[0] if terms else '', terms[0] if terms else '', terms[0] if terms else '', session_id] + search_params + [limit])
-                
+                """,
+                    [
+                        terms[0] if terms else "",
+                        terms[0] if terms else "",
+                        terms[0] if terms else "",
+                        session_id,
+                    ]
+                    + search_params
+                    + [limit],
+                )
+
                 rows = cur.fetchall()
-                
+
                 if rows:
                     return _format_results(rows, query, is_global=False)
-                
+
                 # 2. If no results in session and global search enabled, search globally
                 if not include_global:
                     return f"📭 '{query}' için sonuç bulunamadı."
-                
+
                 # Global search: only successful queries, exclude current session
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT 
                         id, session_id, question_id, question_text, question_number,
                         step_number, step_name, skill_description, 
@@ -661,15 +752,26 @@ def search_skills(
                       AND ({where_clause})
                     ORDER BY similarity_score DESC, created_at DESC
                     LIMIT %s
-                """, [terms[0] if terms else '', terms[0] if terms else '', terms[0] if terms else '', session_id] + search_params + [limit])
-                
+                """,
+                    [
+                        terms[0] if terms else "",
+                        terms[0] if terms else "",
+                        terms[0] if terms else "",
+                        session_id,
+                    ]
+                    + search_params
+                    + [limit],
+                )
+
                 global_rows = cur.fetchall()
-                
+
                 if global_rows:
                     return _format_results(global_rows, query, is_global=True)
-                
-                return f"📭 '{query}' için ne session'da ne de global'de sonuç bulunamadı."
-                
+
+                return (
+                    f"📭 '{query}' için ne session'da ne de global'de sonuç bulunamadı."
+                )
+
     except Exception as e:
         logger.error(f"❌ search_skills failed: {e}")
         return f"⚠️ Arama başarısız: {str(e)}"
@@ -678,24 +780,25 @@ def search_skills(
 def get_step_detail(step_id: int) -> str:
     """
     Get detailed information about a specific step.
-    
+
     Shows: Cypher query + first 5 results
-    
+
     Args:
         step_id: Step ID
-    
+
     Returns:
         Formatted step detail
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return "⚠️ Session blackboard devre dışı."
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT 
                         id, session_id, question_id, question_text, question_number,
                         step_number, step_name, skill_description, skill_tags, intent,
@@ -703,54 +806,62 @@ def get_step_detail(step_id: int) -> str:
                         full_results, execution_time_ms, created_at
                     FROM session_blackboard
                     WHERE id = %s
-                """, (step_id,))
-                
+                """,
+                    (step_id,),
+                )
+
                 row = cur.fetchone()
-                
+
                 if not row:
                     return f"⚠️ Step {step_id} bulunamadı."
-                
-                status_icon = "✅" if row['status'] == "success" else "❌" if row['status'] == "failed" else "⚪"
-                
+
+                status_icon = (
+                    "✅"
+                    if row["status"] == "success"
+                    else "❌" if row["status"] == "failed" else "⚪"
+                )
+
                 lines = [
                     f"📋 STEP DETAY: [{row['step_number']:02d}] {row['step_name']}",
                     "",
                     f"Soru (Q{row['question_number']}): {row['question_text']}",
                     f"Durum: {status_icon} {row['status']} ({row['record_count']} kayıt)",
                 ]
-                
-                if row['skill_description']:
+
+                if row["skill_description"]:
                     lines.append(f"Açıklama: {row['skill_description']}")
-                
-                if row['skill_tags']:
+
+                if row["skill_tags"]:
                     lines.append(f"Tags: {', '.join(row['skill_tags'])}")
-                
-                if row['execution_time_ms']:
+
+                if row["execution_time_ms"]:
                     lines.append(f"Süre: {row['execution_time_ms']}ms")
-                
+
                 lines.append("")
                 lines.append("📝 CYPHER SORGUSU:")
                 lines.append("```cypher")
-                lines.append(row['cypher_query'])
+                lines.append(row["cypher_query"])
                 lines.append("```")
-                
+
                 # First 5 results
-                results = row['full_results'] or []
+                results = row["full_results"] or []
                 if results:
                     lines.append("")
                     lines.append(f"📊 SONUÇLAR (ilk 5 / toplam {len(results)}):")
                     for i, result in enumerate(results[:5], 1):
                         lines.append(f"  ({i}) {_format_preview(result)}")
-                    
+
                     if len(results) > 5:
                         lines.append(f"  ... ve {len(results) - 5} daha fazla sonuç")
-                        lines.append(f"  💡 Daha fazlası için: read_step_results(step_id={step_id}, start=5, end=15)")
+                        lines.append(
+                            f"  💡 Daha fazlası için: read_step_results(step_id={step_id}, start=5, end=15)"
+                        )
                 else:
                     lines.append("")
                     lines.append("📊 SONUÇ: Kayıt bulunamadı")
-                
+
                 return "\n".join(lines)
-                
+
     except Exception as e:
         logger.error(f"❌ get_step_detail failed: {e}")
         return f"⚠️ Step detayı alınamadı: {str(e)}"
@@ -759,64 +870,69 @@ def get_step_detail(step_id: int) -> str:
 def get_step_results(step_id: int, start: int = 0, end: int = 10) -> str:
     """
     Get paginated results for a step.
-    
+
     Args:
         step_id: Step ID
         start: Start index (0-based)
         end: End index (exclusive)
-    
+
     Returns:
         Formatted results
     """
     if not SESSION_BLACKBOARD_ENABLED:
         return "⚠️ Session blackboard devre dışı."
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT step_name, record_count, full_results
                     FROM session_blackboard
                     WHERE id = %s
-                """, (step_id,))
-                
+                """,
+                    (step_id,),
+                )
+
                 row = cur.fetchone()
-                
+
                 if not row:
                     return f"⚠️ Step {step_id} bulunamadı."
-                
-                results = row['full_results'] or []
+
+                results = row["full_results"] or []
                 total = len(results)
-                
+
                 if total == 0:
                     return f"📊 Step [{step_id}] {row['step_name']}: Kayıt yok"
-                
+
                 # Validate range
                 start = max(0, start)
                 end = min(total, end)
-                
+
                 if start >= total:
                     return f"⚠️ start ({start}) toplam kayıt sayısından ({total}) büyük."
-                
+
                 sliced = results[start:end]
-                
+
                 lines = [
                     f"📊 Step [{step_id}] {row['step_name']}",
                     f"Kayıtlar: {start + 1}-{start + len(sliced)} / {total}",
-                    ""
+                    "",
                 ]
-                
+
                 for i, result in enumerate(sliced, start + 1):
                     lines.append(f"({i}) {_format_preview(result)}")
-                
+
                 if end < total:
                     lines.append("")
-                    lines.append(f"💡 Sonraki sayfa: read_step_results(step_id={step_id}, start={end}, end={end + 10})")
-                
+                    lines.append(
+                        f"💡 Sonraki sayfa: read_step_results(step_id={step_id}, start={end}, end={end + 10})"
+                    )
+
                 return "\n".join(lines)
-                
+
     except Exception as e:
         logger.error(f"❌ get_step_results failed: {e}")
         return f"⚠️ Sonuçlar alınamadı: {str(e)}"
@@ -826,21 +942,24 @@ def get_question_count(session_id: str) -> int:
     """Get the current question count for a session."""
     if not SESSION_BLACKBOARD_ENABLED:
         return 0
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT COALESCE(MAX(question_number), 0)
                     FROM session_blackboard
                     WHERE session_id = %s
-                """, (session_id,))
-                
+                """,
+                    (session_id,),
+                )
+
                 row = cur.fetchone()
                 return row[0] if row else 0
-                
+
     except Exception as e:
         logger.error(f"❌ get_question_count failed: {e}")
         return 0
@@ -850,21 +969,24 @@ def get_step_count(session_id: str, question_id: str) -> int:
     """Get the current step count for a question."""
     if not SESSION_BLACKBOARD_ENABLED:
         return 0
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT COALESCE(MAX(step_number), 0)
                     FROM session_blackboard
                     WHERE session_id = %s AND question_id = %s
-                """, (session_id, question_id))
-                
+                """,
+                    (session_id, question_id),
+                )
+
                 row = cur.fetchone()
                 return row[0] if row else 0
-                
+
     except Exception as e:
         logger.error(f"❌ get_step_count failed: {e}")
         return 0
@@ -874,20 +996,25 @@ def clear_session(session_id: str) -> int:
     """Clear all data for a session."""
     if not session_id:
         return 0
-    
+
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     DELETE FROM session_blackboard WHERE session_id = %s
-                """, (session_id,))
-                
+                """,
+                    (session_id,),
+                )
+
                 deleted = cur.rowcount
-                logger.info(f"🗑️ Session blackboard cleared: session={session_id[:8]}, deleted={deleted}")
+                logger.info(
+                    f"🗑️ Session blackboard cleared: session={session_id[:8]}, deleted={deleted}"
+                )
                 return deleted
-                
+
     except Exception as e:
         logger.error(f"❌ clear_session failed: {e}")
         return 0
@@ -897,19 +1024,24 @@ def cleanup_old_sessions(hours: int = SESSION_BLACKBOARD_TTL_HOURS) -> int:
     """Remove sessions older than specified hours."""
     try:
         init_blackboard_tables()
-        
+
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     DELETE FROM session_blackboard 
                     WHERE created_at < NOW() - INTERVAL '%s hours'
-                """, (hours,))
-                
+                """,
+                    (hours,),
+                )
+
                 deleted = cur.rowcount
                 if deleted > 0:
-                    logger.info(f"🧹 Old sessions cleaned: {deleted} rows older than {hours}h")
+                    logger.info(
+                        f"🧹 Old sessions cleaned: {deleted} rows older than {hours}h"
+                    )
                 return deleted
-                
+
     except Exception as e:
         logger.error(f"❌ cleanup_old_sessions failed: {e}")
         return 0
@@ -919,14 +1051,15 @@ def cleanup_old_sessions(hours: int = SESSION_BLACKBOARD_TTL_HOURS) -> int:
 # UTILITY FUNCTIONS
 # =============================================================================
 
+
 def _format_preview(result: Dict) -> str:
     """Format a single result for preview display."""
     if not result:
         return "{}"
-    
+
     # Common fields to prioritize
-    priority_fields = ['fileName', 'name', 'text', 'title', 'id', 'score']
-    
+    priority_fields = ["fileName", "name", "text", "title", "id", "score"]
+
     parts = []
     for field in priority_fields:
         if field in result:
@@ -934,7 +1067,7 @@ def _format_preview(result: Dict) -> str:
             if isinstance(value, str) and len(value) > 50:
                 value = value[:50] + "..."
             parts.append(f"{field}: {value}")
-    
+
     # Add remaining fields (up to 3 more)
     remaining = [k for k in result.keys() if k not in priority_fields]
     for field in remaining[:3]:
@@ -942,5 +1075,5 @@ def _format_preview(result: Dict) -> str:
         if isinstance(value, str) and len(value) > 30:
             value = value[:30] + "..."
         parts.append(f"{field}: {value}")
-    
+
     return "{" + ", ".join(parts) + "}"

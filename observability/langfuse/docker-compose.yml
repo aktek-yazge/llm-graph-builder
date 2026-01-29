@@ -79,9 +79,12 @@ services:
     restart: always
     depends_on: *langfuse-depends-on
     ports:
-      - 3101:3000  # Port 3101 (3100 is used by Loki)
+      - 3101:3000 # Port 3101 - direct access (backup)
+    expose:
+      - "3000"
     environment:
       <<: *langfuse-worker-env
+      HOSTNAME: "0.0.0.0"
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-NxAuth2024SecureSessionKey}
       # Headless Initialization - Auto-create organization and project
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-llm-graph-builder}
@@ -95,6 +98,15 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-Admin2024LgfsSecure}
     networks:
       - langfuse-network
+      - traefik-public
+      - observability
+    labels:
+      - "traefik.enable=true"
+      # Langfuse: langfuse.{domain} - env'den gelir
+      - "traefik.http.routers.langfuse.rule=Host(`${LANGFUSE_DOMAIN:-langfuse.dev.local}`)"
+      - "traefik.http.routers.langfuse.entrypoints=web,websecure"
+      - "traefik.http.services.langfuse.loadbalancer.server.port=3000"
+      - "traefik.docker.network=traefik-public"
 
   langfuse-clickhouse:
     image: docker.io/clickhouse/clickhouse-server:24
@@ -109,8 +121,8 @@ services:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
     ports:
-      - 127.0.0.1:8124:8123  # HTTP interface (port 8124 to avoid conflicts)
-      - 127.0.0.1:9001:9000  # Native interface (port 9001 to avoid conflicts)
+      - 127.0.0.1:8124:8123 # HTTP interface (port 8124 to avoid conflicts)
+      - 127.0.0.1:9001:9000 # Native interface (port 9001 to avoid conflicts)
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
@@ -131,8 +143,8 @@ services:
       MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER:-langfuse_minio}
       MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-Mn2024S3SecretKey}
     ports:
-      - 9190:9000  # S3 API (port 9190 to avoid conflicts)
-      - 127.0.0.1:9191:9001  # Console
+      - 9190:9000 # S3 API (port 9190 to avoid conflicts)
+      - 127.0.0.1:9191:9001 # Console
     volumes:
       - langfuse_minio_data:/data
     healthcheck:
@@ -152,7 +164,7 @@ services:
       --requirepass ${LANGFUSE_REDIS_AUTH:-Rds2024CacheSecure}
       --maxmemory-policy noeviction
     ports:
-      - 127.0.0.1:6380:6379  # Port 6380 to avoid conflict with main Redis
+      - 127.0.0.1:6380:6379 # Port 6380 to avoid conflict with main Redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -178,35 +190,9 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - 127.0.0.1:5433:5432  # Port 5433 to avoid conflict with main PostgreSQL
+      - 127.0.0.1:5433:5432 # Port 5433 to avoid conflict with main PostgreSQL
     volumes:
       - langfuse_postgres_data:/var/lib/postgresql/data
-    networks:
-      - langfuse-network
-
-  # ============================================
-  # Feedback PostgreSQL with pgvector
-  # Ayrı container - Langfuse DB'den bağımsız
-  # ============================================
-  feedback-postgres:
-    image: docker.io/pgvector/pgvector:pg17
-    container_name: feedback-postgres
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U feedback"]
-      interval: 3s
-      timeout: 3s
-      retries: 10
-    environment:
-      POSTGRES_USER: feedback
-      POSTGRES_PASSWORD: FeedbackPg2024Secure
-      POSTGRES_DB: feedback
-      TZ: UTC
-      PGTZ: UTC
-    ports:
-      - 127.0.0.1:5434:5432  # Port 5434 - ayrı port
-    volumes:
-      - feedback_postgres_data:/var/lib/postgresql/data
     networks:
       - langfuse-network
 
@@ -219,10 +205,13 @@ volumes:
     driver: local
   langfuse_minio_data:
     driver: local
-  feedback_postgres_data:
-    driver: local
 
 networks:
   langfuse-network:
     driver: bridge
-
+  traefik-public:
+    external: true
+    name: traefik-public
+  observability:
+    external: true
+    name: observability
