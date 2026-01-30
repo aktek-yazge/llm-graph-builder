@@ -201,6 +201,9 @@ backend/logs/test-rotation.jsonl*
 gen-lang-client-*.json
 *.secrets.yaml
 .vscode/mcp.json
+
+# pgAdmin password files
+.devcontainer/pgadmin-*/pgpass
 backend/src/workflow/fastagent.jsonl
 backend/fastagent.jsonl
 backend/fastagent.config.yaml

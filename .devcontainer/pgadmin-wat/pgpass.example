@@ -1,0 +1,2 @@
+# pgpass format: hostname:port:database:username:password
+wat-postgres:5432:llm_graph_builder:postgres:YOUR_PASSWORD_HERE

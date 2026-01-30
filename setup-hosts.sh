@@ -17,7 +17,18 @@ HOSTS_FILE="/etc/hosts"
 MARKER_START="# === WAT Dev Environment - START ==="
 MARKER_END="# === WAT Dev Environment - END ==="
 
-HOSTS_ENTRIES="127.0.0.1   dev.local"
+# Ana domain ve müşteri subdomainleri
+# Her müşteri için: browser subdomain + neo4j (bolt) subdomain
+HOSTS_ENTRIES="127.0.0.1   dev.local
+127.0.0.1   wat.dev.local
+127.0.0.1   neo4j.wat.dev.local
+127.0.0.1   akkok-sicil.dev.local
+127.0.0.1   neo4j.akkok-sicil.dev.local
+127.0.0.1   dinkal.dev.local
+127.0.0.1   neo4j.dinkal.dev.local
+127.0.0.1   traefik.dev.local
+127.0.0.1   rabbitmq.dev.local
+127.0.0.1   mcp-inspector.dev.local"
 
 remove_entries() {
     echo "Mevcut WAT hosts kayitlari kaldiriliyor..."
@@ -49,16 +60,30 @@ add_entries() {
     echo ""
     echo "Hosts kayitlari basariyla eklendi!"
     echo ""
-    echo "WAT Projesi:"
+    echo "=== Musteri Subdomain'leri (Neo4j otomatik Bolt baglantisi) ==="
+    echo ""
+    echo "WAT:"
+    echo "  http://wat.dev.local             -> Neo4j Browser (neo4j/Watmotor!654*)"
     echo "  http://dev.local/wat/ui          -> Frontend"
     echo "  http://dev.local/wat/server      -> Backend API"
-    echo "  http://dev.local/wat/mcp         -> MCP Server"
-    echo "  http://dev.local/wat/neo4j       -> Neo4j Browser (neo4j/Watmotor!654*)"
-    echo "  http://dev.local/wat/qdrant      -> Qdrant API"
     echo ""
-    echo "Altyapi Servisleri:"
-    echo "  http://dev.local/rabbitmq        -> RabbitMQ Management"
-    echo "  http://localhost:8090/dashboard/ -> Traefik Dashboard"
+    echo "AKKOK-SICIL:"
+    echo "  http://akkok-sicil.dev.local     -> Neo4j Browser (neo4j/AkkokSicil!654*)"
+    echo "  http://akkok-sicil.dev.local/pgadmin -> pgAdmin"
+    echo "  http://akkok-sicil.dev.local/flower  -> Celery Flower"
+    echo "  http://dev.local/akkok-sicil/ui  -> Frontend"
+    echo "  http://dev.local/akkok-sicil/server -> Backend API"
+    echo ""
+    echo "DINKAL:"
+    echo "  http://dinkal.dev.local          -> Neo4j Browser (neo4j/Dinkal!654*)"
+    echo "  http://dinkal.dev.local/pgadmin  -> pgAdmin"
+    echo "  http://dev.local/dinkal/ui       -> Frontend"
+    echo "  http://dev.local/dinkal/server   -> Backend API"
+    echo ""
+    echo "=== Altyapi Servisleri ==="
+    echo "  http://traefik.dev.local         -> Traefik Dashboard"
+    echo "  http://rabbitmq.dev.local        -> RabbitMQ Management"
+    echo "  http://mcp-inspector.dev.local   -> MCP Inspector"
     echo ""
 }
 

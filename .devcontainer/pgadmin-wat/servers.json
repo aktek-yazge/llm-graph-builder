@@ -1,9 +1,9 @@
 {
   "Servers": {
     "1": {
-      "Name": "Dinkal PostgreSQL",
-      "Group": "Dinkal",
-      "Host": "dinkal-postgres",
+      "Name": "WAT PostgreSQL",
+      "Group": "WAT",
+      "Host": "wat-postgres",
       "Port": 5432,
       "MaintenanceDB": "llm_graph_builder",
       "Username": "postgres",

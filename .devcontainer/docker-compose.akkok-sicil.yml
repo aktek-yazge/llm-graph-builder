@@ -5,9 +5,10 @@
 #   docker compose -p akkok-sicil -f docker-compose.akkok-sicil.yml up -d
 #   docker compose -p akkok-sicil -f docker-compose.akkok-sicil.yml down
 #
-# ERİŞİM:
-#   Neo4j:    http://dev.local/akkok-sicil/neo4j
-#   pgAdmin:  http://dev.local/akkok-sicil/pgadmin
+# ERİŞİM (Subdomain Routing):
+#   Neo4j Browser: http://akkok-sicil.dev.local (otomatik Bolt bağlantısı)
+#   pgAdmin:       http://akkok-sicil.dev.local/pgadmin
+#   Flower:        http://akkok-sicil.dev.local/flower
 #
 # NOT: Backend/Frontend devcontainer içinden manuel başlatılır:
 #   ./start-backend-yedek.sh akkok-sicil
@@ -38,6 +39,12 @@ services:
       - NEO4J_apoc_export_file_enabled=true
       - NEO4J_apoc_import_file_enabled=true
       - NEO4J_apoc_import_file_use__neo4j__config=true
+      # Subdomain routing için advertised address ayarları
+      # Browser: akkok-sicil.dev.local (HTTP)
+      # Bolt: neo4j.akkok-sicil.dev.local:80 (WebSocket)
+      - NEO4J_server_default__advertised__address=akkok-sicil.dev.local
+      - NEO4J_server_bolt_advertised__address=neo4j.akkok-sicil.dev.local:80
+      - NEO4J_server_http_advertised__address=:80
     deploy:
       resources:
         limits:
@@ -51,17 +58,21 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      # Ana router - tüm neo4j istekleri için
-      - "traefik.http.routers.akkok-sicil-neo4j.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/neo4j`)"
+      # =========================================================================
+      # Neo4j Browser (HTTP) - akkok-sicil.dev.local
+      # =========================================================================
+      - "traefik.http.routers.akkok-sicil-neo4j.rule=Host(`akkok-sicil.dev.local`)"
       - "traefik.http.routers.akkok-sicil-neo4j.entrypoints=web"
-      - "traefik.http.routers.akkok-sicil-neo4j.priority=15"
-      - "traefik.http.services.akkok-sicil-neo4j.loadbalancer.server.port=7474"
-      - "traefik.http.middlewares.strip-akkok-sicil-neo4j.stripprefix.prefixes=/akkok-sicil/neo4j"
-      # Redirect: /akkok-sicil/neo4j → /akkok-sicil/neo4j/browser/
-      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.regex=^(https?://[^/]+/akkok-sicil/neo4j)/?$$"
-      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.replacement=$${1}/browser/"
-      - "traefik.http.middlewares.neo4j-add-browser.redirectregex.permanent=false"
-      - "traefik.http.routers.akkok-sicil-neo4j.middlewares=neo4j-add-browser,strip-akkok-sicil-neo4j"
+      - "traefik.http.routers.akkok-sicil-neo4j.priority=10"
+      - "traefik.http.routers.akkok-sicil-neo4j.service=akkok-sicil-neo4j-browser"
+      - "traefik.http.services.akkok-sicil-neo4j-browser.loadbalancer.server.port=7474"
+      # =========================================================================
+      # Neo4j Bolt (WebSocket) - neo4j.akkok-sicil.dev.local subdomain
+      # =========================================================================
+      - "traefik.http.routers.akkok-sicil-bolt.rule=Host(`neo4j.akkok-sicil.dev.local`)"
+      - "traefik.http.routers.akkok-sicil-bolt.entrypoints=web"
+      - "traefik.http.routers.akkok-sicil-bolt.service=akkok-sicil-neo4j-bolt"
+      - "traefik.http.services.akkok-sicil-neo4j-bolt.loadbalancer.server.port=7687"
 
   # ===========================================================================
   # AKKOK-SİCİL - Redis Cache
@@ -127,11 +138,15 @@ services:
     environment:
       - PGADMIN_DEFAULT_EMAIL=admin@akkok.com
       - PGADMIN_DEFAULT_PASSWORD=admin
-      - SCRIPT_NAME=/akkok-sicil/pgadmin
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+      - SCRIPT_NAME=/pgadmin
     expose:
       - "80"
     volumes:
       - akkok_sicil_pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
     deploy:
       resources:
         limits:
@@ -142,7 +157,7 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.akkok-sicil-pgadmin.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/pgadmin`)"
+      - "traefik.http.routers.akkok-sicil-pgadmin.rule=Host(`akkok-sicil.dev.local`) && PathPrefix(`/pgadmin`)"
       - "traefik.http.routers.akkok-sicil-pgadmin.entrypoints=web"
       - "traefik.http.routers.akkok-sicil-pgadmin.priority=15"
       - "traefik.http.services.akkok-sicil-pgadmin.loadbalancer.server.port=80"
@@ -237,11 +252,11 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.akkok-sicil-flower.rule=Host(`dev.local`) && PathPrefix(`/akkok-sicil/flower`)"
+      - "traefik.http.routers.akkok-sicil-flower.rule=Host(`akkok-sicil.dev.local`) && PathPrefix(`/flower`)"
       - "traefik.http.routers.akkok-sicil-flower.entrypoints=web"
       - "traefik.http.routers.akkok-sicil-flower.priority=15"
       - "traefik.http.services.akkok-sicil-flower.loadbalancer.server.port=5555"
-      - "traefik.http.middlewares.strip-akkok-sicil-flower.stripprefix.prefixes=/akkok-sicil/flower"
+      - "traefik.http.middlewares.strip-akkok-sicil-flower.stripprefix.prefixes=/flower"
       - "traefik.http.routers.akkok-sicil-flower.middlewares=strip-akkok-sicil-flower"
 
 volumes:
