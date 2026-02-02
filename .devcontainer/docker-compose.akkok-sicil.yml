@@ -184,6 +184,7 @@ services:
       - PYTHONPATH=/app
       - ENV=development
     volumes:
+      # Named volume - devcontainer ile paylaşım için
       - akkok_sicil_celery_output:/app/output
       # Dev'de src mount devcontainer path sorunu yaratır, image içindeki kod kullanılır
     deploy:
@@ -220,7 +221,9 @@ services:
     environment:
       - PYTHONPATH=/app
       - ENV=development
-    # Dev'de src mount devcontainer path sorunu yaratır, image içindeki kod kullanılır
+    volumes:
+      # Named volume - devcontainer ile paylaşım için
+      - akkok_sicil_celery_output:/app/output
     deploy:
       resources:
         limits:

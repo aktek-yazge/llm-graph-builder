@@ -74,9 +74,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=Ekdmjweu483i
-      - POSTGRES_DB=llm_graph_builder
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-llm_graph_builder}
     command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
       - ~/postgres-data-prod:/var/lib/postgresql/data
@@ -177,7 +177,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/qwerty5555
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false
@@ -219,7 +219,7 @@ services:
       - "7475:7474"
       - "7688:7687"
     environment:
-      - NEO4J_AUTH=neo4j/qwerty5555
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD_2:-${NEO4J_PASSWORD}}
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false

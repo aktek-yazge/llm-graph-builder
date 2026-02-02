@@ -1,0 +1,130 @@
+# =============================================================================
+# INFISICAL - Self-Hosted Secret Management
+# =============================================================================
+#
+# Kurulum:
+#   1. .env dosyasını oluştur: cp .env.example .env
+#   2. ENCRYPTION_KEY ve AUTH_SECRET değerlerini güncelle
+#   3. docker compose up -d
+#
+# Erişim:
+#   - Dashboard: http://localhost:8085 (veya https://secrets.yazge.aktekbilisim.com)
+#
+# İlk Kurulum:
+#   1. Admin hesabı oluştur
+#   2. "llm-graph-builder" projesi oluştur
+#   3. development, preview, production environment'ları ekle
+#   4. Machine Identity oluştur
+#
+# =============================================================================
+
+services:
+  # ============================================
+  # INFISICAL SERVER
+  # ============================================
+  infisical:
+    image: infisical/infisical:latest
+    container_name: infisical-server
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      infisical-db:
+        condition: service_healthy
+      infisical-redis:
+        condition: service_healthy
+    labels:
+      - "logging=alloy"
+      # Traefik entegrasyonu (opsiyonel)
+      - "traefik.enable=true"
+      - "traefik.http.routers.infisical.rule=Host(`secrets.yazge.aktekbilisim.com`)"
+      - "traefik.http.routers.infisical.entrypoints=web,websecure"
+      - "traefik.http.services.infisical.loadbalancer.server.port=8080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - infisical-internal
+      - traefik-public
+      - observability
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ============================================
+  # POSTGRESQL - Infisical Database
+  # ============================================
+  infisical-db:
+    image: postgres:16-alpine
+    container_name: infisical-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${INFISICAL_DB_USER:-infisical}
+      - POSTGRES_PASSWORD=${INFISICAL_DB_PASSWORD}
+      - POSTGRES_DB=${INFISICAL_DB_NAME:-infisical}
+    volumes:
+      - infisical_postgres_data:/var/lib/postgresql/data
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - infisical-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${INFISICAL_DB_USER:-infisical}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================
+  # REDIS - Infisical Cache & Queue
+  # ============================================
+  infisical-redis:
+    image: redis:7-alpine
+    container_name: infisical-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - infisical_redis_data:/data
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - infisical-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+networks:
+  infisical-internal:
+    driver: bridge
+  traefik-public:
+    external: true
+    name: traefik-public
+  observability:
+    external: true
+    name: observability
+
+volumes:
+  infisical_postgres_data:
+  infisical_redis_data:

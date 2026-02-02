@@ -41,6 +41,7 @@ services:
       - backend_pip_cache:/root/.cache/pip # Python cache
       - frontend_node_modules:/workspace/frontend/node_modules # Node.js cache
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
+      - akkok_sicil_celery_output:/workspace/backend/output_celery # Celery output paylaşımı
     environment:
       - PYTHONPATH=/workspace/backend
       # Neo4j bağlantısı (servis adı kullanılır, backend .env'den override edilir)
@@ -68,6 +69,9 @@ volumes:
   backend_pip_cache:
     external: true
     name: wat_backend_pip_cache
+  akkok_sicil_celery_output:
+    external: true
+    name: akkok_sicil_celery_output
 
 networks:
   wat-dev-network:

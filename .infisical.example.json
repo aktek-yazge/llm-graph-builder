@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Infisical/infisical/main/.infisical.json.schema",
+  "workspaceId": "YOUR_PROJECT_ID_HERE",
+  "defaultEnvironment": "development",
+  "gitBranchToEnvironmentMapping": {
+    "main": "production",
+    "staging": "staging",
+    "feature/*": "development",
+    "*": "development"
+  }
+}
+

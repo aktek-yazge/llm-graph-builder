@@ -212,3 +212,10 @@ llm_graph_builder_backup.sql
 
 # DevContainer cache
 .devcontainer/.cache/
+
+# Infisical
+.infisical.json
+.infisicalignore
+.infisical-token
+infisical/.env
+*.infisical-token

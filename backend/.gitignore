@@ -2,6 +2,10 @@
 .venv/
 .venv.old/
 __pycache__/
+
+# Output directories (Celery volume mount)
+output/
+output_celery/
 *.pyc
 *.pyo
 *.pyd

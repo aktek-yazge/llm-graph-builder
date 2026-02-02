@@ -3,6 +3,16 @@ set -e
 
 echo "🚀 Full-Stack DevContainer kurulum başlıyor..."
 
+# Infisical CLI kurulumu
+if ! command -v infisical &> /dev/null; then
+    echo "🔐 Infisical CLI kuruluyor..."
+    curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | bash
+    apt-get update && apt-get install -y infisical
+    echo "✅ Infisical CLI kuruldu"
+else
+    echo "✅ Infisical CLI zaten mevcut"
+fi
+
 # Python venv'leri oluştur (her proje için ayrı)
 echo "🐍 Python venv'leri oluşturuluyor..."
 

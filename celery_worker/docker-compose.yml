@@ -56,7 +56,7 @@ services:
       - PYTHONIOENCODING=utf-8
     volumes:
       - celery_output:/app/output
-      - ./src:/app/src
+      # - ./src:/app/src  # Dev only - uncomment for hot reload
     deploy:
       resources:
         limits:
@@ -114,7 +114,8 @@ services:
       - LC_ALL=C.UTF-8
       - PYTHONIOENCODING=utf-8
     volumes:
-      - ./src:/app/src
+      # - ./src:/app/src  # Dev only - uncomment for hot reload
+      - celery_output:/app/output
     deploy:
       resources:
         limits:

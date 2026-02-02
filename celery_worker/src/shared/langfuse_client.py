@@ -145,26 +145,32 @@ def trace_llm_call(
         return
     
     try:
-        # Create trace
-        trace = langfuse.trace(
+        # Langfuse SDK v3+ uses start_span/start_generation instead of trace()
+        # session_id and user_id go into metadata
+        span_metadata = {
+            **(metadata or {}),
+            "session_id": session_id,
+            "user_id": user_id,
+        }
+        
+        # Create a span for the LLM call
+        span = langfuse.start_span(
             name=name,
-            session_id=session_id,
-            user_id=user_id,
             input=input_data,
-            metadata=metadata or {},
+            metadata=span_metadata,
         )
         
-        # Create generation span
-        generation = trace.generation(
+        # Create generation
+        generation = langfuse.start_generation(
             name=name,
             input=input_data,
-            metadata=metadata or {},
+            metadata=span_metadata,
         )
         
         class SpanWrapper:
-            def __init__(self, gen, tr):
+            def __init__(self, gen, parent_span):
                 self._generation = gen
-                self._trace = tr
+                self._span = parent_span
                 self._start_time = datetime.now()
             
             def update(
@@ -177,51 +183,64 @@ def trace_llm_call(
                 **kwargs
             ):
                 """Update generation with output and usage"""
-                update_kwargs = {}
-                
-                if output is not None:
-                    update_kwargs["output"] = output
-                
-                if usage:
-                    update_kwargs["usage"] = {
-                        "input": usage.get("input_tokens", usage.get("input", 0)),
-                        "output": usage.get("output_tokens", usage.get("output", 0)),
-                        "total": usage.get("total_tokens", usage.get("total", 0)),
-                    }
-                
-                if model:
-                    update_kwargs["model"] = model
-                
-                if level:
-                    update_kwargs["level"] = level
-                
-                if status_message:
-                    update_kwargs["status_message"] = status_message
-                
-                update_kwargs.update(kwargs)
-                
                 try:
-                    self._generation.end(**update_kwargs)
+                    # End generation with update
+                    if self._generation:
+                        end_kwargs = {}
+                        
+                        if output is not None:
+                            end_kwargs["output"] = output
+                        
+                        if usage:
+                            # Langfuse expects specific keys
+                            end_kwargs["usage"] = {
+                                "input": usage.get("input_tokens", usage.get("input", 0)),
+                                "output": usage.get("output_tokens", usage.get("output", 0)),
+                                "total": usage.get("total_tokens", usage.get("total", 0)),
+                            }
+                            if "cached_tokens" in usage:
+                                end_kwargs["usage"]["cached"] = usage["cached_tokens"]
+                        
+                        if model:
+                            end_kwargs["model"] = model
+                        
+                        if level:
+                            end_kwargs["level"] = level
+                        
+                        if status_message:
+                            end_kwargs["status_message"] = status_message
+                        
+                        end_kwargs.update(kwargs)
+                        self._generation.end(**end_kwargs)
+                    
+                    # Also end parent span
+                    if self._span:
+                        self._span.end(output=output)
+                        
                 except Exception as e:
-                    logger.warning(f"⚠️ Langfuse generation update failed: {e}")
+                    logger.warning(f"⚠️ Langfuse update failed: {e}")
             
             def end(self, **kwargs):
-                """End the generation span"""
+                """End the generation and span"""
                 try:
-                    self._generation.end(**kwargs)
+                    if self._generation:
+                        self._generation.end(**kwargs)
+                    if self._span:
+                        self._span.end()
                 except Exception as e:
-                    logger.warning(f"⚠️ Langfuse generation end failed: {e}")
+                    logger.warning(f"⚠️ Langfuse end failed: {e}")
             
             @property
             def trace_id(self):
-                return self._trace.id if self._trace else None
+                return self._span.id if self._span else None
         
-        span = SpanWrapper(generation, trace)
+        wrapper = SpanWrapper(generation, span)
         
         try:
-            yield span
+            yield wrapper
         except Exception as e:
-            span.update(
+            # Record error in span
+            wrapper.update(
                 level="ERROR",
                 status_message=str(e),
             )
@@ -242,6 +261,8 @@ def log_llm_usage(
     latency_ms: float = 0.0,
     step_name: str = "llm_call",
     metadata: Optional[Dict[str, Any]] = None,
+    llm_input: Optional[Any] = None,
+    llm_output: Optional[Any] = None,
 ):
     """
     Log LLM usage to Langfuse.
@@ -256,6 +277,8 @@ def log_llm_usage(
         latency_ms: Latency in milliseconds
         step_name: Name of the step
         metadata: Additional metadata
+        llm_input: LLM input (messages/prompt) - SHOWS IN DASHBOARD
+        llm_output: LLM output (response) - SHOWS IN DASHBOARD
     """
     if not is_langfuse_enabled():
         return
@@ -265,30 +288,33 @@ def log_llm_usage(
         return
     
     try:
-        trace = langfuse.trace(
+        # Langfuse SDK v3+: start_generation -> update -> end
+        generation = langfuse.start_generation(
             name=step_name,
-            session_id=session_id,
+            model=model,
+            input=llm_input,
+            output=llm_output,
             metadata={
+                "session_id": session_id,
                 "model": model,
                 "cost_usd": cost_usd,
                 "latency_ms": latency_ms,
+                "cache_hit_rate": round(cached_tokens / max(input_tokens, 1) * 100, 1),
                 **(metadata or {}),
             },
         )
         
-        trace.generation(
-            name=step_name,
-            model=model,
-            usage={
-                "input": input_tokens,
+        # Update with usage details, then end
+        uncached_input = max(0, input_tokens - cached_tokens)
+        generation.update(
+            usage_details={
+                "input": uncached_input,
+                "input_cached_tokens": cached_tokens,
                 "output": output_tokens,
                 "total": input_tokens + output_tokens,
             },
-            metadata={
-                "cost_usd": cost_usd,
-                "latency_ms": latency_ms,
-            },
-        ).end()
+        )
+        generation.end()
         
     except Exception as e:
         logger.warning(f"⚠️ Langfuse usage logging failed: {e}")
@@ -325,18 +351,20 @@ def trace_document_processing(
         elif status == "completed":
             level = "DEFAULT"
         
-        langfuse.trace(
+        # Langfuse SDK v3+: use start_span instead of trace()
+        span = langfuse.start_span(
             name=f"document_{step}",
-            session_id=f"file_{file_id}",
             input={"file_name": file_name, "step": step},
             metadata={
+                "session_id": f"file_{file_id}",
                 "file_id": file_id,
                 "file_name": file_name,
                 "status": status,
+                "level": level,
                 **(metadata or {}),
             },
-            level=level,
         )
+        span.end()
         
     except Exception as e:
         logger.warning(f"⚠️ Langfuse document trace failed: {e}")

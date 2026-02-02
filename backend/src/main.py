@@ -31,7 +31,10 @@ import asyncio
 #     logging.warning(f"⚠️ OpenTelemetry başlatılamadı: {otel_error} - Normal logging devam ediyor")
 from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
-from src.document_sources.local_file import get_documents_from_file_by_path, generate_page_images_with_pymupdf
+from src.document_sources.local_file import (
+    get_documents_from_file_by_path,
+    generate_page_images_with_pymupdf,
+)
 from src.entities.source_node import sourceNode
 from src.llm import get_graph_from_llm
 from src.document_sources.gcs_bucket import *
@@ -43,7 +46,11 @@ from src.shared.common_fn import *
 from src.make_relationships import *
 from src.document_sources.web_pages import *
 from src.graph_query import get_graphDB_driver
-from src.utf8_utils import normalize_unicode_text, normalize_file_name, ensure_utf8_encoding
+from src.utf8_utils import (
+    normalize_unicode_text,
+    normalize_file_name,
+    ensure_utf8_encoding,
+)
 import re
 from langchain_community.document_loaders import WikipediaLoader, WebBaseLoader
 import warnings
@@ -53,20 +60,22 @@ import urllib.parse
 
 # Logger helper fonksiyonlarını utils'den import et
 from src.utils.log_helpers import (
-    log_upload, 
-    log_delete, 
-    log_chunking, 
-    log_extraction, 
-    log_processing
+    log_upload,
+    log_delete,
+    log_chunking,
+    log_extraction,
+    log_processing,
 )
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+
 # markdown_to_json is only needed for document processing, which is done in celery_worker
 try:
     import markdown_to_json
 except (ImportError, ModuleNotFoundError):
     markdown_to_json = None  # Document processing is in celery_worker
 from src.models.file_queue_models import get_file_queue_db, UploadedFile, FileStatus
+
 # from src.tasks import process_file_pipeline  # Moved to celery_worker
 
 # pandas is only needed for data processing, which is done in celery_worker
@@ -80,7 +89,9 @@ import time
 
 warnings.filterwarnings("ignore")
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(message)s", datefmt="%H:%M:%S", level="INFO")
+logging.basicConfig(
+    format="%(asctime)s - %(message)s", datefmt="%H:%M:%S", level="INFO"
+)
 
 # Neo4j notification ve deprecation warning'lerini kapat
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
@@ -88,14 +99,23 @@ logging.getLogger("neo4j").setLevel(logging.WARNING)
 
 # Daha agresif filtreleme
 neo4j_logger = logging.getLogger("neo4j")
+
+
 def filter_neo4j_notifications(record):
     message = record.getMessage().lower()
     # Bu mesajları filtrele
     filtered_keywords = [
-        "deprecation", "deprecated", "unknown label", "call subquery", 
-        "variable scope clause", "notification", "severity", "category"
+        "deprecation",
+        "deprecated",
+        "unknown label",
+        "call subquery",
+        "variable scope clause",
+        "notification",
+        "severity",
+        "category",
     ]
     return not any(keyword in message for keyword in filtered_keywords)
+
 
 neo4j_logger.addFilter(filter_neo4j_notifications)
 
@@ -272,7 +292,9 @@ def create_source_node_graph_web_url(graph, model, source_url, source_type):
     obj_source_node.model = model
     obj_source_node.url = urllib.parse.unquote(source_url)
     obj_source_node.created_at = datetime.now()
-    obj_source_node.file_name = normalize_file_name(title.strip() if isinstance(title, str) else title)
+    obj_source_node.file_name = normalize_file_name(
+        title.strip() if isinstance(title, str) else title
+    )
     obj_source_node.language = language
     obj_source_node.file_size = sys.getsizeof(pages[0].page_content)
     obj_source_node.chunkNodeCount = 0
@@ -415,9 +437,11 @@ async def extract_graph_from_file_local_file(
     if not retry_condition:
         # Extract işlemi artık sadece mevcut chunk'larla çalışır
         # Pages'leri yüklemek gereksiz - chunk'lar upload sırasında oluşturulmuş olmalı
-        log_extraction(f"🔄 Graph extraction başlıyor for: {fileName} (chunks should exist from upload)")
+        log_extraction(
+            f"🔄 Graph extraction başlıyor for: {fileName} (chunks should exist from upload)"
+        )
         log_extraction(f"🎯 Extract mode: Local file processing")
-        
+
         # Document node'undan page_images'ı al
         page_images = None
         try:
@@ -425,14 +449,16 @@ async def extract_graph_from_file_local_file(
             graphDb_data_Access = graphDBdataAccess(graph)
             result = graphDb_data_Access.execute_query(
                 "MATCH (d:Document {fileName: $file_name}) RETURN d.page_images AS page_images",
-                {"file_name": fileName}
+                {"file_name": fileName},
             )
-            if result and len(result) > 0 and result[0].get('page_images'):
-                page_images = result[0]['page_images']
-                logging.info(f"🖼️ Retrieved {len(page_images)} page images from Document node")
+            if result and len(result) > 0 and result[0].get("page_images"):
+                page_images = result[0]["page_images"]
+                logging.info(
+                    f"🖼️ Retrieved {len(page_images)} page images from Document node"
+                )
         except Exception as e:
             logging.warning(f"⚠️ Could not retrieve page_images from Document node: {e}")
-        
+
         return await processing_source(
             uri,
             userName,
@@ -834,7 +860,7 @@ async def processing_source(
     )
     uri_latency["create_connection"] = f"{elapsed_create_connection:.2f}"
     graphDb_data_Access = graphDBdataAccess(graph)
-    
+
     # Document node'ın mutlaka oluşturulduğundan emin ol
     try:
         logging.info(f"Document node kontrolü ve oluşturması: {file_name}")
@@ -845,11 +871,17 @@ async def processing_source(
         # Document durumunu Failed yap
         graphDb_data_Access.update_exception_db(file_name, str(e))
         raise e
-    
+
     create_chunk_vector_index(graph)
     start_get_chunkId_chunkDoc_list = time.time()
     total_chunks, chunkId_chunkDoc_list = get_chunkId_chunkDoc_list(
-        graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition, page_images
+        graph,
+        file_name,
+        pages,
+        token_chunk_size,
+        chunk_overlap,
+        retry_condition,
+        page_images,
     )
     end_get_chunkId_chunkDoc_list = time.time()
     elapsed_get_chunkId_chunkDoc_list = (
@@ -868,17 +900,21 @@ async def processing_source(
         try:
             logging.info(f"🔍 Policy entity extraction başlıyor: {file_name}")
             from src.policy_extraction import extract_missing_policy_info
-            
+
             start_policy_extraction = time.time()
-            policy_extraction_result = await extract_missing_policy_info(graph, file_name, model)
+            policy_extraction_result = await extract_missing_policy_info(
+                graph, file_name, model
+            )
             end_policy_extraction = time.time()
             elapsed_policy_extraction = end_policy_extraction - start_policy_extraction
-            
-            logging.info(f"✅ Policy entity extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye")
+
+            logging.info(
+                f"✅ Policy entity extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye"
+            )
             logging.info(f"📋 Entity extraction sonucu: {policy_extraction_result}")
-            
+
             uri_latency["policy_extraction"] = f"{elapsed_policy_extraction:.2f}"
-            
+
         except Exception as e:
             logging.error(f"❌ Policy entity extraction hatası: {e}")
             # Policy extraction başarısız olsa bile ana işleme devam et
@@ -888,7 +924,9 @@ async def processing_source(
     result = graphDb_data_Access.get_current_status_document_node(file_name)
     end_status_document_node = time.time()
     elapsed_status_document_node = end_status_document_node - start_status_document_node
-    logging.info(f'Time taken to get the current status of document node: {elapsed_status_document_node:.2f} seconds')
+    logging.info(
+        f"Time taken to get the current status of document node: {elapsed_status_document_node:.2f} seconds"
+    )
     uri_latency["get_status_document_node"] = f"{elapsed_status_document_node:.2f}"
     # default for retry processed chunk offset
     select_chunks_with_retry = 0
@@ -938,7 +976,7 @@ async def processing_source(
             job_status = "Completed"
             failed_chunks = []
             successful_chunks = 0
-            
+
             for i in range(0, len(chunkId_chunkDoc_list), update_graph_chunk_processed):
                 select_chunks_upto = i + update_graph_chunk_processed
                 logging.info(f"Selected Chunks upto: {select_chunks_upto}")
@@ -976,25 +1014,33 @@ async def processing_source(
                             )
                         )
                         successful_chunks += len(selected_chunks)
-                        logging.info(f"Chunk batch {i}-{select_chunks_upto} başarıyla işlendi")
+                        logging.info(
+                            f"Chunk batch {i}-{select_chunks_upto} başarıyla işlendi"
+                        )
                     except Exception as chunk_error:
                         # Chunk processing hatası - sonraki batch'e geç
                         failed_chunks.extend([f"batch_{i}-{select_chunks_upto}"])
-                        logging.error(f"Chunk batch {i}-{select_chunks_upto} işlenirken hata: {chunk_error}")
+                        logging.error(
+                            f"Chunk batch {i}-{select_chunks_upto} işlenirken hata: {chunk_error}"
+                        )
                         logging.info(f"Sonraki chunk batch'ine geçiliyor...")
-                        
+
                         # Graph bağlantısını yeniden kurmayı dene
                         try:
                             if graph is None or graph._driver._closed:
                                 logging.info("Graph bağlantısı yeniden kuruluyor...")
-                                graph = create_graph_database_connection(uri, userName, password, database)
+                                graph = create_graph_database_connection(
+                                    uri, userName, password, database
+                                )
                                 graphDb_data_Access = graphDBdataAccess(graph)
                         except Exception as reconnect_error:
-                            logging.error(f"Graph yeniden bağlantı hatası: {reconnect_error}")
-                        
+                            logging.error(
+                                f"Graph yeniden bağlantı hatası: {reconnect_error}"
+                            )
+
                         # Bu batch için continue - sonraki batch'e geç
                         continue
-                        
+
                     # Bu kısım sadece başarılı chunk'lar için çalışır
                     processing_chunks_end_time = time.time()
                     processing_chunks_elapsed_end_time = (
@@ -1036,21 +1082,31 @@ async def processing_source(
             # Extract işlemi tamamlandıktan sonra özet çıkar
             total_chunks_attempted = len(chunkId_chunkDoc_list)
             failed_chunks_count = len(failed_chunks)
-            success_rate = (successful_chunks / total_chunks_attempted) * 100 if total_chunks_attempted > 0 else 0
-            
+            success_rate = (
+                (successful_chunks / total_chunks_attempted) * 100
+                if total_chunks_attempted > 0
+                else 0
+            )
+
             logging.info(f"Extract özeti - Dosya: {file_name}")
-            logging.info(f"Toplam chunk: {total_chunks_attempted}, Başarılı: {successful_chunks}, Başarısız: {failed_chunks_count}")
+            logging.info(
+                f"Toplam chunk: {total_chunks_attempted}, Başarılı: {successful_chunks}, Başarısız: {failed_chunks_count}"
+            )
             logging.info(f"Başarı oranı: {success_rate:.1f}%")
-            
+
             if failed_chunks_count > 0:
                 logging.warning(f"Başarısız chunk batch'ler: {failed_chunks}")
                 # Eğer %50'den fazla chunk başarısızsa, job'ı partial olarak işaretle
                 if success_rate < 50:
                     job_status = "Partially Failed"
-                    logging.warning(f"Extract kısmen başarısız - başarı oranı %{success_rate:.1f}")
+                    logging.warning(
+                        f"Extract kısmen başarısız - başarı oranı %{success_rate:.1f}"
+                    )
                 else:
                     job_status = "Partially Completed"
-                    logging.info(f"Extract kısmen tamamlandı - başarı oranı %{success_rate:.1f}")
+                    logging.info(
+                        f"Extract kısmen tamamlandı - başarı oranı %{success_rate:.1f}"
+                    )
             else:
                 logging.info("Tüm chunk'lar başarıyla işlendi")
 
@@ -1070,7 +1126,9 @@ async def processing_source(
             obj_source_node.processing_time = processed_time
 
             graphDb_data_Access.update_source_node(obj_source_node)
-            graphDb_data_Access.update_node_relationship_count(normalize_file_name(file_name))
+            graphDb_data_Access.update_node_relationship_count(
+                normalize_file_name(file_name)
+            )
             logging.info(
                 "Updated the nodeCount and relCount properties in Document node"
             )
@@ -1097,22 +1155,22 @@ async def processing_source(
                     f"{int(processing_source_func)/node_count}/s"
                 )
 
-            # Otomatik cleanup ve post-processing (eğer extract başarılı ise)
-            # if job_status == "Completed":
-            #     try:
-            #         # 1. Policy Node Cleanup - Orphan Policy node'larını temizle
-            #         logging.info(f"Policy node cleanup başlıyor: {file_name}")
-            #         from src.policy_cleanup import cleanup_policy_nodes_to_document
-                    
-            #         cleanup_result = cleanup_policy_nodes_to_document(graph, file_name)
-            #         if cleanup_result['policy_nodes_found'] > 0:
-            #             logging.info(f"Policy cleanup tamamlandı: {cleanup_result['policy_nodes_deleted']} node silindi, {cleanup_result['relationships_moved']} ilişki taşındı")
-            #         else:
-            #             logging.info(f"Policy cleanup: Temizlenecek Policy node bulunamadı")
-                        
-            #     except Exception as cleanup_error:
-            #         logging.error(f"Policy cleanup hatası: {cleanup_error}")
-                
+                # Otomatik cleanup ve post-processing (eğer extract başarılı ise)
+                # if job_status == "Completed":
+                #     try:
+                #         # 1. Policy Node Cleanup - Orphan Policy node'larını temizle
+                #         logging.info(f"Policy node cleanup başlıyor: {file_name}")
+                #         from src.policy_cleanup import cleanup_policy_nodes_to_document
+
+                #         cleanup_result = cleanup_policy_nodes_to_document(graph, file_name)
+                #         if cleanup_result['policy_nodes_found'] > 0:
+                #             logging.info(f"Policy cleanup tamamlandı: {cleanup_result['policy_nodes_deleted']} node silindi, {cleanup_result['relationships_moved']} ilişki taşındı")
+                #         else:
+                #             logging.info(f"Policy cleanup: Temizlenecek Policy node bulunamadı")
+
+                #     except Exception as cleanup_error:
+                #         logging.error(f"Policy cleanup hatası: {cleanup_error}")
+
                 # 2. Cross-chunk similarity relationships
                 # try:
                 #     logging.info(f"Cross-chunk similarity relationships başlıyor: {file_name}")
@@ -1124,24 +1182,27 @@ async def processing_source(
                 # except Exception as cross_chunk_error:
                 #     logging.error(f"Cross-chunk relationship hatası: {cross_chunk_error}")
                 #     uri_latency["cross_chunk_rel_post"] = "FAILED"
-                
+
                 # 3. Post-processing (eğer kurallar verilmiş ise)
                 if enable_post_processing and post_processing_rules:
                     try:
-                        logging.info(f"Extract sonrası otomatik post-processing başlıyor: {file_name}")
-                        
+                        logging.info(
+                            f"Extract sonrası otomatik post-processing başlıyor: {file_name}"
+                        )
+
                         # Post-processing kurallarını parse et
                         if isinstance(post_processing_rules, str):
                             import json
+
                             rules_list = json.loads(post_processing_rules)
                         else:
                             rules_list = post_processing_rules
-                        
+
                         logging.info(f"Post-processing kuralları: {rules_list}")
-                        
+
                         # Post-processing'i çalıştır - sadece bu dosya için
                         from src.llm import apply_dynamic_entity_post_processing
-                        
+
                         # Neo4j'deki gerçek dosya adını al (Unicode escape karakterleri ile)
                         real_file_name_query = """
                         MATCH (d:Document) 
@@ -1150,57 +1211,97 @@ async def processing_source(
                         LIMIT 1
                         """
                         # Dosya adının bir kısmını al (ilk 20 karakter gibi)
-                        file_name_part = file_name[:20] if len(file_name) > 20 else file_name
-                        real_file_result = execute_graph_query(graph, real_file_name_query, 
-                                                             params={"fileName": file_name, "fileNamePart": file_name_part})
-                        
-                        if real_file_result and real_file_result[0].get('realFileName'):
-                            real_file_name = real_file_result[0]['realFileName']
-                            logging.info(f"Post-processing için gerçek dosya adı: {real_file_name}")
+                        file_name_part = (
+                            file_name[:20] if len(file_name) > 20 else file_name
+                        )
+                        real_file_result = execute_graph_query(
+                            graph,
+                            real_file_name_query,
+                            params={
+                                "fileName": file_name,
+                                "fileNamePart": file_name_part,
+                            },
+                        )
+
+                        if real_file_result and real_file_result[0].get("realFileName"):
+                            real_file_name = real_file_result[0]["realFileName"]
+                            logging.info(
+                                f"Post-processing için gerçek dosya adı: {real_file_name}"
+                            )
                             target_files = [real_file_name]
                         else:
-                            logging.warning(f"Gerçek dosya adı bulunamadı, orijinal kullanılıyor: {file_name}")
+                            logging.warning(
+                                f"Gerçek dosya adı bulunamadı, orijinal kullanılıyor: {file_name}"
+                            )
                             target_files = [file_name]
-                        
+
                         post_processing_start_time = time.time()
                         post_processing_result = apply_dynamic_entity_post_processing(
-                            graph, 
-                            rules_list, 
-                            target_file_names=target_files
+                            graph, rules_list, target_file_names=target_files
                         )
                         post_processing_end_time = time.time()
-                        
-                        logging.info(f"Extract sonrası post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye")
-                        logging.info(f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu")
-                        
+
+                        logging.info(
+                            f"Extract sonrası post-processing tamamlandı: {post_processing_end_time - post_processing_start_time:.2f} saniye"
+                        )
+                        logging.info(
+                            f"Post-processing ile {post_processing_result.get('total_created_relationships', 0)} yeni relationship oluşturuldu"
+                        )
+
                         # Node count'ları tekrar say (post-processing sonrasında)
                         graphDb_data_Access = graphDBdataAccess(graph)
-                        final_count_response = graphDb_data_Access.update_node_relationship_count(file_name)
+                        final_count_response = (
+                            graphDb_data_Access.update_node_relationship_count(
+                                file_name
+                            )
+                        )
                         if final_count_response:
-                            final_node_count = int(final_count_response[file_name].get('nodeCount', node_count))
-                            final_rel_count = int(final_count_response[file_name].get('relationshipCount', rel_count))
-                            
+                            final_node_count = int(
+                                final_count_response[file_name].get(
+                                    "nodeCount", node_count
+                                )
+                            )
+                            final_rel_count = int(
+                                final_count_response[file_name].get(
+                                    "relationshipCount", rel_count
+                                )
+                            )
+
                             # Response'u güncelle
                             response["nodeCount"] = final_node_count
                             response["relationshipCount"] = final_rel_count
-                            
-                            logging.info(f"Post-processing sonrası güncel sayılar - Nodes: {final_node_count}, Relationships: {final_rel_count}")
-                        
+
+                            logging.info(
+                                f"Post-processing sonrası güncel sayılar - Nodes: {final_node_count}, Relationships: {final_rel_count}"
+                            )
+
                         # Post-processing bilgilerini uri_latency'ye ekle
                         uri_latency["post_processing_enabled"] = "true"
-                        uri_latency["post_processing_time"] = f"{post_processing_end_time - post_processing_start_time:.2f}"
-                        uri_latency["post_processing_created_rels"] = str(post_processing_result.get('total_created_relationships', 0))
-                        uri_latency["post_processing_rules_count"] = str(len(rules_list))
-                        
+                        uri_latency["post_processing_time"] = (
+                            f"{post_processing_end_time - post_processing_start_time:.2f}"
+                        )
+                        uri_latency["post_processing_created_rels"] = str(
+                            post_processing_result.get("total_created_relationships", 0)
+                        )
+                        uri_latency["post_processing_rules_count"] = str(
+                            len(rules_list)
+                        )
+
                     except Exception as post_processing_error:
-                        logging.error(f"Extract sonrası post-processing hatası: {post_processing_error}")
+                        logging.error(
+                            f"Extract sonrası post-processing hatası: {post_processing_error}"
+                        )
                         uri_latency["post_processing_enabled"] = "true"
-                        uri_latency["post_processing_error"] = str(post_processing_error)
+                        uri_latency["post_processing_error"] = str(
+                            post_processing_error
+                        )
                 else:
                     uri_latency["post_processing_enabled"] = "false"
-                
+
                 # Cross-chunk relationships her zaman post-processing aşamasında yapıldı
-                logging.info(f"Post-processing tamamlandı - Cross-chunk relationships dahil edildi")
+                logging.info(
+                    f"Post-processing tamamlandı - Cross-chunk relationships dahil edildi"
+                )
 
             response["fileName"] = file_name
             response["nodeCount"] = node_count
@@ -1238,7 +1339,7 @@ async def processing_source_v2(
 ):
     """
     V2 Processing: Policy-specific entity extraction (simplified)
-    
+
     Pages'ten Policy-specific entity'leri çıkarır:
     - ✅ Chunk oluşturma (create_chunks_for_upload ile)
     - ❌ Chunk embeddings yok (şimdilik)
@@ -1249,13 +1350,13 @@ async def processing_source_v2(
     - ✅ Neo4j'ye kaydetme
     - ✅ Policy-Entity relationships (HAS_ENTITY)
     - ❌ Duplicate merge yok (manuel olarak /merge_duplicate_entities endpoint'i ile yapılır)
-    
+
     Not: Sadece 1 LLM çağrısı yapılır (_create_document_related_nodes içinde)
     """
     uri_latency = {}
     response = {}
     start_time = datetime.now()
-    
+
     try:
         # Graph connection
         start_create_connection = time.time()
@@ -1263,32 +1364,42 @@ async def processing_source_v2(
         elapsed_create_connection = time.time() - start_create_connection
         logging.info(f"⏱️ Database connection: {elapsed_create_connection:.2f}s")
         uri_latency["create_connection"] = f"{elapsed_create_connection:.2f}"
-        
+
         graphDb_data_Access = graphDBdataAccess(graph)
-        
+
         # Chunk'ları oluştur (V2 için)
         if pages:
             logging.info(f"🧩 Creating {len(pages)} chunks for V2 file: {file_name}")
             # create_chunks_for_upload imported via src.make_relationships import *
-            logging.info(f"🔄 V2: Starting create_chunks_for_upload for: {file_name} (async, non-blocking)")
-            await create_chunks_for_upload(graph, pages, file_name, page_images=page_images)
+            logging.info(
+                f"🔄 V2: Starting create_chunks_for_upload for: {file_name} (async, non-blocking)"
+            )
+            await create_chunks_for_upload(
+                graph, pages, file_name, page_images=page_images
+            )
             logging.info(f"✅ Chunks created successfully for: {file_name}")
-        
+
         # Document status kontrolü (node zaten chunking'de oluşturuldu) - async
         start_status_check = time.time()
-        result = await asyncio.to_thread(graphDb_data_Access.get_current_status_document_node, file_name)
+        result = await asyncio.to_thread(
+            graphDb_data_Access.get_current_status_document_node, file_name
+        )
         elapsed_status_check = time.time() - start_status_check
         uri_latency["status_check"] = f"{elapsed_status_check:.2f}"
-        
+
         if not result or len(result) == 0:
-            raise LLMGraphBuilderException(f"Unable to get document status for: {file_name}")
-        
+            raise LLMGraphBuilderException(
+                f"Unable to get document status for: {file_name}"
+            )
+
         # Neo4j'deki Document node status'unu kontrol et
         current_status = result[0]["Status"]
-        
+
         # Chunked status'u graph creation için uygun
         if current_status == "Chunked":
-            logging.info(f"✅ File is Chunked and ready for graph creation: {file_name}")
+            logging.info(
+                f"✅ File is Chunked and ready for graph creation: {file_name}"
+            )
         # Processing status'u restart sonrası olabilir, bu durumda işleme devam et
         # (SQLite'daki status "pending"e reset edilmiş olabilir ama Neo4j'deki status hala "Processing" olabilir)
         elif current_status == "Processing":
@@ -1298,7 +1409,7 @@ async def processing_source_v2(
             # Continue processing - this handles restart scenarios where SQLite was reset but Neo4j wasn't
         else:
             logging.info(f"📋 Current file status: {current_status} for {file_name}")
-        
+
         # Status'u Processing olarak güncelle - async
         obj_source_node = sourceNode()
         obj_source_node.file_name = normalize_file_name(file_name)
@@ -1306,26 +1417,26 @@ async def processing_source_v2(
         obj_source_node.model = model
         obj_source_node.processed_chunk = 0
         obj_source_node.total_chunks = len(pages)  # Page sayısı
-        
+
         start_update_status = time.time()
         await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
         elapsed_update_status = time.time() - start_update_status
         uri_latency["update_status_to_processing"] = f"{elapsed_update_status:.2f}"
-        
+
         logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
-        
+
         # Policy-specific Entity Extraction (LLM çağrısı - tek LLM call)
         # Retry mekanizması ile LLM extraction hatalarını yönet
         start_extraction = time.time()
         logging.info(f"🚀 Policy-specific entity extraction başlıyor...")
-        
+
         max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
         retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
         retries = 0
         current_delay = retry_delay
         extraction_successful = False
         last_error = None
-        
+
         while retries < max_retries and not extraction_successful:
             try:
                 # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
@@ -1336,31 +1447,35 @@ async def processing_source_v2(
                     file_name,
                     "auto",
                     None,
-                    model
+                    model,
                 )
-                
+
                 extraction_successful = True
                 elapsed_extraction = time.time() - start_extraction
                 uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
                 if retries > 0:
-                    logging.info(f"✅ Policy entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s")
+                    logging.info(
+                        f"✅ Policy entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
+                    )
                 else:
-                    logging.info(f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s")
-                
+                    logging.info(
+                        f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s"
+                    )
+
             except Exception as extraction_error:
                 retries += 1
                 last_error = extraction_error
                 error_str = str(extraction_error)
-                
+
                 # LLM extraction hatalarını kontrol et
                 is_llm_error = (
-                    "varlık çıkarımı başarısız" in error_str.lower() or
-                    "llm extraction hatası" in error_str.lower() or
-                    "extraction" in error_str.lower() or
-                    "entity" in error_str.lower() or
-                    "policy" in error_str.lower()
+                    "varlık çıkarımı başarısız" in error_str.lower()
+                    or "llm extraction hatası" in error_str.lower()
+                    or "extraction" in error_str.lower()
+                    or "entity" in error_str.lower()
+                    or "policy" in error_str.lower()
                 )
-                
+
                 if retries < max_retries and is_llm_error:
                     logging.warning(
                         f"⚠️ LLM extraction hatası (deneme {retries}/{max_retries}): {error_str[:200]}... "
@@ -1371,24 +1486,36 @@ async def processing_source_v2(
                 else:
                     # Retry limit'e ulaşıldı veya LLM hatası değil
                     elapsed_extraction = time.time() - start_extraction
-                    uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
+                    uri_latency["policy_entity_extraction"] = (
+                        f"FAILED - {elapsed_extraction:.2f}"
+                    )
                     if retries >= max_retries:
                         logging.error(
                             f"❌ Policy entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
                         )
                     else:
-                        logging.error(f"❌ Policy entity extraction hatası (retry yapılmayacak): {error_str[:500]}")
+                        logging.error(
+                            f"❌ Policy entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
+                        )
                     # Dosya durumunu Failed yap ve işlemi sonlandır - async
-                    await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
+                    await asyncio.to_thread(
+                        graphDb_data_Access.update_exception_db,
+                        file_name,
+                        str(last_error),
+                    )
                     raise last_error
-        
+
         if not extraction_successful:
             elapsed_extraction = time.time() - start_extraction
-            uri_latency["policy_entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
+            uri_latency["policy_entity_extraction"] = (
+                f"FAILED - {elapsed_extraction:.2f}"
+            )
             logging.error(f"❌ Policy entity extraction başarısız: {last_error}")
-            await asyncio.to_thread(graphDb_data_Access.update_exception_db, file_name, str(last_error))
+            await asyncio.to_thread(
+                graphDb_data_Access.update_exception_db, file_name, str(last_error)
+            )
             raise last_error
-        
+
         # Policy-Entity Relationships
         # start_policy_rel = time.time()
         # try:
@@ -1400,27 +1527,31 @@ async def processing_source_v2(
         #     elapsed_policy_rel = time.time() - start_policy_rel
         #     uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
         #     logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
-        
+
         # Final counts update - async
         start_count_update = time.time()
         try:
-            counts = await asyncio.to_thread(graphDb_data_Access.update_node_relationship_count, file_name)
+            counts = await asyncio.to_thread(
+                graphDb_data_Access.update_node_relationship_count, file_name
+            )
             node_count = counts[file_name].get("nodeCount", 0)
             rel_count = counts[file_name].get("relationshipCount", 0)
             elapsed_count_update = time.time() - start_count_update
             uri_latency["count_update"] = f"{elapsed_count_update:.2f}"
-            logging.info(f"✅ Final counts: {node_count} nodes, {rel_count} relationships")
+            logging.info(
+                f"✅ Final counts: {node_count} nodes, {rel_count} relationships"
+            )
         except Exception as count_error:
             elapsed_count_update = time.time() - start_count_update
             uri_latency["count_update"] = f"FAILED - {elapsed_count_update:.2f}"
             logging.error(f"❌ Count update hatası: {count_error}")
             node_count = 0
             rel_count = 0
-        
+
         # Status'u Completed olarak güncelle
         end_time = datetime.now()
         processed_time = end_time - start_time
-        
+
         obj_source_node = sourceNode()
         obj_source_node.file_name = normalize_file_name(file_name)
         obj_source_node.status = "Completed"
@@ -1429,16 +1560,18 @@ async def processing_source_v2(
         obj_source_node.node_count = node_count
         obj_source_node.relationship_count = rel_count
         obj_source_node.processed_chunk = len(pages)  # Tüm pages işlendi
-        
+
         # Final status update - async
         await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
-        
+
         total_processing_time = time.time() - start_time.timestamp()
         uri_latency["total_processing_time"] = f"{total_processing_time:.2f}"
-        
+
         logging.info(f"✅ V2 Processing completed for: {file_name}")
-        logging.info(f"📊 Results: {node_count} nodes, {rel_count} relationships in {total_processing_time:.2f}s")
-        
+        logging.info(
+            f"📊 Results: {node_count} nodes, {rel_count} relationships in {total_processing_time:.2f}s"
+        )
+
         # Response
         response = {
             "fileName": file_name,
@@ -1448,189 +1581,221 @@ async def processing_source_v2(
             "status": "Completed",
             "model": model,
             "success_count": 1,
-            "processing_version": "V2"
+            "processing_version": "V2",
         }
-        
+
         return uri_latency, response
-        
+
     except Exception as e:
         logging.error(f"❌ processing_source_v2 failed for {file_name}: {e}")
         import traceback
+
         logging.error(f"Traceback: {traceback.format_exc()}")
-        
+
         # Status'u Failed olarak güncelle - async
         try:
             obj_source_node = sourceNode()
             obj_source_node.file_name = normalize_file_name(file_name)
             obj_source_node.status = "Failed"
             obj_source_node.processing_error = str(e)[:500]
-            await asyncio.to_thread(graphDb_data_Access.update_source_node, obj_source_node)
+            await asyncio.to_thread(
+                graphDb_data_Access.update_source_node, obj_source_node
+            )
         except:
             pass
-        
+
         response = {
             "fileName": file_name,
             "status": "Failed",
             "error": str(e),
-            "processing_version": "V2"
+            "processing_version": "V2",
         }
-        
+
         return uri_latency, response
 
 
 async def processing_chunks(
-  chunkId_chunkDoc_list,
-  graph,
-  uri,
-  userName,
-  password,
-  database,
-  file_name,
-  model,
-  allowedNodes,
-  allowedRelationship,
-  chunks_to_combine,
-  node_count,
-  rel_count,
-  additional_instructions=None,
-  max_pages=None,
+    chunkId_chunkDoc_list,
+    graph,
+    uri,
+    userName,
+    password,
+    database,
+    file_name,
+    model,
+    allowedNodes,
+    allowedRelationship,
+    chunks_to_combine,
+    node_count,
+    rel_count,
+    additional_instructions=None,
+    max_pages=None,
 ):
-  latency = {}
-  successful_steps = 0
-  total_steps = 7  # 6'dan 7'ye artırdık
+    latency = {}
+    successful_steps = 0
+    total_steps = 7  # 6'dan 7'ye artırdık
 
-  # (re)open driver if closed
-  if graph is None or graph._driver._closed:
-    graph = create_graph_database_connection(uri, userName, password, database)
+    # (re)open driver if closed
+    if graph is None or graph._driver._closed:
+        graph = create_graph_database_connection(uri, userName, password, database)
 
-  # 1. update embeddings on chunks
-  try:
-    t0 = time.time()
-    create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
-    latency["update_embedding"] = f"{time.time() - t0:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 1/7 başarılı: Chunk embeddings oluşturuldu")
-  except Exception as e:
-    latency["update_embedding"] = "FAILED"
-    logging.error(f"Step 1/7 başarısız: Chunk embeddings oluşturulamadı - {e}")
+    # 1. update embeddings on chunks
+    try:
+        t0 = time.time()
+        create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
+        latency["update_embedding"] = f"{time.time() - t0:.2f}"
+        successful_steps += 1
+        logging.info(f"Step 1/7 başarılı: Chunk embeddings oluşturuldu")
+    except Exception as e:
+        latency["update_embedding"] = "FAILED"
+        logging.error(f"Step 1/7 başarısız: Chunk embeddings oluşturulamadı - {e}")
 
-  # 2. ask LLM for sub-graph per chunk
-  try:
-    t1 = time.time()
-    logging.info(f"🚀 LLM Graph Transformer başlıyor - Entity extraction için LLM çağrılıyor")
-    graph_documents = await get_graph_from_llm(
-      model,
-      chunkId_chunkDoc_list,
-      allowedNodes,
-      allowedRelationship,
-      chunks_to_combine,
-      file_name,
-      additional_instructions,
-      graph,
-      max_pages
+    # 2. ask LLM for sub-graph per chunk
+    try:
+        t1 = time.time()
+        logging.info(
+            f"🚀 LLM Graph Transformer başlıyor - Entity extraction için LLM çağrılıyor"
+        )
+        graph_documents = await get_graph_from_llm(
+            model,
+            chunkId_chunkDoc_list,
+            allowedNodes,
+            allowedRelationship,
+            chunks_to_combine,
+            file_name,
+            additional_instructions,
+            graph,
+            max_pages,
+        )
+        latency["entity_extraction"] = f"{time.time() - t1:.2f}"
+        successful_steps += 1
+        logging.info(
+            f"Step 2/7 başarılı: ✅ LLM entity extraction tamamlandı - {len(graph_documents)} graph document oluşturuldu"
+        )
+    except Exception as e:
+        latency["entity_extraction"] = "FAILED"
+        logging.error(f"Step 2/7 başarısız: ❌ LLM entity extraction hatası - {e}")
+        # LLM hatası kritik - boş graph_documents ile devam et
+        graph_documents = []
+
+    # 3. normalize IDs / backticks / types
+    try:
+        cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
+        successful_steps += 1
+        logging.info(
+            f"Step 3/7 başarılı: ✅ Entity'ler normalize edildi - {len(cleaned)} temizlenmiş graph document"
+        )
+    except Exception as e:
+        logging.error(f"Step 3/7 başarısız: ❌ Entity normalization hatası - {e}")
+        cleaned = []
+
+    # 4. save nodes & rels into Neo4j
+    try:
+        t2 = time.time()
+        logging.info(f"🗃️ Entity'ler Neo4j'ye kaydediliyor...")
+        save_graphDocuments_in_neo4j(graph, cleaned)
+        latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
+        successful_steps += 1
+        logging.info(f"Step 4/7 başarılı: ✅ Entity'ler Neo4j'ye kaydedildi")
+    except Exception as e:
+        latency["save_graphDocuments"] = "FAILED"
+        logging.error(f"Step 4/7 başarısız: ❌ Neo4j'ye kaydetme hatası - {e}")
+
+    # 5. relate each chunk to its extracted entities (technical tracking)
+    try:
+        pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
+        t3 = time.time()
+        logging.info(f"🔗 Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuluyor...")
+        merge_relationship_between_chunk_and_entites(graph, pairs)
+        latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
+        successful_steps += 1
+        logging.info(
+            f"Step 5/7 başarılı: ✅ Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuldu (technical tracking)"
+        )
+    except Exception as e:
+        latency["chunk_entity_rel"] = "FAILED"
+        logging.error(
+            f"Step 5/7 başarısız: ❌ Chunk-Entity EXTRACTED_FROM ilişki hatası - {e}"
+        )
+
+    # 6. Create Policy-Entity relationships (business logic)
+    try:
+        t4 = time.time()
+        logging.info(f"🏢 Policy-Entity HAS_ENTITY ilişkileri oluşturuluyor...")
+        create_policy_entity_relationships(graph, file_name)
+        latency["policy_entity_rel"] = f"{time.time() - t4:.2f}"
+        successful_steps += 1
+        logging.info(
+            f"Step 6/7 başarılı: ✅ Policy-Entity HAS_ENTITY ilişkileri oluşturuldu (business logic)"
+        )
+    except Exception as e:
+        latency["policy_entity_rel"] = "FAILED"
+        logging.error(
+            f"Step 6/7 başarısız: ❌ Policy-Entity HAS_ENTITY ilişki hatası - {e}"
+        )
+
+    # 6.5. Merge duplicate nodes with upload-time nodes
+    try:
+        from src.llm import merge_duplicate_nodes_with_upload_nodes
+
+        t5 = time.time()
+        merge_result = merge_duplicate_nodes_with_upload_nodes(graph, file_name)
+        latency["duplicate_node_merge"] = f"{time.time() - t5:.2f}"
+        logging.info(
+            f"Duplicate node merge: {merge_result['merged_count']} node merge edildi"
+        )
+        if merge_result["merged_count"] > 0:
+            logging.info(f"Merge detayları: {merge_result['details']}")
+    except Exception as e:
+        latency["duplicate_node_merge"] = "FAILED"
+        logging.error(f"Duplicate node merge hatası - {e}")
+
+    # 7. update overall node/relationship counts (her zaman çalıştır)
+    try:
+        graphDb = graphDBdataAccess(graph)
+        counts = graphDb.update_node_relationship_count(file_name)
+        node_count = counts[file_name].get("nodeCount", 0)
+        rel_count = counts[file_name].get("relationshipCount", 0)
+        logging.info(
+            f"Node/Relationship sayıları güncellendi: {node_count} nodes, {rel_count} rels"
+        )
+    except Exception as e:
+        logging.error(f"Node/Relationship sayı güncelleme hatası - {e}")
+        # Varsayılan değerlerle devam et
+        node_count = node_count if node_count else 0
+        rel_count = rel_count if rel_count else 0
+
+    success_rate = (successful_steps / total_steps) * 100
+    logging.info(
+        f"Chunk processing özeti: {successful_steps}/{total_steps} step başarılı (%{success_rate:.1f})"
     )
-    latency["entity_extraction"] = f"{time.time() - t1:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 2/7 başarılı: ✅ LLM entity extraction tamamlandı - {len(graph_documents)} graph document oluşturuldu")
-  except Exception as e:
-    latency["entity_extraction"] = "FAILED"
-    logging.error(f"Step 2/7 başarısız: ❌ LLM entity extraction hatası - {e}")
-    # LLM hatası kritik - boş graph_documents ile devam et
-    graph_documents = []
 
-  # 3. normalize IDs / backticks / types
-  try:
-    cleaned = handle_backticks_nodes_relationship_id_type(graph_documents)
-    successful_steps += 1
-    logging.info(f"Step 3/7 başarılı: ✅ Entity'ler normalize edildi - {len(cleaned)} temizlenmiş graph document")
-  except Exception as e:
-    logging.error(f"Step 3/7 başarısız: ❌ Entity normalization hatası - {e}")
-    cleaned = []
-
-  # 4. save nodes & rels into Neo4j
-  try:
-    t2 = time.time()
-    logging.info(f"🗃️ Entity'ler Neo4j'ye kaydediliyor...")
-    save_graphDocuments_in_neo4j(graph, cleaned)
-    latency["save_graphDocuments"] = f"{time.time() - t2:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 4/7 başarılı: ✅ Entity'ler Neo4j'ye kaydedildi")
-  except Exception as e:
-    latency["save_graphDocuments"] = "FAILED"
-    logging.error(f"Step 4/7 başarısız: ❌ Neo4j'ye kaydetme hatası - {e}")
-
-  # 5. relate each chunk to its extracted entities (technical tracking)
-  try:
-    pairs = get_chunk_and_graphDocument(cleaned, chunkId_chunkDoc_list)
-    t3 = time.time()
-    logging.info(f"🔗 Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuluyor...")
-    merge_relationship_between_chunk_and_entites(graph, pairs)
-    latency["chunk_entity_rel"] = f"{time.time() - t3:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 5/7 başarılı: ✅ Chunk-Entity EXTRACTED_FROM ilişkileri oluşturuldu (technical tracking)")
-  except Exception as e:
-    latency["chunk_entity_rel"] = "FAILED"
-    logging.error(f"Step 5/7 başarısız: ❌ Chunk-Entity EXTRACTED_FROM ilişki hatası - {e}")
-
-  # 6. Create Policy-Entity relationships (business logic)
-  try:
-    t4 = time.time()
-    logging.info(f"🏢 Policy-Entity HAS_ENTITY ilişkileri oluşturuluyor...")
-    create_policy_entity_relationships(graph, file_name)
-    latency["policy_entity_rel"] = f"{time.time() - t4:.2f}"
-    successful_steps += 1
-    logging.info(f"Step 6/7 başarılı: ✅ Policy-Entity HAS_ENTITY ilişkileri oluşturuldu (business logic)")
-  except Exception as e:
-    latency["policy_entity_rel"] = "FAILED"
-    logging.error(f"Step 6/7 başarısız: ❌ Policy-Entity HAS_ENTITY ilişki hatası - {e}")
-
-  # 6.5. Merge duplicate nodes with upload-time nodes
-  try:
-    from src.llm import merge_duplicate_nodes_with_upload_nodes
-    t5 = time.time()
-    merge_result = merge_duplicate_nodes_with_upload_nodes(graph, file_name)
-    latency["duplicate_node_merge"] = f"{time.time() - t5:.2f}"
-    logging.info(f"Duplicate node merge: {merge_result['merged_count']} node merge edildi")
-    if merge_result['merged_count'] > 0:
-      logging.info(f"Merge detayları: {merge_result['details']}")
-  except Exception as e:
-    latency["duplicate_node_merge"] = "FAILED"
-    logging.error(f"Duplicate node merge hatası - {e}")
-
-  # 7. update overall node/relationship counts (her zaman çalıştır)
-  try:
-    graphDb = graphDBdataAccess(graph)
-    counts = graphDb.update_node_relationship_count(file_name)
-    node_count = counts[file_name].get("nodeCount", 0)
-    rel_count = counts[file_name].get("relationshipCount", 0)
-    logging.info(f"Node/Relationship sayıları güncellendi: {node_count} nodes, {rel_count} rels")
-  except Exception as e:
-    logging.error(f"Node/Relationship sayı güncelleme hatası - {e}")
-    # Varsayılan değerlerle devam et
-    node_count = node_count if node_count else 0
-    rel_count = rel_count if rel_count else 0
-
-  success_rate = (successful_steps / total_steps) * 100
-  logging.info(f"Chunk processing özeti: {successful_steps}/{total_steps} step başarılı (%{success_rate:.1f})")
-  
-  return node_count, rel_count, latency
+    return node_count, rel_count, latency
 
 
 def get_chunkId_chunkDoc_list(
-    graph, file_name, pages, token_chunk_size, chunk_overlap, retry_condition, page_images=None
+    graph,
+    file_name,
+    pages,
+    token_chunk_size,
+    chunk_overlap,
+    retry_condition,
+    page_images=None,
 ):
     # File name'i normalize et
     file_name = normalize_file_name(file_name)
-    
+
     if not retry_condition:
-        logging.info("Looking for existing chunks (chunks must be created during upload)")
-        
+        logging.info(
+            "Looking for existing chunks (chunks must be created during upload)"
+        )
+
         # Chunk'ların upload sırasında oluşturulmuş olup olmadığını kontrol et
         # Yeni sistem: PART_OF ilişkisi ile
         existing_chunks = execute_graph_query(
             graph, QUERY_TO_GET_CHUNKS, params={"filename": file_name}
         )
-        
+
         # Eğer yeni sistemde chunk bulunamazsa eski sistemi dene (fileName property'si ile)
         if not existing_chunks or not existing_chunks[0].get("text"):
             logging.info(f"🔄 Trying legacy chunk lookup for: {file_name}")
@@ -1640,11 +1805,15 @@ def get_chunkId_chunkDoc_list(
                 RETURN c.id as id, c.text as text, c.position as position, c.page_number as page_number
                 ORDER BY c.position
             """
-            existing_chunks = execute_graph_query(graph, legacy_query, params={"filename": file_name})
-        
+            existing_chunks = execute_graph_query(
+                graph, legacy_query, params={"filename": file_name}
+            )
+
         if existing_chunks and existing_chunks[0].get("text"):
-            logging.info(f"✅ Found {len(existing_chunks)} existing chunks for {file_name}")
-            
+            logging.info(
+                f"✅ Found {len(existing_chunks)} existing chunks for {file_name}"
+            )
+
             # Mevcut chunk'ları kullan, sadece embedding'leri kontrol et ve ekle
             chunkId_chunkDoc_list = []
             for chunk in existing_chunks:
@@ -1652,7 +1821,7 @@ def get_chunkId_chunkDoc_list(
                 metadata = {"id": chunk["id"], "position": chunk["position"]}
                 if chunk.get("page_number") is not None:
                     metadata["page_number"] = chunk["page_number"]
-                
+
                 chunk_doc = Document(
                     page_content=chunk["text"],
                     metadata=metadata,
@@ -1660,120 +1829,171 @@ def get_chunkId_chunkDoc_list(
                 chunkId_chunkDoc_list.append(
                     {"chunk_id": chunk["id"], "chunk_doc": chunk_doc}
                 )
-            
+
             # Embedding'leri kontrol et ve eksikleri ekle
             create_chunk_embeddings(graph, chunkId_chunkDoc_list, file_name)
-            
+
             return len(existing_chunks), chunkId_chunkDoc_list
         else:
             # Chunk'lar upload sırasında oluşturulmamışsa (eski dosyalar için)
-            logging.warning(f"No chunks found for {file_name}. Attempting to create chunks from existing document...")
-            
+            logging.warning(
+                f"No chunks found for {file_name}. Attempting to create chunks from existing document..."
+            )
+
             # Document node'dan dosya bilgilerini al
             try:
                 document_query = """
                 MATCH (d:Document {fileName: $file_name}) 
                 RETURN d.file_type AS file_type, d.created_at AS created_at
                 """
-                doc_result = execute_graph_query(graph, document_query, params={"filename": file_name})
-                
+                doc_result = execute_graph_query(
+                    graph, document_query, params={"filename": file_name}
+                )
+
                 if doc_result and len(doc_result) > 0:
-                    logging.info(f"Found Document node for {file_name}, attempting chunk creation...")
-                    
+                    logging.info(
+                        f"Found Document node for {file_name}, attempting chunk creation..."
+                    )
+
                     # Dosya path'ini bul ve chunk'ları oluştur
                     merged_file_path = None
                     possible_paths = [
                         f"/Users/mehmeterdogan/python-projects/llm-graph-builder/merged_files/{file_name}",
                         f"./merged_files/{file_name}",
-                        f"merged_files/{file_name}"
+                        f"merged_files/{file_name}",
                     ]
-                    
+
                     for path in possible_paths:
                         if os.path.exists(path):
                             merged_file_path = path
                             break
-                    
+
                     if merged_file_path and os.path.exists(merged_file_path):
-                        logging.info(f"Found file at: {merged_file_path}, creating chunks...")
-                        
+                        logging.info(
+                            f"Found file at: {merged_file_path}, creating chunks..."
+                        )
+
                         # Dosyayı load et ve chunk'ları oluştur
-                        from src.document_sources.local_file import load_document_content
-                        loader, encoding_flag, _ = load_document_content(merged_file_path, generate_images=False)
+                        from src.document_sources.local_file import (
+                            load_document_content,
+                        )
+
+                        loader, encoding_flag, _ = load_document_content(
+                            merged_file_path, generate_images=False
+                        )
                         pages = loader.load()
-                        
+
                         if pages:
                             # Chunk'ları oluştur
                             # CreateChunksofDocument is now in celery_worker
                             # For backward compatibility, use simple page-based chunks
-                            logging.warning("CreateChunksofDocument is deprecated in backend - use celery_worker for chunking")
+                            logging.warning(
+                                "CreateChunksofDocument is deprecated in backend - use celery_worker for chunking"
+                            )
                             # Use pages directly as chunks
-                            chunks = [{"page_content": page.get("page_content", ""), "metadata": page.get("metadata", {})} for page in pages]
-                            
+                            chunks = [
+                                {
+                                    "page_content": page.get("page_content", ""),
+                                    "metadata": page.get("metadata", {}),
+                                }
+                                for page in pages
+                            ]
+
                             if chunks:
                                 # Chunk node'ları veritabanına kaydet
-                                from src.make_relationships import create_chunks_for_upload
+                                from src.make_relationships import (
+                                    create_chunks_for_upload,
+                                )
                                 import asyncio
-                                
+
                                 # create_chunks_for_upload artık async, event loop içinde çalıştır
                                 try:
                                     loop = asyncio.get_event_loop()
                                     if loop.is_running():
                                         # Eğer loop zaten çalışıyorsa, thread pool'da çalıştır
                                         import concurrent.futures
+
                                         async def run_create_chunks():
                                             return await create_chunks_for_upload(
                                                 graph=graph,
-                                                chunks=chunks, 
+                                                chunks=chunks,
                                                 file_name=file_name,
-                                                page_images=page_images if page_images else [],
-                                                generate_embedding=False  # Emergency durumda embedding oluşturma
+                                                page_images=(
+                                                    page_images if page_images else []
+                                                ),
+                                                generate_embedding=False,  # Emergency durumda embedding oluşturma
                                             )
+
                                         with concurrent.futures.ThreadPoolExecutor() as executor:
-                                            future = executor.submit(asyncio.run, run_create_chunks())
+                                            future = executor.submit(
+                                                asyncio.run, run_create_chunks()
+                                            )
                                             created_chunks = future.result()
                                     else:
-                                        created_chunks = loop.run_until_complete(create_chunks_for_upload(
-                                            graph=graph,
-                                            chunks=chunks, 
-                                            file_name=file_name,
-                                            page_images=page_images if page_images else [],
-                                            generate_embedding=False  # Emergency durumda embedding oluşturma
-                                        ))
+                                        created_chunks = loop.run_until_complete(
+                                            create_chunks_for_upload(
+                                                graph=graph,
+                                                chunks=chunks,
+                                                file_name=file_name,
+                                                page_images=(
+                                                    page_images if page_images else []
+                                                ),
+                                                generate_embedding=False,  # Emergency durumda embedding oluşturma
+                                            )
+                                        )
                                 except RuntimeError:
                                     # Event loop yoksa, yeni bir tane oluştur
-                                    created_chunks = asyncio.run(create_chunks_for_upload(
-                                        graph=graph,
-                                        chunks=chunks, 
-                                        file_name=file_name,
-                                        page_images=page_images if page_images else [],
-                                        generate_embedding=False  # Emergency durumda embedding oluşturma
-                                    ))
-                                
-                                logging.info(f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created")
-                                
+                                    created_chunks = asyncio.run(
+                                        create_chunks_for_upload(
+                                            graph=graph,
+                                            chunks=chunks,
+                                            file_name=file_name,
+                                            page_images=(
+                                                page_images if page_images else []
+                                            ),
+                                            generate_embedding=False,  # Emergency durumda embedding oluşturma
+                                        )
+                                    )
+
+                                logging.info(
+                                    f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created"
+                                )
+
                                 # Şimdi chunk'ları kullan
                                 chunkId_chunkDoc_list = []
                                 for i, chunk_data in enumerate(created_chunks):
                                     chunk_doc = Document(
                                         page_content=chunk_data["text"],
-                                        metadata={"id": chunk_data["id"], "position": i + 1},
+                                        metadata={
+                                            "id": chunk_data["id"],
+                                            "position": i + 1,
+                                        },
                                     )
                                     chunkId_chunkDoc_list.append(
-                                        {"chunk_id": chunk_data["id"], "chunk_doc": chunk_doc}
+                                        {
+                                            "chunk_id": chunk_data["id"],
+                                            "chunk_doc": chunk_doc,
+                                        }
                                     )
-                                
+
                                 return len(created_chunks), chunkId_chunkDoc_list
                             else:
-                                logging.error(f"Failed to create chunks for {file_name}")
+                                logging.error(
+                                    f"Failed to create chunks for {file_name}"
+                                )
                         else:
-                            logging.error(f"No pages could be loaded from {merged_file_path}")
+                            logging.error(
+                                f"No pages could be loaded from {merged_file_path}"
+                            )
                     else:
-                        logging.error(f"File not found in any expected location for {file_name}")
+                        logging.error(
+                            f"File not found in any expected location for {file_name}"
+                        )
                 else:
                     logging.error(f"No Document node found for {file_name}")
             except Exception as e:
                 logging.error(f"Emergency chunk creation failed for {file_name}: {e}")
-            
+
             # Son çare: hata ver
             raise LLMGraphBuilderException(
                 f"No chunks found for {file_name}. File may need to be re-uploaded. "
@@ -1796,7 +2016,7 @@ def get_chunkId_chunkDoc_list(
                 metadata = {"id": chunk["id"], "position": chunk["position"]}
                 if chunk.get("page_number") is not None:
                     metadata["page_number"] = chunk["page_number"]
-                
+
                 chunk_doc = Document(
                     page_content=chunk["text"],
                     metadata=metadata,
@@ -1891,52 +2111,60 @@ def connection_check_and_get_vector_dimensions(graph, database):
 
 
 def merge_chunks_local(file_name, total_chunks, chunk_dir, merged_dir):
-    logging.info(f"🔗 Starting merge process for: {file_name}, Total chunks: {total_chunks}")
+    logging.info(
+        f"🔗 Starting merge process for: {file_name}, Total chunks: {total_chunks}"
+    )
 
     if not os.path.exists(merged_dir):
         os.mkdir(merged_dir)
         logging.info(f"📂 Created merged directory: {merged_dir}")
-    
+
     logging.info(f"📁 Merged File Directory: {merged_dir}")
     merged_file_path = os.path.join(merged_dir, file_name)
     logging.info(f"📄 Target merged file path: {merged_file_path}")
-    
+
     try:
         with open(merged_file_path, "wb") as write_stream:
             total_bytes_written = 0
             for i in range(1, total_chunks + 1):
                 chunk_file_path = os.path.join(chunk_dir, f"{file_name}_part_{i}")
                 logging.info(f"🔍 Processing chunk {i}: {chunk_file_path}")
-                
+
                 if not os.path.exists(chunk_file_path):
                     logging.error(f"❌ Chunk file missing: {chunk_file_path}")
                     raise FileNotFoundError(f"Chunk file {chunk_file_path} not found")
-                
+
                 chunk_size = os.path.getsize(chunk_file_path)
                 logging.info(f"📦 Chunk {i} size: {chunk_size} bytes")
-                
+
                 with open(chunk_file_path, "rb") as chunk_file:
                     bytes_copied = shutil.copyfileobj(chunk_file, write_stream)
                     total_bytes_written += chunk_size
                     logging.info(f"✅ Chunk {i} merged successfully")
-                
-                os.unlink(chunk_file_path)  # Delete the individual chunk file after merging
+
+                os.unlink(
+                    chunk_file_path
+                )  # Delete the individual chunk file after merging
                 logging.info(f"🗑️ Chunk file deleted: {chunk_file_path}")
-        
-        logging.info(f"✅ All chunks merged successfully. Total bytes written: {total_bytes_written}")
-        
+
+        logging.info(
+            f"✅ All chunks merged successfully. Total bytes written: {total_bytes_written}"
+        )
+
         if not os.path.exists(merged_file_path):
             logging.error(f"❌ Merged file was not created: {merged_file_path}")
             raise FileNotFoundError(f"Merged file was not created: {merged_file_path}")
 
         file_size = os.path.getsize(merged_file_path)
         logging.info(f"📏 Final merged file size: {file_size} bytes")
-        
+
         if file_size != total_bytes_written:
-            logging.warning(f"⚠️ Size mismatch - Expected: {total_bytes_written}, Actual: {file_size}")
-        
+            logging.warning(
+                f"⚠️ Size mismatch - Expected: {total_bytes_written}, Actual: {file_size}"
+            )
+
         return file_size
-        
+
     except Exception as e:
         logging.error(f"❌ Error during merge process: {str(e)}")
         # Cleanup any partial file
@@ -1961,34 +2189,50 @@ def upload_file(
     # Dosya adını normalize et (Unicode consistency için)
     import unicodedata
     from src.utf8_utils import normalize_file_name
-    
+
     # Model parametresi kontrolü - varsayılan değer ataması
     if not model or model.strip() == "":
         model = "openai_gpt_4o_mini"
-        log_upload(f"⚠️ Model parametresi boş veya gelmedi, varsayılan model kullanılıyor: {model}", "warning")
+        log_upload(
+            f"⚠️ Model parametresi boş veya gelmedi, varsayılan model kullanılıyor: {model}",
+            "warning",
+        )
     else:
         log_upload(f"✅ Model parametresi alındı: {model}")
-    
+
     originalname = normalize_file_name(originalname)
-    log_upload(f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}")
-    log_upload(f"⚙️ Upload config - Model: {model}, Generate Embedding: {generate_embedding}")
-    log_upload(f"🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})")
-    
+    log_upload(
+        f"📤 Upload started - File: {originalname}, Chunk: {chunk_number}/{total_chunks}"
+    )
+    log_upload(
+        f"⚙️ Upload config - Model: {model}, Generate Embedding: {generate_embedding}"
+    )
+    log_upload(
+        f"🔤 Normalized filename: {originalname} (bytes: {originalname.encode('utf-8')})"
+    )
+
     # Chunk boyutu kontrol et
-    if hasattr(chunk, 'size'):
+    if hasattr(chunk, "size"):
         chunk_size = chunk.size
         log_upload(f"📏 Chunk size: {chunk_size} bytes")
         if chunk_size == 0:
-            log_upload(f"⚠️ Received empty chunk for {originalname}, chunk {chunk_number}/{total_chunks}", "warning")
+            log_upload(
+                f"⚠️ Received empty chunk for {originalname}, chunk {chunk_number}/{total_chunks}",
+                "warning",
+            )
     else:
         log_upload(f"📏 Chunk size information not available for {originalname}")
 
     gcs_file_cache = os.environ.get("GCS_FILE_CACHE")
     log_upload(f"☁️ GCS file cache: {gcs_file_cache}")
-    
+
     # Normalize filename early to ensure consistency throughout upload process
-    normalized_filename = normalize_file_name(originalname.strip() if isinstance(originalname, str) else originalname)
-    log_upload(f"Upload: Original filename: '{originalname}' -> Normalized: '{normalized_filename}'")
+    normalized_filename = normalize_file_name(
+        originalname.strip() if isinstance(originalname, str) else originalname
+    )
+    log_upload(
+        f"Upload: Original filename: '{originalname}' -> Normalized: '{normalized_filename}'"
+    )
 
     if gcs_file_cache == "True":
         folder_name = create_gcs_bucket_folder_name_hashed(uri, normalized_filename)
@@ -2001,22 +2245,33 @@ def upload_file(
             os.mkdir(chunk_dir)
             log_upload(f"📂 Created chunk directory: {chunk_dir}")
 
-        chunk_file_path = os.path.join(chunk_dir, f"{normalized_filename}_part_{chunk_number}")
+        chunk_file_path = os.path.join(
+            chunk_dir, f"{normalized_filename}_part_{chunk_number}"
+        )
         log_upload(f"💾 Saving chunk to: {chunk_file_path}")
 
         with open(chunk_file_path, "wb") as chunk_file:
             chunk_content = chunk.file.read()
             content_size = len(chunk_content)
             chunk_file.write(chunk_content)
-            log_upload(f"✅ Chunk {chunk_number} saved successfully, bytes written: {content_size}")
-            
+            log_upload(
+                f"✅ Chunk {chunk_number} saved successfully, bytes written: {content_size}"
+            )
+
             if content_size == 0:
-                log_upload(f"⚠️ Written chunk is empty for {originalname}, chunk {chunk_number}/{total_chunks}", "warning")
+                log_upload(
+                    f"⚠️ Written chunk is empty for {originalname}, chunk {chunk_number}/{total_chunks}",
+                    "warning",
+                )
             else:
-                log_upload(f"📊 Chunk content summary - First 100 chars: {chunk_content[:100] if content_size > 0 else 'EMPTY'}")
+                log_upload(
+                    f"📊 Chunk content summary - First 100 chars: {chunk_content[:100] if content_size > 0 else 'EMPTY'}"
+                )
 
     if int(chunk_number) == int(total_chunks):
-        log_upload(f"🔗 Last chunk received, starting file merge process for: {originalname}")
+        log_upload(
+            f"🔗 Last chunk received, starting file merge process for: {originalname}"
+        )
         # If this is the last chunk, merge all chunks into a single file
         if gcs_file_cache == "True":
             file_size = merge_file_gcs(
@@ -2029,60 +2284,73 @@ def upload_file(
 
         logging.info(f"✅ File merged successfully - Final size: {file_size} bytes")
         merged_file_path = os.path.join(merged_dir, normalized_filename)
-        
+
         # ✨ ÖNCE: Upload öncesi otomatik temizlik yap (dosya varsa temizle)
         log_upload(f"🧹 Starting pre-upload cleanup check for: {normalized_filename}")
         graphDb_data_Access = graphDBdataAccess(graph)
-        cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(normalized_filename)
+        cleanup_result = graphDb_data_Access.auto_clean_existing_file_data(
+            normalized_filename
+        )
         if cleanup_result:
             log_upload(f"✅ Pre-upload cleanup completed successfully")
         else:
             log_upload(f"ℹ️ No cleanup needed or cleanup skipped")
-        
+
         # Source node oluştur
-        log_upload(f"Creating source node for file: {originalname} (size: {file_size} bytes)")
+        log_upload(
+            f"Creating source node for file: {originalname} (size: {file_size} bytes)"
+        )
         file_extension = normalized_filename.split(".")[-1]
-        
+
         # S3 Upload Logic
         s3_url = None
         s3_key = None
-        
+
         # Check if S3 credentials are available
         s3_bucket = os.environ.get("S3_BACKUP_BUCKET")
         aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
         aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-        
+
         if s3_bucket and aws_access_key_id and aws_secret_access_key:
             try:
-                log_upload(f"☁️ Starting S3 upload for merged file: {normalized_filename}")
-                
+                log_upload(
+                    f"☁️ Starting S3 upload for merged file: {normalized_filename}"
+                )
+
                 # S3 Key: documents/{filename}/{filename} (to match existing structure)
                 # Note: We use the file name as the folder name too
                 doc_name = Path(normalized_filename).stem
                 s3_key = f"documents/{doc_name}/{normalized_filename}"
-                
+
                 # Extract images from PDF before uploading (for distributed workers)
                 generated_images = []
                 if file_extension.lower() == "pdf":
                     try:
-                        log_upload(f"🖼️ Starting image extraction for PDF: {normalized_filename}")
-                        
-                        # Create output directory for images
-                        images_dir = os.path.join(merged_dir, "../output", doc_name, "images")
+                        log_upload(
+                            f"🖼️ Starting image extraction for PDF: {normalized_filename}"
+                        )
+
+                        # Create output directory for images (from env or default to output_celery for Celery volume mount)
+                        output_base = os.environ.get("OUTPUT_DIR", "output_celery")
+                        images_dir = os.path.join(output_base, doc_name, "images")
                         os.makedirs(images_dir, exist_ok=True)
-                        
+
                         # Extract images using PyMuPDF
-                        generated_images = generate_page_images_with_pymupdf(merged_file_path, images_dir)
-                        
+                        generated_images = generate_page_images_with_pymupdf(
+                            merged_file_path, images_dir
+                        )
+
                         if generated_images:
-                            log_upload(f"✅ Extracted {len(generated_images)} page images")
+                            log_upload(
+                                f"✅ Extracted {len(generated_images)} page images"
+                            )
                         else:
                             log_upload(f"⚠️ No images extracted from PDF", "warning")
-                            
+
                     except Exception as img_error:
                         log_upload(f"❌ Image extraction failed: {img_error}", "error")
                         # Continue with upload even if image extraction fails
-                
+
                 # Upload PDF to S3
                 s3_url = upload_single_file_to_s3(
                     file_path=merged_file_path,
@@ -2090,37 +2358,44 @@ def upload_file(
                     s3_key=s3_key,
                     aws_access_key_id=aws_access_key_id,
                     aws_secret_access_key=aws_secret_access_key,
-                    delete_local_after_upload=True  # Delete local file after successful upload
+                    delete_local_after_upload=True,  # Delete local file after successful upload
                 )
-                
+
                 # Upload images to S3 if any were extracted
                 if generated_images and s3_url:
                     try:
                         log_upload(f"☁️ Uploading {len(generated_images)} images to S3")
-                        
+
                         uploaded_urls, failed_files = upload_files_to_s3(
                             file_paths=generated_images,
                             bucket_name=s3_bucket,
                             s3_prefix=f"documents/{doc_name}/images",
                             aws_access_key_id=aws_access_key_id,
                             aws_secret_access_key=aws_secret_access_key,
-                            delete_local_after_upload=True  # Delete local images after upload
+                            delete_local_after_upload=True,  # Delete local images after upload
                         )
-                        
+
                         if uploaded_urls:
                             log_upload(f"✅ Uploaded {len(uploaded_urls)} images to S3")
                         if failed_files:
-                            log_upload(f"⚠️ Failed to upload {len(failed_files)} images", "warning")
-                            
+                            log_upload(
+                                f"⚠️ Failed to upload {len(failed_files)} images",
+                                "warning",
+                            )
+
                     except Exception as img_upload_error:
-                        log_upload(f"❌ Image upload to S3 failed: {img_upload_error}", "error")
-                
+                        log_upload(
+                            f"❌ Image upload to S3 failed: {img_upload_error}", "error"
+                        )
+
                 if s3_url:
                     log_upload(f"✅ Successfully uploaded to S3: {s3_url}")
                     # Update file source to S3
                     obj_source_node = sourceNode()
                     obj_source_node.file_source = "s3"
-                    obj_source_node.awsAccessKeyId = aws_access_key_id # Store key ID for reference if needed
+                    obj_source_node.awsAccessKeyId = (
+                        aws_access_key_id  # Store key ID for reference if needed
+                    )
                 else:
                     log_upload(f"❌ S3 upload failed, keeping local file", "error")
                     # Fallback to local file
@@ -2153,7 +2428,7 @@ def upload_file(
         obj_source_node.node_count = 0
         obj_source_node.relationship_count = 0
         obj_source_node.processing_time = 0
-        
+
         return {
             "file_size": file_size,
             "file_name": normalized_filename,  # Return normalized filename
@@ -2243,11 +2518,15 @@ def manually_cancelled_job(graph, filenames, source_types, merged_dir, uri):
         obj_source_node.updated_at = datetime.now()
         graphDb_data_Access = graphDBdataAccess(graph)
         graphDb_data_Access.update_source_node(obj_source_node)
-        count_response = graphDb_data_Access.update_node_relationship_count(normalized_file_name)
+        count_response = graphDb_data_Access.update_node_relationship_count(
+            normalized_file_name
+        )
         obj_source_node = None
         merged_file_path = os.path.join(merged_dir, normalized_file_name)
         if source_type == "local file" and gcs_file_cache == "True":
-            folder_name = create_gcs_bucket_folder_name_hashed(uri, normalized_file_name)
+            folder_name = create_gcs_bucket_folder_name_hashed(
+                uri, normalized_file_name
+            )
             delete_file_from_gcs(BUCKET_UPLOAD, folder_name, normalized_file_name)
         else:
             logging.info(

@@ -8,8 +8,11 @@
 #    Docker daemon başladığında otomatik olarak açılırlar.
 #
 # Kullanım:
-#   1. Bağımsız: cd observability && docker-compose up -d
+#   1. Bağımsız: cd observability && docker-compose up -d --build
 #   2. Ana compose ile: docker-compose -f docker-compose.preview.yml -f observability/docker-compose.yml up -d
+#
+# NOT: Config dosyaları Dockerfile ile image'a dahil edilir.
+#      Host path bağımlılığı yoktur, her ortamda çalışır.
 #
 # Portlar:
 #   - Grafana:     http://localhost:3000
@@ -23,28 +26,20 @@ services:
   # ---------------------------------------------------------------------------
   # Grafana Alloy - Birleşik Telemetry Collector
   # ---------------------------------------------------------------------------
-  # Replaces: Promtail + OTel Collector + Grafana Agent
-  # Features:
-  #   - OTLP receiver (traces, metrics, logs)
-  #   - File-based log collection
-  #   - Docker container log discovery
-  #   - Flow-based configuration
-  # ---------------------------------------------------------------------------
   alloy:
-    image: grafana/alloy:v1.12.0
+    build:
+      context: ./alloy
+      dockerfile: Dockerfile
     container_name: alloy
     volumes:
-      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      # Backend JSON logs (backend/logs klasöründen)
-      - ../backend/logs:/var/log/backend:ro
-      # Docker container logs
+      # Docker container logs (Docker socket erişimi için)
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Alloy data persistence
       - alloy-data:/var/lib/alloy/data
     ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
       - "12345:12345" # Alloy UI
     command:
       - run
@@ -62,10 +57,11 @@ services:
   # Loki - Log Aggregation ve Storage
   # ---------------------------------------------------------------------------
   loki:
-    image: grafana/loki:2.9.4
+    build:
+      context: ./loki
+      dockerfile: Dockerfile
     container_name: loki
     volumes:
-      - ./loki/config.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
     ports:
       - "3100:3100"
@@ -83,14 +79,15 @@ services:
   # Tempo - Distributed Tracing Backend
   # ---------------------------------------------------------------------------
   tempo:
-    image: grafana/tempo:2.3.1
+    build:
+      context: ./tempo
+      dockerfile: Dockerfile
     container_name: tempo
     volumes:
-      - ./tempo/config.yaml:/etc/tempo/config.yaml:ro
       - tempo-data:/var/tempo
     ports:
-      - "3200:3200"   # Tempo HTTP API
-      - "9095:9095"   # Tempo gRPC
+      - "3200:3200" # Tempo HTTP API
+      - "9095:9095" # Tempo gRPC
     command: ["-config.file=/etc/tempo/config.yaml"]
     restart: always
     networks:
@@ -103,9 +100,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # Redis Stack - Semantic Cache (RediSearch + RedisJSON)
-  # ---------------------------------------------------------------------------
-  # LLM response caching için vector similarity search desteği
-  # Port: 6381 (Langfuse Redis ile çakışmasın diye)
   # ---------------------------------------------------------------------------
   redis-stack:
     image: redis/redis-stack-server:latest
@@ -130,7 +124,6 @@ services:
     image: grafana/grafana:10.3.1
     container_name: grafana
     volumes:
-      # Docker volumes - host bind mount yok
       - grafana-data:/var/lib/grafana
       - grafana-provisioning:/etc/grafana/provisioning
       - grafana-dashboards:/var/lib/grafana/dashboards
@@ -138,7 +131,6 @@ services:
       - "3000"
     labels:
       - "traefik.enable=true"
-      # Grafana: grafana.dev.local
       - "traefik.http.routers.grafana.rule=Host(`grafana.dev.local`)"
       - "traefik.http.routers.grafana.entrypoints=web"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
@@ -146,17 +138,15 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
-      # Tempo features: traceQL editor, search, service graph, APM table
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,tempoSearch,tempoBackendSearch,tempoServiceGraph,tempoApmTable,traceQLStreaming
-      # Türkçe timezone
       - TZ=Europe/Istanbul
     restart: always
     networks:
       - observability
       - traefik-public
-    # depends_on kaldırıldı - bağımsız başlatılabilir
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      test:
+        ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 10s
       timeout: 5s
       retries: 3
