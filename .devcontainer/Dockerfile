@@ -52,6 +52,7 @@ RUN apt-get update && \
        lsb-release \
        net-tools \
        iputils-ping \
+       openssh-client \
        zsh && \
    # Docker CE repository ekle (Ubuntu repository'sini kullan)
    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
