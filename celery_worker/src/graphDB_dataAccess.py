@@ -23,6 +23,9 @@ from functools import wraps
 # Domain-specific prompts
 from prompts import load_prompt, get_domain
 
+# Generic graph executor for dynamic graph creation
+from src.generic_graph_executor import GenericGraphExecutor, create_graph_from_llm_output
+
 load_dotenv()
 
 
@@ -1494,65 +1497,78 @@ class graphDBdataAccess:
             # Belgenin tüm Chunk'larını veritabanından al
             document_content = self._get_document_content_from_chunks(file_name)
 
-            # LLM ile kapsamlı varlık çıkarımı yap (belge içeriğini geçir)
-            entities_data = self.extract_comprehensive_policy_entities_with_llm(
-                file_name, document_content, model
-            )
+            # Domain'e göre farklı extraction yöntemi kullan
+            domain = get_domain()
+            logging.info(f"📋 Domain: {domain}")
 
-            if not entities_data:
-                error_msg = f"⚠️ {file_name} için varlık çıkarımı başarısız. LLM extraction hatası."
-                logging.error(error_msg)
-                raise Exception(error_msg)
-
-            # Document type'ı kontrol et
-            document_type = entities_data.get("document_type", "MAIN_POLICY")
-
-            if document_type in ["ENDORSEMENT", "CANCELLATION", "RENEWAL"]:
-                # Zeyilname/iptal/yenileme olarak işle
-                logging.info(f"📋 {file_name} → {document_type} olarak işleniyor...")
-                self.create_endorsement_entity(entities_data, file_name, document_type)
-            else:
-                # Ana poliçe olarak işle
-                logging.info(f"📋 {file_name} → MAIN_POLICY olarak işleniyor...")
-                self.create_comprehensive_policy_entities(
-                    entities_data, file_name, model
+            if domain == "sigorta":
+                # ========================================
+                # SIGORTA DOMAIN - Eski hardcoded yapı
+                # ========================================
+                logging.info(f"📋 Sigorta domain - hardcoded entity extraction kullanılıyor")
+                
+                # LLM ile kapsamlı varlık çıkarımı yap (belge içeriğini geçir)
+                entities_data = self.extract_comprehensive_policy_entities_with_llm(
+                    file_name, document_content, model
                 )
 
-            # Document'a docType ve metadata ekle (sadece docType kullanıyoruz, document_type kaldırıldı)
-            policy_data = entities_data.get("policy")
-            if policy_data is None:
-                policy_data = {}
-            dates_data = entities_data.get("dates")
-            if dates_data is None:
-                dates_data = {}
+                if not entities_data:
+                    error_msg = f"⚠️ {file_name} için varlık çıkarımı başarısız. LLM extraction hatası."
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
 
-            update_document_query = """
-                MATCH (d:Document {fileName: $file_name})
-                SET d.docType = $doc_type,
-                    d.hasExtractedEntities = true,
-                    d.entityExtractionMethod = 'LLM_comprehensive',
-                    d.lastProcessedAt = datetime()
-                RETURN d.fileName as updated_file
-            """
+                # Document type'ı kontrol et
+                document_type = entities_data.get("document_type", "MAIN_POLICY")
 
-            # docType için standardize edilmiş değerler kullanıyoruz: MAIN_POLICY, ENDORSEMENT, RENEWAL, CANCELLATION
-            self.graph.query(
-                update_document_query,
-                {
-                    "file_name": file_name,
-                    "doc_type": document_type,  # Artık direkt document_type değerini kullanıyoruz (MAIN_POLICY, ENDORSEMENT, etc.)
-                },
-                session_params={"database": self.graph._database},
-            )
+                if document_type in ["ENDORSEMENT", "CANCELLATION", "RENEWAL"]:
+                    # Zeyilname/iptal/yenileme olarak işle
+                    logging.info(f"📋 {file_name} → {document_type} olarak işleniyor...")
+                    self.create_endorsement_entity(entities_data, file_name, document_type)
+                else:
+                    # Ana poliçe olarak işle
+                    logging.info(f"📋 {file_name} → MAIN_POLICY olarak işleniyor...")
+                    self.create_comprehensive_policy_entities(
+                        entities_data, file_name, model
+                    )
 
-            # NOT: Duplicate merge işlemleri manuel olarak /merge_duplicate_entities endpoint'i ile yapılacak
-            # self.merge_existing_duplicate_customers()
-            # self.merge_existing_duplicate_insurance_companies()
-            # self.merge_existing_duplicate_coverage_types()
+                # Document'a docType ve metadata ekle
+                update_document_query = """
+                    MATCH (d:Document {fileName: $file_name})
+                    SET d.docType = $doc_type,
+                        d.hasExtractedEntities = true,
+                        d.entityExtractionMethod = 'LLM_comprehensive',
+                        d.lastProcessedAt = datetime()
+                    RETURN d.fileName as updated_file
+                """
+                self.graph.query(
+                    update_document_query,
+                    {"file_name": file_name, "doc_type": document_type},
+                    session_params={"database": self.graph._database},
+                )
 
-            # Document Summary node oluştur (Agent'ın hızlı erişimi için)
-            # TODO: Summary özelliği şimdilik devre dışı - ileride aktifleştirilebilir
-            # self._create_document_summary(file_name, entities_data, document_type, model)
+            else:
+                # ========================================
+                # DİĞER DOMAIN'LER - Generic Graph Executor
+                # ========================================
+                logging.info(f"📋 {domain} domain - generic graph executor kullanılıyor")
+                
+                # Generic entity extraction (nodes/relationships format)
+                llm_output = self._extract_entities_generic(file_name, document_content, model)
+                
+                if not llm_output:
+                    error_msg = f"⚠️ {file_name} için generic varlık çıkarımı başarısız."
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
+                
+                # Generic Graph Executor ile Neo4j'ye yaz
+                executor = GenericGraphExecutor(self.graph)
+                result = executor.create_graph_from_llm_output(llm_output, file_name)
+                
+                if not result.get("success"):
+                    errors = result.get("errors", [])
+                    logging.warning(f"⚠️ Generic graph creation partial failure: {errors}")
+                
+                document_type = llm_output.get("document_type", "DIGER")
 
             logging.info(
                 f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})"
@@ -4144,6 +4160,127 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
 
         except Exception as e:
             logging.error(f"Varlık node'ları oluşturma hatası: {e}")
+
+    def _extract_entities_generic(
+        self,
+        file_name: str,
+        document_content: str,
+        model: str = "openai_gpt_4o_mini"
+    ) -> dict:
+        """
+        Generic entity extraction - LLM'den nodes/relationships formatında JSON alır.
+        
+        Bu metod domain-agnostic olup, LLM'in ürettiği node tiplerini ve
+        ilişkileri olduğu gibi Neo4j'ye yazar.
+        
+        Args:
+            file_name: Belge adı
+            document_content: Belgenin metin içeriği
+            model: LLM modeli
+        
+        Returns:
+            {
+                "document_type": "GENEL_KURUL",
+                "nodes": [...],
+                "relationships": [...]
+            }
+        """
+        logging.info(f"🤖 Generic Entity Extraction başlatılıyor - Model: {model}, Dosya: {file_name}")
+        
+        try:
+            # Domain-specific prompt yükle
+            domain = get_domain()
+            prompt_template = load_prompt("entity_extraction", domain)
+            prompt = prompt_template.format(
+                file_name=file_name,
+                document_content=document_content
+            )
+            logging.info(f"📋 Generic extraction prompt loaded for domain: {domain}")
+            
+            # Gemini ile çağır
+            response_text = ""
+            use_gemini = False
+            
+            try:
+                from google import genai as genai_sdk
+                from google.genai import types
+                
+                api_key = os.environ.get("GEMINI_API_KEY")
+                if api_key:
+                    client = genai_sdk.Client(api_key=api_key)
+                    
+                    generation_config = types.GenerateContentConfig(
+                        max_output_tokens=8192,
+                        temperature=0.1,
+                    )
+                    
+                    response = client.models.generate_content(
+                        model="models/gemini-2.0-flash",
+                        contents=[types.Part.from_text(text=prompt)],
+                        config=generation_config,
+                    )
+                    
+                    response_text = response.text.strip() if response.text else ""
+                    use_gemini = True
+                    logging.info(f"✅ Gemini response received: {len(response_text)} chars")
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ Gemini failed, falling back to LLM: {e}")
+            
+            # Gemini kullanılamadıysa alternatif LLM kullan
+            if not use_gemini or not response_text:
+                from src.llm import get_llm
+                llm, _ = get_llm(model)
+                response = llm.invoke(prompt)
+                response_text = response.content.strip() if hasattr(response, "content") and response.content else ""
+            
+            # JSON parse
+            if not response_text:
+                logging.error("❌ Empty response from LLM")
+                return {}
+            
+            # Extract JSON from response
+            if "{" in response_text and "}" in response_text:
+                start_idx = response_text.find("{")
+                end_idx = response_text.rfind("}") + 1
+                json_text = response_text[start_idx:end_idx]
+                
+                # Clean markdown code blocks if present
+                if json_text.startswith("```json"):
+                    json_text = json_text.replace("```json", "").replace("```", "").strip()
+                elif json_text.startswith("```"):
+                    json_text = json_text.replace("```", "").strip()
+                
+                try:
+                    result = json.loads(json_text)
+                    
+                    # Validate structure
+                    if "nodes" not in result:
+                        result["nodes"] = []
+                    if "relationships" not in result:
+                        result["relationships"] = []
+                    if "document_type" not in result:
+                        result["document_type"] = "DIGER"
+                    
+                    logging.info(
+                        f"✅ Generic extraction parsed: "
+                        f"{len(result['nodes'])} nodes, "
+                        f"{len(result['relationships'])} relationships"
+                    )
+                    
+                    return result
+                    
+                except json.JSONDecodeError as e:
+                    logging.error(f"❌ JSON parse error: {e}")
+                    logging.debug(f"Response text: {json_text[:500]}...")
+                    return {}
+            else:
+                logging.error("❌ No JSON found in response")
+                return {}
+                
+        except Exception as e:
+            logging.error(f"❌ Generic entity extraction error: {e}")
+            return {}
 
     def _get_existing_policy_relationship_types_from_schema(self) -> dict:
         """
