@@ -7,6 +7,7 @@ Sen Türkiye sigorta poliçesi belgelerinden bilgi grafiği (knowledge graph) i�
 Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Bir LLM bu graph üzerinde Cypher sorguları yazarak kullanıcı sorularını cevaplayacak.
 
 Örnek kullanıcı soruları:
+
 - "Ahmet Yılmaz'ın kasko poliçesi var mı?"
 - "Bu müşterinin tüm poliçelerini göster"
 - "Allianz'ın sattığı konut poliçeleri hangileri?"
@@ -19,10 +20,11 @@ Aynı varlık (şirket, kişi, adres) farklı belgelerde farklı yazılabilir. S
 ### Normalization Kuralları:
 
 1. **`normalized_name`**: Her entity'nin zorunlu property'si. Sorgu eşleştirmesi için kullanılır.
+
    - Küçük harfe çevir
    - Türkçe karakterleri dönüştür (ş→s, ğ→g, ü→u, ö→o, ç→c, ı→i)
    - Gereksiz kelimeleri kaldır: "A.Ş.", "LTD.", "ŞTİ.", "İNC.", "SİGORTA", "HOLDİNG" vb.
-   - Boşlukları "_" ile değiştir
+   - Boşlukları "\_" ile değiştir
    - Özel karakterleri kaldır
 
 2. **`name`**: Orijinal görüntülenen isim (belgede yazıldığı gibi)
@@ -31,17 +33,17 @@ Aynı varlık (şirket, kişi, adres) farklı belgelerde farklı yazılabilir. S
 
 ### Normalization Örnekleri:
 
-| Belgede Yazılan | normalized_name | 
-|-----------------|-----------------|
-| "Allianz Sigorta A.Ş." | `allianz` |
-| "ALLİANZ SİGORTA AŞ" | `allianz` |
-| "Allianz" | `allianz` |
-| "HDI Sigorta A.Ş." | `hdi` |
-| "Türkiye Sigorta A.Ş." | `turkiye` |
-| "AHMET YILMAZ" | `ahmet_yilmaz` |
-| "Ahmet YILMAZ" | `ahmet_yilmaz` |
-| "YILMAZ, AHMET" | `ahmet_yilmaz` |
-| "ABC Holding A.Ş." | `abc` |
+| Belgede Yazılan        | normalized_name |
+| ---------------------- | --------------- |
+| "Allianz Sigorta A.Ş." | `allianz`       |
+| "ALLİANZ SİGORTA AŞ"   | `allianz`       |
+| "Allianz"              | `allianz`       |
+| "HDI Sigorta A.Ş."     | `hdi`           |
+| "Türkiye Sigorta A.Ş." | `turkiye`       |
+| "AHMET YILMAZ"         | `ahmet_yilmaz`  |
+| "Ahmet YILMAZ"         | `ahmet_yilmaz`  |
+| "YILMAZ, AHMET"        | `ahmet_yilmaz`  |
+| "ABC Holding A.Ş."     | `abc`           |
 
 ### ID Oluşturma = normalized_name tabanlı
 
@@ -58,10 +60,9 @@ ID = prefix + "_" + normalized_name
 
 **Dosya Adı:** "{file_name}"
 
-**Belge İçeriği:**
----
-{document_content}
----
+## **Belge İçeriği:**
+
+## {document_content}
 
 ## ÇIKTI FORMATI
 
@@ -70,7 +71,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```json
 {{
   "document_type": "MAIN_POLICY | ENDORSEMENT | RENEWAL | CANCELLATION",
-  
+
   "nodes": [
     {{
       "label": "NodeLabel",
@@ -81,7 +82,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
       }}
     }}
   ],
-  
+
   "relationships": [
     {{
       "from_id": "source_node_id",
@@ -96,6 +97,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ## NODE TİPLERİ VE ÖZELLİKLERİ
 
 ### Policy (Poliçe) - ANA VARLIK
+
 ```json
 {{
   "label": "Policy",
@@ -114,6 +116,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Customer (Müşteri)
+
 ```json
 {{
   "label": "Customer",
@@ -131,11 +134,13 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 **Müşteri ID Öncelik Sırası:**
+
 1. TC Kimlik No varsa → `customer_12345678901`
 2. Vergi No varsa → `customer_1234567890`
 3. Hiçbiri yoksa → `customer_[normalized_name]` örn: `customer_ahmet_yilmaz`
 
 ### InsuranceCompany (Sigorta Şirketi)
+
 ```json
 {{
   "label": "InsuranceCompany",
@@ -162,6 +167,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 | Sompo Sigorta | sompo | company_sompo |
 
 ### Agent (Acente)
+
 ```json
 {{
   "label": "Agent",
@@ -177,10 +183,12 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 **Acente ID Öncelik Sırası:**
+
 1. Acente kodu varsa → `agent_12345`
 2. Kod yoksa → `agent_[normalized_name]` örn: `agent_guven_sigorta`
 
 ### Coverage (Teminat)
+
 ```json
 {{
   "label": "Coverage",
@@ -196,6 +204,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Premium (Prim)
+
 ```json
 {{
   "label": "Premium",
@@ -211,6 +220,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Address (Adres/Riziko Adresi)
+
 ```json
 {{
   "label": "Address",
@@ -226,6 +236,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Vehicle (Araç - Kasko/Trafik için)
+
 ```json
 {{
   "label": "Vehicle",
@@ -244,6 +255,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Property (Mülk - Konut/DASK için)
+
 ```json
 {{
   "label": "Property",
@@ -265,6 +277,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Endorsement (Zeyilname)
+
 ```json
 {{
   "label": "Endorsement",
@@ -281,19 +294,19 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 
 ## İLİŞKİ TİPLERİ
 
-| İlişki Tipi | Açıklama | Örnek |
-|-------------|----------|-------|
-| `HAS_POLICY` | Müşterinin poliçesi | (Customer)-[:HAS_POLICY]->(Policy) |
-| `ISSUED_BY` | Poliçeyi düzenleyen şirket | (Policy)-[:ISSUED_BY]->(InsuranceCompany) |
-| `SOLD_BY` | Poliçeyi satan acente | (Policy)-[:SOLD_BY]->(Agent) |
-| `HAS_COVERAGE` | Poliçenin teminatı | (Policy)-[:HAS_COVERAGE]->(Coverage) |
-| `HAS_PREMIUM` | Poliçenin primi | (Policy)-[:HAS_PREMIUM]->(Premium) |
-| `COVERS_ADDRESS` | Riziko adresi | (Policy)-[:COVERS_ADDRESS]->(Address) |
-| `COVERS_VEHICLE` | Sigortalı araç | (Policy)-[:COVERS_VEHICLE]->(Vehicle) |
-| `COVERS_PROPERTY` | Sigortalı mülk | (Policy)-[:COVERS_PROPERTY]->(Property) |
-| `HAS_ENDORSEMENT` | Poliçenin zeyilnamesi | (Policy)-[:HAS_ENDORSEMENT]->(Endorsement) |
-| `POLICYHOLDER` | Sigorta ettiren | (Policy)-[:POLICYHOLDER]->(Customer) |
-| `INSURED` | Sigortalı (farklı kişi ise) | (Policy)-[:INSURED]->(Customer) |
+| İlişki Tipi       | Açıklama                    | Örnek                                      |
+| ----------------- | --------------------------- | ------------------------------------------ |
+| `HAS_POLICY`      | Müşterinin poliçesi         | (Customer)-[:HAS_POLICY]->(Policy)         |
+| `ISSUED_BY`       | Poliçeyi düzenleyen şirket  | (Policy)-[:ISSUED_BY]->(InsuranceCompany)  |
+| `SOLD_BY`         | Poliçeyi satan acente       | (Policy)-[:SOLD_BY]->(Agent)               |
+| `HAS_COVERAGE`    | Poliçenin teminatı          | (Policy)-[:HAS_COVERAGE]->(Coverage)       |
+| `HAS_PREMIUM`     | Poliçenin primi             | (Policy)-[:HAS_PREMIUM]->(Premium)         |
+| `COVERS_ADDRESS`  | Riziko adresi               | (Policy)-[:COVERS_ADDRESS]->(Address)      |
+| `COVERS_VEHICLE`  | Sigortalı araç              | (Policy)-[:COVERS_VEHICLE]->(Vehicle)      |
+| `COVERS_PROPERTY` | Sigortalı mülk              | (Policy)-[:COVERS_PROPERTY]->(Property)    |
+| `HAS_ENDORSEMENT` | Poliçenin zeyilnamesi       | (Policy)-[:HAS_ENDORSEMENT]->(Endorsement) |
+| `POLICYHOLDER`    | Sigorta ettiren             | (Policy)-[:POLICYHOLDER]->(Customer)       |
+| `INSURED`         | Sigortalı (farklı kişi ise) | (Policy)-[:INSURED]->(Customer)            |
 
 ## İLİŞKİ ÖZELLİKLERİ
 
@@ -314,18 +327,22 @@ Bazı ilişkiler ek özellikler taşıyabilir:
 ## ID OLUŞTURMA KURALLARI
 
 1. **Policy ID:** `policy_[policy_number]`
+
    - Örnek: `policy_1234567890`
 
 2. **Customer ID:** `customer_[tc_no]` veya `customer_[vergi_no]`
+
    - Örnek: `customer_12345678901`
 
 3. **Vehicle ID:** `vehicle_[plate]`
+
    - Örnek: `vehicle_34ABC123`
 
 4. **Property ID:** `property_[policy_id]`
+
    - Örnek: `property_policy_1234567890`
 
-5. **Normalization:** Türkçe karakterleri dönüştür, boşlukları _ yap, küçük harf
+5. **Normalization:** Türkçe karakterleri dönüştür, boşlukları \_ yap, küçük harf
    - "Allianz Sigorta A.Ş." → `company_allianz_sigorta`
 
 ## ÖRNEK ÇIKTI
@@ -335,7 +352,7 @@ Aşağıda bir Konut Sigortası Poliçesi için örnek çıktı:
 ```json
 {{
   "document_type": "MAIN_POLICY",
-  
+
   "nodes": [
     {{
       "label": "Customer",
@@ -405,7 +422,7 @@ Aşağıda bir Konut Sigortası Poliçesi için örnek çıktı:
       }}
     }}
   ],
-  
+
   "relationships": [
     {{
       "from_id": "customer_12345678901",
@@ -460,3 +477,4 @@ Aşağıda bir Konut Sigortası Poliçesi için örnek çıktı:
 ## ÇIKTI
 
 Markdown code block (```) KULLANMA. Sadece düz JSON döndür.
+

@@ -7,6 +7,7 @@ Sen Türkiye Ticaret Sicil Gazetesi belgelerinden bilgi grafiği (knowledge grap
 Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Bir LLM bu graph üzerinde Cypher sorguları yazarak kullanıcı sorularını cevaplayacak.
 
 Örnek kullanıcı soruları:
+
 - "Akarsu Enerji'nin yönetim kurulu başkanı kim?"
 - "Zeytinliada Turizm'in ortaklık yapısı nasıl?"
 - "2024'te hangi şirketler genel kurul yaptı?"
@@ -18,10 +19,11 @@ Aynı varlık (şirket, kişi) farklı belgelerde farklı yazılabilir. Sorgu ya
 ### Normalization Kuralları:
 
 1. **`normalized_name`**: Her entity'nin zorunlu property'si. Sorgu eşleştirmesi için kullanılır.
+
    - Küçük harfe çevir
    - Türkçe karakterleri dönüştür (ş→s, ğ→g, ü→u, ö→o, ç→c, ı→i)
    - Gereksiz kelimeleri kaldır: "A.Ş.", "LTD.", "ŞTİ.", "İNC.", "HOLDİNG", "TURİZM", "ENERJİ" vb.
-   - Boşlukları "_" ile değiştir
+   - Boşlukları "\_" ile değiştir
    - Özel karakterleri kaldır
 
 2. **`name` veya `trade_name`**: Orijinal görüntülenen isim (belgede yazıldığı gibi)
@@ -30,14 +32,14 @@ Aynı varlık (şirket, kişi) farklı belgelerde farklı yazılabilir. Sorgu ya
 
 ### Normalization Örnekleri:
 
-| Belgede Yazılan | normalized_name | 
-|-----------------|-----------------|
-| "AKARSU ENERJİ A.Ş." | `akarsu` |
-| "Akarsu Enerji Anonim Şirketi" | `akarsu` |
-| "ZEYTİNLİADA TURİZM LTD. ŞTİ." | `zeytinliada` |
-| "Zeytinliada Turizm" | `zeytinliada` |
-| "AHMET YILMAZ" | `ahmet_yilmaz` |
-| "Ahmet YILMAZ" | `ahmet_yilmaz` |
+| Belgede Yazılan                | normalized_name |
+| ------------------------------ | --------------- |
+| "AKARSU ENERJİ A.Ş."           | `akarsu`        |
+| "Akarsu Enerji Anonim Şirketi" | `akarsu`        |
+| "ZEYTİNLİADA TURİZM LTD. ŞTİ." | `zeytinliada`   |
+| "Zeytinliada Turizm"           | `zeytinliada`   |
+| "AHMET YILMAZ"                 | `ahmet_yilmaz`  |
+| "Ahmet YILMAZ"                 | `ahmet_yilmaz`  |
 
 ### ID Oluşturma = Unique identifier tabanlı
 
@@ -50,10 +52,9 @@ Kişiler için: person_[tc_no] (tercih) veya person_[normalized_name]
 
 **Dosya Adı:** "{file_name}"
 
-**Belge İçeriği:**
----
-{document_content}
----
+## **Belge İçeriği:**
+
+## {document_content}
 
 ## ÇIKTI FORMATI
 
@@ -62,7 +63,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```json
 {{
   "document_type": "GENEL_KURUL | YONETIM_KURULU | KURULUS | SERMAYE | DEGISIKLIK | BIRLESME | TASFIYE | DIGER",
-  
+
   "nodes": [
     {{
       "label": "NodeLabel",
@@ -73,7 +74,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
       }}
     }}
   ],
-  
+
   "relationships": [
     {{
       "from_id": "source_node_id",
@@ -88,6 +89,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ## NODE TİPLERİ VE ÖZELLİKLERİ
 
 ### Company (Şirket) - ANA VARLIK
+
 ```json
 {{
   "label": "Company",
@@ -109,10 +111,12 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 **Şirket ID Öncelik Sırası:**
+
 1. Ticaret Sicil No varsa → `company_123456`
 2. Sicil no yoksa → `company_[normalized_name]` örn: `company_akarsu`
 
 ### Person (Kişi - Yönetici/Ortak/Denetçi)
+
 ```json
 {{
   "label": "Person",
@@ -128,6 +132,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Meeting (Toplantı)
+
 ```json
 {{
   "label": "Meeting",
@@ -143,6 +148,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Decision (Karar)
+
 ```json
 {{
   "label": "Decision",
@@ -156,6 +162,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Capital (Sermaye)
+
 ```json
 {{
   "label": "Capital",
@@ -170,6 +177,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Share (Pay/Hisse)
+
 ```json
 {{
   "label": "Share",
@@ -183,6 +191,7 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```
 
 ### Registration (Tescil Bilgisi)
+
 ```json
 {{
   "label": "Registration",
@@ -198,20 +207,20 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 
 ## İLİŞKİ TİPLERİ
 
-| İlişki Tipi | Açıklama | Örnek |
-|-------------|----------|-------|
-| `HAS_BOARD_MEMBER` | Şirketin yönetim kurulu üyesi | (Company)-[:HAS_BOARD_MEMBER]->(Person) |
-| `HAS_SHAREHOLDER` | Şirketin ortağı/pay sahibi | (Company)-[:HAS_SHAREHOLDER]->(Person veya Company) |
-| `HAS_AUDITOR` | Şirketin denetçisi | (Company)-[:HAS_AUDITOR]->(Person veya Company) |
-| `HAS_AUTHORIZED_SIGNATORY` | İmza yetkilisi | (Company)-[:HAS_AUTHORIZED_SIGNATORY]->(Person) |
-| `HAS_CAPITAL` | Sermaye bilgisi | (Company)-[:HAS_CAPITAL]->(Capital) |
-| `OWNS_SHARE` | Pay sahipliği | (Person)-[:OWNS_SHARE]->(Share) |
-| `SHARE_OF` | Pay hangi şirkete ait | (Share)-[:SHARE_OF]->(Company) |
-| `HELD_MEETING` | Toplantı yaptı | (Company)-[:HELD_MEETING]->(Meeting) |
-| `MADE_DECISION` | Karar aldı | (Meeting)-[:MADE_DECISION]->(Decision) |
-| `REGISTERED_IN` | Tescil edildi | (Company)-[:REGISTERED_IN]->(Registration) |
-| `SUBSIDIARY_OF` | Bağlı şirket | (Company)-[:SUBSIDIARY_OF]->(Company) |
-| `PARENT_OF` | Ana şirket | (Company)-[:PARENT_OF]->(Company) |
+| İlişki Tipi                | Açıklama                      | Örnek                                               |
+| -------------------------- | ----------------------------- | --------------------------------------------------- |
+| `HAS_BOARD_MEMBER`         | Şirketin yönetim kurulu üyesi | (Company)-[:HAS_BOARD_MEMBER]->(Person)             |
+| `HAS_SHAREHOLDER`          | Şirketin ortağı/pay sahibi    | (Company)-[:HAS_SHAREHOLDER]->(Person veya Company) |
+| `HAS_AUDITOR`              | Şirketin denetçisi            | (Company)-[:HAS_AUDITOR]->(Person veya Company)     |
+| `HAS_AUTHORIZED_SIGNATORY` | İmza yetkilisi                | (Company)-[:HAS_AUTHORIZED_SIGNATORY]->(Person)     |
+| `HAS_CAPITAL`              | Sermaye bilgisi               | (Company)-[:HAS_CAPITAL]->(Capital)                 |
+| `OWNS_SHARE`               | Pay sahipliği                 | (Person)-[:OWNS_SHARE]->(Share)                     |
+| `SHARE_OF`                 | Pay hangi şirkete ait         | (Share)-[:SHARE_OF]->(Company)                      |
+| `HELD_MEETING`             | Toplantı yaptı                | (Company)-[:HELD_MEETING]->(Meeting)                |
+| `MADE_DECISION`            | Karar aldı                    | (Meeting)-[:MADE_DECISION]->(Decision)              |
+| `REGISTERED_IN`            | Tescil edildi                 | (Company)-[:REGISTERED_IN]->(Registration)          |
+| `SUBSIDIARY_OF`            | Bağlı şirket                  | (Company)-[:SUBSIDIARY_OF]->(Company)               |
+| `PARENT_OF`                | Ana şirket                    | (Company)-[:PARENT_OF]->(Company)                   |
 
 ## İLİŞKİ ÖZELLİKLERİ
 
@@ -234,15 +243,18 @@ Bazı ilişkiler ek özellikler taşıyabilir:
 ## ID OLUŞTURMA KURALLARI
 
 1. **Company ID:** `company_[sicil_no]` veya `company_[normalized_trade_name]`
+
    - Örnek: `company_713701` veya `company_akarsu_enerji`
 
 2. **Person ID:** `person_[tc_no]` veya `person_[normalized_name]`
+
    - Örnek: `person_12345678901` veya `person_ahmet_yilmaz`
 
 3. **Meeting ID:** `meeting_[company_id]_[YYYYMMDD]`
+
    - Örnek: `meeting_company_713701_20240702`
 
-4. **Normalization:** Türkçe karakterleri dönüştür, boşlukları _ yap, küçük harf
+4. **Normalization:** Türkçe karakterleri dönüştür, boşlukları \_ yap, küçük harf
    - "AKARSU ENERJİ A.Ş." → `akarsu_enerji`
    - "Ahmet Öztürk" → `ahmet_ozturk`
 
@@ -253,7 +265,7 @@ Aşağıda bir Genel Kurul Toplantı Daveti için örnek çıktı:
 ```json
 {{
   "document_type": "GENEL_KURUL",
-  
+
   "nodes": [
     {{
       "label": "Company",
@@ -284,7 +296,7 @@ Aşağıda bir Genel Kurul Toplantı Daveti için örnek çıktı:
       }}
     }}
   ],
-  
+
   "relationships": [
     {{
       "from_id": "company_713701",
@@ -316,3 +328,4 @@ Aşağıda bir Genel Kurul Toplantı Daveti için örnek çıktı:
 ## ÇIKTI
 
 Markdown code block (```) KULLANMA. Sadece düz JSON döndür.
+

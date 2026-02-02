@@ -495,6 +495,112 @@ def create_chunk_fulltext_index(graph):
             logging.error(f"❌ Chunk fulltext index creation failed: {e}")
             raise
 
+# Entity fulltext index definitions for fuzzy search
+ENTITY_FULLTEXT_INDEXES = [
+    {
+        "name": "entity_names",
+        "labels": ["Customer", "InsuranceCompany", "Agent", "Company", "Person"],
+        "properties": ["name", "normalized_name"],
+        "description": "Entity isimlerinde fuzzy search için",
+    },
+    {
+        "name": "entity_aliases",
+        "labels": ["Customer", "InsuranceCompany", "Agent", "Company", "Person"],
+        "properties": ["aliases"],
+        "description": "Entity alias'larında arama için",
+    },
+    {
+        "name": "address_search",
+        "labels": ["Address", "Property"],
+        "properties": ["full_address", "address", "city", "district"],
+        "description": "Adres araması için",
+    },
+    {
+        "name": "policy_search",
+        "labels": ["Policy"],
+        "properties": ["policy_number", "company_policy_number"],
+        "description": "Poliçe numarası araması için",
+    },
+]
+
+
+def create_entity_fulltext_indexes(graph: Neo4jGraph):
+    """
+    Entity node'ları için fulltext index'leri oluşturur.
+    Bu indexler fuzzy search ile entity eşleştirmesi için kullanılır.
+    
+    Örnek kullanım (sorgu LLM için):
+        CALL db.index.fulltext.queryNodes('entity_names', 'allianz~')
+        YIELD node, score
+        RETURN node.name, score
+    """
+    start_time = time.time()
+    database = getattr(graph, '_database', None)
+    
+    try:
+        # Mevcut indexleri kontrol et
+        check_query = "SHOW INDEXES YIELD name RETURN collect(name) as existing"
+        result = execute_graph_query(graph, check_query)
+        existing_indexes = set(result[0]["existing"]) if result else set()
+        
+        created_count = 0
+        skipped_count = 0
+        
+        for index_def in ENTITY_FULLTEXT_INDEXES:
+            index_name = index_def["name"]
+            labels = index_def["labels"]
+            properties = index_def["properties"]
+            
+            if index_name in existing_indexes:
+                skipped_count += 1
+                continue
+            
+            # Multi-label fulltext index oluştur
+            label_str = "|".join(labels)
+            prop_str = ", ".join([f"n.{p}" for p in properties])
+            
+            try:
+                create_query = f"""
+                    CREATE FULLTEXT INDEX {index_name} IF NOT EXISTS
+                    FOR (n:{label_str})
+                    ON EACH [{prop_str}]
+                """
+                execute_graph_query(graph, create_query)
+                created_count += 1
+                logging.info(f"✅ Entity fulltext index created: {index_name}")
+                
+            except Exception as e:
+                # Multi-label desteklenmiyorsa tek tek dene
+                if "multiple labels" in str(e).lower():
+                    for label in labels:
+                        try:
+                            single_name = f"{index_name}_{label.lower()}"
+                            if single_name not in existing_indexes:
+                                single_query = f"""
+                                    CREATE FULLTEXT INDEX {single_name} IF NOT EXISTS
+                                    FOR (n:{label})
+                                    ON EACH [{prop_str}]
+                                """
+                                execute_graph_query(graph, single_query)
+                                created_count += 1
+                        except Exception:
+                            pass  # Hata olursa sessizce geç
+                elif "EquivalentSchemaRuleAlreadyExists" in str(e) or "already exists" in str(e):
+                    skipped_count += 1
+                else:
+                    logging.warning(f"⚠️ Entity fulltext index oluşturulamadı {index_name}: {e}")
+        
+        elapsed = time.time() - start_time
+        if created_count > 0:
+            logging.info(f"✅ Entity fulltext indexes: {created_count} created, {skipped_count} skipped. Time: {elapsed:.2f}s")
+        else:
+            logging.debug(f"ℹ️ Entity fulltext indexes already exist. Time: {elapsed:.2f}s")
+            
+    except Exception as e:
+        logging.error(f"❌ Entity fulltext index creation failed: {e}")
+        # Index oluşturma hatası kritik değil, devam et
+
+
 def create_entity_vector_index(graph: Neo4jGraph):
     """
     Create a vector index for entity nodes to enable semantic search.
