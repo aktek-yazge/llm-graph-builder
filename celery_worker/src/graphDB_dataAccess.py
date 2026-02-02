@@ -13,11 +13,15 @@ from src.shared.common_fn import (
 from src.entities.source_node import sourceNode
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 from src.utils.log_helpers import log_delete, log_processing
+
 # Entity resolution pre-processing KALDIRILDI - post-processing LLM ile yapılıyor
 # from src.entity_resolver import resolve_entity_before_creation
 import json
 from dotenv import load_dotenv
 from functools import wraps
+
+# Domain-specific prompts
+from prompts import load_prompt, get_domain
 
 load_dotenv()
 
@@ -35,6 +39,7 @@ def neo4j_retry(func):
     Decorator to retry Neo4j operations on connection errors.
     Handles ServiceUnavailable, SessionExpired, and ConnectionResetError.
     """
+
     @wraps(func)
     def wrapper(*args, **kwargs):
         last_exception = None
@@ -43,7 +48,9 @@ def neo4j_retry(func):
                 return func(*args, **kwargs)
             except (ServiceUnavailable, SessionExpired, ConnectionResetError) as e:
                 last_exception = e
-                wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                wait_time = min(
+                    NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX
+                )
                 logging.warning(
                     f"⚠️ Neo4j connection error (attempt {attempt}/{NEO4J_RETRY_ATTEMPTS}): {e}. "
                     f"Retrying in {wait_time}s..."
@@ -52,9 +59,14 @@ def neo4j_retry(func):
             except Exception as e:
                 # Check if it's a wrapped connection error
                 error_str = str(e).lower()
-                if "connection" in error_str and ("reset" in error_str or "defunct" in error_str):
+                if "connection" in error_str and (
+                    "reset" in error_str or "defunct" in error_str
+                ):
                     last_exception = e
-                    wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                    wait_time = min(
+                        NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)),
+                        NEO4J_RETRY_WAIT_MAX,
+                    )
                     logging.warning(
                         f"⚠️ Neo4j connection error (attempt {attempt}/{NEO4J_RETRY_ATTEMPTS}): {e}. "
                         f"Retrying in {wait_time}s..."
@@ -62,26 +74,32 @@ def neo4j_retry(func):
                     time.sleep(wait_time)
                 else:
                     raise
-        
+
         # All retries exhausted
-        logging.error(f"❌ Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts")
+        logging.error(
+            f"❌ Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts"
+        )
         if last_exception is not None:
             raise last_exception
-        raise RuntimeError(f"Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts")
-    
+        raise RuntimeError(
+            f"Neo4j operation failed after {NEO4J_RETRY_ATTEMPTS} attempts"
+        )
+
     return wrapper
 
 
-def execute_neo4j_query_with_retry(graph, query, params=None, max_retries=NEO4J_RETRY_ATTEMPTS):
+def execute_neo4j_query_with_retry(
+    graph, query, params=None, max_retries=NEO4J_RETRY_ATTEMPTS
+):
     """
     Execute a Neo4j query with automatic retry on connection errors.
-    
+
     Args:
         graph: Neo4jGraph instance
         query: Cypher query string
         params: Query parameters dict
         max_retries: Maximum number of retry attempts
-        
+
     Returns:
         Query result
     """
@@ -91,25 +109,31 @@ def execute_neo4j_query_with_retry(graph, query, params=None, max_retries=NEO4J_
             return graph.query(query, params=params)
         except (ServiceUnavailable, SessionExpired, ConnectionResetError) as e:
             last_exception = e
-            wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+            wait_time = min(
+                NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX
+            )
             logging.warning(
                 f"⚠️ Neo4j query error (attempt {attempt}/{max_retries}): {e}. "
                 f"Retrying in {wait_time}s..."
             )
             time.sleep(wait_time)
-            
+
             # Try to refresh the connection
             try:
-                if hasattr(graph, '_driver') and graph._driver:
+                if hasattr(graph, "_driver") and graph._driver:
                     graph._driver.verify_connectivity()
             except Exception:
                 pass
         except Exception as e:
             # Check if it's a wrapped connection error
             error_str = str(e).lower()
-            if "connection" in error_str and ("reset" in error_str or "defunct" in error_str):
+            if "connection" in error_str and (
+                "reset" in error_str or "defunct" in error_str
+            ):
                 last_exception = e
-                wait_time = min(NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX)
+                wait_time = min(
+                    NEO4J_RETRY_WAIT_MIN * (2 ** (attempt - 1)), NEO4J_RETRY_WAIT_MAX
+                )
                 logging.warning(
                     f"⚠️ Neo4j query error (attempt {attempt}/{max_retries}): {e}. "
                     f"Retrying in {wait_time}s..."
@@ -117,7 +141,7 @@ def execute_neo4j_query_with_retry(graph, query, params=None, max_retries=NEO4J_
                 time.sleep(wait_time)
             else:
                 raise
-    
+
     logging.error(f"❌ Neo4j query failed after {max_retries} attempts")
     if last_exception is not None:
         raise last_exception
@@ -155,7 +179,7 @@ class graphDBdataAccess:
 
     def __init__(self, graph: Neo4jGraph):
         self.graph = graph
-    
+
     def query_with_retry(self, query, params=None, max_retries=NEO4J_RETRY_ATTEMPTS):
         """
         Execute a Neo4j query with automatic retry on connection errors.
@@ -502,7 +526,7 @@ class graphDBdataAccess:
                 and obj_source_node.processing_time != 0
             ):
                 processing_time = obj_source_node.processing_time
-                if hasattr(processing_time, 'total_seconds'):
+                if hasattr(processing_time, "total_seconds"):
                     params["processingTime"] = round(processing_time.total_seconds(), 2)  # type: ignore[union-attr]
                 else:
                     params["processingTime"] = round(float(processing_time), 2)
@@ -536,7 +560,7 @@ class graphDBdataAccess:
             )
         except Exception as e:
             error_message = str(e)
-            file_name = getattr(self, 'file_name', 'unknown')
+            file_name = getattr(self, "file_name", "unknown")
             self.update_exception_db(self, file_name, error_message)
             raise Exception(error_message)
 
@@ -730,7 +754,9 @@ class graphDBdataAccess:
                         "write_access": write_access,
                     }
 
-    def execute_query(self, query, param: Optional[dict] = None, max_retries=3, delay=2):
+    def execute_query(
+        self, query, param: Optional[dict] = None, max_retries=3, delay=2
+    ):
         """
         Neo4j query'sini timeout ve connection hatalarına karşı retry mekanizması ile çalıştırır
         """
@@ -742,7 +768,9 @@ class graphDBdataAccess:
         while retries < max_retries:
             try:
                 return self.graph.query(
-                    query, query_param, session_params={"database": self.graph._database}
+                    query,
+                    query_param,
+                    session_params={"database": self.graph._database},
                 )
             except (SessionExpired, ServiceUnavailable) as e:
                 retries += 1
@@ -808,7 +836,9 @@ class graphDBdataAccess:
             try:
                 # create_source_node kullanarak tutarlı Document node oluştur
                 self.create_source_node(file_name, skip_entity_extraction=True)
-                logging.info(f"Document node create_source_node ile oluşturuldu: {file_name}")
+                logging.info(
+                    f"Document node create_source_node ile oluşturuldu: {file_name}"
+                )
 
                 # Tekrar sorgula
                 result = self.execute_query(query, param)
@@ -1112,22 +1142,22 @@ class graphDBdataAccess:
         """
         Re-graph creation öncesi Document'a bağlı entity'leri temizler.
         Document ve Chunk node'ları KORUNUR, sadece entity'ler silinir.
-        
+
         Bu fonksiyon:
         1. Document ve Chunk'ları KORUR (PART_OF, FIRST_CHUNK, NEXT_CHUNK ilişkileri dahil)
         2. Chunk'lardan EXTRACTED_FROM ilişkilerini ve entity node'larını siler
         3. Document'a direkt/dolaylı bağlı diğer entity'leri siler (Policy, Customer vs.)
         4. Başka Document'lerde kullanılan shared entity'leri KORUR
-        
+
         Args:
             file_name: Entity'leri temizlenecek dosya adı
-            
+
         Returns:
             dict: Silinen entity istatistikleri
         """
         try:
             logging.info(f"🧹 Re-graph için entity temizliği başlıyor: {file_name}")
-            
+
             # 1. Dosyanın var olup olmadığını kontrol et
             check_query = """
                 MATCH (d:Document {fileName: $file_name})
@@ -1135,14 +1165,14 @@ class graphDBdataAccess:
                 RETURN d.fileName as fileName, count(c) as chunkCount
             """
             result = self.execute_query(check_query, {"file_name": file_name})
-            
+
             if not result or not result[0].get("fileName"):
                 logging.info(f"📄 Dosya veritabanında bulunamadı: {file_name}")
                 return {"status": "not_found", "deleted_entities": 0}
-            
+
             chunk_count = result[0].get("chunkCount", 0)
             logging.info(f"🔍 Dosya bulundu: {file_name} ({chunk_count} chunk)")
-            
+
             # 2. Entity temizleme sorgusu - Document ve Chunk'ları KORUR
             # NOT: Entity'ler Chunk'lara EXTRACTED_FROM ilişkisi ile bağlı (Entity -> Chunk)
             clear_entities_query = """
@@ -1207,9 +1237,11 @@ class graphDBdataAccess:
                     size(safePolicies) as deletedPolicies,
                     size(safePolicyRelatedNodes) as deletedPolicyRelatedNodes
             """
-            
-            clear_result = self.execute_query(clear_entities_query, {"file_name": file_name})
-            
+
+            clear_result = self.execute_query(
+                clear_entities_query, {"file_name": file_name}
+            )
+
             if clear_result:
                 stats = clear_result[0]
                 deleted_extracted_from_rels = stats.get("deletedExtractedFromRels", 0)
@@ -1217,20 +1249,36 @@ class graphDBdataAccess:
                 deleted_doc_entities = stats.get("deletedDocEntities", 0)
                 deleted_policies = stats.get("deletedPolicies", 0)
                 deleted_policy_related = stats.get("deletedPolicyRelatedNodes", 0)
-                
-                total_deleted = (deleted_chunk_entities + deleted_doc_entities + 
-                               deleted_policies + deleted_policy_related)
-                
-                logging.info(f"✅ Re-graph için entity temizliği tamamlandı: {file_name}")
+
+                total_deleted = (
+                    deleted_chunk_entities
+                    + deleted_doc_entities
+                    + deleted_policies
+                    + deleted_policy_related
+                )
+
+                logging.info(
+                    f"✅ Re-graph için entity temizliği tamamlandı: {file_name}"
+                )
                 logging.info(f"📊 Temizlik istatistikleri:")
-                logging.info(f"   - Silinen EXTRACTED_FROM ilişkileri: {deleted_extracted_from_rels}")
-                logging.info(f"   - Silinen Chunk Entity'leri: {deleted_chunk_entities}")
-                logging.info(f"   - Silinen Document Entity'leri: {deleted_doc_entities}")
+                logging.info(
+                    f"   - Silinen EXTRACTED_FROM ilişkileri: {deleted_extracted_from_rels}"
+                )
+                logging.info(
+                    f"   - Silinen Chunk Entity'leri: {deleted_chunk_entities}"
+                )
+                logging.info(
+                    f"   - Silinen Document Entity'leri: {deleted_doc_entities}"
+                )
                 logging.info(f"   - Silinen Policy'ler: {deleted_policies}")
-                logging.info(f"   - Silinen Policy-related node'lar: {deleted_policy_related}")
+                logging.info(
+                    f"   - Silinen Policy-related node'lar: {deleted_policy_related}"
+                )
                 logging.info(f"   - Toplam silinen entity: {total_deleted}")
-                logging.info(f"   ✅ Document ve Chunk'lar KORUNDU ({chunk_count} chunk)")
-                
+                logging.info(
+                    f"   ✅ Document ve Chunk'lar KORUNDU ({chunk_count} chunk)"
+                )
+
                 return {
                     "status": "success",
                     "file_name": file_name,
@@ -1240,12 +1288,12 @@ class graphDBdataAccess:
                     "deleted_doc_entities": deleted_doc_entities,
                     "deleted_policies": deleted_policies,
                     "deleted_policy_related": deleted_policy_related,
-                    "total_deleted_entities": total_deleted
+                    "total_deleted_entities": total_deleted,
                 }
             else:
                 logging.warning(f"⚠️ Entity temizleme sonucu alınamadı: {file_name}")
                 return {"status": "no_result", "deleted_entities": 0}
-                
+
         except Exception as e:
             logging.error(f"❌ Re-graph entity temizleme hatası ({file_name}): {e}")
             return {"status": "error", "error": str(e), "deleted_entities": 0}
@@ -1466,7 +1514,9 @@ class graphDBdataAccess:
             else:
                 # Ana poliçe olarak işle
                 logging.info(f"📋 {file_name} → MAIN_POLICY olarak işleniyor...")
-                self.create_comprehensive_policy_entities(entities_data, file_name, model)
+                self.create_comprehensive_policy_entities(
+                    entities_data, file_name, model
+                )
 
             # Document'a docType ve metadata ekle (sadece docType kullanıyoruz, document_type kaldırıldı)
             policy_data = entities_data.get("policy")
@@ -1532,7 +1582,10 @@ class graphDBdataAccess:
         """
         try:
             from src.shared.common_fn import load_embedding_model
-            from src.make_relationships import create_chunk_vector_index, create_chunk_fulltext_index
+            from src.make_relationships import (
+                create_chunk_vector_index,
+                create_chunk_fulltext_index,
+            )
 
             logging.info(
                 f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}"
@@ -1677,7 +1730,7 @@ class graphDBdataAccess:
                 try:
                     create_chunk_vector_index(self.graph)
                     logging.info(f"✅ Vector index checked/updated")
-                    
+
                     # Fulltext index oluştur (keyword search için)
                     create_chunk_fulltext_index(self.graph)
                     logging.info(f"✅ Fulltext index checked/updated")
@@ -1687,7 +1740,9 @@ class graphDBdataAccess:
                     # logging.info(f"✅ KNN graph relationships updated")
 
                 except Exception as index_error:
-                    logging.warning(f"⚠️ Vector/Fulltext index update warning: {index_error}")
+                    logging.warning(
+                        f"⚠️ Vector/Fulltext index update warning: {index_error}"
+                    )
 
             # Genel sonuç raporu
             summary = {
@@ -2410,6 +2465,7 @@ class graphDBdataAccess:
             use_gemini = False
             try:
                 from google import genai as genai_sdk
+
                 GEMINI_AVAILABLE = True
                 use_gemini = True
             except ImportError:
@@ -2422,14 +2478,32 @@ class graphDBdataAccess:
 
             # İlk 5 chunk'ın içeriğini logla (debug için)
             if document_content_for_llm:
-                chunks_for_log = document_content_for_llm.split('\n')[:5]
-                logging.info(f"📄 LLM extraction için kullanılan ilk 5 chunk içeriği ({file_name}):")
+                chunks_for_log = document_content_for_llm.split("\n")[:5]
+                logging.info(
+                    f"📄 LLM extraction için kullanılan ilk 5 chunk içeriği ({file_name}):"
+                )
                 for i, chunk_text in enumerate(chunks_for_log, 1):
-                    chunk_preview = chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text
+                    chunk_preview = (
+                        chunk_text[:200] + "..."
+                        if len(chunk_text) > 200
+                        else chunk_text
+                    )
                     logging.info(f"   Chunk {i}: {chunk_preview}")
 
-            # Kapsamlı extraction prompt'u
-            prompt = f"""
+            # Kapsamlı extraction prompt'u - Domain-specific dosyadan yükle
+            domain = get_domain()
+            try:
+                prompt_template = load_prompt("entity_extraction", domain)
+                prompt = prompt_template.format(
+                    file_name=file_name, document_content=document_content_for_llm
+                )
+                logging.info(f"📋 Using entity_extraction prompt for domain: {domain}")
+            except (FileNotFoundError, KeyError) as e:
+                logging.warning(
+                    f"⚠️ External prompt not found ({e}), using fallback prompt"
+                )
+                # Fallback: Hardcoded sigorta prompt'u
+                prompt = f"""
 Verilen sigorta poliçesi belgesinden aşağıdaki bilgileri çıkar ve JSON formatında döndür.
 
 Belge adı: "{file_name}"
@@ -2782,22 +2856,24 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 try:
                     api_key = os.environ.get("GEMINI_API_KEY")
                     if not api_key:
-                        logging.warning("❌ GEMINI_API_KEY not found, falling back to regular LLM")
+                        logging.warning(
+                            "❌ GEMINI_API_KEY not found, falling back to regular LLM"
+                        )
                         use_gemini = False
                     else:
                         # Create Gemini client
                         client = genai_sdk.Client(api_key=api_key)
                         from google.genai import types
-                        
+
                         logging.info("✅ Using Gemini 2.0 Flash for entity extraction")
-                        
+
                         # Gemini'ye prompt gönder - max output tokens ayarla
                         try:
                             generation_config = types.GenerateContentConfig(
                                 max_output_tokens=8192,  # JSON response için yeterli token limit
                                 temperature=0.1,  # Daha tutarlı JSON için düşük temperature
                             )
-                            
+
                             response = client.models.generate_content(
                                 model="models/gemini-2.0-flash",
                                 contents=[
@@ -2807,31 +2883,37 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                             )
                         except Exception as config_error:
                             # GenerationConfig hatası varsa, config olmadan dene
-                            logging.warning(f"⚠️ GenerationConfig hatası: {config_error}, config olmadan deneniyor...")
+                            logging.warning(
+                                f"⚠️ GenerationConfig hatası: {config_error}, config olmadan deneniyor..."
+                            )
                             response = client.models.generate_content(
                                 model="models/gemini-2.5-flash-lite",
                                 contents=[
                                     types.Part.from_text(text=prompt),
                                 ],
                             )
-                        
+
                         response_text = response.text.strip() if response.text else ""
-                        logging.info(f"🔍 Gemini entity extraction response length: {len(response_text)} chars")
-                        
+                        logging.info(
+                            f"🔍 Gemini entity extraction response length: {len(response_text)} chars"
+                        )
+
                 except Exception as gemini_error:
-                    logging.warning(f"⚠️ Gemini entity extraction failed: {gemini_error}, falling back to regular LLM")
+                    logging.warning(
+                        f"⚠️ Gemini entity extraction failed: {gemini_error}, falling back to regular LLM"
+                    )
                     use_gemini = False
-            
+
             # Gemini kullanılamadıysa veya başarısız olduysa, eski LLM yöntemini kullan
             if not use_gemini:
                 from src.llm import get_llm
-                
+
                 # Upload endpoint'ten gelen model parametresini kullan
                 llm, _ = get_llm(model)
-                
+
                 # LLM'den yanıt al
                 response = llm.invoke(prompt)  # type: ignore[union-attr]
-                response_text = response.content.strip() if hasattr(response, 'content') and response.content else ""  # type: ignore[union-attr]
+                response_text = response.content.strip() if hasattr(response, "content") and response.content else ""  # type: ignore[union-attr]
 
             # JSON parse et
             try:
@@ -2839,26 +2921,35 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                     start_idx = response_text.find("{")
                     end_idx = response_text.rfind("}") + 1
                     json_text = response_text[start_idx:end_idx]
-                    
+
                     # JSON parse dene
                     try:
                         entities_data = json.loads(json_text)
                     except json.JSONDecodeError as json_error:
                         # Escape karakteri hatalarını düzeltmeye çalış
-                        logging.warning(f"⚠️ JSON parse hatası (escape karakteri sorunu olabilir): {json_error}")
+                        logging.warning(
+                            f"⚠️ JSON parse hatası (escape karakteri sorunu olabilir): {json_error}"
+                        )
                         logging.info("🔄 JSON'u düzeltmeye çalışıyoruz...")
-                        
+
                         # Geçersiz escape karakterlerini ve control character'ları düzelt
                         # Önce markdown code block'ları temizle
                         json_text_cleaned = json_text
                         if json_text_cleaned.startswith("```json"):
-                            json_text_cleaned = json_text_cleaned.replace("```json", "").replace("```", "").strip()
+                            json_text_cleaned = (
+                                json_text_cleaned.replace("```json", "")
+                                .replace("```", "")
+                                .strip()
+                            )
                         elif json_text_cleaned.startswith("```"):
-                            json_text_cleaned = json_text_cleaned.replace("```", "").strip()
-                        
+                            json_text_cleaned = json_text_cleaned.replace(
+                                "```", ""
+                            ).strip()
+
                         # Control character'ları temizle (JSON'da geçersiz: \x00-\x1F arası, \x7F hariç \n, \t, \r)
                         import re
                         import string
+
                         # JSON'da geçerli control character'lar: \n (0x0A), \t (0x09), \r (0x0D)
                         # Diğer control character'ları (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F) temizle
                         def remove_control_characters(text):
@@ -2873,13 +2964,13 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                                 # Geçersiz control character'lar: 0-8, 11-12, 14-31, 127
                                 elif code < 32 or code == 127:
                                     # Boşluk ile değiştir (JSON parse için daha güvenli)
-                                    result.append(' ')
+                                    result.append(" ")
                                 else:
                                     result.append(char)
-                            return ''.join(result)
-                        
+                            return "".join(result)
+
                         json_text_cleaned = remove_control_characters(json_text_cleaned)
-                        
+
                         # Geçersiz escape karakterlerini düzelt
                         # Python'da geçerli escape karakterleri: \\, \", \', \n, \t, \r, \b, \f
                         # Geçersiz olanları (örn: \K, \A) düzelt
@@ -2891,30 +2982,36 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                             pattern = r'\\(?![\\"\'ntrbfux0-9])'
                             # Geçersiz escape karakterlerini sadece backslash'i kaldırarak düzelt
                             # Yani \K -> K, \A -> A (backslash kaldırılır)
-                            fixed = re.sub(pattern, '', text)
+                            fixed = re.sub(pattern, "", text)
                             return fixed
-                        
+
                         json_text_cleaned = fix_invalid_escapes(json_text_cleaned)
-                        
+
                         # Tekrar parse dene
                         try:
                             entities_data = json.loads(json_text_cleaned)
                             logging.info("✅ JSON düzeltme başarılı, parse edildi")
                         except json.JSONDecodeError as retry_error:
                             # Hala parse edilemiyorsa, daha agresif temizleme yap
-                            logging.warning(f"⚠️ İlk düzeltme başarısız, daha agresif temizleme deneniyor: {retry_error}")
-                            
+                            logging.warning(
+                                f"⚠️ İlk düzeltme başarısız, daha agresif temizleme deneniyor: {retry_error}"
+                            )
+
                             # Tüm backslash'leri temizle (son çare)
-                            json_text_cleaned = json_text_cleaned.replace('\\', '')
-                            
+                            json_text_cleaned = json_text_cleaned.replace("\\", "")
+
                             try:
                                 entities_data = json.loads(json_text_cleaned)
-                                logging.info("✅ Agresif temizleme başarılı, JSON parse edildi")
+                                logging.info(
+                                    "✅ Agresif temizleme başarılı, JSON parse edildi"
+                                )
                             except json.JSONDecodeError as final_error:
                                 # Son çare: sadece hata mesajını logla ve exception fırlat (retry için)
                                 error_msg = f"LLM yanıtı JSON parse edilemedi: {final_error}. İlk hata: {json_error}"
                                 logging.error(f"❌ {error_msg}")
-                                logging.error(f"Response text (first 1000 chars): {response_text[:1000]}")
+                                logging.error(
+                                    f"Response text (first 1000 chars): {response_text[:1000]}"
+                                )
                                 # Exception fırlat ki retry mekanizması çalışsın
                                 raise ValueError(error_msg) from final_error
 
@@ -2931,7 +3028,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 else:
                     error_msg = "LLM yanıtında JSON formatı bulunamadı"
                     logging.error(error_msg)
-                    logging.error(f"Response text (first 500 chars): {response_text[:500]}")
+                    logging.error(
+                        f"Response text (first 500 chars): {response_text[:500]}"
+                    )
                     # Exception fırlat ki retry mekanizması çalışsın
                     raise ValueError(error_msg)
 
@@ -2939,7 +3038,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
                 # JSON parse hatası veya ValueError - retry için exception fırlat
                 error_msg = f"LLM yanıtı JSON parse edilemedi: {e}"
                 logging.error(f"❌ {error_msg}")
-                logging.error(f"Response text (first 1000 chars): {response_text[:1000]}")
+                logging.error(
+                    f"Response text (first 1000 chars): {response_text[:1000]}"
+                )
                 # Exception fırlat ki retry mekanizması çalışsın
                 raise ValueError(error_msg) from e
 
@@ -2959,7 +3060,9 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
             if customer_data is None:
                 customer_data = {}
             # None.strip() hatasını önle - get("name") None dönerse boş string kullan
-            extracted_name = (customer_data.get("name") or "").strip() if customer_data else ""
+            extracted_name = (
+                (customer_data.get("name") or "").strip() if customer_data else ""
+            )
 
             # Filename'den müşteri adını çıkar (fallback için)
             filename_customer = self._extract_customer_name_from_filename(file_name)
@@ -2973,13 +3076,27 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
             # 2. Gemini müşteri ismi bulamadıysa, GPT-5 ile retry yap
             if not extracted_name and document_content:
-                logging.info("🔄 Gemini müşteri ismi bulamadı, GPT-5 ile retry yapılıyor...")
-                gpt5_customer = self._retry_customer_extraction_with_gpt5(document_content, file_name)
+                logging.info(
+                    "🔄 Gemini müşteri ismi bulamadı, GPT-5 ile retry yapılıyor..."
+                )
+                gpt5_customer = self._retry_customer_extraction_with_gpt5(
+                    document_content, file_name
+                )
                 if gpt5_customer:
                     logging.info(f"✅ GPT-5'den müşteri ismi alındı: '{gpt5_customer}'")
                     entities_data["customer"] = {
                         "name": gpt5_customer,
-                        "type": customer_data.get("type", "Corporate" if any(kw in gpt5_customer.upper() for kw in ["A.Ş.", "AŞ", "ŞİRKET", "HOLDİNG", "LTD"]) else "Individual"),
+                        "type": customer_data.get(
+                            "type",
+                            (
+                                "Corporate"
+                                if any(
+                                    kw in gpt5_customer.upper()
+                                    for kw in ["A.Ş.", "AŞ", "ŞİRKET", "HOLDİNG", "LTD"]
+                                )
+                                else "Individual"
+                            ),
+                        ),
                         "source": "gpt5_fallback",
                     }
                     return entities_data
@@ -3008,21 +3125,25 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
         except Exception as e:
             logging.error(f"Customer name validation hatası: {e}")
             return entities_data
-    
-    def _retry_customer_extraction_with_gpt5(self, document_content: str, file_name: str) -> str:
+
+    def _retry_customer_extraction_with_gpt5(
+        self, document_content: str, file_name: str
+    ) -> str:
         """
         GPT-5 ile müşteri adı çıkarmayı dene (Gemini başarısız olduğunda fallback)
         """
         try:
             import openai
-            
+
             api_key = os.environ.get("OPENAI_API_KEY")
             if not api_key:
-                logging.warning("❌ OPENAI_API_KEY bulunamadı, GPT-5 fallback atlanıyor")
+                logging.warning(
+                    "❌ OPENAI_API_KEY bulunamadı, GPT-5 fallback atlanıyor"
+                )
                 return ""
-            
+
             client = openai.OpenAI(api_key=api_key)
-            
+
             # Sadece müşteri adı için focused prompt
             prompt = f"""Bu Türk sigorta poliçesi belgesinden SİGORTALI veya SİGORTA ETTİREN kısmındaki müşteri adını çıkar.
 
@@ -3043,20 +3164,27 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             response = client.chat.completions.create(
                 model="gpt-5",
                 messages=[
-                    {"role": "system", "content": "Sen bir sigorta belgesi analiz uzmanısın. Sadece istenen bilgiyi ver, açıklama yapma."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "Sen bir sigorta belgesi analiz uzmanısın. Sadece istenen bilgiyi ver, açıklama yapma.",
+                    },
+                    {"role": "user", "content": prompt},
                 ],
-                temperature=0.1
+                temperature=0.1,
             )
-            
+
             message_content = response.choices[0].message.content
             customer_name = message_content.strip() if message_content else ""
-            
+
             # Boş veya çok kısa cevapları reddet
-            if customer_name and len(customer_name) > 2 and customer_name.lower() not in ["yok", "bulunamadı", "none", ""]:
+            if (
+                customer_name
+                and len(customer_name) > 2
+                and customer_name.lower() not in ["yok", "bulunamadı", "none", ""]
+            ):
                 return customer_name
             return ""
-            
+
         except Exception as e:
             logging.warning(f"⚠️ GPT-5 müşteri çıkarma hatası: {e}")
             return ""
@@ -3597,9 +3725,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             )
 
             if not duplicates_result:
-                logging.info(
-                    "✅ SIKI kriterlerle duplicate Coverage node'u bulunamadı"
-                )
+                logging.info("✅ SIKI kriterlerle duplicate Coverage node'u bulunamadı")
                 return 0
 
             total_merged = 0
@@ -3754,7 +3880,9 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             logging.error(f"❌ Selective duplicate merge hatası: {e}")
             return {"error": str(e), "total_merged": 0}
 
-    def create_comprehensive_policy_entities(self, entities_data: dict, file_name: str, model: str = "openai_gpt_4o_mini"):
+    def create_comprehensive_policy_entities(
+        self, entities_data: dict, file_name: str, model: str = "openai_gpt_4o_mini"
+    ):
         """
         Çıkarılan varlık bilgilerinden Neo4j'de node ve ilişkiler oluşturur.
 
@@ -3773,7 +3901,9 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             # customer None olabilir, bu durumda boş dict kullan
             if customer_data is None:
                 customer_data = {}
-            customer_name = customer_data.get("name", "").strip() if customer_data else ""
+            customer_name = (
+                customer_data.get("name", "").strip() if customer_data else ""
+            )
 
             if customer_name:
                 # Customer name'den safe ID oluştur (filename bilgisi eklenmez)
@@ -3824,8 +3954,14 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             policy_relationship = entities_data.get("policy_relationship")
             if policy_relationship is None:
                 policy_relationship = {}
-            relationship_type = policy_relationship.get("relationship_type", "") if policy_relationship else ""
-            relationship_properties = policy_relationship.get("properties", {}) if policy_relationship else {}
+            relationship_type = (
+                policy_relationship.get("relationship_type", "")
+                if policy_relationship
+                else ""
+            )
+            relationship_properties = (
+                policy_relationship.get("properties", {}) if policy_relationship else {}
+            )
             deductible_info = entities_data.get("deductible_info")
             if deductible_info is None:
                 deductible_info = {}
@@ -3833,17 +3969,25 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             if relationship_type:
                 # OCR hatalarından kaynaklanan relationship type'ları LLM ile normalize et
                 try:
-                    schema_data = self._get_existing_policy_relationship_types_from_schema()
-                    existing_types = [rt["type"] for rt in schema_data.get("relationship_types", [])]
-                    
+                    schema_data = (
+                        self._get_existing_policy_relationship_types_from_schema()
+                    )
+                    existing_types = [
+                        rt["type"] for rt in schema_data.get("relationship_types", [])
+                    ]
+
                     if existing_types:
-                        normalization_result = self._normalize_relationship_type_with_llm(
-                            new_relationship_type=relationship_type,
-                            existing_relationship_types=existing_types,
-                            policy_type=policy_type
+                        normalization_result = (
+                            self._normalize_relationship_type_with_llm(
+                                new_relationship_type=relationship_type,
+                                existing_relationship_types=existing_types,
+                                policy_type=policy_type,
+                            )
                         )
-                        normalized_relationship_type = normalization_result.get("normalized_type", relationship_type)
-                        
+                        normalized_relationship_type = normalization_result.get(
+                            "normalized_type", relationship_type
+                        )
+
                         if normalized_relationship_type != relationship_type:
                             logging.info(
                                 f"🔄 LLM Relationship normalization: {relationship_type} → {normalized_relationship_type} "
@@ -3851,10 +3995,16 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                             )
                         relationship_type = normalized_relationship_type
                 except Exception as norm_error:
-                    logging.warning(f"⚠️ Relationship normalization atlandı: {norm_error}")
-                
+                    logging.warning(
+                        f"⚠️ Relationship normalization atlandı: {norm_error}"
+                    )
+
                 self._create_policy_type_relationship(
-                    policy_id, relationship_type, policy_type, relationship_properties, deductible_info
+                    policy_id,
+                    relationship_type,
+                    policy_type,
+                    relationship_properties,
+                    deductible_info,
                 )
 
             # 3. InsuranceCompany Node'u ve ilişkisini oluştur
@@ -3922,19 +4072,27 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             # 13. InsuredProperty Node'u oluştur (yeni alan)
             insured_property_data = entities_data.get("insured_property")
             if isinstance(insured_property_data, list):
-                if len(insured_property_data) > 0 and isinstance(insured_property_data[0], dict):
+                if len(insured_property_data) > 0 and isinstance(
+                    insured_property_data[0], dict
+                ):
                     insured_property_data = insured_property_data[0]
                 else:
                     insured_property_data = {}
             elif insured_property_data is None:
                 insured_property_data = {}
-            if insured_property_data.get("address") or insured_property_data.get("city") or insured_property_data.get("damageStatus"):
+            if (
+                insured_property_data.get("address")
+                or insured_property_data.get("city")
+                or insured_property_data.get("damageStatus")
+            ):
                 self._create_insured_property_node(insured_property_data, policy_id)
 
             # 14. InsuredPerson Node'u oluştur (yeni alan)
             insured_person_data = entities_data.get("insured_person")
             if isinstance(insured_person_data, list):
-                if len(insured_person_data) > 0 and isinstance(insured_person_data[0], dict):
+                if len(insured_person_data) > 0 and isinstance(
+                    insured_person_data[0], dict
+                ):
                     insured_person_data = insured_person_data[0]
                 else:
                     insured_person_data = {}
@@ -3946,7 +4104,9 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             # 15. Policyholder Node'u oluştur (yeni alan)
             policyholder_data = entities_data.get("policyholder")
             if isinstance(policyholder_data, list):
-                if len(policyholder_data) > 0 and isinstance(policyholder_data[0], dict):
+                if len(policyholder_data) > 0 and isinstance(
+                    policyholder_data[0], dict
+                ):
                     policyholder_data = policyholder_data[0]
                 else:
                     policyholder_data = {}
@@ -3958,7 +4118,9 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             # 16. InsuranceAmount bilgilerini Coverage ve Premium'a aktar (yeni alan)
             insurance_amount_data = entities_data.get("insurance_amount")
             if isinstance(insurance_amount_data, list):
-                if len(insurance_amount_data) > 0 and isinstance(insurance_amount_data[0], dict):
+                if len(insurance_amount_data) > 0 and isinstance(
+                    insurance_amount_data[0], dict
+                ):
                     insurance_amount_data = insurance_amount_data[0]
                 else:
                     insurance_amount_data = {}
@@ -3971,7 +4133,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                 )
 
             # 17. Chunk -> Entity ilişkileri
-            # NOT: EXTRACTED_FROM ilişkileri make_relationships.py'deki 
+            # NOT: EXTRACTED_FROM ilişkileri make_relationships.py'deki
             # merge_relationship_between_chunk_and_entites fonksiyonunda oluşturuluyor.
             # O fonksiyon her chunk işlenirken entity'yi o chunk'a bağlıyor (Entity -> Chunk).
             # _create_chunk_entity_relationships yanlış bir şekilde TÜM chunk'ları TÜM entity'lere
@@ -3986,7 +4148,7 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
     def _get_existing_policy_relationship_types_from_schema(self) -> dict:
         """
         Veritabanı şemasından mevcut IS_*_POLICY relationship type'larını çeker.
-        
+
         Returns:
             {
                 "relationship_types": [
@@ -4017,22 +4179,24 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
                    usage_count as count
             ORDER BY usage_count DESC
             """
-            
+
             result = self.execute_query(query, {})
-            
+
             relationship_types = []
             for row in result:
-                relationship_types.append({
-                    "type": row["type"],
-                    "count": row.get("count", 0),
-                    "sample_usage": "Customer -> Policy"
-                })
-            
+                relationship_types.append(
+                    {
+                        "type": row["type"],
+                        "count": row.get("count", 0),
+                        "sample_usage": "Customer -> Policy",
+                    }
+                )
+
             return {
                 "relationship_types": relationship_types,
-                "total_types": len(relationship_types)
+                "total_types": len(relationship_types),
             }
-            
+
         except Exception as e:
             logging.error(f"❌ Schema'dan relationship type'ları çekme hatası: {e}")
             return {"relationship_types": [], "total_types": 0}
@@ -4042,22 +4206,27 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
         Schema relationship type'larını cache'den al veya çek.
         """
         current_time = time.time()
-        
+
         # Cache kontrolü
-        if (graphDBdataAccess._schema_cache is not None and 
-            graphDBdataAccess._schema_cache_timestamp is not None and
-            (current_time - graphDBdataAccess._schema_cache_timestamp) < graphDBdataAccess.SCHEMA_CACHE_TTL):
+        if (
+            graphDBdataAccess._schema_cache is not None
+            and graphDBdataAccess._schema_cache_timestamp is not None
+            and (current_time - graphDBdataAccess._schema_cache_timestamp)
+            < graphDBdataAccess.SCHEMA_CACHE_TTL
+        ):
             logging.debug("📦 Schema cache'den alındı")
             return graphDBdataAccess._schema_cache
-        
+
         # Cache yoksa veya expire olmuşsa çek
-        logging.info("🔄 Schema'dan relationship type'ları çekiliyor (cache yok/expire)...")
+        logging.info(
+            "🔄 Schema'dan relationship type'ları çekiliyor (cache yok/expire)..."
+        )
         schema_data = self._get_existing_policy_relationship_types_from_schema()
-        
+
         # Cache'e kaydet
         graphDBdataAccess._schema_cache = schema_data
         graphDBdataAccess._schema_cache_timestamp = current_time
-        
+
         return schema_data
 
     def _normalize_relationship_type_with_llm(
@@ -4065,17 +4234,17 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
         new_relationship_type: str,
         existing_relationship_types: list,
         policy_type: str = "",
-        model: str = "openai_gpt_4o_mini"
+        model: str = "openai_gpt_4o_mini",
     ) -> dict:
         """
         LLM'e yeni relationship type'ı gönderir, mevcut olanlardan en uygun olanı seçtirir.
-        
+
         Args:
             new_relationship_type: Gemini'den gelen yeni relationship type (örn: "IS_DASK_KONUT_POLICY")
             existing_relationship_types: Şemadan çekilen mevcut relationship type'ları
             policy_type: Poliçe türü (opsiyonel, context için)
             model: Kullanılacak LLM modeli
-        
+
         Returns:
             {
                 "normalized_type": "IS_DASK_POLICY",
@@ -4090,19 +4259,20 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
             if existing_relationship_types:
                 if isinstance(existing_relationship_types[0], dict):
                     # Dict listesi: [{"type": "...", "count": N}, ...]
-                    existing_list = "\n".join([
-                        f"- {rt['type']} (kullanım: {rt.get('count', 'N/A')} kez)"
-                        for rt in existing_relationship_types
-                    ])
+                    existing_list = "\n".join(
+                        [
+                            f"- {rt['type']} (kullanım: {rt.get('count', 'N/A')} kez)"
+                            for rt in existing_relationship_types
+                        ]
+                    )
                 else:
                     # String listesi: ["IS_KASKO_POLICY", ...]
-                    existing_list = "\n".join([
-                        f"- {rt}"
-                        for rt in existing_relationship_types
-                    ])
+                    existing_list = "\n".join(
+                        [f"- {rt}" for rt in existing_relationship_types]
+                    )
             else:
                 existing_list = "Henüz hiç relationship type yok (ilk oluşturma)"
-            
+
             prompt = f"""
 Sen bir veritabanı uzmanısın. Yeni bir relationship type normalize edeceksin.
 
@@ -4140,17 +4310,18 @@ KRİTİK:
 - Yeni relationship type oluşturma, sadece hiç uygun olan yoksa!
 - Sadece JSON döndür, markdown code block kullanma!
 """
-            
+
             # Gemini veya diğer LLM kullan
             use_gemini = False
             try:
                 from google import genai as genai_sdk
+
                 api_key = os.environ.get("GEMINI_API_KEY")
                 if api_key:
                     use_gemini = True
                     client = genai_sdk.Client(api_key=api_key)
                     from google.genai import types
-                    
+
                     response = client.models.generate_content(
                         model="models/gemini-2.0-flash",
                         contents=[types.Part.from_text(text=prompt)],
@@ -4158,56 +4329,67 @@ KRİTİK:
                     response_text = response.text.strip() if response.text else ""
             except Exception:
                 use_gemini = False
-            
+
             if not use_gemini:
                 # Fallback: Diğer LLM
                 from src.llm import get_llm
+
                 llm, _ = get_llm(model)
                 response = llm.invoke(prompt)  # type: ignore[union-attr]
-                response_text = response.content.strip() if hasattr(response, 'content') and response.content else ""  # type: ignore[union-attr]
-            
+                response_text = response.content.strip() if hasattr(response, "content") and response.content else ""  # type: ignore[union-attr]
+
             # JSON parse et
             try:
                 # Markdown code block varsa temizle
                 if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0].strip()
+                    response_text = (
+                        response_text.split("```json")[1].split("```")[0].strip()
+                    )
                 elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0].strip()
-                
+                    response_text = (
+                        response_text.split("```")[1].split("```")[0].strip()
+                    )
+
                 # JSON bul
                 if "{" in response_text and "}" in response_text:
                     start_idx = response_text.find("{")
                     end_idx = response_text.rfind("}") + 1
                     json_text = response_text[start_idx:end_idx]
                     normalization_result = json.loads(json_text)
-                    
-                    normalized_type = normalization_result.get("normalized_type", new_relationship_type)
-                    matched_existing = normalization_result.get("matched_existing", False)
+
+                    normalized_type = normalization_result.get(
+                        "normalized_type", new_relationship_type
+                    )
+                    matched_existing = normalization_result.get(
+                        "matched_existing", False
+                    )
                     reason = normalization_result.get("reason", "")
                     confidence = normalization_result.get("confidence", 0.5)
-                    
+
                     if normalized_type != new_relationship_type:
                         logging.info(
                             f"🔄 Relationship type normalize edildi: "
                             f"{new_relationship_type} → {normalized_type} "
                             f"(Reason: {reason}, Confidence: {confidence:.2f})"
                         )
-                    
+
                     return {
                         "normalized_type": normalized_type,
                         "matched_existing": matched_existing,
                         "reason": reason,
-                        "confidence": confidence
+                        "confidence": confidence,
                     }
                 else:
-                    logging.warning("LLM yanıtında JSON bulunamadı, orijinal type kullanılıyor")
+                    logging.warning(
+                        "LLM yanıtında JSON bulunamadı, orijinal type kullanılıyor"
+                    )
                     return {
                         "normalized_type": new_relationship_type,
                         "matched_existing": False,
                         "reason": "LLM JSON döndüremedi",
-                        "confidence": 0.0
+                        "confidence": 0.0,
                     }
-                    
+
             except json.JSONDecodeError as e:
                 logging.error(f"LLM yanıtı JSON parse edilemedi: {e}")
                 logging.error(f"Response (first 500 chars): {response_text[:500]}")
@@ -4215,16 +4397,16 @@ KRİTİK:
                     "normalized_type": new_relationship_type,
                     "matched_existing": False,
                     "reason": f"JSON parse hatası: {e}",
-                    "confidence": 0.0
+                    "confidence": 0.0,
                 }
-                
+
         except Exception as e:
             logging.error(f"❌ LLM normalization hatası: {e}")
             return {
                 "normalized_type": new_relationship_type,
                 "matched_existing": False,
                 "reason": f"LLM hatası: {e}",
-                "confidence": 0.0
+                "confidence": 0.0,
             }
 
     def create_endorsement_entity(
@@ -4309,8 +4491,14 @@ KRİTİK:
 
             # 10. InsuredProperty Node'u oluştur (yeni alan)
             insured_property_data = entities_data.get("insured_property", {})
-            if insured_property_data.get("address") or insured_property_data.get("city") or insured_property_data.get("damageStatus"):
-                self._create_insured_property_node(insured_property_data, endorsement_id)
+            if (
+                insured_property_data.get("address")
+                or insured_property_data.get("city")
+                or insured_property_data.get("damageStatus")
+            ):
+                self._create_insured_property_node(
+                    insured_property_data, endorsement_id
+                )
 
             # 11. InsuredPerson Node'u oluştur (yeni alan)
             insured_person_data = entities_data.get("insured_person", {})
@@ -4856,7 +5044,9 @@ KRİTİK:
                     session_params={"database": self.graph._database},
                 )
 
-                logging.info(f"✅ Endorsement Start Date: {start_date} (year={year}, month={month})")
+                logging.info(
+                    f"✅ Endorsement Start Date: {start_date} (year={year}, month={month})"
+                )
 
             # Bitiş tarihi
             end_date_value = dates_data.get("end_date")
@@ -4897,7 +5087,9 @@ KRİTİK:
                     session_params={"database": self.graph._database},
                 )
 
-                logging.info(f"✅ Endorsement End Date: {end_date} (year={year}, month={month})")
+                logging.info(
+                    f"✅ Endorsement End Date: {end_date} (year={year}, month={month})"
+                )
 
         except Exception as e:
             logging.error(f"Endorsement date nodes oluşturma hatası: {e}")
@@ -4953,7 +5145,7 @@ KRİTİK:
     ):
         """
         Customer node'u oluşturur ve Policy ile ilişkilendirir.
-        
+
         NOT: Pre-processing entity resolution KALDIRILDI.
         - Her Customer kendi adıyla MERGE edilir (exact match)
         - Semantic duplicate'ler post-processing ile merge edilir (LLM doğrulamalı)
@@ -4961,13 +5153,15 @@ KRİTİK:
         """
         try:
             # None değerlerini handle et (LLM bazen None dönebilir)
-            customer_name = (customer_data.get("name") or "").strip() if customer_data else ""
+            customer_name = (
+                (customer_data.get("name") or "").strip() if customer_data else ""
+            )
             if not customer_name:
                 return
 
             # Customer ID oluştur (name-based unique ID)
             customer_id = f"customer_{customer_name.replace(' ', '_').upper()}"
-            
+
             # MERGE ile exact name match - aynı isim varsa update, yoksa create
             # Semantic benzerlik (A.Ş. vs ANONİM ŞİRKETİ) post-processing'de LLM ile merge edilir
             query = """
@@ -5014,7 +5208,9 @@ KRİTİK:
         """InsuranceCompany node'u oluşturur ve Policy ile ilişkilendirir - case insensitive normalization ile"""
         try:
             # None değerlerini handle et (LLM bazen None dönebilir)
-            company_name = (company_data.get("name") or "").strip() if company_data else ""
+            company_name = (
+                (company_data.get("name") or "").strip() if company_data else ""
+            )
             if not company_name:
                 return
 
@@ -5068,35 +5264,35 @@ KRİTİK:
         """
         Tarih string'ini parse eder ve (year, month) tuple döner.
         Birden fazla tarih formatını destekler.
-        
+
         Args:
             date_string: Parse edilecek tarih string'i (örn: "2024-10-07", "7/10/2024", "7-10-2024")
-        
+
         Returns:
             tuple: (year: str, month: str)
         """
         year = "0"
         month = "0"
-        
+
         if not date_string or not date_string.strip():
             return (year, month)
-        
+
         date_string = date_string.strip()
-        
+
         try:
             from datetime import datetime as dt
             import re
-            
+
             # Farklı tarih formatlarını dene
             date_formats = [
-                "%Y-%m-%d",      # 2024-10-07
-                "%d/%m/%Y",      # 7/10/2024 veya 07/10/2024
-                "%d-%m-%Y",      # 7-10-2024
-                "%Y/%m/%d",      # 2024/10/07
-                "%d.%m.%Y",      # 7.10.2024
-                "%m/%d/%Y",      # 10/7/2024 (US format)
+                "%Y-%m-%d",  # 2024-10-07
+                "%d/%m/%Y",  # 7/10/2024 veya 07/10/2024
+                "%d-%m-%Y",  # 7-10-2024
+                "%Y/%m/%d",  # 2024/10/07
+                "%d.%m.%Y",  # 7.10.2024
+                "%m/%d/%Y",  # 10/7/2024 (US format)
             ]
-            
+
             parsed_date = None
             for date_format in date_formats:
                 try:
@@ -5104,56 +5300,64 @@ KRİTİK:
                     break
                 except ValueError:
                     continue
-            
+
             if parsed_date:
                 year = str(parsed_date.year)
                 month = str(parsed_date.month)
             else:
                 # Parse edilemedi, regex ile çıkarmaya çalış
                 # Yıl için 4 haneli sayı ara (19xx veya 20xx)
-                year_match = re.search(r'\b(19|20)\d{2}\b', date_string)
+                year_match = re.search(r"\b(19|20)\d{2}\b", date_string)
                 if year_match:
                     year = year_match.group()
-                
+
                 # Ay için 1-2 haneli sayı ara (1-12 arası)
                 # Önce yıldan önceki sayıları kontrol et (DD/MM/YYYY formatı için)
-                parts = re.split(r'[/\-\.]', date_string)
+                parts = re.split(r"[/\-\.]", date_string)
                 if len(parts) >= 3:
                     # Yıl hangi pozisyonda?
                     year_idx = None
                     for i, part in enumerate(parts):
-                        if len(part) == 4 and part.startswith(('19', '20')):
+                        if len(part) == 4 and part.startswith(("19", "20")):
                             year_idx = i
                             break
-                    
+
                     if year_idx is not None:
                         # Yıldan önceki sayı ay olabilir
                         if year_idx > 0:
                             month_candidate = parts[year_idx - 1]
-                            if month_candidate.isdigit() and 1 <= int(month_candidate) <= 12:
+                            if (
+                                month_candidate.isdigit()
+                                and 1 <= int(month_candidate) <= 12
+                            ):
                                 month = month_candidate
                         # Yıldan sonraki sayı ay olabilir (YYYY/MM/DD formatı için)
                         elif year_idx < len(parts) - 1:
                             month_candidate = parts[year_idx + 1]
-                            if month_candidate.isdigit() and 1 <= int(month_candidate) <= 12:
+                            if (
+                                month_candidate.isdigit()
+                                and 1 <= int(month_candidate) <= 12
+                            ):
                                 month = month_candidate
-                
+
                 # Hala ay bulunamadıysa, genel regex ile dene
                 if month == "0":
-                    month_match = re.search(r'\b(0?[1-9]|1[0-2])\b', date_string)
+                    month_match = re.search(r"\b(0?[1-9]|1[0-2])\b", date_string)
                     if month_match:
                         month = month_match.group()
-                
+
                 if year != "0" or month != "0":
-                    logging.warning(f"⚠️ Tarih parse edilemedi, regex ile çıkarıldı: {date_string} → year={year}, month={month}")
+                    logging.warning(
+                        f"⚠️ Tarih parse edilemedi, regex ile çıkarıldı: {date_string} → year={year}, month={month}"
+                    )
                 else:
                     logging.error(f"❌ Tarih parse edilemedi: {date_string}")
-                    
+
         except Exception as parse_error:
             logging.error(f"❌ Tarih parse hatası: {date_string} - {parse_error}")
             year = "0"
             month = "0"
-        
+
         return (year, month)
 
     def _create_date_nodes_for_policy(self, dates_data: dict, policy_id: str):
@@ -5242,7 +5446,9 @@ KRİTİK:
                     session_params={"database": self.graph._database},
                 )
 
-                logging.info(f"✅ End Date node oluşturuldu: {end_date} (year={year}, month={month})")
+                logging.info(
+                    f"✅ End Date node oluşturuldu: {end_date} (year={year}, month={month})"
+                )
 
         except Exception as e:
             logging.error(f"Date nodes oluşturma hatası: {e}")
@@ -5352,23 +5558,25 @@ KRİTİK:
             # Eğer coverage_types None ise veya boş liste ise, erken çık
             if not coverage_types:
                 return
-                
+
             for coverage_type in coverage_types:
                 # Eğer coverage_type bir liste ise (nested list durumu), düzleştir
                 if isinstance(coverage_type, list):
                     # Nested list'i düzleştir ve her item için tekrar çağır
                     self._create_coverage_nodes(coverage_type, policy_id)
                     continue
-                
+
                 # Eğer coverage_type bir string ise, dict'e dönüştür
                 if isinstance(coverage_type, str):
                     coverage_type = {"name": coverage_type}
-                
+
                 # Artık coverage_type bir dict olmalı
                 if not isinstance(coverage_type, dict):
-                    logging.warning(f"⚠️ Geçersiz coverage_type formatı (type: {type(coverage_type)}): {coverage_type}")
+                    logging.warning(
+                        f"⚠️ Geçersiz coverage_type formatı (type: {type(coverage_type)}): {coverage_type}"
+                    )
                     continue
-                
+
                 name = coverage_type.get("name", "").strip()
                 if not name:
                     continue
@@ -5405,22 +5613,22 @@ KRİTİK:
         try:
             if not guarantees:
                 return
-                
+
             for guarantee in guarantees:
                 # Handle nested lists
                 if isinstance(guarantee, list):
                     self._create_guarantee_nodes(guarantee, policy_id)
                     continue
-                
+
                 # Handle strings
                 if isinstance(guarantee, str):
                     guarantee = {"name": guarantee}
-                
+
                 # Validate dict
                 if not isinstance(guarantee, dict):
                     logging.warning(f"⚠️ Geçersiz guarantee formatı: {guarantee}")
                     continue
-                
+
                 name = guarantee.get("name", "").strip()
                 if not name:
                     continue
@@ -5469,22 +5677,22 @@ KRİTİK:
         try:
             if not clauses:
                 return
-                
+
             for clause in clauses:
                 # Handle nested lists
                 if isinstance(clause, list):
                     self._create_clause_nodes(clause, policy_id)
                     continue
-                
+
                 # Handle strings
                 if isinstance(clause, str):
                     clause = {"name": clause}
-                
+
                 # Validate dict
                 if not isinstance(clause, dict):
                     logging.warning(f"⚠️ Geçersiz clause formatı: {clause}")
                     continue
-                
+
                 name = clause.get("name", "").strip()
                 if not name:
                     continue
@@ -5701,7 +5909,9 @@ KRİTİK:
         except Exception as e:
             logging.error(f"RiskAddress node oluşturma hatası: {e}")
 
-    def _create_insured_property_node(self, insured_property_data: dict, policy_id: str):
+    def _create_insured_property_node(
+        self, insured_property_data: dict, policy_id: str
+    ):
         """InsuredProperty node'u oluşturur (sigortalanan yer bilgileri)"""
         try:
             address = (insured_property_data.get("address") or "").strip()
@@ -5714,22 +5924,46 @@ KRİTİK:
                 return
 
             property_id = f"insured_property_{policy_id}"
-            
+
             # Tapu bilgileri
             deed_data = insured_property_data.get("deed", {})
             ada = deed_data.get("ada", "") if isinstance(deed_data, dict) else ""
             parsel = deed_data.get("parsel", "") if isinstance(deed_data, dict) else ""
             pafta = deed_data.get("pafta", "") if isinstance(deed_data, dict) else ""
-            independent_section = deed_data.get("independentSectionNumber", "") if isinstance(deed_data, dict) else ""
-            
+            independent_section = (
+                deed_data.get("independentSectionNumber", "")
+                if isinstance(deed_data, dict)
+                else ""
+            )
+
             # Bina bilgileri
             building_data = insured_property_data.get("building", {})
-            construction_type = building_data.get("constructionType", "") if isinstance(building_data, dict) else ""
-            construction_year = building_data.get("constructionYear", "") if isinstance(building_data, dict) else ""
-            total_floors = building_data.get("totalFloors", "") if isinstance(building_data, dict) else ""
-            usage_type = building_data.get("usageType", "") if isinstance(building_data, dict) else ""
+            construction_type = (
+                building_data.get("constructionType", "")
+                if isinstance(building_data, dict)
+                else ""
+            )
+            construction_year = (
+                building_data.get("constructionYear", "")
+                if isinstance(building_data, dict)
+                else ""
+            )
+            total_floors = (
+                building_data.get("totalFloors", "")
+                if isinstance(building_data, dict)
+                else ""
+            )
+            usage_type = (
+                building_data.get("usageType", "")
+                if isinstance(building_data, dict)
+                else ""
+            )
             area = building_data.get("area")
-            area_unit = building_data.get("areaUnit", "") if isinstance(building_data, dict) else ""
+            area_unit = (
+                building_data.get("areaUnit", "")
+                if isinstance(building_data, dict)
+                else ""
+            )
 
             query = """
                 MERGE (ip:InsuredProperty {id: $property_id})
@@ -5812,7 +6046,7 @@ KRİTİK:
                 return
 
             person_id = f"insured_person_{policy_id}"
-            
+
             query = """
                 MERGE (ip:InsuredPerson {id: $person_id})
                 ON CREATE SET 
@@ -5870,7 +6104,7 @@ KRİTİK:
                 return
 
             holder_id = f"policyholder_{policy_id}"
-            
+
             query = """
                 MERGE (ph:Policyholder {id: $holder_id})
                 ON CREATE SET 
@@ -5920,10 +6154,12 @@ KRİTİK:
         except Exception as e:
             logging.error(f"Policyholder node oluşturma hatası: {e}")
 
-    def _create_chunk_entity_relationships(self, file_name: str, policy_id: str, entities_data: dict):
+    def _create_chunk_entity_relationships(
+        self, file_name: str, policy_id: str, entities_data: dict
+    ):
         """
         Document'a ait Chunk'ları, çıkarılan Entity'lere HAS_ENTITY ilişkisi ile bağlar.
-        
+
         Bu ilişki sayesinde:
         - Agent "bu bilgi nereden geldi?" sorusuna cevap verebilir
         - Citation/kaynak gösterme imkanı sağlar
@@ -5932,68 +6168,79 @@ KRİTİK:
         try:
             # Tüm entity tiplerini ve ID'lerini topla
             entity_ids = []
-            
+
             # Policy
             if policy_id:
                 entity_ids.append({"type": "Policy", "id": policy_id})
-            
+
             # Customer - None kontrolü ile
             customer_data = entities_data.get("customer") or {}
-            customer_name = (customer_data.get("name") or "").strip() if customer_data else ""
+            customer_name = (
+                (customer_data.get("name") or "").strip() if customer_data else ""
+            )
             if customer_name:
                 entity_ids.append({"type": "Customer", "name": customer_name})
-            
+
             # InsuranceCompany - None kontrolü ile
             company_data = entities_data.get("insurance_company") or {}
-            company_name = (company_data.get("name") or "").strip() if company_data else ""
+            company_name = (
+                (company_data.get("name") or "").strip() if company_data else ""
+            )
             if company_name:
                 entity_ids.append({"type": "InsuranceCompany", "name": company_name})
-            
+
             # Coverage - policy_id ile bağlı
             coverage_data = entities_data.get("coverage") or {}
             if coverage_data:
                 entity_ids.append({"type": "Coverage", "policy_id": policy_id})
-            
+
             # Premium - policy_id ile bağlı
             premium_data = entities_data.get("premium") or {}
             if premium_data.get("amount") is not None:
                 entity_ids.append({"type": "Premium", "policy_id": policy_id})
-            
+
             # RiskAddress - policy_id ile bağlı
             address_data = entities_data.get("address") or {}
             if address_data.get("address") or address_data.get("city"):
                 entity_ids.append({"type": "RiskAddress", "policy_id": policy_id})
-            
+
             # InsuredProperty - policy_id ile bağlı
             insured_property_data = entities_data.get("insured_property")
-            if isinstance(insured_property_data, list) and len(insured_property_data) > 0:
+            if (
+                isinstance(insured_property_data, list)
+                and len(insured_property_data) > 0
+            ):
                 entity_ids.append({"type": "InsuredProperty", "policy_id": policy_id})
             elif isinstance(insured_property_data, dict) and insured_property_data:
                 entity_ids.append({"type": "InsuredProperty", "policy_id": policy_id})
-            
+
             # InsuredPerson - policy_id ile bağlı
             insured_person_data = entities_data.get("insured_person")
             if isinstance(insured_person_data, list) and len(insured_person_data) > 0:
                 entity_ids.append({"type": "InsuredPerson", "policy_id": policy_id})
-            elif isinstance(insured_person_data, dict) and insured_person_data.get("name"):
+            elif isinstance(insured_person_data, dict) and insured_person_data.get(
+                "name"
+            ):
                 entity_ids.append({"type": "InsuredPerson", "policy_id": policy_id})
-            
+
             # Policyholder - policy_id ile bağlı
             policyholder_data = entities_data.get("policyholder")
             if isinstance(policyholder_data, list) and len(policyholder_data) > 0:
                 entity_ids.append({"type": "Policyholder", "policy_id": policy_id})
             elif isinstance(policyholder_data, dict) and policyholder_data.get("name"):
                 entity_ids.append({"type": "Policyholder", "policy_id": policy_id})
-            
+
             if not entity_ids:
-                logging.info(f"ℹ️ Chunk-Entity ilişkisi için entity bulunamadı: {file_name}")
+                logging.info(
+                    f"ℹ️ Chunk-Entity ilişkisi için entity bulunamadı: {file_name}"
+                )
                 return
-            
+
             # Chunk'ları Entity'lere bağla
             # Her entity tipi için ayrı query çalıştır
             for entity_info in entity_ids:
                 entity_type = entity_info.get("type")
-                
+
                 if entity_type == "Policy":
                     query = """
                         MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
@@ -6004,8 +6251,11 @@ KRİTİK:
                             r.extraction_method = 'comprehensive'
                         RETURN count(r) as relationships_created
                     """
-                    params = {"file_name": file_name, "entity_id": entity_info.get("id")}
-                    
+                    params = {
+                        "file_name": file_name,
+                        "entity_id": entity_info.get("id"),
+                    }
+
                 elif entity_type == "Customer":
                     query = """
                         MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
@@ -6015,8 +6265,11 @@ KRİTİK:
                             r.source = 'llm_extraction'
                         RETURN count(r) as relationships_created
                     """
-                    params = {"file_name": file_name, "entity_name": entity_info.get("name")}
-                    
+                    params = {
+                        "file_name": file_name,
+                        "entity_name": entity_info.get("name"),
+                    }
+
                 elif entity_type == "InsuranceCompany":
                     query = """
                         MATCH (d:Document {fileName: $file_name})<-[:PART_OF]-(c:Chunk)
@@ -6026,8 +6279,11 @@ KRİTİK:
                             r.source = 'llm_extraction'
                         RETURN count(r) as relationships_created
                     """
-                    params = {"file_name": file_name, "entity_name": entity_info.get("name")}
-                    
+                    params = {
+                        "file_name": file_name,
+                        "entity_name": entity_info.get("name"),
+                    }
+
                 else:
                     # Diğer entity'ler için policy_id ile bağlantı kur
                     query = f"""
@@ -6038,8 +6294,11 @@ KRİTİK:
                             r.source = 'llm_extraction'
                         RETURN count(r) as relationships_created
                     """
-                    params = {"file_name": file_name, "policy_id": entity_info.get("policy_id")}
-                
+                    params = {
+                        "file_name": file_name,
+                        "policy_id": entity_info.get("policy_id"),
+                    }
+
                 try:
                     result = self.graph.query(
                         query,
@@ -6047,25 +6306,35 @@ KRİTİK:
                         session_params={"database": self.graph._database},
                     )
                     if result and result[0].get("relationships_created", 0) > 0:
-                        logging.info(f"✅ Chunk->{entity_type} HAS_ENTITY ilişkileri oluşturuldu: {result[0].get('relationships_created')}")
+                        logging.info(
+                            f"✅ Chunk->{entity_type} HAS_ENTITY ilişkileri oluşturuldu: {result[0].get('relationships_created')}"
+                        )
                 except Exception as entity_error:
-                    logging.warning(f"⚠️ Chunk->{entity_type} ilişkisi oluşturulamadı: {entity_error}")
-            
+                    logging.warning(
+                        f"⚠️ Chunk->{entity_type} ilişkisi oluşturulamadı: {entity_error}"
+                    )
+
             logging.info(f"✅ Chunk-Entity ilişkileri tamamlandı: {file_name}")
-            
+
         except Exception as e:
             logging.error(f"❌ Chunk-Entity ilişkileri oluşturma hatası: {e}")
 
-    def _create_document_summary(self, file_name: str, entities_data: dict, document_type: str, model: str = "openai_gpt_4o_mini"):
+    def _create_document_summary(
+        self,
+        file_name: str,
+        entities_data: dict,
+        document_type: str,
+        model: str = "openai_gpt_4o_mini",
+    ):
         """
         Document için LLM kullanarak akıllı özet node oluşturur.
-        
+
         Bu özet:
         - Agent'ın hızlı erişimi için belgenin ana bilgilerini içerir
         - Semantic search için optimize edilmiş doğal dil metni
         - Embedding ile benzerlik araması yapılabilir
         - Document'a HAS_SUMMARY ilişkisi ile bağlanır
-        
+
         Args:
             file_name: Belge adı
             entities_data: Çıkarılan entity verileri
@@ -6074,10 +6343,12 @@ KRİTİK:
         """
         try:
             logging.info(f"📝 Document Summary oluşturuluyor (LLM ile): {file_name}")
-            
+
             # Entity verilerini JSON olarak hazırla (LLM'e göndermek için)
-            entities_json = json.dumps(entities_data, ensure_ascii=False, indent=2, default=str)
-            
+            entities_json = json.dumps(
+                entities_data, ensure_ascii=False, indent=2, default=str
+            )
+
             # Özet oluşturma prompt'u
             summary_prompt = f"""
 Aşağıdaki sigorta poliçesi/belgesi bilgilerinden Türkçe olarak doğal dil ile özet oluştur.
@@ -6108,63 +6379,73 @@ Yıllık prim tutarı 2.500 TL, toplam teminat bedeli 1.500.000 TL'dir."
 
 SADECE özet metnini döndür, başka açıklama ekleme:
 """
-            
+
             summary_text = None
-            
+
             # Gemini kullanılıyor mu kontrol et
             try:
                 from google import genai as genai_sdk
+
                 api_key = os.environ.get("GEMINI_API_KEY")
-                
+
                 if api_key:
                     client = genai_sdk.Client(api_key=api_key)
                     from google.genai import types
-                    
+
                     logging.info("✅ Gemini 2.0 Flash ile özet oluşturuluyor...")
-                    
+
                     response = client.models.generate_content(
                         model="models/gemini-2.0-flash",
                         contents=[
                             types.Part.from_text(text=summary_prompt),
                         ],
                     )
-                    
+
                     summary_text = response.text.strip() if response.text else None
-                    
+
                     if summary_text:
                         # Tırnak işaretlerini temizle (LLM bazen tırnak içinde döndürüyor)
                         summary_text = summary_text.strip('"').strip("'").strip()
-                        logging.info(f"✅ Gemini ile özet oluşturuldu ({len(summary_text)} karakter)")
-                        
+                        logging.info(
+                            f"✅ Gemini ile özet oluşturuldu ({len(summary_text)} karakter)"
+                        )
+
             except Exception as gemini_error:
-                logging.warning(f"⚠️ Gemini özet oluşturma başarısız: {gemini_error}, fallback deneniyor...")
-            
+                logging.warning(
+                    f"⚠️ Gemini özet oluşturma başarısız: {gemini_error}, fallback deneniyor..."
+                )
+
             # Gemini başarısız olduysa langchain LLM kullan
             if not summary_text:
                 try:
                     from src.llm import get_llm
+
                     llm, _ = get_llm(model)
                     response = llm.invoke(summary_prompt)  # type: ignore[union-attr]
                     summary_text = response.content.strip() if response.content else None  # type: ignore[union-attr]
-                    
+
                     if summary_text:
                         summary_text = summary_text.strip('"').strip("'").strip()
-                        logging.info(f"✅ LLM ({model}) ile özet oluşturuldu ({len(summary_text)} karakter)")
-                        
+                        logging.info(
+                            f"✅ LLM ({model}) ile özet oluşturuldu ({len(summary_text)} karakter)"
+                        )
+
                 except Exception as llm_error:
                     logging.warning(f"⚠️ LLM özet oluşturma başarısız: {llm_error}")
-            
+
             # LLM başarısız olduysa fallback: entity verilerinden basit özet oluştur
             if not summary_text:
-                summary_text = self._create_fallback_summary(entities_data, document_type, file_name)
-                
+                summary_text = self._create_fallback_summary(
+                    entities_data, document_type, file_name
+                )
+
             if not summary_text or len(summary_text) < 20:
                 logging.warning(f"⚠️ Özet oluşturulamadı: {file_name}")
                 return
-            
+
             # Summary node oluştur ve Document'a bağla
             summary_id = f"summary_{file_name.replace('.', '_').replace(' ', '_')}"
-            
+
             query = """
                 MERGE (s:Summary {id: $summary_id})
                 ON CREATE SET 
@@ -6184,10 +6465,14 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                 SET r.created_at = datetime()
                 RETURN s.id as summary_id
             """
-            
+
             # LLM kullanıldı mı belirle
-            generated_by = "gemini" if "Gemini" in str(summary_text) else ("llm" if summary_text else "fallback")
-            
+            generated_by = (
+                "gemini"
+                if "Gemini" in str(summary_text)
+                else ("llm" if summary_text else "fallback")
+            )
+
             result = self.graph.query(
                 query,
                 {
@@ -6195,69 +6480,83 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                     "summary_text": summary_text,
                     "document_type": document_type,
                     "file_name": file_name,
-                    "generated_by": generated_by
+                    "generated_by": generated_by,
                 },
                 session_params={"database": self.graph._database},
             )
-            
+
             if result:
-                logging.info(f"✅ Document Summary oluşturuldu: {summary_id} ({len(summary_text)} karakter)")
-            
+                logging.info(
+                    f"✅ Document Summary oluşturuldu: {summary_id} ({len(summary_text)} karakter)"
+                )
+
         except Exception as e:
             logging.error(f"❌ Document Summary oluşturma hatası: {e}")
 
-    def _create_fallback_summary(self, entities_data: dict, document_type: str, file_name: str) -> str:
+    def _create_fallback_summary(
+        self, entities_data: dict, document_type: str, file_name: str
+    ) -> str:
         """
         LLM başarısız olduğunda entity verilerinden basit özet oluşturur.
         """
         try:
             parts = []
-            
+
             # Document type
             doc_type_tr = {
                 "MAIN_POLICY": "ana poliçe",
                 "ENDORSEMENT": "zeyilname",
                 "CANCELLATION": "iptal belgesi",
-                "RENEWAL": "yenileme belgesi"
+                "RENEWAL": "yenileme belgesi",
             }.get(document_type, "belge")
-            
+
             # Customer - None kontrolü ile
             customer_data = entities_data.get("customer") or {}
             customer_name = (customer_data.get("name") or "").strip()
-            
+
             # Insurance Company - None kontrolü ile
             company_data = entities_data.get("insurance_company") or {}
             company_name = (company_data.get("name") or "").strip()
-            
+
             # Policy - None kontrolü ile
             policy_data = entities_data.get("policy") or {}
             policy_type = (policy_data.get("type") or "").strip()
-            
+
             # Build summary
             if customer_name and company_name:
-                parts.append(f"Bu belge {customer_name} adına {company_name} tarafından düzenlenmiş bir {doc_type_tr}")
+                parts.append(
+                    f"Bu belge {customer_name} adına {company_name} tarafından düzenlenmiş bir {doc_type_tr}"
+                )
             elif customer_name:
-                parts.append(f"Bu belge {customer_name} adına düzenlenmiş bir {doc_type_tr}")
+                parts.append(
+                    f"Bu belge {customer_name} adına düzenlenmiş bir {doc_type_tr}"
+                )
             else:
                 parts.append(f"Bu belge bir {doc_type_tr}")
-            
+
             if policy_type:
                 parts[-1] += f" ({policy_type})"
             parts[-1] += "."
-            
+
             # Dates
             dates_data = entities_data.get("dates") or {}
             if dates_data.get("start_date") and dates_data.get("end_date"):
-                parts.append(f"Geçerlilik: {dates_data.get('start_date')} - {dates_data.get('end_date')}.")
-            
+                parts.append(
+                    f"Geçerlilik: {dates_data.get('start_date')} - {dates_data.get('end_date')}."
+                )
+
             # Premium
             premium_data = entities_data.get("premium") or {}
             insurance_amount = entities_data.get("insurance_amount") or {}
-            premium_amount = premium_data.get("amount") or insurance_amount.get("policyPremium")
+            premium_amount = premium_data.get("amount") or insurance_amount.get(
+                "policyPremium"
+            )
             if premium_amount:
-                currency = premium_data.get("currency") or insurance_amount.get("currency", "TRY")
+                currency = premium_data.get("currency") or insurance_amount.get(
+                    "currency", "TRY"
+                )
                 parts.append(f"Prim: {premium_amount} {currency}.")
-            
+
             # Address
             address_data = entities_data.get("address") or {}
             city = address_data.get("city", "")
@@ -6265,9 +6564,9 @@ SADECE özet metnini döndür, başka açıklama ekleme:
             if city:
                 location = f"{district}, {city}" if district else city
                 parts.append(f"Konum: {location}.")
-            
+
             return " ".join(parts) if parts else ""
-            
+
         except Exception as e:
             logging.warning(f"⚠️ Fallback summary oluşturma hatası: {e}")
             return ""
@@ -6279,14 +6578,16 @@ SADECE özet metnini döndür, başka açıklama ekleme:
         InsuranceAmount bilgilerini Coverage ve Premium node'larına aktarır.
         Node yoksa oluşturur, varsa günceller.
         Policy veya Endorsement için çalışır (policy_id parametresi her ikisini de destekler).
-        
+
         ÖNEMLİ: Endorsement için yeni değerler sadece Endorsement node'una yazılır,
         Policy node'u etkilenmez.
         """
         try:
             insurance_value = insurance_amount_data.get("insuranceValue")
             policy_premium = insurance_amount_data.get("policyPremium")
-            endorsement_insurance_value = insurance_amount_data.get("endorsementInsuranceValue")
+            endorsement_insurance_value = insurance_amount_data.get(
+                "endorsementInsuranceValue"
+            )
             endorsement_premium = insurance_amount_data.get("endorsementPremium")
             currency = insurance_amount_data.get("currency", "TRY")
 
@@ -6301,7 +6602,7 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                 {"policy_id": policy_id},
                 session_params={"database": self.graph._database},
             )
-            
+
             is_endorsement = False
             if node_result and len(node_result) > 0:
                 labels = node_result[0].get("labels", [])
@@ -6315,19 +6616,32 @@ SADECE özet metnini döndür, başka açıklama ekleme:
             # Policy için: sadece policy değerlerini kullan
             if is_endorsement:
                 # Endorsement için: endorsement değerleri öncelikli, yoksa policy değerleri
-                final_insurance_value = endorsement_insurance_value if endorsement_insurance_value is not None else insurance_value
-                final_premium = endorsement_premium if endorsement_premium is not None else policy_premium
-                logging.info(f"📋 Endorsement için değerler: insuranceValue={final_insurance_value}, premium={final_premium}")
+                final_insurance_value = (
+                    endorsement_insurance_value
+                    if endorsement_insurance_value is not None
+                    else insurance_value
+                )
+                final_premium = (
+                    endorsement_premium
+                    if endorsement_premium is not None
+                    else policy_premium
+                )
+                logging.info(
+                    f"📋 Endorsement için değerler: insuranceValue={final_insurance_value}, premium={final_premium}"
+                )
             else:
                 # Policy için: sadece policy değerlerini kullan (endorsement değerlerini görmezden gel)
                 final_insurance_value = insurance_value
                 final_premium = policy_premium
-                logging.info(f"📋 Policy için değerler: insuranceValue={final_insurance_value}, premium={final_premium}")
+                logging.info(
+                    f"📋 Policy için değerler: insuranceValue={final_insurance_value}, premium={final_premium}"
+                )
 
             # Coverage node'unu oluştur veya güncelle (insuranceValue varsa)
             if final_insurance_value is not None:
                 coverage_id = f"coverage_{policy_id}"
-                coverage_query = """
+                coverage_query = (
+                    """
                     MERGE (cv:CoverageLimit {id: $coverage_id})
                     ON CREATE SET 
                         cv.limit_value = $limit_value,
@@ -6345,24 +6659,31 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                     SET r.created_at = datetime(),
                         r.source = 'llm_extraction'
                     RETURN cv.id as coverage_id
-                """ % node_label
-                
+                """
+                    % node_label
+                )
+
                 self.graph.query(
                     coverage_query,
                     {
                         "coverage_id": coverage_id,
-                        "limit_value": float(final_insurance_value) if final_insurance_value else 0,
+                        "limit_value": (
+                            float(final_insurance_value) if final_insurance_value else 0
+                        ),
                         "currency": currency,
                         "policy_id": policy_id,
                     },
                     session_params={"database": self.graph._database},
                 )
-                logging.info(f"✅ Coverage {'oluşturuldu/güncellendi'}: insuranceValue={final_insurance_value}")
+                logging.info(
+                    f"✅ Coverage {'oluşturuldu/güncellendi'}: insuranceValue={final_insurance_value}"
+                )
 
             # Premium node'unu oluştur veya güncelle (policyPremium varsa)
             if final_premium is not None:
                 premium_id = f"premium_{policy_id}"
-                premium_query = """
+                premium_query = (
+                    """
                     MERGE (pr:Premium {id: $premium_id})
                     ON CREATE SET 
                         pr.amount = $amount,
@@ -6378,8 +6699,10 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                     SET r.created_at = datetime(),
                         r.source = 'llm_extraction'
                     RETURN pr.id as premium_id
-                """ % node_label
-                
+                """
+                    % node_label
+                )
+
                 self.graph.query(
                     premium_query,
                     {
@@ -6390,7 +6713,9 @@ SADECE özet metnini döndür, başka açıklama ekleme:
                     },
                     session_params={"database": self.graph._database},
                 )
-                logging.info(f"✅ Premium {'oluşturuldu/güncellendi'}: premium={final_premium}")
+                logging.info(
+                    f"✅ Premium {'oluşturuldu/güncellendi'}: premium={final_premium}"
+                )
 
         except Exception as e:
             logging.error(f"InsuranceAmount güncelleme hatası: {e}")

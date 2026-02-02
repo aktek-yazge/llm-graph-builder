@@ -13,24 +13,26 @@ S3_RETRY_WAIT_MIN = 1  # seconds
 S3_RETRY_WAIT_MAX = 5  # seconds
 
 
-def _upload_with_retry(s3_client, file_path: str, bucket_name: str, s3_key: str) -> bool:
+def _upload_with_retry(
+    s3_client, file_path: str, bucket_name: str, s3_key: str
+) -> bool:
     """
     S3'e dosya upload eder, başarısız olursa retry yapar.
-    
+
     Args:
         s3_client: Boto3 S3 client
         file_path: Local dosya yolu
         bucket_name: S3 bucket adı
         s3_key: S3 key (path)
-    
+
     Returns:
         bool: Başarılı ise True, değilse False
-    
+
     Raises:
         Exception: Tüm retry'lar başarısız olursa
     """
     last_exception = None
-    
+
     for attempt in range(1, S3_RETRY_ATTEMPTS + 1):
         try:
             with open(file_path, "rb") as file_data:
@@ -39,20 +41,24 @@ def _upload_with_retry(s3_client, file_path: str, bucket_name: str, s3_key: str)
         except Exception as e:
             last_exception = e
             error_str = str(e).lower()
-            
+
             # Retry yapılabilir hatalar
-            is_retryable = any([
-                "timeout" in error_str,
-                "connection" in error_str,
-                "503" in error_str,
-                "500" in error_str,
-                "slow" in error_str,
-                "reset" in error_str,
-                "broken pipe" in error_str,
-            ])
-            
+            is_retryable = any(
+                [
+                    "timeout" in error_str,
+                    "connection" in error_str,
+                    "503" in error_str,
+                    "500" in error_str,
+                    "slow" in error_str,
+                    "reset" in error_str,
+                    "broken pipe" in error_str,
+                ]
+            )
+
             if attempt < S3_RETRY_ATTEMPTS and is_retryable:
-                wait_time = S3_RETRY_WAIT_MIN * (2 ** (attempt - 1))  # Exponential backoff
+                wait_time = S3_RETRY_WAIT_MIN * (
+                    2 ** (attempt - 1)
+                )  # Exponential backoff
                 wait_time = min(wait_time, S3_RETRY_WAIT_MAX)
                 logging.warning(
                     f"🔄 S3 upload failed for {os.path.basename(file_path)}, retrying in {wait_time}s... "
@@ -71,7 +77,7 @@ def _upload_with_retry(s3_client, file_path: str, bucket_name: str, s3_key: str)
                 logging.error(
                     f"❌ S3 upload failed after {S3_RETRY_ATTEMPTS} attempts for {os.path.basename(file_path)}: {e}"
                 )
-    
+
     raise last_exception
 
 
@@ -142,13 +148,15 @@ def upload_files_to_s3(
 
                 try:
                     _upload_with_retry(s3_client, file_path, bucket_name, s3_key)
-                    
+
                     # S3 URL oluştur
                     s3_url = f"s3://{bucket_name}/{s3_key}"
                     uploaded_urls.append(s3_url)
                     logging.info(f"✅ Successfully uploaded: {s3_url}")
                 except Exception as retry_error:
-                    logging.error(f"❌ S3 upload failed after retries for {file_path}: {retry_error}")
+                    logging.error(
+                        f"❌ S3 upload failed after retries for {file_path}: {retry_error}"
+                    )
                     failed_files.append(file_path)
                     continue
 
@@ -219,7 +227,9 @@ def upload_single_file_to_s3(
         try:
             _upload_with_retry(s3_client, file_path, bucket_name, s3_key)
         except Exception as retry_error:
-            logging.error(f"❌ S3 upload failed after retries for {file_path}: {retry_error}")
+            logging.error(
+                f"❌ S3 upload failed after retries for {file_path}: {retry_error}"
+            )
             return None
 
         s3_url = f"s3://{bucket_name}/{s3_key}"
@@ -243,18 +253,22 @@ def upload_single_file_to_s3(
 
 
 def create_document_output_structure(
-    file_name: str, output_base_dir: str = "output"
+    file_name: str, output_base_dir: str = None
 ) -> Tuple[str, str, str]:
     """
     Bir document için output klasör yapısını oluşturur.
 
     Args:
         file_name: Dosya adı (uzantılı)
-        output_base_dir: Ana output klasörü
+        output_base_dir: Ana output klasörü (varsayılan: OUTPUT_DIR env var veya "output")
 
     Returns:
         Tuple[str, str, str]: (document_dir, pdf_dir, images_dir)
     """
+    # Default to OUTPUT_DIR env var or "output"
+    if output_base_dir is None:
+        output_base_dir = os.environ.get("OUTPUT_DIR", "output")
+
     # Dosya adından uzantıyı çıkar
     doc_name = Path(file_name).stem
 
@@ -560,7 +574,9 @@ def check_document_images_exist_in_s3(
                             logging.warning(
                                 f"⚠️ Error checking image in S3: {key}, error: {e}"
                             )
-                            existing_images.append({"filename": filename, "s3_key": key})
+                            existing_images.append(
+                                {"filename": filename, "s3_key": key}
+                            )
                     except Exception as ex:
                         # Hata durumunda ekle (erişim sorunu olabilir, download sırasında kontrol edilecek)
                         logging.warning(
@@ -570,7 +586,10 @@ def check_document_images_exist_in_s3(
 
         if existing_images:
             # Sadece filename'leri döndür (backward compatibility için)
-            image_filenames = [img["filename"] if isinstance(img, dict) else img for img in existing_images]
+            image_filenames = [
+                img["filename"] if isinstance(img, dict) else img
+                for img in existing_images
+            ]
             logging.info(
                 f"🔍 Found {len(existing_images)} existing page images in S3 for document: {document_name}"
             )
@@ -669,7 +688,10 @@ def download_images_from_s3(
                 logging.info(f"✅ Successfully downloaded: {local_file_path}")
 
             except ClientError as e:
-                if e.response["Error"]["Code"] == "NoSuchKey" or e.response["Error"]["Code"] == "404":
+                if (
+                    e.response["Error"]["Code"] == "NoSuchKey"
+                    or e.response["Error"]["Code"] == "404"
+                ):
                     logging.warning(f"⚠️ Image not found in S3: {s3_key}")
                 else:
                     logging.error(f"❌ Failed to download {image_name} from S3: {e}")

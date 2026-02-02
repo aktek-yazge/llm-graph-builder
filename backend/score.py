@@ -6435,27 +6435,77 @@ async def start_graph_creation(
                 message=f"File must be chunked first (current status: {file_record.chunking_status})",
             )
 
-        # Check if markdown file exists (check both backend and celery_worker directories)
+        # Check if markdown file exists
+        # Handle path translation between Celery (output/) and Backend (output_celery/)
         markdown_exists = False
         markdown_path = file_record.markdown_path
+        actual_markdown_path = None
+
         if markdown_path:
+            # Get OUTPUT_DIR from environment (backend uses output_celery, celery uses output)
+            output_dir = os.environ.get("OUTPUT_DIR", "output_celery")
+
+            # Direct path check
             if os.path.exists(markdown_path):
                 markdown_exists = True
+                actual_markdown_path = markdown_path
             else:
-                # Try celery_worker directory
-                project_root = os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))
-                )
-                celery_worker_path = os.path.join(
-                    project_root, "celery_worker", markdown_path
-                )
-                if os.path.exists(celery_worker_path):
-                    markdown_exists = True
-                    logging.info(
-                        f"📂 Found markdown in celery_worker: {celery_worker_path}"
+                # Try translating output/ to output_celery/ (or vice versa)
+                # Celery writes to 'output/' but backend volume is mounted at 'output_celery/'
+                if markdown_path.startswith("output/"):
+                    translated_path = markdown_path.replace(
+                        "output/", f"{output_dir}/", 1
                     )
+                    if os.path.exists(translated_path):
+                        markdown_exists = True
+                        actual_markdown_path = translated_path
+                        logging.info(
+                            f"📂 Found markdown (translated path): {translated_path}"
+                        )
+                elif markdown_path.startswith("output_celery/"):
+                    translated_path = markdown_path.replace(
+                        "output_celery/", "output/", 1
+                    )
+                    if os.path.exists(translated_path):
+                        markdown_exists = True
+                        actual_markdown_path = translated_path
+                        logging.info(
+                            f"📂 Found markdown (translated path): {translated_path}"
+                        )
+
+                # Also try absolute path from project root
+                if not markdown_exists:
+                    project_root = os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__))
+                    )
+                    abs_path = os.path.join(
+                        project_root,
+                        "backend",
+                        output_dir,
+                        os.path.basename(os.path.dirname(markdown_path)),
+                        os.path.basename(markdown_path),
+                    )
+                    if os.path.exists(abs_path):
+                        markdown_exists = True
+                        actual_markdown_path = abs_path
+                        logging.info(f"📂 Found markdown (absolute path): {abs_path}")
 
         if not markdown_exists:
+            # Log debug info for troubleshooting
+            output_dir = os.environ.get("OUTPUT_DIR", "output_celery")
+            logging.error(f"❌ Markdown file not found!")
+            logging.error(f"   DB markdown_path: {markdown_path}")
+            logging.error(f"   OUTPUT_DIR: {output_dir}")
+            logging.error(f"   CWD: {os.getcwd()}")
+            if markdown_path:
+                translated = (
+                    markdown_path.replace("output/", f"{output_dir}/", 1)
+                    if markdown_path.startswith("output/")
+                    else markdown_path
+                )
+                logging.error(f"   Translated path: {translated}")
+                logging.error(f"   Exists (original): {os.path.exists(markdown_path)}")
+                logging.error(f"   Exists (translated): {os.path.exists(translated)}")
             db_session.close()
             return create_api_response(
                 "Failed", message="Markdown file not found. Please run chunking first."

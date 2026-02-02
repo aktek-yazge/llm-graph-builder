@@ -39,7 +39,7 @@ def demo_page_image_generation():
     
     # Example usage
     file_path = "path/to/your/document.pdf"
-    output_dir = "output"
+    output_dir = os.environ.get("OUTPUT_DIR", "output")
     
     try:
         file_name, pages, file_extension, generated_images = get_documents_from_file_by_path(

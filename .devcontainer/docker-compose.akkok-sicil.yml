@@ -183,6 +183,9 @@ services:
     environment:
       - PYTHONPATH=/app
       - ENV=development
+      # Volume /app/output'a mount edildiği için OUTPUT_DIR=output olmalı
+      # (env_file'daki OUTPUT_DIR=output_celery'yi override eder)
+      - OUTPUT_DIR=output
     volumes:
       # Named volume - devcontainer ile paylaşım için
       - akkok_sicil_celery_output:/app/output
@@ -221,6 +224,8 @@ services:
     environment:
       - PYTHONPATH=/app
       - ENV=development
+      # Volume /app/output'a mount edildiği için OUTPUT_DIR=output olmalı
+      - OUTPUT_DIR=output
     volumes:
       # Named volume - devcontainer ile paylaşım için
       - akkok_sicil_celery_output:/app/output
