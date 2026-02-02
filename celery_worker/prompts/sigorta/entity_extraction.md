@@ -4,11 +4,55 @@ Sen Türkiye sigorta poliçesi belgelerinden bilgi grafiği (knowledge graph) i�
 
 ## AMAÇ
 
-Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Kullanıcılar şu tür sorular soracak:
+Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Bir LLM bu graph üzerinde Cypher sorguları yazarak kullanıcı sorularını cevaplayacak.
+
+Örnek kullanıcı soruları:
 - "Ahmet Yılmaz'ın kasko poliçesi var mı?"
 - "Bu müşterinin tüm poliçelerini göster"
 - "Allianz'ın sattığı konut poliçeleri hangileri?"
 - "Bu adresteki mülkü kapsayan poliçe hangisi?"
+
+## ⚠️ KRİTİK: ENTITY NORMALIZATION
+
+Aynı varlık (şirket, kişi, adres) farklı belgelerde farklı yazılabilir. Sorgu yapan LLM tutarlı sonuçlar alabilmesi için **NORMALIZATION** şart:
+
+### Normalization Kuralları:
+
+1. **`normalized_name`**: Her entity'nin zorunlu property'si. Sorgu eşleştirmesi için kullanılır.
+   - Küçük harfe çevir
+   - Türkçe karakterleri dönüştür (ş→s, ğ→g, ü→u, ö→o, ç→c, ı→i)
+   - Gereksiz kelimeleri kaldır: "A.Ş.", "LTD.", "ŞTİ.", "İNC.", "SİGORTA", "HOLDİNG" vb.
+   - Boşlukları "_" ile değiştir
+   - Özel karakterleri kaldır
+
+2. **`name`**: Orijinal görüntülenen isim (belgede yazıldığı gibi)
+
+3. **`aliases`**: Bilinen alternatif yazımlar (opsiyonel)
+
+### Normalization Örnekleri:
+
+| Belgede Yazılan | normalized_name | 
+|-----------------|-----------------|
+| "Allianz Sigorta A.Ş." | `allianz` |
+| "ALLİANZ SİGORTA AŞ" | `allianz` |
+| "Allianz" | `allianz` |
+| "HDI Sigorta A.Ş." | `hdi` |
+| "Türkiye Sigorta A.Ş." | `turkiye` |
+| "AHMET YILMAZ" | `ahmet_yilmaz` |
+| "Ahmet YILMAZ" | `ahmet_yilmaz` |
+| "YILMAZ, AHMET" | `ahmet_yilmaz` |
+| "ABC Holding A.Ş." | `abc` |
+
+### ID Oluşturma = normalized_name tabanlı
+
+```
+ID = prefix + "_" + normalized_name
+
+Örnekler:
+- company_allianz (InsuranceCompany için)
+- customer_12345678901 (TC ile)
+- customer_ahmet_yilmaz (TC yoksa normalized_name ile)
+```
 
 ## BELGE BİLGİSİ
 
@@ -73,9 +117,10 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```json
 {{
   "label": "Customer",
-  "id": "customer_[tc_no veya vergi_no]",
+  "id": "customer_[tc_no veya vergi_no veya normalized_name]",
   "properties": {{
-    "name": "Müşteri adı (kişi veya şirket)",
+    "name": "Müşteri adı (kişi veya şirket) - orijinal",
+    "normalized_name": "normalize edilmiş isim",
     "customer_type": "Individual | Corporate",
     "tc_number": "TC Kimlik No (11 haneli)",
     "tax_number": "Vergi No (10 haneli)",
@@ -85,31 +130,55 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 }}
 ```
 
+**Müşteri ID Öncelik Sırası:**
+1. TC Kimlik No varsa → `customer_12345678901`
+2. Vergi No varsa → `customer_1234567890`
+3. Hiçbiri yoksa → `customer_[normalized_name]` örn: `customer_ahmet_yilmaz`
+
 ### InsuranceCompany (Sigorta Şirketi)
 ```json
 {{
   "label": "InsuranceCompany",
   "id": "company_[normalized_name]",
   "properties": {{
-    "name": "Sigorta şirketi adı",
-    "code": "Şirket kodu"
+    "name": "Sigorta şirketi adı (orijinal)",
+    "normalized_name": "normalize edilmiş isim (küçük harf, türkçe karakter yok)",
+    "code": "Şirket kodu",
+    "aliases": ["alternatif yazımlar listesi"]
   }}
 }}
 ```
+
+**Sigorta Şirketi Normalization Örnekleri:**
+| Orijinal | normalized_name | ID |
+|----------|-----------------|-----|
+| Allianz Sigorta A.Ş. | allianz | company_allianz |
+| HDI Sigorta A.Ş. | hdi | company_hdi |
+| Axa Sigorta A.Ş. | axa | company_axa |
+| Mapfre Sigorta A.Ş. | mapfre | company_mapfre |
+| Türkiye Sigorta A.Ş. | turkiye | company_turkiye |
+| Anadolu Sigorta | anadolu | company_anadolu |
+| Groupama Sigorta | groupama | company_groupama |
+| Sompo Sigorta | sompo | company_sompo |
 
 ### Agent (Acente)
 ```json
 {{
   "label": "Agent",
-  "id": "agent_[code]",
+  "id": "agent_[code veya normalized_name]",
   "properties": {{
-    "name": "Acente adı/ünvanı",
+    "name": "Acente adı/ünvanı (orijinal)",
+    "normalized_name": "normalize edilmiş isim",
     "code": "Acente kodu",
     "phone": "Telefon",
     "address": "Adres"
   }}
 }}
 ```
+
+**Acente ID Öncelik Sırası:**
+1. Acente kodu varsa → `agent_12345`
+2. Kod yoksa → `agent_[normalized_name]` örn: `agent_guven_sigorta`
 
 ### Coverage (Teminat)
 ```json
@@ -273,6 +342,7 @@ Aşağıda bir Konut Sigortası Poliçesi için örnek çıktı:
       "id": "customer_12345678901",
       "properties": {{
         "name": "AHMET YILMAZ",
+        "normalized_name": "ahmet_yilmaz",
         "customer_type": "Individual",
         "tc_number": "12345678901",
         "phone": "0532 123 45 67"
@@ -295,7 +365,9 @@ Aşağıda bir Konut Sigortası Poliçesi için örnek çıktı:
       "label": "InsuranceCompany",
       "id": "company_allianz",
       "properties": {{
-        "name": "Allianz Sigorta A.Ş."
+        "name": "Allianz Sigorta A.Ş.",
+        "normalized_name": "allianz",
+        "aliases": ["ALLİANZ", "Allianz Sigorta"]
       }}
     }},
     {{

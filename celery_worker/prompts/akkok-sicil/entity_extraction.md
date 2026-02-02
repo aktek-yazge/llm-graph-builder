@@ -4,10 +4,47 @@ Sen Türkiye Ticaret Sicil Gazetesi belgelerinden bilgi grafiği (knowledge grap
 
 ## AMAÇ
 
-Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Kullanıcılar şu tür sorular soracak:
+Bu belgeden çıkarılan bilgiler Neo4j graph veritabanına yazılacak. Bir LLM bu graph üzerinde Cypher sorguları yazarak kullanıcı sorularını cevaplayacak.
+
+Örnek kullanıcı soruları:
 - "Akarsu Enerji'nin yönetim kurulu başkanı kim?"
 - "Zeytinliada Turizm'in ortaklık yapısı nasıl?"
 - "2024'te hangi şirketler genel kurul yaptı?"
+
+## ⚠️ KRİTİK: ENTITY NORMALIZATION
+
+Aynı varlık (şirket, kişi) farklı belgelerde farklı yazılabilir. Sorgu yapan LLM tutarlı sonuçlar alabilmesi için **NORMALIZATION** şart:
+
+### Normalization Kuralları:
+
+1. **`normalized_name`**: Her entity'nin zorunlu property'si. Sorgu eşleştirmesi için kullanılır.
+   - Küçük harfe çevir
+   - Türkçe karakterleri dönüştür (ş→s, ğ→g, ü→u, ö→o, ç→c, ı→i)
+   - Gereksiz kelimeleri kaldır: "A.Ş.", "LTD.", "ŞTİ.", "İNC.", "HOLDİNG", "TURİZM", "ENERJİ" vb.
+   - Boşlukları "_" ile değiştir
+   - Özel karakterleri kaldır
+
+2. **`name` veya `trade_name`**: Orijinal görüntülenen isim (belgede yazıldığı gibi)
+
+3. **`aliases`**: Bilinen alternatif yazımlar (opsiyonel)
+
+### Normalization Örnekleri:
+
+| Belgede Yazılan | normalized_name | 
+|-----------------|-----------------|
+| "AKARSU ENERJİ A.Ş." | `akarsu` |
+| "Akarsu Enerji Anonim Şirketi" | `akarsu` |
+| "ZEYTİNLİADA TURİZM LTD. ŞTİ." | `zeytinliada` |
+| "Zeytinliada Turizm" | `zeytinliada` |
+| "AHMET YILMAZ" | `ahmet_yilmaz` |
+| "Ahmet YILMAZ" | `ahmet_yilmaz` |
+
+### ID Oluşturma = Unique identifier tabanlı
+
+```
+Şirketler için: company_[sicil_no] (tercih) veya company_[normalized_name]
+Kişiler için: person_[tc_no] (tercih) veya person_[normalized_name]
+```
 
 ## BELGE BİLGİSİ
 
@@ -54,9 +91,10 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
 ```json
 {{
   "label": "Company",
-  "id": "company_[sicil_no]",
+  "id": "company_[sicil_no veya normalized_name]",
   "properties": {{
-    "trade_name": "TAM TİCARET UNVANI",
+    "trade_name": "TAM TİCARET UNVANI (orijinal)",
+    "normalized_name": "normalize edilmiş kısa ad",
     "short_name": "Kısa ad",
     "registry_number": "Ticaret Sicil No",
     "tax_number": "Vergi No",
@@ -64,10 +102,15 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
     "city": "İl",
     "district": "İlçe",
     "headquarters": "Merkez adresi",
-    "establishment_date": "YYYY-MM-DD"
+    "establishment_date": "YYYY-MM-DD",
+    "aliases": ["alternatif yazımlar listesi"]
   }}
 }}
 ```
+
+**Şirket ID Öncelik Sırası:**
+1. Ticaret Sicil No varsa → `company_123456`
+2. Sicil no yoksa → `company_[normalized_name]` örn: `company_akarsu`
 
 ### Person (Kişi - Yönetici/Ortak/Denetçi)
 ```json
@@ -75,9 +118,11 @@ Aşağıdaki JSON formatında çıktı üret. Bu format direkt Neo4j'ye yazılac
   "label": "Person",
   "id": "person_[tc_no veya normalized_name]",
   "properties": {{
-    "name": "Ad Soyad",
+    "name": "Ad Soyad (orijinal)",
+    "normalized_name": "ad_soyad (küçük harf, türkçe karakter yok)",
     "tc_number": "TC Kimlik No",
-    "nationality": "T.C. | Yabancı"
+    "nationality": "T.C. | Yabancı",
+    "aliases": ["alternatif yazımlar"]
   }}
 }}
 ```

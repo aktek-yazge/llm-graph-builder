@@ -179,7 +179,7 @@ class GenericGraphExecutor:
         """
         label = node.get("label")
         node_id = node.get("id")
-        properties = node.get("properties", {})
+        properties = node.get("properties", {}).copy()
         
         if not label or not node_id:
             logging.warning(f"⚠️ Invalid node: missing label or id - {node}")
@@ -191,18 +191,45 @@ class GenericGraphExecutor:
         # Add id to properties
         properties["id"] = node_id
         
+        # Auto-generate normalized_name from 'name' if not provided
+        # This ensures consistent matching across different documents
+        if "name" in properties and "normalized_name" not in properties:
+            properties["normalized_name"] = normalize_id(properties["name"])
+            logging.debug(f"Auto-normalized: {properties['name']} → {properties['normalized_name']}")
+        
+        # Handle aliases - need special merge logic
+        has_aliases = "aliases" in properties
+        aliases = properties.pop("aliases", []) if has_aliases else []
+        
         # Build Cypher query
         # Using MERGE to avoid duplicates
-        query = f"""
-            MERGE (n:{label} {{id: $node_id}})
-            SET n += $properties
-            RETURN n.id as created_id
-        """
+        if has_aliases and aliases:
+            # For nodes with aliases, merge existing aliases with new ones
+            query = f"""
+                MERGE (n:{label} {{id: $node_id}})
+                SET n += $properties
+                WITH n
+                SET n.aliases = CASE 
+                    WHEN n.aliases IS NULL THEN $aliases
+                    ELSE [x IN (n.aliases + $aliases) WHERE x IS NOT NULL | x]
+                END
+                WITH n
+                SET n.aliases = apoc.coll.toSet(n.aliases)
+                RETURN n.id as created_id
+            """
+            params = {"node_id": node_id, "properties": properties, "aliases": aliases}
+        else:
+            query = f"""
+                MERGE (n:{label} {{id: $node_id}})
+                SET n += $properties
+                RETURN n.id as created_id
+            """
+            params = {"node_id": node_id, "properties": properties}
         
         try:
             self.graph.query(
                 query,
-                {"node_id": node_id, "properties": properties},
+                params,
                 session_params={"database": self._database} if self._database else {}
             )
             
@@ -210,6 +237,22 @@ class GenericGraphExecutor:
             return node_id
             
         except Exception as e:
+            # If APOC not available, try without alias deduplication
+            if "apoc" in str(e).lower():
+                logging.warning("APOC not available, aliases may have duplicates")
+                fallback_query = f"""
+                    MERGE (n:{label} {{id: $node_id}})
+                    SET n += $properties
+                    SET n.aliases = COALESCE(n.aliases, []) + $aliases
+                    RETURN n.id as created_id
+                """
+                self.graph.query(
+                    fallback_query,
+                    {"node_id": node_id, "properties": properties, "aliases": aliases},
+                    session_params={"database": self._database} if self._database else {}
+                )
+                return node_id
+            
             logging.error(f"❌ Failed to create node {label} ({node_id}): {e}")
             raise
     
