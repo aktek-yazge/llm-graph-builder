@@ -1497,78 +1497,31 @@ class graphDBdataAccess:
             # Belgenin tüm Chunk'larını veritabanından al
             document_content = self._get_document_content_from_chunks(file_name)
 
-            # Domain'e göre farklı extraction yöntemi kullan
+            # ========================================
+            # TÜM DOMAIN'LER - Generic Graph Executor
+            # ========================================
+            # Domain-agnostic: Tüm domain'ler (sigorta dahil) generic executor kullanır
+            # Node tipleri ve ilişkiler prompt dosyasında tanımlı
             domain = get_domain()
-            logging.info(f"📋 Domain: {domain}")
-
-            if domain == "sigorta":
-                # ========================================
-                # SIGORTA DOMAIN - Eski hardcoded yapı
-                # ========================================
-                logging.info(f"📋 Sigorta domain - hardcoded entity extraction kullanılıyor")
-                
-                # LLM ile kapsamlı varlık çıkarımı yap (belge içeriğini geçir)
-                entities_data = self.extract_comprehensive_policy_entities_with_llm(
-                    file_name, document_content, model
-                )
-
-                if not entities_data:
-                    error_msg = f"⚠️ {file_name} için varlık çıkarımı başarısız. LLM extraction hatası."
-                    logging.error(error_msg)
-                    raise Exception(error_msg)
-
-                # Document type'ı kontrol et
-                document_type = entities_data.get("document_type", "MAIN_POLICY")
-
-                if document_type in ["ENDORSEMENT", "CANCELLATION", "RENEWAL"]:
-                    # Zeyilname/iptal/yenileme olarak işle
-                    logging.info(f"📋 {file_name} → {document_type} olarak işleniyor...")
-                    self.create_endorsement_entity(entities_data, file_name, document_type)
-                else:
-                    # Ana poliçe olarak işle
-                    logging.info(f"📋 {file_name} → MAIN_POLICY olarak işleniyor...")
-                    self.create_comprehensive_policy_entities(
-                        entities_data, file_name, model
-                    )
-
-                # Document'a docType ve metadata ekle
-                update_document_query = """
-                    MATCH (d:Document {fileName: $file_name})
-                    SET d.docType = $doc_type,
-                        d.hasExtractedEntities = true,
-                        d.entityExtractionMethod = 'LLM_comprehensive',
-                        d.lastProcessedAt = datetime()
-                    RETURN d.fileName as updated_file
-                """
-                self.graph.query(
-                    update_document_query,
-                    {"file_name": file_name, "doc_type": document_type},
-                    session_params={"database": self.graph._database},
-                )
-
-            else:
-                # ========================================
-                # DİĞER DOMAIN'LER - Generic Graph Executor
-                # ========================================
-                logging.info(f"📋 {domain} domain - generic graph executor kullanılıyor")
-                
-                # Generic entity extraction (nodes/relationships format)
-                llm_output = self._extract_entities_generic(file_name, document_content, model)
-                
-                if not llm_output:
-                    error_msg = f"⚠️ {file_name} için generic varlık çıkarımı başarısız."
-                    logging.error(error_msg)
-                    raise Exception(error_msg)
-                
-                # Generic Graph Executor ile Neo4j'ye yaz
-                executor = GenericGraphExecutor(self.graph)
-                result = executor.create_graph_from_llm_output(llm_output, file_name)
-                
-                if not result.get("success"):
-                    errors = result.get("errors", [])
-                    logging.warning(f"⚠️ Generic graph creation partial failure: {errors}")
-                
-                document_type = llm_output.get("document_type", "DIGER")
+            logging.info(f"📋 Domain: {domain} - generic graph executor kullanılıyor")
+            
+            # Generic entity extraction (nodes/relationships format)
+            llm_output = self._extract_entities_generic(file_name, document_content, model)
+            
+            if not llm_output:
+                error_msg = f"⚠️ {file_name} için generic varlık çıkarımı başarısız."
+                logging.error(error_msg)
+                raise Exception(error_msg)
+            
+            # Generic Graph Executor ile Neo4j'ye yaz
+            executor = GenericGraphExecutor(self.graph)
+            result = executor.create_graph_from_llm_output(llm_output, file_name)
+            
+            if not result.get("success"):
+                errors = result.get("errors", [])
+                logging.warning(f"⚠️ Generic graph creation partial failure: {errors}")
+            
+            document_type = llm_output.get("document_type", "DIGER")
 
             logging.info(
                 f"✅ {file_name} için kapsamlı extraction tamamlandı ({document_type})"
@@ -2449,6 +2402,9 @@ class graphDBdataAccess:
         model: str = "openai_gpt_4o_mini",
     ) -> dict:
         """
+        DEPRECATED: Bu fonksiyon artık kullanılmıyor.
+        Bunun yerine _extract_entities_generic() ve GenericGraphExecutor kullanın.
+        
         LLM kullanarak poliçe belgesinden kapsamlı varlık bilgilerini çıkarır.
 
         Çıkarılan varlıklar:
@@ -3900,6 +3856,9 @@ Sadece müşteri adını yaz, başka bir şey yazma:"""
         self, entities_data: dict, file_name: str, model: str = "openai_gpt_4o_mini"
     ):
         """
+        DEPRECATED: Bu fonksiyon artık kullanılmıyor.
+        Bunun yerine GenericGraphExecutor.create_graph_from_llm_output() kullanın.
+        
         Çıkarılan varlık bilgilerinden Neo4j'de node ve ilişkiler oluşturur.
 
         Args:
@@ -4550,6 +4509,10 @@ KRİTİK:
         self, entities_data: dict, file_name: str, document_type: str = "ENDORSEMENT"
     ):
         """
+        DEPRECATED: Bu fonksiyon artık kullanılmıyor.
+        Bunun yerine GenericGraphExecutor.create_graph_from_llm_output() kullanın.
+        Zeyilname bilgileri prompt'ta Endorsement node tipi olarak tanımlanmalı.
+        
         Zeyilname/İptal/Yenileme belgesinden Endorsement node'u ve ilgili entity'leri oluşturur.
 
         Ana poliçeyi bularak zeyilname zincirinin sonuna ekler.
