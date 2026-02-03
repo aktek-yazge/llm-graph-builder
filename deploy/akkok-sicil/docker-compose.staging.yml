@@ -2,6 +2,10 @@
 # AKKOK-SİCİL - Staging/Preview Deployment Stack
 # =============================================================================
 #
+# ÖN KOŞUL:
+#   Infrastructure stack çalışıyor olmalı:
+#   cd ../infrastructure && docker compose -p infrastructure up -d
+#
 # KULLANIM:
 #   # Infisical ile çalıştırma (önerilen)
 #   infisical run --env=staging --path=/tenants/akkok-sicil -- \
@@ -10,13 +14,15 @@
 #   # Manuel .env dosyası ile
 #   docker compose -p akkok-sicil -f docker-compose.staging.yml --env-file .env up -d
 #
-# ERİŞİM (Traefik subdomain routing):
+# ERİŞİM (Traefik path-based routing):
 #   Frontend:  https://akkok-sicil.yazge.aktekbilisim.com
 #   Backend:   https://akkok-sicil.yazge.aktekbilisim.com/server
 #   Neo4j:     https://akkok-sicil.yazge.aktekbilisim.com/neo4j
 #   pgAdmin:   https://akkok-sicil.yazge.aktekbilisim.com/pgadmin
-#   RabbitMQ:  https://akkok-sicil.yazge.aktekbilisim.com/rabbitmq
 #   Flower:    https://akkok-sicil.yazge.aktekbilisim.com/flower
+#
+# SHARED SERVİSLER (infrastructure stack):
+#   RabbitMQ:  https://rabbitmq.yazge.aktekbilisim.com
 #
 # GEREKLİ ENV DEĞİŞKENLERİ:
 #   TENANT_DOMAIN, POSTGRES_PASSWORD, NEO4J_PASSWORD, RABBITMQ_PASSWORD
@@ -26,46 +32,6 @@
 # =============================================================================
 
 services:
-  # ===========================================================================
-  # RabbitMQ - Message Broker
-  # ===========================================================================
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: akkok-sicil-rabbitmq
-    expose:
-      - "5672"
-      - "15672"
-    environment:
-      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-rabbitmq}
-      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
-      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    labels:
-      - "logging=alloy"
-      - "traefik.enable=true"
-      - "traefik.http.routers.akkok-sicil-rabbitmq.rule=Host(`${TENANT_DOMAIN}`) && PathPrefix(`/rabbitmq`)"
-      - "traefik.http.routers.akkok-sicil-rabbitmq.entrypoints=web,websecure"
-      - "traefik.http.routers.akkok-sicil-rabbitmq.priority=20"
-      - "traefik.http.services.akkok-sicil-rabbitmq.loadbalancer.server.port=15672"
-      - "traefik.http.middlewares.akkok-sicil-strip-rabbitmq.stripprefix.prefixes=/rabbitmq"
-      - "traefik.http.routers.akkok-sicil-rabbitmq.middlewares=akkok-sicil-strip-rabbitmq"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "500m"
-        max-file: "10"
-    networks:
-      - internal
-      - observability
-      - traefik-public
-    restart: always
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
   # ===========================================================================
   # PostgreSQL - Database with pgvector
   # ===========================================================================
@@ -329,9 +295,9 @@ services:
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       # OpenTelemetry
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4317}
       - OTEL_SERVICE_NAME=akkok-sicil-backend
-      - OTEL_ENVIRONMENT=staging
+      - OTEL_ENVIRONMENT=${OTEL_ENVIRONMENT:-staging}
       # Authentication
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - JWT_EXPIRATION_HOURS=${JWT_EXPIRATION_HOURS:-168}
@@ -368,12 +334,11 @@ services:
         max-file: "10"
     networks:
       - internal
+      - infrastructure
       - observability
       - traefik-public
     restart: always
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       neo4j:
@@ -446,11 +411,10 @@ services:
         max-file: "5"
     networks:
       - internal
+      - infrastructure
       - observability
     restart: always
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       neo4j:
@@ -500,11 +464,10 @@ services:
         max-file: "3"
     networks:
       - internal
+      - infrastructure
       - observability
     restart: always
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       postgres:
         condition: service_healthy
 
@@ -538,12 +501,11 @@ services:
         max-file: "3"
     networks:
       - internal
+      - infrastructure
       - observability
       - traefik-public
     restart: always
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+    # RabbitMQ infrastructure stack'te çalışır - bağımlılık yok
 
   # ===========================================================================
   # Frontend - React Application
@@ -582,6 +544,9 @@ services:
 networks:
   internal:
     driver: bridge
+  infrastructure:
+    external: true
+    name: infrastructure_infrastructure
   observability:
     external: true
     name: observability
@@ -590,7 +555,6 @@ networks:
     name: traefik-public
 
 volumes:
-  rabbitmq_data:
   postgres_data:
   pgadmin_data:
   redis_data:

@@ -1,0 +1,69 @@
+# =============================================================================
+# TRAEFIK - Reverse Proxy & Load Balancer
+# =============================================================================
+#
+# ÖN KOŞUL:
+#   docker network create traefik-public
+#
+# KULLANIM:
+#   docker compose -p traefik up -d
+#
+# ERİŞİM:
+#   Dashboard: https://traefik.${BASE_DOMAIN}
+#
+# SSL:
+#   Let's Encrypt ile otomatik sertifika alır
+# =============================================================================
+
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TZ=Europe/Istanbul
+    volumes:
+      # Docker socket (container discovery)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Static configuration
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      # Dynamic configuration
+      - ./dynamic:/etc/traefik/dynamic:ro
+      # SSL certificates
+      - traefik_certs:/letsencrypt
+      # Logs
+      - traefik_logs:/var/log/traefik
+    labels:
+      # Dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      # Dashboard auth
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+      # Alloy logging
+      - "logging=alloy"
+    networks:
+      - traefik-public
+    restart: always
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  traefik-public:
+    external: true
+    name: traefik-public
+
+volumes:
+  traefik_certs:
+    name: traefik_certs
+  traefik_logs:
+    name: traefik_logs

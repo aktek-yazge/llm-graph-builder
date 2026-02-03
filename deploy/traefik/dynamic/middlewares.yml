@@ -1,0 +1,41 @@
+# =============================================================================
+# Traefik Dynamic Configuration - Middlewares
+# =============================================================================
+
+http:
+  middlewares:
+    # Rate limiting
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+
+    # Security headers
+    security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: 'SAMEORIGIN'
+
+    # CORS (gerekirse)
+    cors:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        accessControlAllowOriginList:
+          - '*'
+        accessControlMaxAge: 100
+        addVaryHeader: true
+
+    # Compress
+    compress:
+      compress: {}
+

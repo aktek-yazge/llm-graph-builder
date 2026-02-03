@@ -1,130 +1,56 @@
 # =============================================================================
 # Traefik Dynamic Configuration - Devcontainer Routing
 # =============================================================================
-# VS Code DevContainer için manuel routing tanımları
-# Docker provider devcontainer labels'ını göremediği durumlar için
+# DevContainer için routing tanımları
+# Subdomain-based routing kullanılıyor
+# =============================================================================
 
 http:
   routers:
     # =========================================================================
-    # WAT - Backend & Frontend
-    # =========================================================================
-    wat-backend:
-      rule: 'Host(`dev.local`) && PathPrefix(`/wat/server`)'
-      entryPoints:
-        - web
-      middlewares:
-        - strip-wat-server
-      service: devcontainer-backend
-      priority: 20
-
-    wat-frontend:
-      rule: 'Host(`dev.local`) && PathPrefix(`/wat/ui`)'
-      entryPoints:
-        - web
-      middlewares:
-        - add-trailing-slash-wat
-      service: devcontainer-frontend
-      priority: 15
-
-    # =========================================================================
-    # AKKOK-SİCİL - Backend & Frontend (Subdomain-based)
+    # AKKOK-SİCİL - Subdomain Routing
     # =========================================================================
     akkok-sicil-backend:
       rule: 'Host(`server.akkok-sicil.dev.local`)'
       entryPoints:
         - web
       service: devcontainer-backend
-      priority: 20
 
     akkok-sicil-frontend:
       rule: 'Host(`akkok-sicil.dev.local`)'
       entryPoints:
         - web
       service: devcontainer-frontend
-      priority: 10
-
-    # Legacy path-based routing (backward compatibility)
-    akkok-sicil-backend-legacy:
-      rule: 'Host(`dev.local`) && PathPrefix(`/akkok-sicil/server`)'
-      entryPoints:
-        - web
-      middlewares:
-        - strip-akkok-sicil-server
-      service: devcontainer-backend
-      priority: 20
-
-    akkok-sicil-frontend-legacy:
-      rule: 'Host(`dev.local`) && PathPrefix(`/akkok-sicil/ui`)'
-      entryPoints:
-        - web
-      middlewares:
-        - add-trailing-slash-akkok-sicil
-      service: devcontainer-frontend
-      priority: 15
 
     # =========================================================================
-    # DINKAL - Backend & Frontend
+    # WAT - Subdomain Routing
+    # =========================================================================
+    wat-backend:
+      rule: 'Host(`server.wat.dev.local`)'
+      entryPoints:
+        - web
+      service: devcontainer-backend
+
+    wat-frontend:
+      rule: 'Host(`wat.dev.local`)'
+      entryPoints:
+        - web
+      service: devcontainer-frontend
+
+    # =========================================================================
+    # DINKAL - Subdomain Routing
     # =========================================================================
     dinkal-backend:
-      rule: 'Host(`dev.local`) && PathPrefix(`/dinkal/server`)'
+      rule: 'Host(`server.dinkal.dev.local`)'
       entryPoints:
         - web
-      middlewares:
-        - strip-dinkal-server
       service: devcontainer-backend
-      priority: 20
 
     dinkal-frontend:
-      rule: 'Host(`dev.local`) && PathPrefix(`/dinkal/ui`)'
+      rule: 'Host(`dinkal.dev.local`)'
       entryPoints:
         - web
-      middlewares:
-        - add-trailing-slash-dinkal
       service: devcontainer-frontend
-      priority: 15
-
-  middlewares:
-    strip-wat-server:
-      stripPrefix:
-        prefixes:
-          - '/wat/server'
-    strip-wat-ui:
-      stripPrefix:
-        prefixes:
-          - '/wat/ui'
-    strip-akkok-sicil-server:
-      stripPrefix:
-        prefixes:
-          - '/akkok-sicil/server'
-    strip-akkok-sicil-ui:
-      stripPrefix:
-        prefixes:
-          - '/akkok-sicil/ui'
-    strip-dinkal-server:
-      stripPrefix:
-        prefixes:
-          - '/dinkal/server'
-    strip-dinkal-ui:
-      stripPrefix:
-        prefixes:
-          - '/dinkal/ui'
-    # Trailing slash redirect - Vite base path için gerekli
-    add-trailing-slash-akkok-sicil:
-      redirectRegex:
-        regex: '^(https?://[^/]+/akkok-sicil/ui)$'
-        replacement: '${1}/'
-        permanent: false
-    add-trailing-slash-wat:
-      redirectRegex:
-        regex: '^(https?://[^/]+/wat/ui)$'
-        replacement: '${1}/'
-        permanent: false
-    add-trailing-slash-dinkal:
-      redirectRegex:
-        regex: '^(https?://[^/]+/dinkal/ui)$'
-        replacement: '${1}/'
-        permanent: false
 
   services:
     devcontainer-backend:

@@ -1,0 +1,104 @@
+# =============================================================================
+# INFRASTRUCTURE - Shared Services for All Tenants
+# =============================================================================
+#
+# ÖN KOŞUL:
+#   cp .env.example .env
+#
+# KULLANIM:
+#   docker compose -p infrastructure up -d
+#
+# SERVİSLER:
+#   - RabbitMQ: Message broker (tüm tenant'lar kullanır)
+#   - Alloy: Telemetry collector (logs, traces, metrics -> harici Grafana'ya)
+#
+# NOT:
+#   - Grafana, Langfuse harici sunucularda çalışır
+#   - Alloy toplanan telemetriyi harici Loki/Tempo'ya gönderir
+#   - Traefik ve Infisical ayrı sunucularda çalışabilir
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # RabbitMQ - Shared Message Broker
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-rabbitmq}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.rabbitmq.rule=Host(`rabbitmq.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.rabbitmq.entrypoints=web,websecure"
+      - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - infrastructure
+      - traefik-public
+    restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # Grafana Alloy - Telemetry Collector
+  # ===========================================================================
+  # Logs -> Harici Loki
+  # Traces -> Harici Tempo
+  # Metrics -> Harici Prometheus/Mimir
+  # ===========================================================================
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    ports:
+      - "4317:4317" # OTLP gRPC (uygulamalardan telemetri alır)
+      - "4318:4318" # OTLP HTTP
+      - "12345:12345" # Alloy UI
+    environment:
+      # Harici servis endpoint'leri
+      - LOKI_URL=${LOKI_URL:-http://loki:3100}
+      - TEMPO_URL=${TEMPO_URL:-http://tempo:4317}
+      - PROMETHEUS_REMOTE_WRITE_URL=${PROMETHEUS_REMOTE_WRITE_URL:-}
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    restart: always
+    networks:
+      - infrastructure
+    labels:
+      - "logging=alloy"
+
+networks:
+  infrastructure:
+    driver: bridge
+  traefik-public:
+    external: true
+    name: traefik-public
+
+volumes:
+  rabbitmq_data:
+    name: infra_rabbitmq_data
+  alloy_data:
+    name: infra_alloy_data
