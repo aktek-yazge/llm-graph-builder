@@ -3,16 +3,17 @@
 # =============================================================================
 # Traefik, RabbitMQ, MCP Inspector gibi paylaşımlı servisler
 #
+# ÖN KOŞUL:
+#   cp .env.example .env  # Şifreleri .env dosyasında ayarlayın
+#
 # KULLANIM:
 #   docker compose -p shared -f docker-compose.shared.yml up -d
 #
 # ERİŞİM:
-#   Traefik Dashboard:  http://localhost:8090/dashboard/
-#   RabbitMQ:           http://dev.local/rabbitmq
-#   MCP Inspector:      http://dev.local/mcp-inspector
-#
-# Lokal test için /etc/hosts:
-#   127.0.0.1   dev.local
+#   Traefik Dashboard:  http://traefik.dev.local veya http://localhost:8090
+#   RabbitMQ:           http://rabbitmq.dev.local
+#   MCP Inspector:      http://mcp-inspector.dev.local
+#   Portainer:          http://portainer.dev.local
 # =============================================================================
 
 services:
@@ -71,7 +72,7 @@ services:
       - "15672:15672"
     environment:
       - RABBITMQ_DEFAULT_USER=rabbitmq
-      - RABBITMQ_DEFAULT_PASS=RabbitMQ!654*
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
     restart: always
     networks:

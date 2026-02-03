@@ -22,7 +22,7 @@ services:
       - "7474"
       - "7687"
     environment:
-      - NEO4J_AUTH=neo4j/Dinkal!654*
+      - NEO4J_AUTH=neo4j/${DINKAL_NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
       - NEO4J_dbms_usage__report_enabled=false
@@ -105,7 +105,7 @@ services:
       - "5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=Ekdmjweu483i
+      - POSTGRES_PASSWORD=${DINKAL_POSTGRES_PASSWORD}
       - POSTGRES_DB=llm_graph_builder
     command: postgres -c max_connections=2000 -c shared_buffers=256MB
     volumes:
@@ -134,7 +134,7 @@ services:
       - "80"
     environment:
       - PGADMIN_DEFAULT_EMAIL=admin@dinkal.com
-      - PGADMIN_DEFAULT_PASSWORD=Dinkal!654*
+      - PGADMIN_DEFAULT_PASSWORD=${DINKAL_PGADMIN_PASSWORD:-admin}
       - PGADMIN_CONFIG_SERVER_MODE=False
       - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
       - SCRIPT_NAME=/pgadmin

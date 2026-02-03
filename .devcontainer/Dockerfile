@@ -78,6 +78,11 @@ RUN sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/inst
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.zshrc && \
     chsh -s $(which zsh)
 
+# Install Atuin (shell history sync & search)
+RUN curl -sSL https://raw.githubusercontent.com/atuinsh/atuin/main/install.sh | bash && \
+    echo 'eval "$(atuin init zsh)"' >> /root/.zshrc && \
+    echo 'eval "$(atuin init bash)"' >> /root/.bashrc
+
 # Set LD_LIBRARY_PATH for both x86_64 and aarch64
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu
 ENV PATH="/root/.local/bin:$PATH"

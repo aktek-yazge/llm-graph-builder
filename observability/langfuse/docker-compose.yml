@@ -1,14 +1,19 @@
-# Langfuse v3.142.0 - Self-Hosted Docker Compose
+# =============================================================================
+# Langfuse v3 - Self-Hosted Docker Compose
+# =============================================================================
 # LLM Observability, Tracing, and Prompt Management
 # GitHub: https://github.com/langfuse/langfuse
 # Docs: https://langfuse.com/docs
 #
-# Make sure to update the credential placeholders with your own secrets.
-# We mark them with # CHANGEME in the file below.
+# ÖN KOŞUL:
+#   cp .env.example .env  # Şifreleri .env dosyasında ayarlayın
 #
-# In addition, we recommend to restrict inbound traffic on the host to langfuse-web (port 3000) and minio (port 9090) only.
-# All other components are bound to localhost (127.0.0.1) to only accept connections from the local machine.
-# External connections from other machines will not be able to reach these services directly.
+# KULLANIM:
+#   docker compose up -d
+#
+# ERİŞİM:
+#   http://langfuse.dev.local veya http://localhost:3101
+# =============================================================================
 
 services:
   langfuse-worker:

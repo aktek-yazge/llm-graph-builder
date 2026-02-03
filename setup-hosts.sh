@@ -18,17 +18,25 @@ MARKER_START="# === WAT Dev Environment - START ==="
 MARKER_END="# === WAT Dev Environment - END ==="
 
 # Ana domain ve müşteri subdomainleri
-# Her müşteri için: browser subdomain + neo4j (bolt) subdomain
+# Her müşteri için: frontend, server, neo4j, bolt, flower, pgadmin
 HOSTS_ENTRIES="127.0.0.1   dev.local
 127.0.0.1   wat.dev.local
 127.0.0.1   neo4j.wat.dev.local
 127.0.0.1   akkok-sicil.dev.local
+127.0.0.1   server.akkok-sicil.dev.local
 127.0.0.1   neo4j.akkok-sicil.dev.local
+127.0.0.1   bolt.akkok-sicil.dev.local
+127.0.0.1   flower.akkok-sicil.dev.local
+127.0.0.1   pgadmin.akkok-sicil.dev.local
 127.0.0.1   dinkal.dev.local
 127.0.0.1   neo4j.dinkal.dev.local
 127.0.0.1   traefik.dev.local
 127.0.0.1   rabbitmq.dev.local
-127.0.0.1   mcp-inspector.dev.local"
+127.0.0.1   mcp-inspector.dev.local
+127.0.0.1   portainer.dev.local
+127.0.0.1   grafana.dev.local
+127.0.0.1   langfuse.dev.local
+127.0.0.1   infisical.dev.local"
 
 remove_entries() {
     echo "Mevcut WAT hosts kayitlari kaldiriliyor..."

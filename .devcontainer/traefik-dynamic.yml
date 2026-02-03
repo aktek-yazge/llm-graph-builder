@@ -28,9 +28,24 @@ http:
       priority: 15
 
     # =========================================================================
-    # AKKOK-SİCİL - Backend & Frontend
+    # AKKOK-SİCİL - Backend & Frontend (Subdomain-based)
     # =========================================================================
     akkok-sicil-backend:
+      rule: 'Host(`server.akkok-sicil.dev.local`)'
+      entryPoints:
+        - web
+      service: devcontainer-backend
+      priority: 20
+
+    akkok-sicil-frontend:
+      rule: 'Host(`akkok-sicil.dev.local`)'
+      entryPoints:
+        - web
+      service: devcontainer-frontend
+      priority: 10
+
+    # Legacy path-based routing (backward compatibility)
+    akkok-sicil-backend-legacy:
       rule: 'Host(`dev.local`) && PathPrefix(`/akkok-sicil/server`)'
       entryPoints:
         - web
@@ -39,7 +54,7 @@ http:
       service: devcontainer-backend
       priority: 20
 
-    akkok-sicil-frontend:
+    akkok-sicil-frontend-legacy:
       rule: 'Host(`dev.local`) && PathPrefix(`/akkok-sicil/ui`)'
       entryPoints:
         - web

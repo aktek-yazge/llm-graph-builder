@@ -21,7 +21,14 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       // Traefik reverse proxy için izin verilen hostlar
-      allowedHosts: ['localhost', 'dev.local', 'wat.local', 'aksa.local', 'kormas.local', 'demoserver.yazge.aktekbilisim.com'],
+      allowedHosts: [
+        'localhost',
+        'dev.local',
+        'akkok-sicil.dev.local',
+        'wat.dev.local',
+        'dinkal.dev.local',
+        'demoserver.yazge.aktekbilisim.com',
+      ],
     },
   };
 });

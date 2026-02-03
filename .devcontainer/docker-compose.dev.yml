@@ -42,6 +42,7 @@ services:
       - frontend_node_modules:/workspace/frontend/node_modules # Node.js cache
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket access
       - akkok_sicil_celery_output:/workspace/backend/output_celery # Celery output paylaşımı
+      - atuin_data:/root/.local/share/atuin # Atuin shell history
     environment:
       - PYTHONPATH=/workspace/backend
       # Neo4j bağlantısı (servis adı kullanılır, backend .env'den override edilir)
@@ -72,6 +73,8 @@ volumes:
   akkok_sicil_celery_output:
     external: true
     name: akkok_sicil_celery_output
+  atuin_data:
+    name: devcontainer_atuin_data
 
 networks:
   wat-dev-network:
