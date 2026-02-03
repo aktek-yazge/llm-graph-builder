@@ -73,7 +73,7 @@ services:
       - RABBITMQ_DEFAULT_USER=rabbitmq
       - RABBITMQ_DEFAULT_PASS=RabbitMQ!654*
       - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit consumer_timeout infinity
-    restart: unless-stopped
+    restart: always
     networks:
       - wat-dev-network
       - dinkal-dev-network
@@ -97,7 +97,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=6274
-    restart: unless-stopped
+    restart: always
     networks:
       - wat-dev-network
       - dinkal-dev-network

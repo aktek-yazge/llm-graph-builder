@@ -25,7 +25,7 @@ services:
   infisical:
     image: infisical/infisical:latest
     container_name: infisical-server
-    restart: unless-stopped
+    restart: always
     ports:
       - "8085:8080"
     env_file:
@@ -39,9 +39,9 @@ services:
         condition: service_healthy
     labels:
       - "logging=alloy"
-      # Traefik entegrasyonu (opsiyonel)
+      # Traefik entegrasyonu
       - "traefik.enable=true"
-      - "traefik.http.routers.infisical.rule=Host(`secrets.yazge.aktekbilisim.com`)"
+      - "traefik.http.routers.infisical.rule=Host(`infisical.dev.local`) || Host(`secrets.yazge.aktekbilisim.com`)"
       - "traefik.http.routers.infisical.entrypoints=web,websecure"
       - "traefik.http.services.infisical.loadbalancer.server.port=8080"
     logging:
@@ -66,7 +66,7 @@ services:
   infisical-db:
     image: postgres:16-alpine
     container_name: infisical-postgres
-    restart: unless-stopped
+    restart: always
     environment:
       - POSTGRES_USER=${INFISICAL_DB_USER:-infisical}
       - POSTGRES_PASSWORD=${INFISICAL_DB_PASSWORD}
@@ -95,7 +95,7 @@ services:
   infisical-redis:
     image: redis:7-alpine
     container_name: infisical-redis
-    restart: unless-stopped
+    restart: always
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - infisical_redis_data:/data

@@ -20,6 +20,7 @@
 #   - Tempo:       http://localhost:3200
 #   - Alloy OTLP:  grpc://localhost:4317, http://localhost:4318
 #   - Alloy UI:    http://localhost:12345
+#   - Portainer:   http://localhost:9000 veya http://portainer.dev.local
 # =============================================================================
 
 services:
@@ -151,6 +152,28 @@ services:
       timeout: 5s
       retries: 3
 
+  # ---------------------------------------------------------------------------
+  # Portainer - Docker Management UI
+  # ---------------------------------------------------------------------------
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    restart: always
+    networks:
+      - observability
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.dev.local`)"
+      - "traefik.http.routers.portainer.entrypoints=web"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
 networks:
   observability:
     external: true
@@ -174,3 +197,5 @@ volumes:
     name: observability-alloy-data
   redis-stack-data:
     name: observability-redis-stack-data
+  portainer-data:
+    name: observability-portainer-data

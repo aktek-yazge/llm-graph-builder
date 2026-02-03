@@ -49,7 +49,10 @@
     6379,
     8001,
     8002,
+    8085,
     8090,
+    9000,
+    9443,
     15672
   ],
   "portsAttributes": {
@@ -107,6 +110,18 @@
     },
     "15672": {
       "label": "RabbitMQ Management",
+      "onAutoForward": "silent"
+    },
+    "8085": {
+      "label": "Infisical",
+      "onAutoForward": "silent"
+    },
+    "9000": {
+      "label": "Portainer HTTP",
+      "onAutoForward": "silent"
+    },
+    "9443": {
+      "label": "Portainer HTTPS",
       "onAutoForward": "silent"
     }
   },

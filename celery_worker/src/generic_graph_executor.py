@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=logging-fstring-interpolation,broad-exception-caught
 """
 Generic Graph Executor
 
@@ -68,10 +69,10 @@ class GenericGraphExecutor:
     Kullanım:
         executor = GenericGraphExecutor(graph)
         result = executor.create_graph_from_llm_output(llm_output, file_name)
-    
+
     İlk çalışmada otomatik olarak entity fulltext index'leri oluşturur.
     """
-    
+
     # Class-level flag: Index kontrolü sadece bir kez yapılır
     _indexes_ensured = False
 
@@ -82,17 +83,19 @@ class GenericGraphExecutor:
         """
         self.graph = graph
         self._database = getattr(graph, "_database", None)
-    
-    def _ensure_entity_indexes(self):
+
+    def ensure_entity_indexes(self):
         """
         Entity fulltext index'lerinin varlığını kontrol eder ve gerekirse oluşturur.
         Bu metod sadece ilk çağrıda çalışır (class-level flag ile).
         """
         if GenericGraphExecutor._indexes_ensured:
             return
-        
+
         try:
+            # pylint: disable=import-outside-toplevel
             from src.make_relationships import create_entity_fulltext_indexes
+
             create_entity_fulltext_indexes(self.graph)
             GenericGraphExecutor._indexes_ensured = True
             logging.info("✅ Entity fulltext indexes checked/created")
@@ -305,7 +308,7 @@ class GenericGraphExecutor:
     def _create_relationship(
         self,
         rel: Dict[str, Any],
-        valid_node_ids: Set[str],  # noqa: ARG002 - Reserved for future validation
+        _valid_node_ids: Set[str],  # Reserved for future validation
     ) -> bool:
         """
         İki node arasında ilişki oluşturur.
@@ -358,7 +361,10 @@ class GenericGraphExecutor:
                 return True
             else:
                 logging.warning(
-                    f"⚠️ Relationship not created (nodes may not exist): ({from_id})-[{rel_type}]->({to_id})"
+                    "⚠️ Relationship not created (nodes may not exist): (%s)-[%s]->(%s)",
+                    from_id,
+                    rel_type,
+                    to_id,
                 )
                 return False
 

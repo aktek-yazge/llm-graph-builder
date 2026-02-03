@@ -195,7 +195,7 @@ services:
         limits:
           memory: 8g
           cpus: "2"
-    restart: unless-stopped
+    restart: always
     networks:
       - akkok-sicil-dev-network
     depends_on:
@@ -234,7 +234,7 @@ services:
         limits:
           memory: 2g
           cpus: "1"
-    restart: unless-stopped
+    restart: always
     networks:
       - akkok-sicil-dev-network
     depends_on:
@@ -255,7 +255,7 @@ services:
       - FLOWER_UNAUTHENTICATED_API=true
     expose:
       - "5555"
-    restart: unless-stopped
+    restart: always
     networks:
       - akkok-sicil-dev-network
     labels:
