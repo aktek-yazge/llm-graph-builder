@@ -130,7 +130,7 @@ services:
       - NEO4J_MCP_SERVER_PORT=8002
       - NEO4J_MCP_SERVER_PATH=/mcp/
       - NEO4J_NAMESPACE=
-      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,devcontainer
+      - NEO4J_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,host.docker.internal,mcp-neo4j-cypher,devcontainer,dev.local,mcp.dev.local
       - NEO4J_MCP_SERVER_ALLOW_ORIGINS=*
       - NEO4J_READ_TIMEOUT=30
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -152,9 +152,16 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
+      # Service tanımı (tek service, iki router kullanır)
+      - "traefik.http.services.mcp-cypher.loadbalancer.server.port=8002"
+      # Router 1: Path prefix - http://dev.local/mcp
       - "traefik.http.routers.mcp-cypher.rule=Host(`dev.local`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.mcp-cypher.entrypoints=web"
-      - "traefik.http.services.mcp-cypher.loadbalancer.server.port=8002"
+      - "traefik.http.routers.mcp-cypher.service=mcp-cypher"
+      # Router 2: Subdomain - http://mcp.dev.local/mcp/
+      - "traefik.http.routers.mcp-cypher-subdomain.rule=Host(`mcp.dev.local`)"
+      - "traefik.http.routers.mcp-cypher-subdomain.entrypoints=web"
+      - "traefik.http.routers.mcp-cypher-subdomain.service=mcp-cypher"
 
 volumes:
   traefik_dynamic_config:

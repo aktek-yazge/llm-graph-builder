@@ -27,7 +27,7 @@ HOSTS_ENTRIES="127.0.0.1   dev.local
 127.0.0.1   flower.akkok-sicil.dev.local pgadmin.akkok-sicil.dev.local
 127.0.0.1   dinkal.dev.local server.dinkal.dev.local
 127.0.0.1   neo4j.dinkal.dev.local bolt.dinkal.dev.local
-127.0.0.1   traefik.dev.local rabbitmq.dev.local mcp-inspector.dev.local
+127.0.0.1   traefik.dev.local rabbitmq.dev.local mcp-inspector.dev.local mcp.dev.local
 127.0.0.1   portainer.dev.local grafana.dev.local langfuse.dev.local infisical.dev.local"
 
 remove_entries() {
