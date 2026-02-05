@@ -56,114 +56,9 @@ def merge_relationship_between_chunk_and_entites(graph: Neo4jGraph, graph_docume
         else:
             logging.info("✅ Entities created with EXTRACTED_FROM relationships")
         
-        # Business Entity Linking: PolicyType, InsuredItem entity'lerini business node'lara bağla
-        logging.info("🔗 Linking business entities to their respective business nodes...")
-        
-        business_linking_query = """
-        UNWIND $batch_data AS data
-        MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
-        MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
-        
-        // PolicyType entity'lerini Policy node'una bağla
-        FOREACH (_ IN CASE WHEN data.node_type = 'PolicyType' THEN [1] ELSE [] END |
-            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
-            MERGE (policy)-[:HAS_TYPE]->(entity)
-        )
-        
-        // InsuredItem entity'lerini Policy node'una bağla
-        FOREACH (_ IN CASE WHEN data.node_type = 'InsuredItem' THEN [1] ELSE [] END |
-            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
-            MERGE (policy)-[:HAS_INSURED_ITEM]->(entity)
-        )
-        
-        RETURN count(*) as processed
-        """
-        
-        business_result = execute_graph_query(graph, business_linking_query, params={"batch_data": batch_data})
-        
-        if business_result:
-            logging.info(f"🔗 Processed business entity linking for {business_result[0]['processed']} entities")
-            
-            # PolicyYear ve Customer işlemlerini ayrı query'lerde yap
-            # PolicyYear entity'lerini kontrol et ve Policy'ye bağla
-            policy_year_query = """
-            UNWIND $batch_data AS data
-            MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
-            MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
-            WHERE data.node_type = 'PolicyYear' AND data.node_id =~ '^(19|20)\\\\d{2}$'
-            
-            MERGE (policyYear:PolicyYear {year: toInteger(data.node_id), name: data.node_id})
-            MERGE (policy:Policy)-[:DOCUMENTED_IN]->(d)
-            MERGE (policy)-[:HAS_YEAR]->(policyYear)
-            
-            RETURN count(*) as policy_year_processed
-            """
-            
-            policy_year_result = execute_graph_query(graph, policy_year_query, params={"batch_data": batch_data})
-            if policy_year_result:
-                logging.info(f"🔗 Processed {policy_year_result[0]['policy_year_processed']} PolicyYear entities")
-            
-            # Customer entity'lerini kontrol et ve Customer node'u oluştur
-            customer_query = """
-            UNWIND $batch_data AS data
-            MATCH (c:Chunk {id: data.chunk_id})-[:PART_OF]->(d:Document)
-            MATCH (entity:__Entity__ {id: data.node_id})-[:EXTRACTED_FROM]->(c)
-            WHERE data.node_type = 'Customer'
-            
-            MERGE (customer:Customer {name: data.node_id, fullName: data.node_id})
-            MERGE (customer)-[:HAS_DOC]->(d)
-            
-            RETURN count(*) as customer_processed
-            """
-            
-            customer_result = execute_graph_query(graph, customer_query, params={"batch_data": batch_data})
-            if customer_result:
-                logging.info(f"🔗 Processed {customer_result[0]['customer_processed']} Customer entities")
-        
-        if business_result:
-            logging.info(f"🔗 Processed business entity linking for {business_result[0]['processed']} entities")
-            
-            # Bağlantı sayılarını kontrol et
-            check_query = """
-            UNWIND $batch_data AS data
-            MATCH (entity:__Entity__ {id: data.node_id})
-            
-            OPTIONAL MATCH (policy:Policy)-[:HAS_TYPE]->(entity)
-            WHERE data.node_type = 'PolicyType'
-            
-            OPTIONAL MATCH (policy2:Policy)-[:HAS_INSURED_ITEM]->(entity)
-            WHERE data.node_type = 'InsuredItem'
-            
-            OPTIONAL MATCH (policy3:Policy)-[:HAS_YEAR]->(py:PolicyYear)
-            WHERE data.node_type = 'PolicyYear' AND py.name = data.node_id
-            
-            OPTIONAL MATCH (customer:Customer)-[:HAS_DOC]->(d:Document)
-            WHERE data.node_type = 'Customer' AND customer.name = data.node_id
-            
-            RETURN 
-                data.node_type as entity_type,
-                data.node_id as entity_id,
-                count(DISTINCT policy) as policy_type_links,
-                count(DISTINCT policy2) as insured_item_links,
-                count(DISTINCT policy3) as policy_year_links,
-                count(DISTINCT customer) as customer_links
-            """
-            
-            check_result = execute_graph_query(graph, check_query, params={"batch_data": batch_data})
-            
-            if check_result:
-                for result in check_result:
-                    entity_type = result['entity_type']
-                    entity_id = result['entity_id']
-                    
-                    if entity_type == 'PolicyType' and result['policy_type_links'] > 0:
-                        logging.info(f"  ✅ PolicyType '{entity_id}' linked to {result['policy_type_links']} Policy node(s)")
-                    elif entity_type == 'InsuredItem' and result['insured_item_links'] > 0:
-                        logging.info(f"  ✅ InsuredItem '{entity_id}' linked to {result['insured_item_links']} Policy node(s)")
-                    elif entity_type == 'PolicyYear' and result['policy_year_links'] > 0:
-                        logging.info(f"  ✅ PolicyYear '{entity_id}' linked to {result['policy_year_links']} Policy node(s)")
-                    elif entity_type == 'Customer' and result['customer_links'] > 0:
-                        logging.info(f"  ✅ Customer '{entity_id}' linked to {result['customer_links']} Document(s)")
+        # Domain-agnostic: İş mantığı bağlantıları prompt-driven olarak yapılır
+        # Entity tipleri ve ilişkiler LLM extraction'dan gelir, hardcoded değil
+        logging.info("ℹ️ Entity relationships are prompt-driven (no hardcoded business logic)")
     else:
         logging.info("ℹ️ No entities to create")
 
@@ -495,31 +390,19 @@ def create_chunk_fulltext_index(graph):
             logging.error(f"❌ Chunk fulltext index creation failed: {e}")
             raise
 
-# Entity fulltext index definitions for fuzzy search
+# Entity fulltext index definitions for fuzzy search (domain-agnostic)
 ENTITY_FULLTEXT_INDEXES = [
     {
         "name": "entity_names",
-        "labels": ["Customer", "InsuranceCompany", "Agent", "Company", "Person"],
-        "properties": ["name", "normalized_name"],
+        "labels": ["Company", "Person", "__Entity__"],
+        "properties": ["name", "normalized_name", "id"],
         "description": "Entity isimlerinde fuzzy search için",
     },
     {
         "name": "entity_aliases",
-        "labels": ["Customer", "InsuranceCompany", "Agent", "Company", "Person"],
+        "labels": ["Company", "Person", "__Entity__"],
         "properties": ["aliases"],
         "description": "Entity alias'larında arama için",
-    },
-    {
-        "name": "address_search",
-        "labels": ["Address", "Property"],
-        "properties": ["full_address", "address", "city", "district"],
-        "description": "Adres araması için",
-    },
-    {
-        "name": "policy_search",
-        "labels": ["Policy"],
-        "properties": ["policy_number", "company_policy_number"],
-        "description": "Poliçe numarası araması için",
     },
 ]
 
@@ -651,37 +534,32 @@ def create_cross_chunk_relations(graph: Neo4jGraph, file_name: str, similarity_t
 
 def create_document_relationships(graph: Neo4jGraph, target_document: str = None) -> dict:
     """
-    Person node'larını HAS_POLICY ilişkisiyle document'lara bağlar
+    Entity node'larını document'lara bağlar (domain-agnostic).
     Args:
         target_document: Eğer belirtilirse, sadece bu document için ilişkiler kurar
-    Returns: {'person_policy_connections': int, 'policy_connections': int, 'company_connections': int}
+    Returns: {'entity_connections': int, 'company_connections': int, 'metadata_connections': int}
     """
     if target_document:
-        logging.info(f"Creating person-document relationships for specific document: {target_document}")
+        logging.info(f"Creating entity-document relationships for specific document: {target_document}")
     else:
-        logging.info("Creating PERSON-HAS_POLICY-Document relationships")
+        logging.info("Creating entity-document relationships")
     
     results = {}
     
-    # 1. Person node'larını document'lara HAS_POLICY ile bağla
-    person_policy_query = """
-    // Her kişinin hangi dokümanlarda geçtiğini bul
-    MATCH (person:Person)<-[:HAS_ENTITY]-(c:Chunk)-[:PART_OF]->(d:Document)
+    # 1. Entity'leri document'lara MENTIONED_IN ile bağla (generic)
+    entity_doc_query = """
+    // Her entity'nin hangi dokümanlarda geçtiğini bul
+    MATCH (entity:__Entity__)-[:EXTRACTED_FROM]->(c:Chunk)-[:PART_OF]->(d:Document)
     """ + (f" WHERE d.fileName = $target_document" if target_document else "") + """
     
-    // Kişi ile doküman arasında HAS_POLICY ilişkisi kur
-    WITH person, d, count(DISTINCT c) AS chunk_count
+    // Entity ile doküman arasında MENTIONED_IN ilişkisi kur
+    WITH entity, d, count(DISTINCT c) AS chunk_count
     WHERE chunk_count >= 1
     
-    MERGE (person)-[r:HAS_POLICY]->(d)
+    MERGE (entity)-[r:MENTIONED_IN]->(d)
     ON CREATE SET 
         r.chunk_count = chunk_count,
-        r.created_at = datetime(),
-        r.confidence = CASE 
-            WHEN chunk_count >= 5 THEN 'HIGH'
-            WHEN chunk_count >= 2 THEN 'MEDIUM'
-            ELSE 'LOW'
-        END
+        r.created_at = datetime()
     ON MATCH SET 
         r.chunk_count = chunk_count,
         r.updated_at = datetime()
@@ -691,29 +569,25 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
     
     try:
         params = {"target_document": target_document} if target_document else {}
-        result = execute_graph_query(graph, person_policy_query, params=params)
-        results['person_policy_connections'] = result[0]['connections_created'] if result else 0
-        logging.info(f"Created {results['person_policy_connections']} PERSON-HAS_POLICY-Document connections")
+        result = execute_graph_query(graph, entity_doc_query, params=params)
+        results['entity_connections'] = result[0]['connections_created'] if result else 0
+        logging.info(f"Created {results['entity_connections']} ENTITY-MENTIONED_IN-Document connections")
     except Exception as e:
-        logging.error(f"Error creating person-policy connections: {e}")
-        results['person_policy_connections'] = 0
+        logging.error(f"Error creating entity-document connections: {e}")
+        results['entity_connections'] = 0
     
-    # 2. Poliçe türü bağlantısı iptal edildi - SAME_POLICY_TYPE relationship kaldırıldı
-    results['policy_connections'] = 0
-    
-    # 3. Aynı şirkete ait document'ları birbirine bağla
+    # 2. Aynı Company entity'ye sahip document'ları birbirine bağla (generic)
     company_query = """
     // Company entity'lere göre bağla
-    MATCH (company)<-[:HAS_ENTITY]-(c1:Chunk)-[:PART_OF]->(d1:Document)
-    MATCH (company)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+    MATCH (company:Company)-[:EXTRACTED_FROM]->(c1:Chunk)-[:PART_OF]->(d1:Document)
+    MATCH (company)-[:EXTRACTED_FROM]->(c2:Chunk)-[:PART_OF]->(d2:Document)
     WHERE d1 <> d2 
-    AND (company:Company OR company.id =~ '(?i).*(sigorta|insurance|axa|allianz|mapfre).*')
     """ + (f" AND (d1.fileName = $target_document OR d2.fileName = $target_document)" if target_document else "") + """
     
     WITH d1, d2, company, count(*) AS shared_chunks
     WHERE shared_chunks >= 1
     
-    MERGE (d1)-[r:SAME_INSURANCE_COMPANY]->(d2)
+    MERGE (d1)-[r:SAME_COMPANY]->(d2)
     ON CREATE SET 
         r.company_name = company.id,
         r.shared_chunks = shared_chunks,
@@ -734,7 +608,7 @@ def create_document_relationships(graph: Neo4jGraph, target_document: str = None
         logging.error(f"Error creating company-based document connections: {e}")
         results['company_connections'] = 0
     
-    # 4. Document metadata'ya göre de bağlayalım (aynı yıl, aynı owner)
+    # 3. Document metadata'ya göre de bağlayalım (aynı owner)
     metadata_query = """
     // Aynı owner'a ait document'ları bağla
     MATCH (d1:Document), (d2:Document)
@@ -1270,93 +1144,5 @@ def link_chunks_to_document(graph, file_name):
     return linked_count + first_linked_count
 
 
-def create_policy_entity_relationships(graph: Neo4jGraph, file_name: str):
-    """
-    İşlem yapılan chunk'ın bağlı olduğu Policy node'unu bulur ve 
-    o chunk'tan çıkarılan entity'lere HAS_ENTITY ile bağlar.
-    
-    Args:
-        graph: Neo4j graph instance
-        file_name: İşlem yapılacak dosya adı
-    """
-    logging.info(f"Creating Policy-Entity relationships for file: {file_name}")
-    
-    # Önce tüm LLM'den çıkan node'ların __Entity__ label'ına sahip olduğundan emin ol
-    ensure_entity_labels_query = """
-    MATCH (d:Document {fileName: $file_name})
-    MATCH (d)<-[:PART_OF]-(c:Chunk)<-[:EXTRACTED_FROM]-(n)
-    WHERE NOT n:__Entity__
-    SET n:__Entity__
-    RETURN count(n) AS updated_nodes
-    """
-    
-    try:
-        entity_result = execute_graph_query(graph, ensure_entity_labels_query, params={"file_name": file_name})
-        updated_nodes = entity_result[0].get('updated_nodes', 0) if entity_result else 0
-        if updated_nodes > 0:
-            logging.info(f"✅ Added __Entity__ label to {updated_nodes} nodes")
-    except Exception as e:
-        logging.warning(f"Warning: Could not ensure __Entity__ labels: {e}")
-    
-    # Policy node'ları chunk'lardan çıkarılan entity'lere bağla
-    policy_entity_query = """
-    // Her chunk için: o chunk'tan çıkarılan Policy node'unu bul
-    MATCH (d:Document {fileName: $file_name})
-    MATCH (d)<-[:PART_OF]-(c:Chunk)<-[:EXTRACTED_FROM]-(policy:__Entity__)
-    WHERE 'Policy' in labels(policy) OR policy.entity_type = 'Policy' OR toLower(policy.id) CONTAINS 'policy'
-    
-    // Aynı chunk'tan çıkarılan diğer entity'leri bul (Policy hariç)
-    MATCH (entity:__Entity__)-[:EXTRACTED_FROM]->(c)
-    WHERE entity <> policy 
-    AND NOT 'Policy' in labels(entity) 
-    AND entity.entity_type <> 'Policy'
-    AND NOT toLower(entity.id) CONTAINS 'policy'
-    
-    // Policy'yi aynı chunk'tan çıkarılan entity'lere HAS_ENTITY ile bağla (business logic)
-    MERGE (policy)-[r:HAS_ENTITY]->(entity)
-    ON CREATE SET 
-        r.created_at = datetime(),
-        r.source_chunk = c.id,
-        r.relationship_type = 'policy_to_chunk_entity',
-        r.source = 'chunk_based_linking'
-    ON MATCH SET 
-        r.updated_at = datetime()
-    
-    RETURN count(DISTINCT r) AS relationships_created, 
-           count(DISTINCT policy) AS policy_nodes_processed,
-           count(DISTINCT entity) AS entities_linked,
-           count(DISTINCT c) AS chunks_processed
-    """
-    
-    try:
-        result = execute_graph_query(graph, policy_entity_query, params={"file_name": file_name})
-        
-        if result and len(result) > 0:
-            relationships_created = result[0].get('relationships_created', 0)
-            policy_nodes_processed = result[0].get('policy_nodes_processed', 0)
-            entities_linked = result[0].get('entities_linked', 0)
-            chunks_processed = result[0].get('chunks_processed', 0)
-            
-            logging.info(f"✅ Policy-Entity relationships created: {relationships_created} relationships")
-            logging.info(f"   Policy nodes processed: {policy_nodes_processed}")
-            logging.info(f"   Entities linked: {entities_linked}")
-            logging.info(f"   Chunks processed: {chunks_processed}")
-            
-            return {
-                'relationships_created': relationships_created,
-                'policy_nodes_processed': policy_nodes_processed,
-                'entities_linked': entities_linked,
-                'chunks_processed': chunks_processed
-            }
-        else:
-            logging.info("No Policy nodes found or no relationships created")
-            return {
-                'relationships_created': 0,
-                'policy_nodes_processed': 0,
-                'entities_linked': 0,
-                'chunks_processed': 0
-            }
-            
-    except Exception as e:
-        logging.error(f"Error creating Policy-Entity relationships: {e}")
-        raise
+# create_policy_entity_relationships function removed - was insurance-specific
+# Entity relationships are now prompt-driven and handled via EXTRACTED_FROM relationships

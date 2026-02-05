@@ -724,36 +724,26 @@ def delete_files_task(self, file_ids: list):
                         )
                         deleted_chunks = chunk_result[0]["deletedChunks"] if chunk_result else 0
                         
-                        # Step 2: Delete document-related entities (Policy and connected nodes)
+                        # Step 2: Delete document-related entities (generic __Entity__ nodes)
                         delete_entities_query = """
                         MATCH (d:Document {fileName: $filename})
+                        OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
                         
-                        // Find Policy nodes connected via DOCUMENTED_IN
-                        OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-                        
-                        // Find all nodes connected to Policy (1-2 hops)
-                        OPTIONAL MATCH (p)-[*1..2]-(relatedNode)
-                        WHERE relatedNode IS NOT NULL
-                          AND NOT relatedNode:Document 
-                          AND NOT relatedNode:Chunk
-                          AND NOT relatedNode:`__Community__`
+                        // Find all __Entity__ nodes extracted from chunks
+                        OPTIONAL MATCH (entity:__Entity__)-[:EXTRACTED_FROM]->(c)
                         
                         // Safety check: only delete if not connected to other documents
-                        WITH d, p, collect(DISTINCT relatedNode) as relatedNodes
-                        WITH d, p, [node IN relatedNodes WHERE node IS NOT NULL 
+                        WITH d, collect(DISTINCT entity) as entities
+                        WITH d, [entity IN entities WHERE entity IS NOT NULL 
                             AND NOT EXISTS {
-                                MATCH (node)-[*1..3]-(otherDoc:Document)
+                                MATCH (entity)-[:EXTRACTED_FROM]->(:Chunk)-[:PART_OF]->(otherDoc:Document)
                                 WHERE otherDoc.fileName <> $filename
-                            }] AS safeNodes
+                            }] AS safeEntities
                         
-                        // Delete safe nodes and policy
-                        FOREACH (node IN safeNodes | DETACH DELETE node)
-                        WITH d, p, size(safeNodes) as deletedRelated
+                        // Delete safe entities
+                        FOREACH (entity IN safeEntities | DETACH DELETE entity)
                         
-                        // Delete policy if exists
-                        DETACH DELETE p
-                        
-                        RETURN deletedRelated
+                        RETURN size(safeEntities) as deletedRelated
                         """
                         entity_result = use_connection.query(
                             delete_entities_query,
@@ -1089,8 +1079,8 @@ def batch_entity_resolution_task(self, neo4j_uri: str = None):
             "total_merged": 0,
         }
         
-        # Run resolution for different entity types
-        entity_types = ["__Entity__", "Customer", "Insurer", "PolicyType"]
+        # Run resolution for __Entity__ nodes (domain-agnostic)
+        entity_types = ["__Entity__"]
         
         for entity_type in entity_types:
             logging.info(f"📊 Processing {entity_type}...")

@@ -1336,6 +1336,106 @@ const Content: React.FC<ContentProps> = ({
     }
   };
 
+  // Graph Reset handler - Entity'leri sil, yeniden extraction için hazırla
+  const handleResetGraphForV2 = async () => {
+    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+
+    if (!v2FileIds || v2FileIds.length === 0) {
+      showErrorToast('Hiçbir V2 dosyası seçilmedi');
+      return;
+    }
+
+    // Confirm: Entity'lerin silineceğini belirt
+    if (!confirm(
+      'Seçili dosyaların graph\'ını sıfırlamak istediğinize emin misiniz?\n\n' +
+      '⚠️ Bu işlem:\n' +
+      '• Neo4j\'deki TÜM entity\'leri siler (Person, Company, Meeting vb.)\n' +
+      '• Document ve Chunk node\'ları KORUNUR\n' +
+      '• Entity extraction yeniden çalıştırılabilir hale gelir'
+    )) {
+      return;
+    }
+
+    // Check if all V2 files are selected
+    const allV2Files = filesData.filter((f) => f.fileSource === 'V2 Queue' && f.v2FileId);
+    const isAllSelected = allV2Files.length > 0 && v2FileIds.length === allV2Files.length;
+
+    try {
+      setIsExtractLoading(true);
+
+      if (isAllSelected) {
+        // Use "all" parameter when all files are selected
+        showNormalToast('Tüm dosyalar için graph reset ediliyor...');
+        const response = await resetFileStageAPI('all', 'graph');
+        if (response.status === 'Success' || response.status === 'success') {
+          const resetCount = response.data?.reset_count || v2FileIds.length;
+          showSuccessToast(`✓ ${resetCount} dosya graph reset edildi (entity\'ler silindi)`);
+          childRef.current?.reloadV2Files?.();
+        } else {
+          showErrorToast(`Graph reset başarısız: ${response.message || 'Bilinmeyen hata'}`);
+        }
+      } else {
+        // Seçili dosyalar için batch reset
+        const BATCH_SIZE = 50;
+        const totalFiles = v2FileIds.length;
+        const totalBatches = Math.ceil(totalFiles / BATCH_SIZE);
+        
+        showNormalToast(`${totalFiles} dosya için graph reset ediliyor (${totalBatches} batch)...`);
+        
+        let successCount = 0;
+        let failCount = 0;
+
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+          const batchStart = batchIndex * BATCH_SIZE;
+          const batchEnd = Math.min(batchStart + BATCH_SIZE, totalFiles);
+          const batchFileIds = v2FileIds.slice(batchStart, batchEnd);
+          
+          const batchPromises = batchFileIds.map(async (fileId) => {
+            try {
+              const response = await resetFileStageAPI(fileId, 'graph');
+              if (response.status === 'Success' || response.status === 'success') {
+                return { success: true, fileId };
+              } else {
+                return { success: false, fileId, error: response.message };
+              }
+            } catch (error: any) {
+              return { success: false, fileId, error: error.message };
+            }
+          });
+
+          const batchResults = await Promise.all(batchPromises);
+          
+          batchResults.forEach((result) => {
+            if (result.success) {
+              successCount++;
+            } else {
+              failCount++;
+            }
+          });
+          
+          if (totalBatches > 1) {
+            showNormalToast(`Batch ${batchIndex + 1}/${totalBatches} tamamlandı (${successCount}/${totalFiles})`);
+          }
+        }
+
+        if (successCount > 0) {
+          showSuccessToast(`✓ ${successCount}/${totalFiles} dosya graph reset edildi${failCount > 0 ? ` (${failCount} başarısız)` : ''}`);
+        }
+        if (failCount > 0 && successCount === 0) {
+          showErrorToast(`Tüm dosyalar başarısız oldu (${failCount} hata)`);
+        }
+        childRef.current?.reloadV2Files?.();
+      }
+    } catch (error: any) {
+      showErrorToast('Graph reset işlemi başlatılamadı');
+    } finally {
+      setIsExtractLoading(false);
+      setTimeout(() => {
+        childRef.current?.reloadV2Files?.();
+      }, 500);
+    }
+  };
+
   const onClickHandler = () => {
     const selectedRows = childRef.current?.getSelectedRows();
     const v2FileIds = childRef.current?.getV2SelectedFileIds();
@@ -1769,6 +1869,18 @@ const Content: React.FC<ContentProps> = ({
                       showErrorToast('Reset için dosya seçiniz');
                     } else {
                       handleResetChunkingForV2();
+                    }
+                  }}
+                  isDisabled={isReadOnlyUser || extractLoading}
+                />
+                <Menu.Item
+                  title='Graph Sıfırla'
+                  onClick={() => {
+                    const v2FileIds = childRef.current?.getV2SelectedFileIds();
+                    if (!v2FileIds || v2FileIds.length === 0) {
+                      showErrorToast('Graph reset için dosya seçiniz');
+                    } else {
+                      handleResetGraphForV2();
                     }
                   }}
                   isDisabled={isReadOnlyUser || extractLoading}

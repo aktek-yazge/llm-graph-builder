@@ -1,6 +1,9 @@
+# syntax=docker/dockerfile:1
 # Celery Worker Dockerfile
-# Build: docker build -t celery-worker .
+# Build: DOCKER_BUILDKIT=1 docker build -t celery-worker .
 # Run: docker run celery-worker
+#
+# BuildKit cache mount kullanılıyor - dependency'ler cache'te tutulur
 
 FROM ubuntu:24.04
 
@@ -72,9 +75,13 @@ COPY pyproject.toml uv.lock /app/
 
 # Install dependencies to GLOBAL Python (no venv)
 # --system: Install to system Python, not virtualenv
-# --no-cache: Don't cache downloads (smaller image)
-RUN cd /app && \
-    uv pip install --system --no-cache -r pyproject.toml && \
+# --mount=type=cache: BuildKit cache mount for faster rebuilds
+#   - uv cache: downloaded packages
+#   - pip cache: wheel cache
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip \
+    cd /app && \
+    uv pip install --system -r pyproject.toml && \
     # Remove uv after install (not needed at runtime)
     rm /usr/local/bin/uv
 

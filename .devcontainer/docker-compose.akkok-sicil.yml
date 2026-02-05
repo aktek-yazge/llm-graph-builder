@@ -203,7 +203,9 @@ services:
     volumes:
       # Named volume - devcontainer ile paylaşım için
       - akkok_sicil_celery_output:/app/output
-      # Dev'de src mount devcontainer path sorunu yaratır, image içindeki kod kullanılır
+      # Celery worker source - bind mount (live reload)
+      - /host_mnt/Users/mehmeterdogan/python-projects/llm-graph-builder-yedek/celery_worker/src:/app/src:ro
+      - /host_mnt/Users/mehmeterdogan/python-projects/llm-graph-builder-yedek/celery_worker/prompts:/app/prompts:ro
     deploy:
       resources:
         limits:
@@ -243,6 +245,9 @@ services:
     volumes:
       # Named volume - devcontainer ile paylaşım için
       - akkok_sicil_celery_output:/app/output
+      # Celery worker source - bind mount (live reload)
+      - /host_mnt/Users/mehmeterdogan/python-projects/llm-graph-builder-yedek/celery_worker/src:/app/src:ro
+      - /host_mnt/Users/mehmeterdogan/python-projects/llm-graph-builder-yedek/celery_worker/prompts:/app/prompts:ro
     deploy:
       resources:
         limits:
@@ -293,6 +298,8 @@ volumes:
     name: akkok_sicil_pgadmin_data
   akkok_sicil_celery_output:
     name: akkok_sicil_celery_output
+  akkok_sicil_prompts:
+    name: akkok_sicil_prompts
 
 networks:
   akkok-sicil-dev-network:

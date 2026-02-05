@@ -423,87 +423,36 @@ class graphDBdataAccess:
         model: str = "openai_gpt_4o_mini",
     ):
         """
-        Belge tipine göre uygun node'ları oluşturur (sadece Policy)
+        Belge içeriğinden LLM ile entity'leri çıkarır ve graph'a yazar.
+        Domain-agnostic: Tüm entity tipleri prompt'ta tanımlıdır.
 
         Args:
             file_name: Dosya adı
-            document_type: 'policy' veya 'auto' (otomatik tespit)
-            text_content: Kullanılmıyor (CV extraction kaldırıldı)
+            document_type: Şu an kullanılmıyor (generic extraction)
+            text_content: Kullanılmıyor
+            model: Kullanılacak LLM modeli
         """
         try:
-            # Otomatik tespit (artık sadece policy döndürür)
-            if document_type == "auto":
-                document_type = self._detect_document_type(file_name)
-
-            # Policy node oluştur (CV seçeneği kaldırıldı)
-            logging.info(f"📋 Policy node oluşturuluyor: {file_name}")
-            self.create_policy_node_from_document(file_name, model)
+            logging.info(f"📋 Generic entity extraction başlatılıyor: {file_name}")
+            self.extract_and_create_entities(file_name, model)
 
         except Exception as e:
-            logging.error(f"Document related nodes oluşturma hatası ({file_name}): {e}")
+            logging.error(f"Entity extraction hatası ({file_name}): {e}")
             raise e
 
     def _detect_document_type(self, file_name: str) -> str:
         """
-        Dosya adından belge tipini otomatik olarak tespit eder
+        Dosya adından belge tipini otomatik olarak tespit eder.
+        Domain-agnostic: Her zaman "document" döner.
+        Gerçek belge tipi tespiti prompt-driven olarak yapılır.
 
         Args:
             file_name: Dosya adı
 
         Returns:
-            'policy' (CV detection kaldırıldı, sadece policy)
+            'document' (generic tip)
         """
-        try:
-            file_name_lower = file_name.lower()
-
-            # Policy anahtar kelimeleri
-            policy_keywords = [
-                "poliçe",
-                "police",
-                "policy",
-                "sigorta",
-                "insurance",
-                "kasko",
-                "dask",
-                "trafik",
-                "traffic",
-                "zorunlu",
-                "compulsory",
-                "hayat",
-                "life",
-                "sağlık",
-                "saglik",
-                "health",
-                "seyahat",
-                "travel",
-                "konut",
-                "home",
-                "işyeri",
-                "isyeri",
-                "workplace",
-                "ferdi",
-                "individual",
-                "kaza",
-                "accident",
-            ]
-
-            # Policy kontrolü
-            for keyword in policy_keywords:
-                if keyword in file_name_lower:
-                    logging.info(
-                        f"🔍 Policy belgesi tespit edildi ('{keyword}' anahtar kelimesi): {file_name}"
-                    )
-                    return "policy"
-
-            # Varsayılan olarak policy
-            logging.info(
-                f"🔍 Belge tipi tespit edilemedi, varsayılan 'policy' kullanılıyor: {file_name}"
-            )
-            return "policy"
-
-        except Exception as e:
-            logging.error(f"Belge tipi tespit hatası: {e}")
-            return "policy"  # Hata durumunda varsayılan
+        return "document"
 
     def update_source_node(self, obj_source_node: sourceNode):
         try:
@@ -891,53 +840,24 @@ class graphDBdataAccess:
             CALL (documents) {
             UNWIND documents AS d
             
-            // 1. Chunk'ları ve chunk-entity ilişkilerini topla
+            // 1. Chunk'ları ve chunk'tan çıkarılan entity'leri topla
             OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-            OPTIONAL MATCH (c)-[:HAS_ENTITY]->(ce)
-            
-            // 2. Document'a direkt bağlı entity'leri topla (Policy, Customer vs.)
-            OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(policy:Policy)
-            OPTIONAL MATCH (d)<-[:HAS_DOC]-(customer:Customer)
-            OPTIONAL MATCH (policy)-[:HAS_YEAR]->(py:PolicyYear)
-            OPTIONAL MATCH (policy)-[:HAS_INSURED_ITEM]->(ii:InsuredItem)
-            OPTIONAL MATCH (policy)-[:HAS_TYPE]->(pt:PolicyType)
-            
-            // 3. Document'a bağlı diğer node'ları topla (Agent, InsuranceCompany vs.)
-            OPTIONAL MATCH (d)-[*0..2]-(other)
-            WHERE other:Agent OR other:InsuranceCompany OR other:Address OR other:Phone OR other:Email
+            OPTIONAL MATCH (entity:__Entity__)-[:EXTRACTED_FROM]->(c)
             
             WITH d, documents, 
                  COLLECT(DISTINCT c) AS chunks, 
-                 COLLECT(DISTINCT ce) AS chunkEntities,
-                 COLLECT(DISTINCT policy) + COLLECT(DISTINCT customer) + COLLECT(DISTINCT py) + COLLECT(DISTINCT ii) + COLLECT(DISTINCT pt) AS docEntities,
-                 COLLECT(DISTINCT other) AS otherNodes
+                 COLLECT(DISTINCT entity) AS entities
             
-            // 4. Sadece başka document'larda kullanılmayan entity'leri sil
+            // 2. Sadece başka document'larda kullanılmayan entity'leri sil
             WITH d, chunks, 
-                 [entity IN chunkEntities WHERE entity IS NOT NULL AND NOT EXISTS {
-                     MATCH (entity)<-[:HAS_ENTITY]-(c2:Chunk)-[:PART_OF]->(d2:Document)
+                 [entity IN entities WHERE entity IS NOT NULL AND NOT EXISTS {
+                     MATCH (entity)-[:EXTRACTED_FROM]->(c2:Chunk)-[:PART_OF]->(d2:Document)
                      WHERE NOT d2 IN documents
-                 }] AS safeChunkEntities,
-                 [entity IN docEntities WHERE entity IS NOT NULL AND NOT EXISTS {
-                     MATCH (d2:Document)
-                     WHERE NOT d2 IN documents AND (
-                         (d2)<-[:DOCUMENTED_IN]-(entity) OR 
-                         (d2)<-[:HAS_DOC]-(entity) OR
-                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_YEAR]->(entity) OR
-                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_INSURED_ITEM]->(entity) OR
-                         (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:HAS_TYPE]->(entity)
-                     )
-                 }] AS safeDocEntities,
-                 [node IN otherNodes WHERE node IS NOT NULL AND NOT EXISTS {
-                     MATCH (node)-[*0..2]-(d2:Document)
-                     WHERE NOT d2 IN documents
-                 }] AS safeOtherNodes
+                 }] AS safeEntities
             
-            // 5. Güvenli silme işlemi
+            // 3. Güvenli silme işlemi
             FOREACH (chunk IN chunks | DETACH DELETE chunk)
-            FOREACH (entity IN safeChunkEntities | DETACH DELETE entity)
-            FOREACH (entity IN safeDocEntities | DETACH DELETE entity) 
-            FOREACH (node IN safeOtherNodes | DETACH DELETE node)
+            FOREACH (entity IN safeEntities | DETACH DELETE entity)
             DETACH DELETE d
             } IN TRANSACTIONS OF 1 ROWS
             """
@@ -1478,18 +1398,18 @@ class graphDBdataAccess:
             print(f"Error in getting node labels/relationship types from db: {e}")
             return []
 
-    def create_policy_node_from_document(
+    def extract_and_create_entities(
         self, file_name: str, model: str = "openai_gpt_4o_mini"
     ):
         """
-        Belge içeriğinden LLM kullanarak kapsamlı poliçe/zeyilname bilgilerini çıkarır ve tüm ilgili node'ları oluşturur.
+        Belge içeriğinden LLM kullanarak entity'leri çıkarır ve Neo4j'ye yazar.
+        Domain-agnostic: Entity tipleri ve ilişkiler prompt dosyasında tanımlıdır.
 
         Bu metod:
-        1. Veritabanından belgenin Chunk'larını almır
+        1. Veritabanından belgenin Chunk'larını alır
         2. Chunk içeriğini birleştirerek belge metnini oluşturur
-        3. LLM ile kapsamlı varlık çıkarımı yapar (document_type dahil)
-        4. Document type'a göre Policy veya Endorsement node'u oluşturur
-        5. Tüm ilgili entity'leri oluşturur ve ilişkiler kurar
+        3. LLM ile generic varlık çıkarımı yapar
+        4. GenericGraphExecutor ile Neo4j'ye yazar
         """
         try:
             logging.info(f"🔍 {file_name} için kapsamlı LLM extraction başlatılıyor...")
@@ -1529,7 +1449,7 @@ class graphDBdataAccess:
 
         except Exception as e:
             logging.error(
-                f"Policy/Endorsement node oluşturma hatası ({file_name}): {e}"
+                f"Entity extraction hatası ({file_name}): {e}"
             )
             raise e
 

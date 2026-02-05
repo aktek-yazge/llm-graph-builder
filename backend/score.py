@@ -375,6 +375,74 @@ def _cleanup_neo4j_for_file(
         return None
 
 
+def _cleanup_entities_for_file(
+    neo4j_uri: str, neo4j_database: str, filename: str, original_name: str
+) -> Optional[str]:
+    """
+    Neo4j'den dosyaya ait TÜM entity node'larını RECURSIVE olarak siler.
+    Document ve Chunk node'ları KORUNUR.
+    
+    Zincirleme ilişkiler (Company->Meeting->Person) de temizlenir.
+    Bu fonksiyon SENKRON çalışır - asyncio.to_thread ile çağrılmalı.
+    
+    ⚠️ NOT: Bu fonksiyon graph reset için kullanılır.
+    Sadece chunk silmek için _cleanup_neo4j_for_file kullanın.
+    """
+    from src.shared.common_fn import create_graph_database_connection
+
+    try:
+        graph_connection = create_graph_database_connection(
+            neo4j_uri,
+            os.environ.get("NEO4J_USERNAME"),
+            os.environ.get("NEO4J_PASSWORD"),
+            neo4j_database,
+        )
+
+        # 1. Direkt bağlı entity'leri bul
+        # 2. Onların bağıntılı olduğu entity'leri de bul (3 seviye derinlik)
+        # 3. Document ve Chunk hariç hepsini sil
+        delete_entities_query = """
+        MATCH (d:Document {fileName: $fileName})-[:HAS_ENTITY]->(directEntity)
+        WITH d, collect(DISTINCT directEntity) as directEntities
+        
+        // Zincirleme bağlı entity'leri bul (1-3 hop)
+        UNWIND directEntities as entity
+        OPTIONAL MATCH (entity)-[*1..3]-(related)
+        WHERE NOT related:Document AND NOT related:Chunk
+        
+        WITH d, directEntities, collect(DISTINCT related) as relatedEntities
+        WITH d, directEntities + [x IN relatedEntities WHERE x IS NOT NULL AND NOT x IN directEntities] as allEntities
+        
+        // Tüm entity'leri sil
+        UNWIND allEntities as e
+        DETACH DELETE e
+        
+        WITH d, count(e) as deletedCount
+        RETURN deletedCount
+        """
+        
+        result = graph_connection.query(delete_entities_query, {"fileName": filename})
+        deleted_count = result[0]["deletedCount"] if result and result[0]["deletedCount"] else 0
+
+        # Document node'unu güncelle
+        update_doc_query = """
+        MATCH (d:Document {fileName: $fileName})
+        SET d.status = 'Processing',
+            d.hasExtractedEntities = false
+        RETURN d.fileName as fileName
+        """
+        graph_connection.query(update_doc_query, {"fileName": filename})
+
+        if deleted_count > 0:
+            logging.info(f"🗑️ Deleted {deleted_count} entities for {original_name} (Document & chunks preserved)")
+            return f"{deleted_count} entities deleted (Document & chunks preserved)"
+        return "No entities found to delete"
+
+    except Exception as e:
+        logging.warning(f"⚠️ Neo4j entity cleanup error for {original_name}: {str(e)}")
+        return None
+
+
 def get_cached_agent(
     session_id: str, graph: Neo4jGraph, model_name: str
 ) -> IntelligentAgent:
@@ -6963,15 +7031,13 @@ async def reset_file_stage(
                         },
                     )
             elif stage == "graph":
-                # Reset all files that have graph_status in ["processing", "completed", "failed"]
+                # Reset all files that have graph_status NOT in ["pending"]
+                # Include: processing, completed, failed, pending_endorsement, etc.
                 files_to_reset = (
                     db_session.query(UploadedFile)
                     .filter(UploadedFile.upload_status == "uploaded")
-                    .filter(
-                        UploadedFile.graph_status.in_(
-                            ["processing", "completed", "failed"]
-                        )
-                    )
+                    .filter(UploadedFile.chunking_status == "chunked")  # Chunk'lar hazır olmalı
+                    .filter(UploadedFile.graph_status != "pending")  # Pending olmayanları al
                     .all()
                 )
             else:
@@ -7265,28 +7331,46 @@ async def reset_file_stage(
                     )
 
                 elif stage == "graph":
-                    # Reset only graph
-                    # If graph failed, reset to chunked state (previous stage)
-                    if file_record.graph_status == "failed":
-                        # Graph failed → go back to chunked state
-                        file_record.graph_status = "pending"
-                        # Ensure chunking_status is "chunked" (previous successful stage)
-                        if file_record.chunking_status != "chunked":
-                            file_record.chunking_status = "chunked"
-                        logging.info(
-                            f"🔄 Reset GRAPH stage for file {file_record.id} ({file_record.original_name}) - failed → chunked (ready to retry)"
+                    # ╔═══════════════════════════════════════════════════════════════════╗
+                    # ║  GRAPH RESET (BULK) - Entity'leri sil, yeniden extraction için   ║
+                    # ╚═══════════════════════════════════════════════════════════════════╝
+                    
+                    # Neo4j'den entity'leri sil
+                    try:
+                        neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        neo4j_database = file_record.neo4j_database or os.environ.get(
+                            "NEO4J_DATABASE", "neo4j"
                         )
-                    else:
-                        # Normal reset (processing or completed)
-                        file_record.graph_status = "pending"
-                    file_record.status = "uploaded"  # Reset status
+
+                        if neo4j_uri:
+                            cleanup_result = _cleanup_entities_for_file(
+                                neo4j_uri,
+                                neo4j_database,
+                                file_record.filename,
+                                file_record.original_name,
+                            )
+                            if cleanup_result:
+                                logging.info(
+                                    f"🗑️ Neo4j entity cleanup for {file_record.original_name}: {cleanup_result}"
+                                )
+                    except Exception as neo4j_error:
+                        logging.warning(
+                            f"⚠️ Could not delete entities from Neo4j for {file_record.original_name}: {str(neo4j_error)}"
+                        )
+                    
+                    # Status güncelle
+                    file_record.graph_status = "pending"
+                    if file_record.chunking_status != "chunked":
+                        file_record.chunking_status = "chunked"
+                    file_record.status = "uploaded"
                     file_record.graph_started_at = None
                     file_record.graph_completed_at = None
+                    file_record.node_count = 0
+                    file_record.relationship_count = 0
                     reset_count += 1
-                    # Commit after each file to prevent data loss if process is interrupted
                     db_session.commit()
                     logging.info(
-                        f"🔄 Reset GRAPH for file {file_record.id} ({file_record.original_name})"
+                        f"🔄 Reset GRAPH for file {file_record.id} ({file_record.original_name}) - entities deleted"
                     )
 
             # Final commit for any remaining changes
@@ -7635,24 +7719,57 @@ async def reset_file_stage(
             )
 
         elif stage == "graph":
-            # Reset only graph
-            # If graph failed, reset to chunked state (previous stage)
-            if file_record.graph_status == "failed":
-                # Graph failed → go back to chunked state
-                file_record.graph_status = "pending"
-                # Ensure chunking_status is "chunked" (previous successful stage)
-                if file_record.chunking_status != "chunked":
-                    file_record.chunking_status = "chunked"
-                logging.info(
-                    f"🔄 Reset GRAPH stage for file {file_id_int} (failed → chunked, ready to retry)"
+            # ╔═══════════════════════════════════════════════════════════════════╗
+            # ║  GRAPH RESET - Entity'leri sil, yeniden extraction için hazırla   ║
+            # ║                                                                     ║
+            # ║  📋 Bu reset:                                                      ║
+            # ║      - Neo4j'deki TÜM entity'leri siler (Person, Company, vb.)    ║
+            # ║      - Document ve Chunk node'larını KORUR                        ║
+            # ║      - graph_status = "pending" yapar                             ║
+            # ║      - chunking_status = "chunked" kalır (chunk'lar var)          ║
+            # ╚═══════════════════════════════════════════════════════════════════╝
+            
+            # Neo4j'den entity'leri sil
+            try:
+                neo4j_uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                neo4j_database = file_record.neo4j_database or os.environ.get(
+                    "NEO4J_DATABASE", "neo4j"
                 )
-            else:
-                # Normal reset (processing or completed)
-                file_record.graph_status = "pending"
+
+                if neo4j_uri:
+                    # Run Neo4j entity cleanup in a thread to avoid blocking
+                    cleanup_result = await asyncio.to_thread(
+                        _cleanup_entities_for_file,
+                        neo4j_uri,
+                        neo4j_database,
+                        file_record.filename,
+                        file_record.original_name,
+                    )
+                    if cleanup_result:
+                        logging.info(
+                            f"🗑️ Neo4j entity cleanup for {file_record.original_name}: {cleanup_result}"
+                        )
+                else:
+                    logging.warning(
+                        "⚠️ Neo4j URI not configured, skipping entity deletion"
+                    )
+            except Exception as neo4j_error:
+                logging.warning(
+                    f"⚠️ Could not delete entities from Neo4j: {str(neo4j_error)}"
+                )
+            
+            # Status güncelle
+            file_record.graph_status = "pending"
+            # Chunk'lar var, chunking_status "chunked" olmalı
+            if file_record.chunking_status != "chunked":
+                file_record.chunking_status = "chunked"
             file_record.status = "uploaded"  # Reset status
             file_record.graph_started_at = None
             file_record.graph_completed_at = None
-            logging.info(f"🔄 Reset GRAPH stage for file {file_id_int}")
+            # Node/relationship count'ları sıfırla
+            file_record.node_count = 0
+            file_record.relationship_count = 0
+            logging.info(f"🔄 Reset GRAPH stage for file {file_id_int} (entities deleted, ready for re-extraction)")
 
         # Sync status to Neo4j - use asyncio.to_thread to avoid blocking
         try:
@@ -8148,7 +8265,8 @@ async def delete_queued_file(
                                 OPTIONAL MATCH (d)--(l1)--(l2)
                                 WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l2:Document AND NOT l2:Chunk
                                   AND NOT l1:`__Community__` AND NOT l2:`__Community__`
-                                WITH d, chunks, chunkEntities + level1 + COLLECT(DISTINCT l2) AS allRelatedNodes
+                                WITH d, chunks, chunkEntities, level1, COLLECT(DISTINCT l2) AS level2
+                                WITH d, chunks, chunkEntities + level1 + level2 AS allRelatedNodes
                                 
                                 // Güvenlik kontrolü - sadece başka Document'lara bağlı olmayan node'ları sil
                                 WITH d, chunks,
@@ -8287,7 +8405,8 @@ async def delete_queued_file(
                         OPTIONAL MATCH (d)--(l1)--(l2)
                         WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l2:Document AND NOT l2:Chunk
                           AND NOT l1:`__Community__` AND NOT l2:`__Community__`
-                        WITH d, chunks, chunkEntities + level1 + COLLECT(DISTINCT l2) AS allRelatedNodes
+                        WITH d, chunks, chunkEntities, level1, COLLECT(DISTINCT l2) AS level2
+                        WITH d, chunks, chunkEntities + level1 + level2 AS allRelatedNodes
                         
                         // Güvenlik kontrolü - sadece başka Document'lara bağlı olmayan node'ları sil
                         WITH d, chunks,

@@ -191,25 +191,8 @@ def _ocr_page_with_gpt5(
         if previous_context:
             context_str = f"\n\nÖNCEKİ SAYFA BAĞLAMI (devam eden cümleleri birleştirmek için kullan):\n{previous_context}\n"
 
-        # First page için özel talimatlar
-        first_page_instructions = (
-            """
-İLK SAYFA ÖZEL TALİMATLAR (Sigorta Poliçesi Header):
-Bu sayfa muhtemelen EN KRİTİK poliçe bilgilerini içerir:
-- QR kodları, barkodları ve logoları YOKSAY - SADECE METİN'e odaklan
-- TÜM yapılandırılmış form verilerini çıkar:
-  * Poliçe başlığı (örn: "TRAFİK SİGORTA POLİÇESİ", "KONUT POLİÇESİ")
-  * Tarihler: Başlama Tarihi, Bitiş Tarihi, Tanzim Tarihi
-  * Poliçe numaraları: Poliçe No, Yenileme No, Zeyil No
-  * Acente bilgileri: Acente Kodu, Acente Ünvanı
-  * "Sigortalı" bölümündeki şirket/kişi adı, adres, telefon, TC/Vergi No
-  * Araç bilgileri: Marka, Model, Plaka, Motor No (trafik poliçeleri için)
-  * Mülk bilgileri: Riziko Adresi (gayrimenkul poliçeleri için)
-- Bu EN ÖNEMLİ sayfa - HER alanı titizlikle çıkar!
-"""
-            if page_idx == 1
-            else ""
-        )
+        # First page için özel talimatlar - Domain-agnostic (prompt'tan gelir)
+        first_page_instructions = ""
 
         prompt = f"""Sen bir OCR ve Semantik Chunking uzmanısın.
 Bu, {total_pages} sayfalık bir belgenin {page_idx}. sayfası.
@@ -280,7 +263,7 @@ def process_gemini_ocr(
     Returns:
         dict: {
             "metadata": {
-                "docType": "MAIN_POLICY" | "ENDORSEMENT" | "RENEWAL" | "CANCELLATION",
+                "docType": "Document type from prompt (domain-specific)",
                 ...
             },
             "markdown": "Markdown content with [PAGE BREAK] separators"
@@ -290,7 +273,7 @@ def process_gemini_ocr(
     ocr_start_time = time.time()
     session_id = f"file_{file_id}" if file_id else None
 
-    result = {"metadata": {"docType": "MAIN_POLICY"}, "markdown": ""}  # Default value
+    result = {"metadata": {"docType": "UNKNOWN"}, "markdown": ""}  # Default value
 
     if not GEMINI_AVAILABLE:
         logging.warning("❌ google.genai not available")
@@ -419,29 +402,19 @@ def process_gemini_ocr(
                             f"🔍 Gemini document type detection - Parsed JSON: {doc_type_data}"
                         )
 
-                        detected_doc_type = doc_type_data.get("docType", "MAIN_POLICY")
+                        detected_doc_type = doc_type_data.get("docType", "UNKNOWN")
                         logging.info(
                             f"🔍 Gemini document type detection - Extracted docType: {detected_doc_type}"
                         )
 
-                        # Geçerli docType kontrolü
-                        valid_types = [
-                            "MAIN_POLICY",
-                            "ENDORSEMENT",
-                            "RENEWAL",
-                            "CANCELLATION",
-                        ]
-                        if detected_doc_type in valid_types:
+                        # Domain-agnostic: LLM'in döndürdüğü tipi kabul et
+                        # Her domain kendi tiplerini prompt'ta tanımlar
+                        if detected_doc_type:
                             result["metadata"]["docType"] = detected_doc_type
                             doc_type_detected = True
                             logging.info(
                                 f"✅ Document type detected: {detected_doc_type}"
                             )
-                        else:
-                            logging.warning(
-                                f"⚠️ Invalid docType detected: {detected_doc_type}, using default MAIN_POLICY"
-                            )
-                            logging.warning(f"⚠️ Valid types are: {valid_types}")
                     except json.JSONDecodeError as e:
                         logging.error(f"❌ Failed to parse document type JSON: {e}")
                         logging.error(
@@ -461,12 +434,12 @@ def process_gemini_ocr(
 
                 if not doc_type_detected:
                     logging.info(
-                        "ℹ️ Document type detection failed or returned invalid result, using default MAIN_POLICY"
+                        "ℹ️ Document type detection failed, using default UNKNOWN"
                     )
 
             except Exception as e:
                 logging.warning(
-                    f"⚠️ Document type detection failed: {e}, using default MAIN_POLICY"
+                    f"⚠️ Document type detection failed: {e}, using default UNKNOWN"
                 )
 
         # Tüm sayfaları markdown'a çevir
@@ -739,20 +712,20 @@ async def processing_source_v2(
     page_images=None,
 ):
     """
-    V2 Processing: Policy-specific entity extraction (simplified)
+    V2 Processing: Generic LLM-driven entity extraction
 
-    Pages'ten Policy-specific entity'leri çıkarır:
+    Pages'ten dinamik olarak entity'leri çıkarır:
     - ✅ Chunk oluşturma (create_chunks_for_upload ile)
     - ❌ Chunk embeddings yok (şimdilik)
     - ❌ Chunk-Entity linking yok (şimdilik)
-    - ❌ Rastgele entity extraction yok (Person, Organization, etc.)
-    - ✅ Policy-specific entities (Policy, Customer, InsuranceCompany, Agent, Coverage)
-    - ✅ LLM extraction (_create_document_related_nodes)
+    - ✅ Generic entities (domain-agnostic, LLM-driven)
+    - ✅ LLM extraction (GenericGraphExecutor ile)
     - ✅ Neo4j'ye kaydetme
-    - ✅ Policy-Entity relationships (HAS_ENTITY)
+    - ✅ Entity relationships (prompt'ta tanımlı)
     - ❌ Duplicate merge yok (manuel olarak /merge_duplicate_entities endpoint'i ile yapılır)
 
     Not: Sadece 1 LLM çağrısı yapılır (_create_document_related_nodes içinde)
+    Entity tipleri ve ilişkiler domain-specific prompt dosyasında tanımlıdır.
     """
     # Note: os, sys, time, datetime, asyncio, logging are already imported at module level
     from src.graphDB_dataAccess import graphDBdataAccess
@@ -863,10 +836,10 @@ async def processing_source_v2(
 
         logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
 
-        # Policy-specific Entity Extraction (LLM çağrısı - tek LLM call)
+        # Generic Entity Extraction (LLM çağrısı - tek LLM call)
         # Retry mekanizması ile LLM extraction hatalarını yönet
         start_extraction = time.time()
-        logging.info(f"🚀 Policy-specific entity extraction başlıyor...")
+        logging.info(f"🚀 LLM-driven entity extraction başlıyor...")
 
         max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
         retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
@@ -877,8 +850,8 @@ async def processing_source_v2(
 
         while retries < max_retries and not extraction_successful:
             try:
-                # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
-                # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
+                # _create_document_related_nodes: Generic entity extraction yapar
+                # Bu fonksiyon içinde LLM çağrısı yapılıyor (extract_and_create_entities)
                 # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
                 await asyncio.to_thread(
                     graphDb_data_Access._create_document_related_nodes,
@@ -890,14 +863,14 @@ async def processing_source_v2(
 
                 extraction_successful = True
                 elapsed_extraction = time.time() - start_extraction
-                uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
+                uri_latency["entity_extraction"] = f"{elapsed_extraction:.2f}"
                 if retries > 0:
                     logging.info(
-                        f"✅ Policy entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
+                        f"✅ Entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
                     )
                 else:
                     logging.info(
-                        f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s"
+                        f"✅ Entity extraction tamamlandı - {elapsed_extraction:.2f}s"
                     )
 
             except Exception as extraction_error:
@@ -911,7 +884,6 @@ async def processing_source_v2(
                     or "llm extraction hatası" in error_str.lower()
                     or "extraction" in error_str.lower()
                     or "entity" in error_str.lower()
-                    or "policy" in error_str.lower()
                 )
 
                 if retries < max_retries and is_llm_error:
@@ -924,16 +896,16 @@ async def processing_source_v2(
                 else:
                     # Retry limit'e ulaşıldı veya LLM hatası değil
                     elapsed_extraction = time.time() - start_extraction
-                    uri_latency["policy_entity_extraction"] = (
+                    uri_latency["entity_extraction"] = (
                         f"FAILED - {elapsed_extraction:.2f}"
                     )
                     if retries >= max_retries:
                         logging.error(
-                            f"❌ Policy entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
+                            f"❌ Entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
                         )
                     else:
                         logging.error(
-                            f"❌ Policy entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
+                            f"❌ Entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
                         )
                     # Dosya durumunu Failed yap ve işlemi sonlandır - async
                     await asyncio.to_thread(
@@ -945,17 +917,17 @@ async def processing_source_v2(
 
         if not extraction_successful:
             elapsed_extraction = time.time() - start_extraction
-            uri_latency["policy_entity_extraction"] = (
+            uri_latency["entity_extraction"] = (
                 f"FAILED - {elapsed_extraction:.2f}"
             )
-            logging.error(f"❌ Policy entity extraction başarısız: {last_error}")
+            logging.error(f"❌ Entity extraction başarısız: {last_error}")
             await asyncio.to_thread(
                 graphDb_data_Access.update_exception_db, file_name, str(last_error)
             )
             if last_error is not None:
                 raise last_error
             else:
-                raise RuntimeError("Policy entity extraction failed with unknown error")
+                raise RuntimeError("Entity extraction failed with unknown error")
 
         # Status'u Completed olarak güncelle
         end_time = datetime.now()
@@ -1747,7 +1719,7 @@ class FileProcessor:
 
                     markdown_text = ocr_result.get("markdown", "")
                     metadata = ocr_result.get("metadata", {})
-                    doc_type = metadata.get("docType", "MAIN_POLICY")
+                    doc_type = metadata.get("docType", "DOCUMENT")
 
                     # Gemini başarısız olduysa hata fırlat
                     if not markdown_text or not markdown_text.strip():
@@ -2313,8 +2285,8 @@ class FileProcessor:
             logging.info(f"✅ V2 Graph extraction completed for: {normalized_filename}")
             logging.info(f"⏱️ Latency details: {latency}")
 
-            # Check if Policy node was created in Neo4j
-            # If no Policy node exists, mark as failed
+            # Generic entity verification - check if any entities were extracted
+            # Domain-agnostic: herhangi bir entity oluşturulmuş mu kontrol et
             try:
                 from src.shared.common_fn import create_graph_database_connection
 
@@ -2322,62 +2294,39 @@ class FileProcessor:
                     create_graph_database_connection, uri, userName, password, database
                 )
 
-                # Check if Policy or Endorsement node exists for this document
-                node_check_query = """
+                # Check if any entities were created for this document (generic approach)
+                # Document'a bağlı herhangi bir entity (Chunk hariç) var mı?
+                entity_check_query = """
                 MATCH (d:Document {fileName: $file_name})
-                OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-                OPTIONAL MATCH (e:Endorsement)-[:DOCUMENTED_IN]->(d)
-                RETURN count(p) as policy_count, count(e) as endorsement_count, d.docType as doc_type
+                OPTIONAL MATCH (d)-[r]-(e)
+                WHERE NOT e:Chunk AND NOT e:Document
+                RETURN count(DISTINCT e) as entity_count, d.docType as doc_type
                 """
 
                 node_result = await asyncio.to_thread(
                     graph_connection.query,
-                    node_check_query,
+                    entity_check_query,
                     {"file_name": normalized_filename},
                 )
 
-                policy_count = node_result[0]["policy_count"] if node_result else 0
-                endorsement_count = (
-                    node_result[0]["endorsement_count"] if node_result else 0
-                )
+                entity_count = node_result[0]["entity_count"] if node_result else 0
                 doc_type = node_result[0].get("doc_type", "") if node_result else ""
 
-                # Endorsement dosyaları için Endorsement node kontrolü yap
-                # Ana poliçeler için Policy node kontrolü yap
-                if doc_type in ["ENDORSEMENT", "RENEWAL", "CANCELLATION"]:
-                    if endorsement_count == 0:
-                        error_message = f"Endorsement node was not created for document: {normalized_filename}"
-                        logging.error(f"❌ {error_message}")
-                        file_record.graph_status = "failed"
-                        file_record.status = "failed"  # Ana status da failed olmalı
-                        file_record.processing_error = error_message[:500]
-                        file_record.reason = (
-                            f"Graph verification failed: {error_message}"
-                        )
-                        db_session.commit()
-                        return
-                    else:
-                        logging.info(
-                            f"✅ Endorsement node found for document: {normalized_filename} (count: {endorsement_count})"
-                        )
-                elif policy_count == 0:
-                    error_message = f"Policy node was not created for document: {normalized_filename}"
-                    logging.error(f"❌ {error_message}")
-                    file_record.graph_status = "failed"
-                    file_record.status = "failed"  # Ana status da failed olmalı
-                    file_record.processing_error = error_message[:500]
-                    file_record.reason = f"Graph verification failed: {error_message}"
-                    db_session.commit()
-                    return
+                if entity_count == 0:
+                    # Entity yoksa warning ver ama fail etme
+                    # LLM bazen entity çıkaramayabilir, bu kritik bir hata değil
+                    logging.warning(
+                        f"⚠️ No entities extracted for document: {normalized_filename} (docType: {doc_type})"
+                    )
                 else:
                     logging.info(
-                        f"✅ Policy node verified: {policy_count} Policy node(s) found for {normalized_filename}"
+                        f"✅ Graph verification passed: {entity_count} entity(s) found for {normalized_filename}"
                     )
-            except Exception as policy_check_error:
+            except Exception as entity_check_error:
                 logging.error(
-                    f"❌ Error checking Policy node for {normalized_filename}: {str(policy_check_error)}"
+                    f"❌ Error checking entities for {normalized_filename}: {str(entity_check_error)}"
                 )
-                # Don't fail the entire process if policy check fails
+                # Don't fail the entire process if entity check fails
                 import traceback
 
                 logging.error(f"Traceback: {traceback.format_exc()}")
@@ -2639,91 +2588,10 @@ class FileProcessor:
                     )
                     return
 
-                # Check docType before graph creation (Neo4j'den direkt okuyoruz, LLM'den tekrar çıkarmıyoruz)
-                # If docType is not MAIN_POLICY, skip graph creation and mark as pending_endorsement
-                try:
-                    from src.shared.common_fn import create_graph_database_connection
-
-                    # Get Neo4j credentials for docType check
-                    uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
-                    userName = os.environ.get("NEO4J_USERNAME")
-                    password = os.environ.get("NEO4J_PASSWORD")
-                    database = file_record.neo4j_database or os.environ.get(
-                        "NEO4J_DATABASE", "neo4j"
-                    )
-
-                    if all([uri, userName, password]):
-                        # Create graph connection for docType check (async olarak thread pool'da çalıştır)
-                        graph = await asyncio.to_thread(
-                            create_graph_database_connection,
-                            uri,
-                            userName,
-                            password,
-                            database,
-                        )
-
-                        if graph:
-                            # Neo4j'den docType'ı direkt oku (chunking aşamasında kaydedilmiş)
-                            doc_type_query = """
-                            MATCH (d:Document {fileName: $file_name})
-                            RETURN d.docType as docType
-                            LIMIT 1
-                            """
-
-                            doc_type_result = await asyncio.to_thread(
-                                graph.query,
-                                doc_type_query,
-                                {"file_name": file_record.filename},
-                            )
-
-                            doc_type = None
-                            if doc_type_result and len(doc_type_result) > 0:
-                                doc_type = doc_type_result[0].get("docType")
-
-                            # Eğer docType yoksa veya MAIN_POLICY değilse, pending_endorsement olarak işaretle
-                            if doc_type and doc_type not in ["MAIN_POLICY", None, ""]:
-                                logging.info(
-                                    f"📋 V2: Document docType is {doc_type} (not MAIN_POLICY), skipping graph creation for: {file_record.original_name}"
-                                )
-                                # Mark as pending_endorsement
-                                file_record.graph_status = "pending_endorsement"
-                                # Remove from processing queue
-                                if file_record.status in (
-                                    "queued",
-                                    "processing",
-                                ):
-                                    file_record.status = "uploaded"
-                                db_session.commit()
-                                logging.info(
-                                    f"✅ V2: File {file_record.id} ({file_record.original_name}) marked as pending_endorsement"
-                                )
-
-                                # Close graph connection
-                                if (
-                                    hasattr(graph, "_driver")
-                                    and not graph._driver._closed
-                                ):
-                                    graph._driver.close()
-
-                                return  # Skip graph creation
-                            elif doc_type == "MAIN_POLICY":
-                                logging.info(
-                                    f"✅ V2: Document docType is MAIN_POLICY, proceeding with graph creation for: {file_record.original_name}"
-                                )
-                            else:
-                                # docType yoksa veya None ise, varsayılan olarak MAIN_POLICY kabul et
-                                logging.info(
-                                    f"ℹ️ V2: Document docType not found or None for {file_record.original_name}, assuming MAIN_POLICY and proceeding with graph creation"
-                                )
-
-                            # Close graph connection (graph creation'da tekrar açılacak)
-                            if hasattr(graph, "_driver") and not graph._driver._closed:
-                                graph._driver.close()
-                except Exception as doc_type_error:
-                    # If docType check fails, proceed with graph creation (fallback to MAIN_POLICY)
-                    logging.warning(
-                        f"⚠️ V2: Document docType check failed for {file_record.original_name}: {str(doc_type_error)}. Proceeding with graph creation (assuming MAIN_POLICY)."
-                    )
+                # Domain-agnostic: Tüm docType'lar için graph creation yapılır
+                logging.info(
+                    f"📋 V2: Proceeding with graph creation for: {file_record.original_name}"
+                )
 
                 # Status zaten batch seçiminde "processing" olarak güncellenmiş
                 # Model, uri gibi bilgiler de batch seçiminde güncellenmiş

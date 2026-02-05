@@ -1000,65 +1000,18 @@ def get_document_node_id_from_graph(graph, file_name):
     return file_name
 
 
-def detect_document_domain(file_name: str, first_chunk: str = "") -> str:
+def detect_document_domain(_file_name: str = "", _first_chunk: str = "") -> str:
     """
-    Dosya adı ve içeriğinden domain'i otomatik tespit eder
+    Domain'i REACT_DOMAIN environment variable'dan alır.
+    Domain-agnostic: Keyword-based detection kaldırıldı.
     
     Args:
-        file_name: Dosya adı
-        first_chunk: İlk chunk içeriği (opsiyonel)
+        _file_name: Dosya adı (not used - kept for backward compatibility)
+        _first_chunk: İlk chunk içeriği (not used - kept for backward compatibility)
         
     Returns:
-        Domain adı (insurance, legal, financial, general)
+        Domain adı (REACT_DOMAIN env var veya "general")
     """
-    file_name_lower = file_name.lower()
-    content_lower = first_chunk.lower() if first_chunk else ""
-    
-    # Sigorta tespiti - geliştirilmiş keywords
-    insurance_keywords = [
-        "poliçe", "sigorta", "kasko", "trafik", "dask", "konut", "işyeri",
-        "policy", "insurance", "coverage", "premium", "claim", "teminat",
-        "prim", "sigortalı", "acente", "yangın", "deprem", "doğa sigorta",
-        "türk sigorta", "aksigorta", "anadolu sigorta", "allianz",
-        "mali sorumluluk", "ferdi kaza", "cam kırılması", "riziko"
-    ]
-    
-    # Hukuki tespiti  
-    legal_keywords = [
-        "dava", "mahkeme", "avukat", "hukuk", "sözleşme", "anlaşma",
-        "court", "legal", "lawsuit", "attorney", "contract", "agreement",
-        "icra", "iflas", "temyiz", "karar", "hüküm", "dilekçe"
-    ]
-    
-    # Finansal tespiti
-    financial_keywords = [
-        "banka", "kredi", "ödeme", "fatura", "hesap", "para", "tl", "usd", "eur",
-        "bank", "credit", "payment", "invoice", "account", "money", "financial",
-        "faiz", "kar", "zarar", "bilanço", "mali", "muhasebe"
-    ]
-    
-    # Dosya adından domain tespit et
-    if any(keyword in file_name_lower for keyword in insurance_keywords):
-        return "insurance"
-    elif any(keyword in file_name_lower for keyword in legal_keywords):
-        return "legal"  
-    elif any(keyword in file_name_lower for keyword in financial_keywords):
-        return "financial"
-    
-    # İçerikten domain tespit et
-    if content_lower:
-        insurance_score = sum(1 for keyword in insurance_keywords if keyword in content_lower)
-        legal_score = sum(1 for keyword in legal_keywords if keyword in content_lower)
-        financial_score = sum(1 for keyword in financial_keywords if keyword in content_lower)
-        
-        max_score = max(insurance_score, legal_score, financial_score)
-        
-        if max_score > 2:  # En az 3 anahtar kelime eşleşmesi gerekli
-            if insurance_score == max_score:
-                return "insurance"
-            elif legal_score == max_score:
-                return "legal"
-            elif financial_score == max_score:
-                return "financial"
-    
-    return "general"
+    # Domain is determined by REACT_DOMAIN environment variable, not by content analysis
+    # This makes the system truly domain-agnostic
+    return os.environ.get("REACT_DOMAIN", "general")
