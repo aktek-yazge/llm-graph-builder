@@ -65,10 +65,6 @@ from src.langchain_deepagents import (
     stream_react_agent_response,
     REACT_LANGCHAIN_AVAILABLE,
 )
-from src.qa_based_entity_extractor import (
-    QABasedEntityExtractor,
-    create_domain_specific_questions,
-)
 from src.llm import detect_document_domain
 from src.shared.common_fn import *
 from src.shared.constants import QUERY_TO_GET_CHUNKS
@@ -7002,12 +6998,20 @@ async def reset_file_stage(
                                             if chunk_result
                                             else 0
                                         )
-                                        # Delete policy and related
+                                        # Dinamik silme - Document'a bağlı tüm entity'leri siler (domain-agnostic)
                                         graph_conn.query(
                                             """MATCH (d:Document {fileName: $fileName})
-                                            OPTIONAL MATCH (p:Policy)-[:DOCUMENTED_IN]->(d)
-                                            OPTIONAL MATCH (p)-[*1..2]-(n) WHERE n IS NOT NULL AND NOT n:Document AND NOT n:Chunk
-                                            DETACH DELETE p, n""",
+                                            // Document'a bağlı tüm node'ları topla (2 seviye)
+                                            OPTIONAL MATCH (d)--(l1)
+                                            WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l1:`__Community__`
+                                            OPTIONAL MATCH (l1)--(l2)
+                                            WHERE NOT l2:Document AND NOT l2:Chunk AND NOT l2:`__Community__`
+                                            WITH d, COLLECT(DISTINCT l1) + COLLECT(DISTINCT l2) AS allNodes
+                                            // Sadece başka Document'lara bağlı olmayan node'ları sil
+                                            WITH d, [n IN allNodes WHERE n IS NOT NULL AND NOT EXISTS {
+                                                MATCH (n)-[*1..2]-(otherDoc:Document) WHERE otherDoc <> d
+                                            }] AS safeNodes
+                                            FOREACH (n IN safeNodes | DETACH DELETE n)""",
                                             {"fileName": filename},
                                         )
                                         return deleted_chunks
@@ -8014,89 +8018,50 @@ async def delete_file_background_task(
 
                             if use_connection:
 
-                                # V2 Document deletion query
+                                # V2 Document deletion query - Dinamik, tüm node tiplerini bulur
+                                # Hardcoded node tipleri yerine generic graph traversal kullanır
                                 delete_query = """
                                     MATCH (d:Document {fileName: $filename})
                                     
-                                    // 1. Document'a bağlı Chunk node'ları topla
+                                    // 1. Chunk'ları topla
                                     OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                                    WITH d, COLLECT(DISTINCT c) AS chunks
                                     
-                                    // 2. Document'a DOCUMENTED_IN ile bağlı Policy node'ları topla (-> yönünde)
-                                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(p:Policy)
+                                    // 2. Chunk'lara bağlı entity'leri topla
+                                    OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                                    WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
                                     
-                                    // 3. Document'a DOCUMENTED_IN ile bağlı Endorsement node'ları topla
-                                    OPTIONAL MATCH (d)<-[:DOCUMENTED_IN]-(e:Endorsement)
+                                    // 3. Document'a direkt bağlı TÜM node'ları topla (1. seviye)
+                                    OPTIONAL MATCH (d)--(directNode)
+                                    WHERE NOT directNode:Document AND NOT directNode:Chunk AND NOT directNode:`__Community__`
+                                    WITH d, chunks, chunkEntities, COLLECT(DISTINCT directNode) AS directNodes
                                     
-                                    // 4. Policy'den -> yönünde bağlı tüm node'ları topla
-                                    OPTIONAL MATCH (p)-[*1..2]->(relatedNodes)
-                                    WHERE relatedNodes:PolicyYear OR relatedNodes:InsuredItem OR 
-                                          relatedNodes:PolicyType OR relatedNodes:Customer OR
-                                          relatedNodes:Agent OR relatedNodes:InsuranceCompany OR
-                                          relatedNodes:Address OR relatedNodes:Phone OR relatedNodes:Email
+                                    // 4. İkinci seviye node'ları topla (Document -> X -> Y)
+                                    OPTIONAL MATCH (d)--(l1)--(l2)
+                                    WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l1:`__Community__`
+                                      AND NOT l2:Document AND NOT l2:Chunk AND NOT l2:`__Community__`
+                                      AND NOT l2 IN directNodes
+                                    WITH d, chunks, chunkEntities, directNodes, COLLECT(DISTINCT l2) AS secondLevelNodes
                                     
-                                    // 5. Policy'den bağlı Endorsement node'ları topla (FIRST_ENDORSEMENT, NEXT_ENDORSEMENT)
-                                    OPTIONAL MATCH (p)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(policyEndorsements:Endorsement)
-                                    
-                                    // 6. Endorsement'lardan bağlı node'ları topla
-                                    OPTIONAL MATCH (e)-[*1..2]->(endorsementRelatedNodes)
-                                    WHERE endorsementRelatedNodes:Premium OR endorsementRelatedNodes:Coverage OR
-                                          endorsementRelatedNodes:Clause OR endorsementRelatedNodes:Payment OR
-                                          endorsementRelatedNodes:Address OR endorsementRelatedNodes:Phone OR
-                                          endorsementRelatedNodes:Email
-                                    
-                                    OPTIONAL MATCH (policyEndorsements)-[*1..2]->(policyEndorsementRelatedNodes)
-                                    WHERE policyEndorsementRelatedNodes:Premium OR policyEndorsementRelatedNodes:Coverage OR
-                                          policyEndorsementRelatedNodes:Clause OR policyEndorsementRelatedNodes:Payment OR
-                                          policyEndorsementRelatedNodes:Address OR policyEndorsementRelatedNodes:Phone OR
-                                          policyEndorsementRelatedNodes:Email
-                                    
-                                    // 7. Sadece başka Document'larda kullanılmayan node'ları sil
-                                    WITH d, 
-                                         COLLECT(DISTINCT c) AS chunks,
-                                         COLLECT(DISTINCT p) AS policies,
-                                         COLLECT(DISTINCT e) + COLLECT(DISTINCT policyEndorsements) AS allEndorsements,
-                                         COLLECT(DISTINCT relatedNodes) AS relatedNodesList,
-                                         COLLECT(DISTINCT endorsementRelatedNodes) + COLLECT(DISTINCT policyEndorsementRelatedNodes) AS endorsementRelatedNodesList
-                                    
-                                    // Güvenli silme: Başka document'larda kullanılmayan Policy'leri kontrol et
+                                    // 5. Üçüncü seviye node'ları topla (Document -> X -> Y -> Z)
+                                    OPTIONAL MATCH (d)--(l1)--(l2)--(l3)
+                                    WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l1:`__Community__`
+                                      AND NOT l2:Document AND NOT l2:Chunk AND NOT l2:`__Community__`
+                                      AND NOT l3:Document AND NOT l3:Chunk AND NOT l3:`__Community__`
+                                      AND NOT l3 IN directNodes AND NOT l3 IN secondLevelNodes
                                     WITH d, chunks,
-                                         [policy IN policies WHERE policy IS NOT NULL AND NOT EXISTS {
-                                             MATCH (d2:Document)
-                                             WHERE d2 <> d AND (d2)<-[:DOCUMENTED_IN]-(policy)
-                                         }] AS safePolicies,
-                                         [endorsement IN allEndorsements WHERE endorsement IS NOT NULL AND NOT EXISTS {
-                                             MATCH (d2:Document)
-                                             WHERE d2 <> d AND (
-                                                 (d2)<-[:DOCUMENTED_IN]-(endorsement) OR
-                                                 (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(endorsement)
-                                             )
-                                         }] AS safeEndorsements,
-                                         [node IN relatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                             MATCH (d2:Document)<-[:DOCUMENTED_IN]-(p2:Policy)
-                                             WHERE d2 <> d AND (
-                                                 (p2)-[*1..2]->(node) OR
-                                                 (p2)<-[:HAS_DOC]-(node) OR
-                                                 (p2)<-[:DOCUMENTED_IN]-(node)
-                                             )
-                                         }] AS safeRelatedNodes,
-                                         [node IN endorsementRelatedNodesList WHERE node IS NOT NULL AND NOT EXISTS {
-                                             MATCH (d2:Document)
-                                             WHERE d2 <> d AND (
-                                                 (d2)<-[:DOCUMENTED_IN]-(:Endorsement)-[*1..2]->(node) OR
-                                                 (d2)<-[:DOCUMENTED_IN]-(:Policy)-[:FIRST_ENDORSEMENT|NEXT_ENDORSEMENT*]->(:Endorsement)-[*1..2]->(node)
-                                             )
-                                         }] AS safeEndorsementRelatedNodes
+                                         chunkEntities + directNodes + secondLevelNodes + COLLECT(DISTINCT l3) AS allRelatedNodes
                                     
-                                    // 8. Silme işlemi
+                                    // 6. Güvenlik kontrolü - sadece başka Document'lara bağlı olmayan node'ları sil
+                                    WITH d, chunks,
+                                         [node IN allRelatedNodes WHERE node IS NOT NULL AND NOT EXISTS {
+                                             MATCH (node)-[*1..3]-(otherDoc:Document)
+                                             WHERE otherDoc <> d
+                                         }] AS safeToDeleteNodes
+                                    
+                                    // 7. Silme işlemi
                                     FOREACH (chunk IN chunks | DETACH DELETE chunk)
-                                    FOREACH (endorsement IN safeEndorsements | 
-                                        FOREACH (relNode IN safeEndorsementRelatedNodes | DETACH DELETE relNode)
-                                    )
-                                    FOREACH (endorsement IN safeEndorsements | DETACH DELETE endorsement)
-                                    FOREACH (policy IN safePolicies | 
-                                        FOREACH (relNode IN safeRelatedNodes | DETACH DELETE relNode)
-                                    )
-                                    FOREACH (policy IN safePolicies | DETACH DELETE policy)
+                                    FOREACH (node IN safeToDeleteNodes | DETACH DELETE node)
                                     DETACH DELETE d
                                     
                                     RETURN count(d) AS deletedDocuments
@@ -8276,7 +8241,7 @@ async def delete_queued_file(
                             f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_record.id}"
                         )
 
-                    # 2. Delete from Neo4j
+                    # 2. Delete from Neo4j - Dinamik silme (tüm bağlı entity'leri temizler)
                     if graph_connection:
                         try:
                             from src.utf8_utils import normalize_file_name
@@ -8285,19 +8250,44 @@ async def delete_queued_file(
                                 file_record.original_name
                             )
 
-                            # Delete chunks
+                            # Dinamik silme query'si - Document ve bağlı tüm node'ları siler
+                            dynamic_delete_query = """
+                                MATCH (d:Document {fileName: $fileName})
+                                
+                                // Chunk'ları topla
+                                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                                WITH d, COLLECT(DISTINCT c) AS chunks
+                                
+                                // Chunk'lara bağlı entity'leri topla
+                                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                                WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
+                                
+                                // Document'a bağlı tüm node'ları topla (3 seviye derinliğe kadar)
+                                OPTIONAL MATCH (d)--(l1)
+                                WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l1:`__Community__`
+                                WITH d, chunks, chunkEntities, COLLECT(DISTINCT l1) AS level1
+                                
+                                OPTIONAL MATCH (d)--(l1)--(l2)
+                                WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l2:Document AND NOT l2:Chunk
+                                  AND NOT l1:`__Community__` AND NOT l2:`__Community__`
+                                WITH d, chunks, chunkEntities + level1 + COLLECT(DISTINCT l2) AS allRelatedNodes
+                                
+                                // Güvenlik kontrolü - sadece başka Document'lara bağlı olmayan node'ları sil
+                                WITH d, chunks,
+                                     [node IN allRelatedNodes WHERE node IS NOT NULL AND NOT EXISTS {
+                                         MATCH (node)-[*1..3]-(otherDoc:Document)
+                                         WHERE otherDoc <> d
+                                     }] AS safeToDeleteNodes
+                                
+                                // Silme işlemi
+                                FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                                FOREACH (node IN safeToDeleteNodes | DETACH DELETE node)
+                                DETACH DELETE d
+                                
+                                RETURN 1 as deleted
+                            """
                             graph_connection.query(
-                                "MATCH (c:Chunk) WHERE c.fileName = $fileName DETACH DELETE c",
-                                {"fileName": normalized_name},
-                            )
-                            # Delete orphan entities
-                            graph_connection.query(
-                                "MATCH (e) WHERE e.fileName = $fileName AND NOT (e)--() DELETE e",
-                                {"fileName": normalized_name},
-                            )
-                            # Delete document
-                            graph_connection.query(
-                                "MATCH (d:Document) WHERE d.fileName = $fileName DETACH DELETE d",
+                                dynamic_delete_query,
                                 {"fileName": normalized_name},
                             )
                             logging.info(
@@ -8392,26 +8382,51 @@ async def delete_queued_file(
                     f"🛑 Revoked Celery task {file_record.celery_task_id} for file {file_id_int}"
                 )
 
-            # 2. Delete from Neo4j
+            # 2. Delete from Neo4j - Dinamik silme (tüm bağlı entity'leri temizler)
             if graph_connection:
                 try:
                     from src.utf8_utils import normalize_file_name
 
                     normalized_name = normalize_file_name(original_name)
 
-                    # Delete chunks
+                    # Dinamik silme query'si - Document ve bağlı tüm node'ları siler
+                    dynamic_delete_query = """
+                        MATCH (d:Document {fileName: $fileName})
+                        
+                        // Chunk'ları topla
+                        OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+                        WITH d, COLLECT(DISTINCT c) AS chunks
+                        
+                        // Chunk'lara bağlı entity'leri topla
+                        OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                        WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
+                        
+                        // Document'a bağlı tüm node'ları topla (3 seviye derinliğe kadar)
+                        OPTIONAL MATCH (d)--(l1)
+                        WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l1:`__Community__`
+                        WITH d, chunks, chunkEntities, COLLECT(DISTINCT l1) AS level1
+                        
+                        OPTIONAL MATCH (d)--(l1)--(l2)
+                        WHERE NOT l1:Document AND NOT l1:Chunk AND NOT l2:Document AND NOT l2:Chunk
+                          AND NOT l1:`__Community__` AND NOT l2:`__Community__`
+                        WITH d, chunks, chunkEntities + level1 + COLLECT(DISTINCT l2) AS allRelatedNodes
+                        
+                        // Güvenlik kontrolü - sadece başka Document'lara bağlı olmayan node'ları sil
+                        WITH d, chunks,
+                             [node IN allRelatedNodes WHERE node IS NOT NULL AND NOT EXISTS {
+                                 MATCH (node)-[*1..3]-(otherDoc:Document)
+                                 WHERE otherDoc <> d
+                             }] AS safeToDeleteNodes
+                        
+                        // Silme işlemi
+                        FOREACH (chunk IN chunks | DETACH DELETE chunk)
+                        FOREACH (node IN safeToDeleteNodes | DETACH DELETE node)
+                        DETACH DELETE d
+                        
+                        RETURN 1 as deleted
+                    """
                     graph_connection.query(
-                        "MATCH (c:Chunk) WHERE c.fileName = $fileName DETACH DELETE c",
-                        {"fileName": normalized_name},
-                    )
-                    # Delete orphan entities
-                    graph_connection.query(
-                        "MATCH (e) WHERE e.fileName = $fileName AND NOT (e)--() DELETE e",
-                        {"fileName": normalized_name},
-                    )
-                    # Delete document
-                    graph_connection.query(
-                        "MATCH (d:Document) WHERE d.fileName = $fileName DETACH DELETE d",
+                        dynamic_delete_query,
                         {"fileName": normalized_name},
                     )
                     logging.info(f"🗑️ Neo4j cleanup completed for: {normalized_name}")

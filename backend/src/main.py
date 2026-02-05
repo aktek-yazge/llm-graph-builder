@@ -895,30 +895,8 @@ async def processing_source(
     )
     uri_latency["total_chunks"] = total_chunks
 
-    # POLICY EXTRACTION - Eksik policy bilgilerini chunk içeriklerinden çıkar
-    if total_chunks > 0:  # Chunk'lar varsa policy extraction yap
-        try:
-            logging.info(f"🔍 Policy entity extraction başlıyor: {file_name}")
-            from src.policy_extraction import extract_missing_policy_info
-
-            start_policy_extraction = time.time()
-            policy_extraction_result = await extract_missing_policy_info(
-                graph, file_name, model
-            )
-            end_policy_extraction = time.time()
-            elapsed_policy_extraction = end_policy_extraction - start_policy_extraction
-
-            logging.info(
-                f"✅ Policy entity extraction tamamlandı: {elapsed_policy_extraction:.2f} saniye"
-            )
-            logging.info(f"📋 Entity extraction sonucu: {policy_extraction_result}")
-
-            uri_latency["policy_extraction"] = f"{elapsed_policy_extraction:.2f}"
-
-        except Exception as e:
-            logging.error(f"❌ Policy entity extraction hatası: {e}")
-            # Policy extraction başarısız olsa bile ana işleme devam et
-            uri_latency["policy_extraction"] = "failed"
+    # Entity extraction artık celery_worker tarafından yapılmaktadır
+    # Backend sadece Document ve Chunk node'larını oluşturur
 
     start_status_document_node = time.time()
     result = graphDb_data_Access.get_current_status_document_node(file_name)
@@ -1425,108 +1403,8 @@ async def processing_source_v2(
 
         logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
 
-        # Policy-specific Entity Extraction (LLM çağrısı - tek LLM call)
-        # Retry mekanizması ile LLM extraction hatalarını yönet
-        start_extraction = time.time()
-        logging.info(f"🚀 Policy-specific entity extraction başlıyor...")
-
-        max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
-        retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
-        retries = 0
-        current_delay = retry_delay
-        extraction_successful = False
-        last_error = None
-
-        while retries < max_retries and not extraction_successful:
-            try:
-                # _create_document_related_nodes: Policy, Customer, InsuranceCompany vs. çıkarır
-                # Bu fonksiyon içinde zaten LLM çağrısı yapılıyor (create_policy_node_from_document)
-                # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
-                await asyncio.to_thread(
-                    graphDb_data_Access._create_document_related_nodes,
-                    file_name,
-                    "auto",
-                    None,
-                    model,
-                )
-
-                extraction_successful = True
-                elapsed_extraction = time.time() - start_extraction
-                uri_latency["policy_entity_extraction"] = f"{elapsed_extraction:.2f}"
-                if retries > 0:
-                    logging.info(
-                        f"✅ Policy entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
-                    )
-                else:
-                    logging.info(
-                        f"✅ Policy entity extraction tamamlandı - {elapsed_extraction:.2f}s"
-                    )
-
-            except Exception as extraction_error:
-                retries += 1
-                last_error = extraction_error
-                error_str = str(extraction_error)
-
-                # LLM extraction hatalarını kontrol et
-                is_llm_error = (
-                    "varlık çıkarımı başarısız" in error_str.lower()
-                    or "llm extraction hatası" in error_str.lower()
-                    or "extraction" in error_str.lower()
-                    or "entity" in error_str.lower()
-                    or "policy" in error_str.lower()
-                )
-
-                if retries < max_retries and is_llm_error:
-                    logging.warning(
-                        f"⚠️ LLM extraction hatası (deneme {retries}/{max_retries}): {error_str[:200]}... "
-                        f"{current_delay} saniye bekleyip tekrar denenecek..."
-                    )
-                    await asyncio.sleep(current_delay)
-                    current_delay *= 2  # Exponential backoff
-                else:
-                    # Retry limit'e ulaşıldı veya LLM hatası değil
-                    elapsed_extraction = time.time() - start_extraction
-                    uri_latency["policy_entity_extraction"] = (
-                        f"FAILED - {elapsed_extraction:.2f}"
-                    )
-                    if retries >= max_retries:
-                        logging.error(
-                            f"❌ Policy entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
-                        )
-                    else:
-                        logging.error(
-                            f"❌ Policy entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
-                        )
-                    # Dosya durumunu Failed yap ve işlemi sonlandır - async
-                    await asyncio.to_thread(
-                        graphDb_data_Access.update_exception_db,
-                        file_name,
-                        str(last_error),
-                    )
-                    raise last_error
-
-        if not extraction_successful:
-            elapsed_extraction = time.time() - start_extraction
-            uri_latency["policy_entity_extraction"] = (
-                f"FAILED - {elapsed_extraction:.2f}"
-            )
-            logging.error(f"❌ Policy entity extraction başarısız: {last_error}")
-            await asyncio.to_thread(
-                graphDb_data_Access.update_exception_db, file_name, str(last_error)
-            )
-            raise last_error
-
-        # Policy-Entity Relationships
-        # start_policy_rel = time.time()
-        # try:
-        #     create_policy_entity_relationships(graph, file_name)
-        #     elapsed_policy_rel = time.time() - start_policy_rel
-        #     uri_latency["policy_entity_rel"] = f"{elapsed_policy_rel:.2f}"
-        #     logging.info(f"✅ Policy-Entity relationships created - {elapsed_policy_rel:.2f}s")
-        # except Exception as policy_error:
-        #     elapsed_policy_rel = time.time() - start_policy_rel
-        #     uri_latency["policy_entity_rel"] = f"FAILED - {elapsed_policy_rel:.2f}"
-        #     logging.error(f"❌ Policy-Entity relationship hatası: {policy_error}")
+        # Entity extraction artık celery_worker tarafından yapılmaktadır
+        # Backend sadece Document ve Chunk node'larını oluşturur
 
         # Final counts update - async
         start_count_update = time.time()

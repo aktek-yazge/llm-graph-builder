@@ -1,4 +1,8 @@
 .DS_Store
+
+# Cursor IDE (contains secrets in mcp.json)
+.cursor/
+
 # Celery worker logs
 celery_worker/logs/
 logs/

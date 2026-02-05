@@ -82,8 +82,11 @@ RUN cd /app && \
 # STAGE 3: Application Code
 # ============================================
 
-# Copy ONLY src folder (explicit, no .dockerignore dependency)
+# Copy src folder (application code)
 COPY src/ /app/src/
+
+# Copy prompts folder (domain-specific prompts for entity extraction)
+COPY prompts/ /app/prompts/
 
 # ============================================
 # ENVIRONMENT

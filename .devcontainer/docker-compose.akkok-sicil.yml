@@ -29,6 +29,9 @@ services:
     expose:
       - "7474"
       - "7687"
+    ports:
+      - "17474:7474"  # HTTP Browser direct access (port 17474)
+      - "17687:7687"  # Bolt direct access (port 17687)
     environment:
       - NEO4J_AUTH=neo4j/${AKKOK_NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
@@ -61,12 +64,22 @@ services:
       - akkok-sicil-dev-network
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=akkok-sicil-dev-network"
+      # =========================================================================
+      # CORS Middleware (Neo4j Browser Preview için gerekli)
+      # =========================================================================
+      - "traefik.http.middlewares.neo4j-cors.headers.accesscontrolallowmethods=GET,POST,PUT,DELETE,OPTIONS"
+      - "traefik.http.middlewares.neo4j-cors.headers.accesscontrolallowheaders=*"
+      - "traefik.http.middlewares.neo4j-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.neo4j-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.neo4j-cors.headers.addvaryheader=true"
       # =========================================================================
       # Neo4j Browser (HTTP) - neo4j.akkok-sicil.dev.local
       # =========================================================================
       - "traefik.http.routers.akkok-sicil-neo4j.rule=Host(`neo4j.akkok-sicil.dev.local`)"
       - "traefik.http.routers.akkok-sicil-neo4j.entrypoints=web"
       - "traefik.http.routers.akkok-sicil-neo4j.service=akkok-sicil-neo4j-browser"
+      - "traefik.http.routers.akkok-sicil-neo4j.middlewares=neo4j-cors"
       - "traefik.http.services.akkok-sicil-neo4j-browser.loadbalancer.server.port=7474"
       # =========================================================================
       # Neo4j Bolt (WebSocket) - bolt.akkok-sicil.dev.local
@@ -74,6 +87,7 @@ services:
       - "traefik.http.routers.akkok-sicil-bolt.rule=Host(`bolt.akkok-sicil.dev.local`)"
       - "traefik.http.routers.akkok-sicil-bolt.entrypoints=web"
       - "traefik.http.routers.akkok-sicil-bolt.service=akkok-sicil-neo4j-bolt"
+      - "traefik.http.routers.akkok-sicil-bolt.middlewares=neo4j-cors"
       - "traefik.http.services.akkok-sicil-neo4j-bolt.loadbalancer.server.port=7687"
 
   # ===========================================================================
