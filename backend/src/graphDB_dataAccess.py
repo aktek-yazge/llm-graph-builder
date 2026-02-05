@@ -1184,7 +1184,7 @@ class graphDBdataAccess:
         """
         try:
             from src.shared.common_fn import load_embedding_model
-            from src.make_relationships import create_chunk_vector_index
+            # create_chunk_vector_index kaldırıldı - celery_worker'da yapılıyor
 
             logging.info(
                 f"🔄 {len(file_names)} dosya için embedding oluşturma başlatılıyor: {file_names}"
@@ -1324,18 +1324,9 @@ class graphDBdataAccess:
                         "chunks_updated": 0,
                     }
 
-            # Vector index'i kontrol et/oluştur
+            # Vector index işlemi celery_worker'da yapılıyor
             if total_updated > 0:
-                try:
-                    create_chunk_vector_index(self.graph)
-                    logging.info(f"✅ Vector index checked/updated")
-
-                    # KNN graph ilişkilerini güncelle - DEVRE DIŞI BIRAKTI
-                    # self.update_KNN_graph()
-                    # logging.info(f"✅ KNN graph relationships updated")
-
-                except Exception as index_error:
-                    logging.warning(f"⚠️ Vector index/KNN update warning: {index_error}")
+                logging.info(f"✅ {total_updated} chunks updated - vector index should be managed by celery_worker")
 
             # Genel sonuç raporu
             summary = {

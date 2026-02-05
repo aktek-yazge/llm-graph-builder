@@ -43,7 +43,7 @@ from src.document_sources.s3_upload_utils import *
 from src.document_sources.wikipedia import *
 from src.document_sources.youtube import *
 from src.shared.common_fn import *
-from src.make_relationships import *
+# make_relationships kaldırıldı - graph extraction celery_worker'da yapılıyor
 from src.document_sources.web_pages import *
 from src.graph_query import get_graphDB_driver
 from src.utf8_utils import (
@@ -1777,88 +1777,10 @@ def get_chunkId_chunkDoc_list(
                                 for page in pages
                             ]
 
-                            if chunks:
-                                # Chunk node'ları veritabanına kaydet
-                                from src.make_relationships import (
-                                    create_chunks_for_upload,
-                                )
-                                import asyncio
-
-                                # create_chunks_for_upload artık async, event loop içinde çalıştır
-                                try:
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
-                                        # Eğer loop zaten çalışıyorsa, thread pool'da çalıştır
-                                        import concurrent.futures
-
-                                        async def run_create_chunks():
-                                            return await create_chunks_for_upload(
-                                                graph=graph,
-                                                chunks=chunks,
-                                                file_name=file_name,
-                                                page_images=(
-                                                    page_images if page_images else []
-                                                ),
-                                                generate_embedding=False,  # Emergency durumda embedding oluşturma
-                                            )
-
-                                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                                            future = executor.submit(
-                                                asyncio.run, run_create_chunks()
-                                            )
-                                            created_chunks = future.result()
-                                    else:
-                                        created_chunks = loop.run_until_complete(
-                                            create_chunks_for_upload(
-                                                graph=graph,
-                                                chunks=chunks,
-                                                file_name=file_name,
-                                                page_images=(
-                                                    page_images if page_images else []
-                                                ),
-                                                generate_embedding=False,  # Emergency durumda embedding oluşturma
-                                            )
-                                        )
-                                except RuntimeError:
-                                    # Event loop yoksa, yeni bir tane oluştur
-                                    created_chunks = asyncio.run(
-                                        create_chunks_for_upload(
-                                            graph=graph,
-                                            chunks=chunks,
-                                            file_name=file_name,
-                                            page_images=(
-                                                page_images if page_images else []
-                                            ),
-                                            generate_embedding=False,  # Emergency durumda embedding oluşturma
-                                        )
-                                    )
-
-                                logging.info(
-                                    f"✅ Emergency chunk creation completed - {len(created_chunks)} chunks created"
-                                )
-
-                                # Şimdi chunk'ları kullan
-                                chunkId_chunkDoc_list = []
-                                for i, chunk_data in enumerate(created_chunks):
-                                    chunk_doc = Document(
-                                        page_content=chunk_data["text"],
-                                        metadata={
-                                            "id": chunk_data["id"],
-                                            "position": i + 1,
-                                        },
-                                    )
-                                    chunkId_chunkDoc_list.append(
-                                        {
-                                            "chunk_id": chunk_data["id"],
-                                            "chunk_doc": chunk_doc,
-                                        }
-                                    )
-
-                                return len(created_chunks), chunkId_chunkDoc_list
-                            else:
-                                logging.error(
-                                    f"Failed to create chunks for {file_name}"
-                                )
+                            # Emergency chunk creation kaldırıldı - celery_worker'da yapılıyor
+                            logging.error(
+                                f"Chunks not found for {file_name}. Chunk creation must be done via celery_worker."
+                            )
                         else:
                             logging.error(
                                 f"No pages could be loaded from {merged_file_path}"

@@ -7,8 +7,7 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_groq import ChatGroq
 from langchain_google_vertexai import HarmBlockThreshold, HarmCategory
 from langchain_experimental.graph_transformers.diffbot import DiffbotGraphTransformer
-# from langchain_experimental.graph_transformers import LLMGraphTransformer
-from src.graph_transformer.transformer import LLMGraphTransformer
+from langchain_experimental.graph_transformers import LLMGraphTransformer
 from langchain_anthropic import ChatAnthropic
 try:
     from langchain_fireworks import ChatFireworks
