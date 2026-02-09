@@ -22,3 +22,4 @@ build/
 # Output files
 output/
 *.log
+output_celery/

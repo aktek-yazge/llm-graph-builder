@@ -86,6 +86,9 @@ dependencies = [
     "azure-core==1.35.1",
     # MCP (If needed in worker)
     "mcp-neo4j-cypher @ git+https://github.com/aktek-yazge/llm-graph-builder.git@d2ce091dc735413ee0fcfd1fc58f01d6e77c1b21#subdirectory=backend/mcp-servers/mcp-neo4j-cypher",
+    "langchain-mcp-adapters>=0.1.0",
+    "langchain-google-genai>=2.1.0",
+    "langgraph>=0.4.0",
     "supervisor>=4.3.0",
     "langfuse>=3.11.1",
 ]
