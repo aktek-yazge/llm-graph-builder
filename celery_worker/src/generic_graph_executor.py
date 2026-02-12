@@ -128,6 +128,8 @@ class GenericGraphExecutor:
             "success": True,
             "nodes_created": 0,
             "relationships_created": 0,
+            "chunks_created": 0,
+            "entity_chunk_links": 0,
             "document_linked": False,
             "errors": [],
         }
@@ -137,13 +139,25 @@ class GenericGraphExecutor:
             if not isinstance(llm_output, dict):
                 raise ValueError(f"llm_output must be dict, got {type(llm_output)}")
 
+            chunks = llm_output.get("chunks", [])
             nodes = llm_output.get("nodes", [])
             relationships = llm_output.get("relationships", [])
             document_type = llm_output.get("document_type", "DIGER")
 
             logging.info(
-                f"📊 GenericGraphExecutor: {len(nodes)} nodes, {len(relationships)} relationships"
+                f"📊 GenericGraphExecutor: {len(chunks)} chunks, {len(nodes)} nodes, {len(relationships)} relationships"
             )
+            
+            # 1.5. Create chunks first (if present)
+            chunk_id_map: Dict[str, str] = {}
+            if chunks:
+                try:
+                    chunk_id_map = self._create_chunks(chunks, file_name)
+                    result["chunks_created"] = len(chunk_id_map)
+                except Exception as e:
+                    error_msg = f"Chunk creation error: {e}"
+                    logging.error(f"❌ {error_msg}")
+                    result["errors"].append(error_msg)
 
             # 2. Create nodes
             created_node_ids = set()
@@ -183,6 +197,16 @@ class GenericGraphExecutor:
                 error_msg = f"Document linking error: {e}"
                 logging.error(f"❌ {error_msg}")
                 result["errors"].append(error_msg)
+            
+            # 4.5. Link entities to chunks (MENTIONED_IN relationship)
+            if chunk_id_map and nodes:
+                try:
+                    entity_chunk_links = self._link_entities_to_chunks(nodes, chunk_id_map)
+                    result["entity_chunk_links"] = entity_chunk_links
+                except Exception as e:
+                    error_msg = f"Entity-chunk linking error: {e}"
+                    logging.error(f"❌ {error_msg}")
+                    result["errors"].append(error_msg)
 
             # 5. Update Document metadata
             try:
@@ -437,6 +461,162 @@ class GenericGraphExecutor:
         )
 
         logging.info(f"📝 Document metadata updated: {file_name} ({document_type})")
+
+    def _create_chunks(
+        self, chunks: list, file_name: str
+    ) -> Dict[str, str]:
+        """
+        Chunk node'larını oluşturur ve Document'e bağlar.
+        
+        Yapı:
+            Document --FIRST_CHUNK--> Chunk1 --NEXT_CHUNK--> Chunk2 --NEXT_CHUNK--> ...
+            Document --HAS_CHUNK--> her Chunk
+        
+        Args:
+            chunks: [{"id": "chunk_001", "text": "...", "position": 1, "page": 1}]
+            file_name: Document fileName (chunk'ları document'e bağlamak için)
+            
+        Returns:
+            Dict mapping chunk_id -> Neo4j node ID
+        """
+        chunk_id_map: Dict[str, str] = {}
+        
+        # Chunk'ları position'a göre sırala
+        sorted_chunks = sorted(chunks, key=lambda x: x.get("position", 0))
+        
+        prev_neo4j_id = None
+        
+        for idx, chunk in enumerate(sorted_chunks):
+            chunk_id = chunk.get("id", "")
+            text = chunk.get("text", "")
+            position = chunk.get("position", idx + 1)
+            page = chunk.get("page", 1)
+            
+            if not chunk_id or not text:
+                continue
+            
+            # Unique ID for Neo4j: file_name + chunk_id
+            neo4j_id = f"{normalize_id(file_name)}_{chunk_id}"
+            
+            # Chunk oluştur ve Document'e HAS_CHUNK ile bağla
+            query = """
+                MERGE (c:Chunk {id: $neo4j_id})
+                SET c.text = $text,
+                    c.position = $position,
+                    c.page = $page,
+                    c.fileName = $file_name,
+                    c.chunkId = $chunk_id
+                WITH c
+                MATCH (d:Document {fileName: $file_name})
+                MERGE (d)-[:HAS_CHUNK]->(c)
+                RETURN c.id as created_id
+            """
+            
+            try:
+                self.graph.query(
+                    query,
+                    {
+                        "neo4j_id": neo4j_id,
+                        "text": text,
+                        "position": position,
+                        "page": page,
+                        "file_name": file_name,
+                        "chunk_id": chunk_id,
+                    },
+                    session_params={"database": self._database} if self._database else {},
+                )
+                
+                chunk_id_map[chunk_id] = neo4j_id
+                
+                # İlk chunk ise FIRST_CHUNK ilişkisi oluştur
+                if idx == 0:
+                    first_chunk_query = """
+                        MATCH (d:Document {fileName: $file_name})
+                        MATCH (c:Chunk {id: $neo4j_id})
+                        MERGE (d)-[:FIRST_CHUNK]->(c)
+                    """
+                    self.graph.query(
+                        first_chunk_query,
+                        {"file_name": file_name, "neo4j_id": neo4j_id},
+                        session_params={"database": self._database} if self._database else {},
+                    )
+                    logging.debug(f"🔗 FIRST_CHUNK: Document -> {neo4j_id}")
+                
+                # Önceki chunk varsa NEXT_CHUNK ilişkisi oluştur
+                if prev_neo4j_id:
+                    next_chunk_query = """
+                        MATCH (prev:Chunk {id: $prev_id})
+                        MATCH (curr:Chunk {id: $curr_id})
+                        MERGE (prev)-[:NEXT_CHUNK]->(curr)
+                    """
+                    self.graph.query(
+                        next_chunk_query,
+                        {"prev_id": prev_neo4j_id, "curr_id": neo4j_id},
+                        session_params={"database": self._database} if self._database else {},
+                    )
+                    logging.debug(f"🔗 NEXT_CHUNK: {prev_neo4j_id} -> {neo4j_id}")
+                
+                prev_neo4j_id = neo4j_id
+                logging.debug(f"✅ Chunk created: {neo4j_id}")
+                
+            except Exception as e:
+                logging.error(f"❌ Failed to create chunk {chunk_id}: {e}")
+        
+        logging.info(f"📄 Created {len(chunk_id_map)} chunks for {file_name} (with FIRST_CHUNK + NEXT_CHUNK chain)")
+        return chunk_id_map
+
+    def _link_entities_to_chunks(
+        self, nodes: list, chunk_id_map: Dict[str, str]
+    ) -> int:
+        """
+        Entity'leri chunk'lara MENTIONED_IN ilişkisiyle bağlar.
+        
+        Args:
+            nodes: Node listesi (her birinde chunk_ids olabilir)
+            chunk_id_map: chunk_id -> neo4j_id mapping
+            
+        Returns:
+            Oluşturulan ilişki sayısı
+        """
+        linked_count = 0
+        
+        for node in nodes:
+            entity_id = node.get("id", "")
+            chunk_ids = node.get("chunk_ids", [])
+            
+            if not entity_id or not chunk_ids:
+                continue
+            
+            for chunk_id in chunk_ids:
+                neo4j_chunk_id = chunk_id_map.get(chunk_id)
+                
+                if not neo4j_chunk_id:
+                    logging.warning(f"⚠️ Chunk not found for entity linking: {chunk_id}")
+                    continue
+                
+                query = """
+                    MATCH (e {id: $entity_id})
+                    MATCH (c:Chunk {id: $chunk_id})
+                    MERGE (e)-[r:MENTIONED_IN]->(c)
+                    RETURN count(r) as linked
+                """
+                
+                try:
+                    result = self.graph.query(
+                        query,
+                        {"entity_id": entity_id, "chunk_id": neo4j_chunk_id},
+                        session_params={"database": self._database} if self._database else {},
+                    )
+                    
+                    if result and result[0].get("linked", 0) > 0:
+                        linked_count += 1
+                        logging.debug(f"✅ Entity {entity_id} linked to chunk {chunk_id}")
+                        
+                except Exception as e:
+                    logging.warning(f"⚠️ Failed to link entity {entity_id} to chunk {chunk_id}: {e}")
+        
+        logging.info(f"🔗 Created {linked_count} entity-chunk links")
+        return linked_count
 
 
 def create_graph_from_llm_output(

@@ -1,6 +1,12 @@
-class LLMGraphBuilderException(Exception):
-    """Exception raised for custom error in the application."""
+# -*- coding: utf-8 -*-
+"""
+LLM Graph Builder Exception - Proxy Module
 
-    def __init__(self, message):
-        self.message = message
-        super().__init__(message)
+Bu dosya /workspace/shared/llm_graph_builder_exception.py'dan re-export yapar.
+
+Kullanım değişmedi:
+    from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
+"""
+
+from shared.llm_graph_builder_exception import *  # noqa: F401,F403
+from shared.llm_graph_builder_exception import LLMGraphBuilderException  # noqa: F401

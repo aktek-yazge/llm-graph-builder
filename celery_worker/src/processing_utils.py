@@ -14,6 +14,11 @@ import json
 from typing import Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timezone
+
+# 🔧 DEBUG: Module load verification
+print(f"[PROCESSING_UTILS] Module loaded at {datetime.now()}", flush=True)
+print(f"[PROCESSING_UTILS] Python version: {sys.version}", flush=True)
+print(f"[PROCESSING_UTILS] Working directory: {os.getcwd()}", flush=True)
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -837,97 +842,121 @@ async def processing_source_v2(
         logging.info(f"🔄 V2 Processing started for: {file_name} ({len(pages)} pages)")
 
         # Generic Entity Extraction (LLM çağrısı - tek LLM call)
-        # Retry mekanizması ile LLM extraction hatalarını yönet
+        # Önce unified OCR tarafından entity'lerin zaten yazılıp yazılmadığını kontrol et
         start_extraction = time.time()
-        logging.info(f"🚀 LLM-driven entity extraction başlıyor...")
+        
+        # Check if entities were already extracted by unified OCR
+        entity_check_query = """
+            MATCH (d:Document {fileName: $file_name})-[:HAS_ENTITY]->(e)
+            RETURN count(e) as entity_count, d.entityExtractionMethod as method
+            LIMIT 1
+        """
+        entity_check_result = await asyncio.to_thread(
+            lambda: graph.query(entity_check_query, {"file_name": file_name})
+        )
+        
+        existing_entity_count = entity_check_result[0]["entity_count"] if entity_check_result else 0
+        extraction_method = entity_check_result[0]["method"] if entity_check_result and entity_check_result[0].get("method") else None
+        
+        if existing_entity_count > 0 and extraction_method == "generic_graph_executor":
+            # Unified OCR already extracted entities - skip LLM extraction
+            logging.info(
+                f"⏭️ Skipping LLM entity extraction - unified OCR already created "
+                f"{existing_entity_count} entities for {file_name}"
+            )
+            uri_latency["entity_extraction"] = "SKIPPED (unified OCR)"
+            extraction_successful = True
+        else:
+            # Proceed with LLM-driven entity extraction
+            logging.info(f"🚀 LLM-driven entity extraction başlıyor...")
 
-        max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
-        retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
-        retries = 0
-        current_delay = retry_delay
-        extraction_successful = False
-        last_error = None
+            max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
+            retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
+            retries = 0
+            current_delay = retry_delay
+            extraction_successful = False
+            last_error = None
 
-        while retries < max_retries and not extraction_successful:
-            try:
-                # _create_document_related_nodes: Generic entity extraction yapar
-                # Bu fonksiyon içinde LLM çağrısı yapılıyor (extract_and_create_entities)
-                # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
-                await asyncio.to_thread(
-                    graphDb_data_Access._create_document_related_nodes,
-                    file_name,
-                    "auto",
-                    None,
-                    model,
-                )
-
-                extraction_successful = True
-                elapsed_extraction = time.time() - start_extraction
-                uri_latency["entity_extraction"] = f"{elapsed_extraction:.2f}"
-                if retries > 0:
-                    logging.info(
-                        f"✅ Entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
+            while retries < max_retries and not extraction_successful:
+                try:
+                    # _create_document_related_nodes: Generic entity extraction yapar
+                    # Bu fonksiyon içinde LLM çağrısı yapılıyor (extract_and_create_entities)
+                    # LLM çağrısı senkron olduğu için thread pool'da çalıştırıyoruz (sunucuyu bloklamamak için)
+                    await asyncio.to_thread(
+                        graphDb_data_Access._create_document_related_nodes,
+                        file_name,
+                        "auto",
+                        None,
+                        model,
                     )
-                else:
-                    logging.info(
-                        f"✅ Entity extraction tamamlandı - {elapsed_extraction:.2f}s"
-                    )
 
-            except Exception as extraction_error:
-                retries += 1
-                last_error = extraction_error
-                error_str = str(extraction_error)
-
-                # LLM extraction hatalarını kontrol et
-                is_llm_error = (
-                    "varlık çıkarımı başarısız" in error_str.lower()
-                    or "llm extraction hatası" in error_str.lower()
-                    or "extraction" in error_str.lower()
-                    or "entity" in error_str.lower()
-                )
-
-                if retries < max_retries and is_llm_error:
-                    logging.warning(
-                        f"⚠️ LLM extraction hatası (deneme {retries}/{max_retries}): {error_str[:200]}... "
-                        f"{current_delay} saniye bekleyip tekrar denenecek..."
-                    )
-                    await asyncio.sleep(current_delay)
-                    current_delay *= 2  # Exponential backoff
-                else:
-                    # Retry limit'e ulaşıldı veya LLM hatası değil
+                    extraction_successful = True
                     elapsed_extraction = time.time() - start_extraction
-                    uri_latency["entity_extraction"] = (
-                        f"FAILED - {elapsed_extraction:.2f}"
-                    )
-                    if retries >= max_retries:
-                        logging.error(
-                            f"❌ Entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
+                    uri_latency["entity_extraction"] = f"{elapsed_extraction:.2f}"
+                    if retries > 0:
+                        logging.info(
+                            f"✅ Entity extraction başarılı (deneme {retries + 1}/{max_retries}) - {elapsed_extraction:.2f}s"
                         )
                     else:
-                        logging.error(
-                            f"❌ Entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
+                        logging.info(
+                            f"✅ Entity extraction tamamlandı - {elapsed_extraction:.2f}s"
                         )
-                    # Dosya durumunu Failed yap ve işlemi sonlandır - async
-                    await asyncio.to_thread(
-                        graphDb_data_Access.update_exception_db,
-                        file_name,
-                        str(last_error),
-                    )
-                    raise last_error
 
-        if not extraction_successful:
-            elapsed_extraction = time.time() - start_extraction
-            uri_latency["entity_extraction"] = (
-                f"FAILED - {elapsed_extraction:.2f}"
-            )
-            logging.error(f"❌ Entity extraction başarısız: {last_error}")
-            await asyncio.to_thread(
-                graphDb_data_Access.update_exception_db, file_name, str(last_error)
-            )
-            if last_error is not None:
-                raise last_error
-            else:
-                raise RuntimeError("Entity extraction failed with unknown error")
+                except Exception as extraction_error:
+                    retries += 1
+                    last_error = extraction_error
+                    error_str = str(extraction_error)
+
+                    # LLM extraction hatalarını kontrol et
+                    is_llm_error = (
+                        "varlık çıkarımı başarısız" in error_str.lower()
+                        or "llm extraction hatası" in error_str.lower()
+                        or "extraction" in error_str.lower()
+                        or "entity" in error_str.lower()
+                    )
+
+                    if retries < max_retries and is_llm_error:
+                        logging.warning(
+                            f"⚠️ LLM extraction hatası (deneme {retries}/{max_retries}): {error_str[:200]}... "
+                            f"{current_delay} saniye bekleyip tekrar denenecek..."
+                        )
+                        await asyncio.sleep(current_delay)
+                        current_delay *= 2  # Exponential backoff
+                    else:
+                        # Retry limit'e ulaşıldı veya LLM hatası değil
+                        elapsed_extraction = time.time() - start_extraction
+                        uri_latency["entity_extraction"] = (
+                            f"FAILED - {elapsed_extraction:.2f}"
+                        )
+                        if retries >= max_retries:
+                            logging.error(
+                                f"❌ Entity extraction {max_retries} deneme sonrası başarısız: {error_str[:500]}"
+                            )
+                        else:
+                            logging.error(
+                                f"❌ Entity extraction hatası (retry yapılmayacak): {error_str[:500]}"
+                            )
+                        # Dosya durumunu Failed yap ve işlemi sonlandır - async
+                        await asyncio.to_thread(
+                            graphDb_data_Access.update_exception_db,
+                            file_name,
+                            str(last_error),
+                        )
+                        raise last_error
+
+            if not extraction_successful:
+                elapsed_extraction = time.time() - start_extraction
+                uri_latency["entity_extraction"] = (
+                    f"FAILED - {elapsed_extraction:.2f}"
+                )
+                logging.error(f"❌ Entity extraction başarısız: {last_error}")
+                await asyncio.to_thread(
+                    graphDb_data_Access.update_exception_db, file_name, str(last_error)
+                )
+                if last_error is not None:
+                    raise last_error
+                else:
+                    raise RuntimeError("Entity extraction failed with unknown error")
 
         # Status'u Completed olarak güncelle
         end_time = datetime.now()
@@ -1697,19 +1726,85 @@ class FileProcessor:
                             logging.error(error_msg)
                             raise Exception(error_msg)
 
+                    print(f"[AGENTIC_OCR] 📸 Found {len(local_images)} images", flush=True)
                     logging.info(
-                        f"📸 Found {len(local_images)} images for Gemini OCR (local/S3/extracted)"
+                        f"📸 Found {len(local_images)} images for AgenticOCR"
                     )
 
-                    # SADECE GEMİNİ OCR İLE MARKDOWN OLUŞTUR (metadata + markdown)
+                    # AgenticOCR: Sayfa sayfa, koordinat takipli OCR
                     from langchain_core.documents import Document
-
-                    loop = asyncio.get_event_loop()
-                    executor = ThreadPoolExecutor(max_workers=1)
-                    ocr_result = await loop.run_in_executor(
-                        executor, lambda: process_gemini_ocr(local_images, "generated")
+                    from prompts import get_domain
+                    print("[AGENTIC_OCR] Importing process_agentic_ocr...", flush=True)
+                    from src.agentic_ocr import process_agentic_ocr
+                    print("[AGENTIC_OCR] Import successful!", flush=True)
+                    
+                    current_domain = get_domain()
+                    print(f"[AGENTIC_OCR] 🤖 Using domain: {current_domain}", flush=True)
+                    logging.info(f"🤖 Using AgenticOCR for domain: {current_domain}")
+                    
+                    # Neo4j bağlantısını erken oluştur (şema çekmek için)
+                    ocr_graph = None
+                    try:
+                        uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                        userName = os.environ.get("NEO4J_USERNAME")
+                        password = os.environ.get("NEO4J_PASSWORD")
+                        database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
+                        
+                        if uri and userName and password:
+                            ocr_graph = create_graph_database_connection(uri, userName, password, database)
+                            logging.info("📊 Neo4j connection created for schema extraction")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Could not create Neo4j connection for schema: {e}")
+                    
+                    print(f"[AGENTIC_OCR] Calling process_agentic_ocr with {len(local_images)} images...", flush=True)
+                    ocr_result = process_agentic_ocr(
+                        image_list=local_images,
+                        file_name=normalized_filename,
+                        file_id=file_record.id if file_record else None,
+                        domain=current_domain,
+                        graph=ocr_graph,
+                        output_dir=document_dir,  # JSON çıktısını kaydet
                     )
-                    executor.shutdown(wait=False)
+                    print(f"[AGENTIC_OCR] Result status: {ocr_result.get('status')}", flush=True)
+                    print(f"[AGENTIC_OCR] Markdown length: {len(ocr_result.get('markdown', ''))}", flush=True)
+                    
+                    # AgenticOCR sonucunu kontrol et
+                    if ocr_result.get("status") != "success":
+                        raise Exception(f"AgenticOCR failed: {ocr_result.get('error', 'Unknown error')}")
+                    
+                    # Yeni JSON format mı yoksa legacy markdown mı?
+                    ocr_output_format = ocr_result.get("metadata", {}).get("output_format", "markdown")
+                    ocr_has_entities = "data" in ocr_result and ocr_result["data"].get("nodes")
+                    
+                    if ocr_output_format == "json" and ocr_has_entities:
+                        # Yeni unified format: OCR + Entity extraction tek seferde yapıldı
+                        ocr_data = ocr_result.get("data", {})
+                        logging.info(
+                            f"🎯 Unified OCR+Entity format detected: "
+                            f"{len(ocr_data.get('chunks', []))} chunks, "
+                            f"{len(ocr_data.get('nodes', []))} nodes, "
+                            f"{len(ocr_data.get('relationships', []))} relationships"
+                        )
+                        
+                        # Chunk'lardan markdown oluştur (legacy uyumluluk için)
+                        markdown_parts = []
+                        for chunk in ocr_data.get("chunks", []):
+                            markdown_parts.append(chunk.get("text", ""))
+                        markdown_text = "\n\n".join(markdown_parts)
+                        
+                        ocr_result = {
+                            "markdown": markdown_text,
+                            "metadata": ocr_result.get("metadata", {}),
+                            "local_path": None,
+                            "_unified_data": ocr_data,  # Entity data'yı sakla
+                        }
+                    else:
+                        # Legacy markdown format
+                        ocr_result = {
+                            "markdown": ocr_result.get("markdown", ""),
+                            "metadata": ocr_result.get("metadata", {}),
+                            "local_path": None,
+                        }
 
                     # OCR sonucunu kontrol et
                     if not ocr_result or not isinstance(ocr_result, dict):
@@ -1788,7 +1883,43 @@ class FileProcessor:
                                 f"✅ Document node created/updated in Neo4j: {normalized_filename}"
                             )
 
-                            # 2. Markdown'ı chunk'lara ayır
+                            # ========================================
+                            # UNIFIED OCR+ENTITY: OCR'dan gelen JSON ile direkt graf oluştur
+                            # ========================================
+                            unified_data = ocr_result.get("_unified_data")
+                            if unified_data and unified_data.get("nodes"):
+                                logging.info(
+                                    f"🎯 Using unified OCR+Entity data for graph creation"
+                                )
+                                
+                                from src.generic_graph_executor import GenericGraphExecutor
+                                
+                                executor = GenericGraphExecutor(graph)
+                                graph_result = executor.create_graph_from_llm_output(
+                                    unified_data, normalized_filename
+                                )
+                                
+                                logging.info(
+                                    f"✅ Unified graph creation completed: "
+                                    f"{graph_result.get('chunks_created', 0)} chunks, "
+                                    f"{graph_result.get('nodes_created', 0)} nodes, "
+                                    f"{graph_result.get('relationships_created', 0)} relationships, "
+                                    f"{graph_result.get('entity_chunk_links', 0)} entity-chunk links"
+                                )
+                                
+                                # Entity extraction zaten yapıldı, flag'i ayarla
+                                ocr_result["_entities_extracted"] = True
+                                
+                                # Skip legacy chunk processing
+                                # (Unified data'da chunk'lar zaten GenericGraphExecutor tarafından yazıldı)
+                            else:
+                                # Legacy: Markdown'dan chunk oluştur
+                                ocr_result["_entities_extracted"] = False
+
+                            # 2. Markdown'ı chunk'lara ayır (legacy flow)
+                            # Unified data varsa bu bölümü atla - chunk'lar zaten yazıldı
+                            skip_legacy_chunking = unified_data and unified_data.get("chunks")
+                            
                             # Minimum chunk boyutu (karakter)
                             min_chunk_size = 150
 
@@ -1920,7 +2051,12 @@ class FileProcessor:
                                 )
 
                             # 4. Chunk node'larını Neo4j'ye yaz
-                            if chunk_documents:
+                            # Skip if unified data already created chunks
+                            if skip_legacy_chunking:
+                                logging.info(
+                                    f"⏭️ Skipping legacy chunk creation - unified OCR already created chunks"
+                                )
+                            elif chunk_documents:
                                 from src.make_relationships import (
                                     create_chunks_for_upload,
                                 )

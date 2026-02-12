@@ -37,7 +37,9 @@ log "🚀 CELERY WORKERS STARTING"
 log "==========================================" 
 
 # Set environment variables
-export PYTHONPATH="$SCRIPT_DIR"
+# SCRIPT_DIR + workspace root (shared modüller için)
+WORKSPACE_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
+export PYTHONPATH="$SCRIPT_DIR:$WORKSPACE_DIR"
 export ENV=development
 # Fix for Mac fork safety with prefork pool
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
