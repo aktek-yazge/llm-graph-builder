@@ -196,6 +196,7 @@ KURALLAR:
 _cropped_regions: List[Dict[str, Any]] = []  # [{"coords": (x1,y1,x2,y2), "desc": "..."}]
 _skipped_regions: List[Dict[str, Any]] = []
 _current_image_path: str = ""  # Mevcut sayfa görüntüsünün yolu
+_grid_info: Dict[str, Any] = {}  # Son çizilen grid bilgisi
 
 
 def set_current_image_path(path: str) -> None:
@@ -216,13 +217,14 @@ def reset_page_state() -> None:
     
     Her yeni sayfa başında Python controller tarafından çağrılır.
     """
-    global _cropped_regions, _skipped_regions, _current_image_path
+    global _cropped_regions, _skipped_regions, _current_image_path, _grid_info
     _cropped_regions = []
     _skipped_regions = []
     _current_image_path = ""
+    _grid_info = {}
     reset_tool_call_log()  # Tool log'unu da sıfırla
     reset_crop_plan()  # Crop planını da sıfırla
-    logger.info("🔄 Page state reset (regions + tool log + crop plan)")
+    logger.info("🔄 Page state reset (regions + tool log + crop plan + grid)")
 
 
 @tool
@@ -521,6 +523,546 @@ def finish_page(
     return result
 
 
+# =============================================================================
+# TSG-AWARE SMART GRID TOOLS
+# =============================================================================
+
+
+def _detect_tsg_columns(image_path: str) -> Dict[str, Any]:
+    """
+    TSG sayfa görüntüsündeki sütun ayırıcı çizgileri otomatik tespit et.
+    
+    Sütun sayısı SABİT DEĞİLDİR - tespit edilen çizgilere göre dinamik
+    olarak S1, S2, ... SN şeklinde numaralandırılır.
+    
+    İçerik bulunan son sınıra kadar tüm sütunlar numaralandırılır.
+    
+    Args:
+        image_path: Sayfa görüntüsünün yolu
+    
+    Returns:
+        Dict: {
+            "columns": {"S1": (x_start, x_end), "S2": ..., ...},
+            "separators": [x1, x2, ...],
+            "width": int, "height": int,
+            "detection_method": "auto" | "fallback"
+        }
+    """
+    from PIL import Image
+    import numpy as np
+    
+    img = Image.open(image_path)
+    w, h = img.size
+    
+    try:
+        from scipy.signal import find_peaks
+        
+        arr = np.array(img.convert('L'))
+        
+        # Sayfa ortasından geniş bant al (header/footer etkisinden kaçın)
+        mid = h // 2
+        band_half = min(100, h // 6)
+        band = arr[mid - band_half:mid + band_half, :]
+        col_profile = band.mean(axis=0)
+        inv_profile = 255 - col_profile
+        
+        # Koyu dikey çizgileri bul
+        peaks, props = find_peaks(
+            inv_profile, 
+            height=80,
+            distance=150,
+            prominence=15,
+        )
+        
+        if len(peaks) >= 3:
+            boundaries = sorted(peaks.tolist())
+            
+            # Ardışık çizgiler arası mesafeleri hesapla
+            gaps = [boundaries[i+1] - boundaries[i] for i in range(len(boundaries)-1)]
+            
+            # Median sütun genişliği (gürültüye dayanıklı)
+            sorted_gaps = sorted(gaps)
+            median_gap = sorted_gaps[len(sorted_gaps) // 2]
+            
+            # --- Sağ tarafta eksik sütun kontrolü ---
+            # Son çizgiden sayfa kenarına kalan alan bir sütunluk mu?
+            remaining_right = w - boundaries[-1]
+            if remaining_right > median_gap * 0.5:
+                # Sağda bir sütunluk daha alan var - sağ sınırı ekle
+                right_bound = min(w - 10, boundaries[-1] + int(median_gap))
+                boundaries.append(right_bound)
+            
+            # --- Sol tarafta eksik sütun kontrolü ---
+            # İlk çizgi çok içerideyse (tam bir sütun genişliği kadar boşluk)
+            # bu sol sınır çizgisi tespit edilememiş demektir
+            remaining_left = boundaries[0]
+            if remaining_left > median_gap * 0.8:
+                # Solda tam bir sütunluk alan var - sol sınırı ekle
+                left_bound = max(10, boundaries[0] - int(median_gap))
+                boundaries.insert(0, left_bound)
+            # Eğer kalan alan küçükse (< median*0.8) bu sadece sayfa marginıdır
+            
+            # --- Çok dar segmentleri filtrele (gürültü) ---
+            # Dar segmentleri komşusuyla birleştir
+            min_col_width = median_gap * 0.6
+            filtered_boundaries = [boundaries[0]]
+            for i in range(1, len(boundaries)):
+                gap = boundaries[i] - filtered_boundaries[-1]
+                if gap >= min_col_width:
+                    filtered_boundaries.append(boundaries[i])
+                # else: bu sınırı atla (çok dar segment, gürültü)
+            boundaries = filtered_boundaries
+            
+            # --- Sütunları oluştur ---
+            columns = {}
+            for i in range(len(boundaries) - 1):
+                col_name = f"S{i + 1}"
+                columns[col_name] = (boundaries[i], boundaries[i + 1])
+            
+            logger.info(
+                f"TSG sütun tespiti (auto): {len(columns)} sütun, "
+                f"sınırlar={boundaries}, "
+                f"sütunlar={{{', '.join(f'{k}: {v[0]}-{v[1]}' for k, v in columns.items())}}}"
+            )
+            
+            return {
+                "columns": columns,
+                "separators": boundaries,
+                "width": w,
+                "height": h,
+                "detection_method": "auto",
+            }
+    
+    except Exception as e:
+        logger.warning(f"TSG sütun tespiti başarısız: {e}, fallback kullanılacak")
+    
+    # ===== FALLBACK: Standart TSG ölçüleri (5 sütun) =====
+    scale = w / 1684.0
+    b = [
+        int(150 * scale),    # S1 sol kenar
+        int(416 * scale),    # S1/S2 ayırıcı
+        int(699 * scale),    # S2/S3 ayırıcı
+        int(982 * scale),    # S3/S4 ayırıcı
+        int(1265 * scale),   # S4/S5 ayırıcı
+        int(1547 * scale),   # S5 sağ kenar
+    ]
+    
+    columns = {}
+    for i in range(len(b) - 1):
+        columns[f"S{i + 1}"] = (b[i], b[i + 1])
+    
+    logger.info(
+        f"TSG sütun tespiti (fallback): {len(columns)} sütun, scale={scale:.2f}"
+    )
+    
+    return {
+        "columns": columns,
+        "separators": b,
+        "width": w,
+        "height": h,
+        "detection_method": "fallback",
+    }
+
+
+def _parse_tsg_cell(cell_ref: str, grid_info: Dict[str, Any]) -> tuple:
+    """
+    TSG hücre referansını piksel koordinatına çevir.
+    
+    Format: "S3:5" → Sütun S3, Satır 5
+    
+    Args:
+        cell_ref: Hücre referansı (örn: "S3:5", "S1:1")
+        grid_info: draw_grid tarafından saklanan grid bilgisi
+    
+    Returns:
+        (x_start, y_start, x_end, y_end) - hücrenin piksel sınırları
+    """
+    parts = cell_ref.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Geçersiz hücre formatı: '{cell_ref}'. "
+            f"Doğru format: 'S3:5' (Sütun:Satır)"
+        )
+    
+    col_name = parts[0].strip().upper()
+    row_num = int(parts[1].strip())
+    
+    columns = grid_info.get("columns", {})
+    rows = grid_info.get("rows", 20)
+    h = grid_info.get("height", 0)
+    
+    if col_name not in columns:
+        valid = ", ".join(columns.keys())
+        raise ValueError(
+            f"Geçersiz sütun: '{col_name}'. Geçerli sütunlar: {valid}"
+        )
+    
+    if row_num < 1 or row_num > rows:
+        raise ValueError(
+            f"Geçersiz satır: {row_num}. Geçerli aralık: 1-{rows}"
+        )
+    
+    col_bounds = columns[col_name]
+    row_h = h // rows
+    
+    x_start = col_bounds[0]
+    x_end = col_bounds[1]
+    y_start = (row_num - 1) * row_h
+    y_end = row_num * row_h
+    
+    return (x_start, y_start, x_end, y_end)
+
+
+def get_grid_info() -> Dict[str, Any]:
+    """Son çizilen grid bilgisini döndür."""
+    return _grid_info.copy()
+
+
+@tool
+def draw_grid(rows: int = 20) -> str:
+    """
+    TSG sayfası üzerine akıllı ızgara çiz.
+    
+    Sütun ayırıcı çizgileri OTOMATIK tespit eder ve bunlara hizalı grid çizer.
+    
+    Grid yapısı:
+    - Sütunlar: S1, S2, S3, S4 (TSG'nin gerçek 4 sütununa hizalı)
+    - Satırlar: 1, 2, 3, ... 20 (yukarıdan aşağıya eşit aralıklı)
+    
+    Referans formatı: "S3:5" = Sütun 3, Satır 5
+    
+    Args:
+        rows: Satır sayısı (varsayılan 20, daha fazla = daha hassas)
+    
+    Returns:
+        Grid görüntüsünün yolu, sütun bilgileri ve referans açıklaması
+    """
+    global _grid_info
+    import time
+    from PIL import Image, ImageDraw, ImageFont
+    
+    start_time = time.time()
+    
+    image_path = _current_image_path
+    if not image_path:
+        return "Hata: Mevcut görüntü yolu ayarlanmamış! get_image_path() ile kontrol et."
+    
+    if not os.path.exists(image_path):
+        return f"Hata: Dosya bulunamadı: {image_path}"
+    
+    try:
+        # TSG sütunlarını tespit et
+        tsg = _detect_tsg_columns(image_path)
+        columns = tsg["columns"]
+        separators = tsg["separators"]
+        w = tsg["width"]
+        h = tsg["height"]
+        detection = tsg["detection_method"]
+        
+        # Görüntüyü aç
+        img = Image.open(image_path)
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        
+        row_h = h // rows
+        
+        # ---- Sütun ayırıcı çizgileri (KALIN, MAVİ) ----
+        col_line_color = (0, 80, 255, 200)
+        col_line_width = 4
+        
+        for sep_x in separators:
+            draw.line([(sep_x, 0), (sep_x, h)], fill=col_line_color, width=col_line_width)
+        
+        # ---- Satır çizgileri (belirgin kırmızı) ----
+        row_line_color = (255, 30, 30, 170)
+        row_line_width = 2
+        
+        for j in range(1, rows):
+            y = j * row_h
+            draw.line([(0, y), (w, y)], fill=row_line_color, width=row_line_width)
+        
+        # ---- Font ----
+        font_size = max(16, min(row_h // 3, 26))
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size
+            )
+        except Exception:
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size
+                )
+            except Exception:
+                font = ImageFont.load_default()
+        
+        small_font_size = max(12, font_size - 2)
+        try:
+            small_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", small_font_size
+            )
+        except Exception:
+            small_font = font
+        
+        # ---- Sütun başlık etiketleri (üst kısım) ----
+        header_bg_color = (0, 80, 255, 220)
+        header_text_color = (255, 255, 255, 255)
+        
+        for col_name, (x_start, x_end) in columns.items():
+            col_center_x = (x_start + x_end) // 2
+            label = col_name
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            
+            # Üst başlık kutusu
+            lx = col_center_x - tw // 2
+            ly = 4
+            padding = 4
+            draw.rectangle(
+                [lx - padding, ly - 2, lx + tw + padding, ly + th + padding],
+                fill=header_bg_color,
+            )
+            draw.text((lx, ly), label, fill=header_text_color, font=font)
+        
+        # ---- Satır numaraları (sol taraf, belirgin) ----
+        row_label_color = (220, 20, 20, 255)
+        row_label_bg = (255, 255, 255, 240)
+        
+        for j in range(rows):
+            label = str(j + 1)
+            y = j * row_h + 3
+            bbox = draw.textbbox((3, y), label, font=small_font)
+            padding = 3
+            draw.rectangle(
+                [bbox[0] - padding, bbox[1] - 2, bbox[2] + padding, bbox[3] + 2],
+                fill=row_label_bg,
+            )
+            draw.text((3, y), label, fill=row_label_color, font=small_font)
+        
+        # ---- Her hücreye referans etiketi (LLM'in görebileceği netlikte) ----
+        cell_label_color = (200, 20, 20, 230)
+        cell_font_size = max(11, small_font_size - 2)
+        try:
+            cell_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", cell_font_size
+            )
+        except Exception:
+            cell_font = small_font
+        
+        for col_name, (x_start, x_end) in columns.items():
+            for j in range(rows):
+                ref_label = f"{col_name}:{j+1}"
+                x = x_start + 4
+                y = j * row_h + 3
+                
+                # Sol üst köşeye belirgin etiket
+                bbox = draw.textbbox((x, y), ref_label, font=cell_font)
+                padding = 2
+                draw.rectangle(
+                    [bbox[0] - padding, bbox[1] - 1, bbox[2] + padding, bbox[3] + 1],
+                    fill=(255, 255, 255, 230),
+                )
+                draw.text((x, y), ref_label, fill=cell_label_color, font=cell_font)
+        
+        # Overlay birleştir
+        img = Image.alpha_composite(img, overlay)
+        img = img.convert('RGB')
+        
+        # Kaydet
+        image_dir = os.path.dirname(image_path)
+        crops_dir = os.path.join(image_dir, "..", "crops")
+        os.makedirs(crops_dir, exist_ok=True)
+        
+        ts = datetime.now().strftime("%H%M%S")
+        ext = os.path.splitext(image_path)[1]
+        output_path = os.path.join(crops_dir, f"{ts}_00_tsg_grid{ext}")
+        img.save(output_path)
+        
+        duration_ms = (time.time() - start_time) * 1000
+        
+        # Grid bilgisini kaydet
+        _grid_info = {
+            "image_path": image_path,
+            "grid_path": output_path,
+            "width": w,
+            "height": h,
+            "columns": columns,           # {"S1": (150, 416), "S2": (416, 699), ...}
+            "separators": separators,
+            "rows": rows,
+            "row_height": row_h,
+            "detection_method": detection,
+        }
+        
+        _log_tool_call(
+            "draw_grid",
+            "local",
+            {"image_path": image_path, "rows": rows, "detection": detection},
+            output_path,
+            duration_ms,
+        )
+        
+        # Sütun bilgisi özeti
+        col_summary = "\n".join(
+            f"  {name}: x={bounds[0]}-{bounds[1]} ({bounds[1]-bounds[0]}px genişlik)"
+            for name, bounds in columns.items()
+        )
+        
+        result = (
+            f"TSG Grid çizildi: {output_path}\n"
+            f"Tespit: {detection} | Boyut: {w}x{h}\n\n"
+            f"SÜTUNLAR (gerçek TSG sütun çizgilerine hizalı):\n{col_summary}\n\n"
+            f"SATIRLAR: 1-{rows} (her satır ~{row_h}px)\n\n"
+            f"REFERANS FORMATI: SütunAdı:SatırNo\n"
+            f"Örnek: crop_by_cells('S3:5', 'S4:18') → S3 satır 5'ten S4 satır 18'e kadar kırp\n\n"
+            f"ÖNEMLİ: Birden fazla kırpma yapabilirsin. Her sütunu AYRI kırp."
+        )
+        
+        logger.info(f"TSG Grid: {output_path} ({detection}, {rows} satır)")
+        return result
+        
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        error_msg = f"Grid çizme hatası: {e}"
+        _log_tool_call("draw_grid", "local", {"image_path": image_path}, error_msg, duration_ms)
+        logger.error(error_msg)
+        return error_msg
+
+
+@tool
+def crop_by_cells(
+    start_cell: str,
+    end_cell: str,
+) -> str:
+    """
+    TSG grid hücre referansları ile görüntü kırp.
+    
+    Önce draw_grid() ile ızgara çiz, sonra bu tool ile kırp.
+    Kırpılmış görüntü orijinal (ızgarasız) görüntüden kesilir.
+    
+    BİRDEN FAZLA KEZ çağırabilirsin! Her sütun için ayrı kırpma yap.
+    
+    Args:
+        start_cell: Sol üst köşe referansı. Format: "SütunAdı:SatırNo"
+                    Örnek: "S3:5" (Sütun 3, Satır 5)
+        end_cell: Sağ alt köşe referansı. Format: "SütunAdı:SatırNo"
+                  Örnek: "S4:18" (Sütun 4, Satır 18)
+    
+    Returns:
+        Kırpılmış görüntünün yolu ve koordinatları
+    
+    Örnekler:
+        crop_by_cells("S3:8", "S3:20")  → Sütun 3'ün alt yarısını kırp
+        crop_by_cells("S4:1", "S4:20")  → Sütun 4'ün tamamını kırp
+        crop_by_cells("S2:5", "S3:15")  → S2-S3 arası bölgeyi kırp
+    """
+    import time
+    from PIL import Image
+    
+    start_time = time.time()
+    
+    if not _grid_info:
+        return "Hata: Önce draw_grid() çağırarak ızgara çiz!"
+    
+    image_path = _grid_info.get("image_path", _current_image_path)
+    if not image_path or not os.path.exists(image_path):
+        return f"Hata: Görüntü bulunamadı: {image_path}"
+    
+    try:
+        columns = _grid_info.get("columns", {})
+        rows = _grid_info.get("rows", 20)
+        h = _grid_info.get("height", 0)
+        w = _grid_info.get("width", 0)
+        row_h = _grid_info.get("row_height", h // rows)
+        
+        # Başlangıç ve bitiş hücrelerini parse et
+        start_bounds = _parse_tsg_cell(start_cell, _grid_info)
+        end_bounds = _parse_tsg_cell(end_cell, _grid_info)
+        
+        # Kırpma koordinatları: start'ın sol-üst'ünden end'in sağ-alt'ına
+        x1 = start_bounds[0]   # start sütununun sol kenarı
+        y1 = start_bounds[1]   # start satırının üst kenarı
+        x2 = end_bounds[2]     # end sütununun sağ kenarı
+        y2 = end_bounds[3]     # end satırının alt kenarı
+        
+        # Sınır kontrolü
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+        
+        # Görüntüyü kırp
+        img = Image.open(image_path)
+        cropped = img.crop((x1, y1, x2, y2))
+        
+        # Kaydet
+        image_dir = os.path.dirname(image_path)
+        crops_dir = os.path.join(image_dir, "..", "crops")
+        os.makedirs(crops_dir, exist_ok=True)
+        
+        ts = datetime.now().strftime("%H%M%S")
+        crop_index = len(_cropped_regions) + 1
+        ext = os.path.splitext(image_path)[1]
+        
+        # Dosya adında okunabilir referans
+        safe_start = start_cell.replace(":", "")
+        safe_end = end_cell.replace(":", "")
+        output_path = os.path.join(
+            crops_dir,
+            f"{ts}_{crop_index:02d}_crop_{safe_start}_{safe_end}{ext}",
+        )
+        cropped.save(output_path)
+        
+        duration_ms = (time.time() - start_time) * 1000
+        
+        # Kırpılan bölgeyi kaydet
+        _cropped_regions.append({
+            "coords": (x1, y1, x2, y2),
+            "cells": f"{start_cell} → {end_cell}",
+            "desc": f"TSG {start_cell} → {end_cell}",
+        })
+        
+        _log_tool_call(
+            "crop_by_cells",
+            "local",
+            {"start_cell": start_cell, "end_cell": end_cell},
+            output_path,
+            duration_ms,
+        )
+        
+        crop_w = x2 - x1
+        crop_h = y2 - y1
+        
+        result = (
+            f"Kırpıldı: {output_path}\n"
+            f"Koordinatlar: ({x1}, {y1}) - ({x2}, {y2})\n"
+            f"Boyut: {crop_w}x{crop_h} piksel\n"
+            f"Bölge: {start_cell} → {end_cell}"
+        )
+        
+        logger.info(f"TSG Crop: {start_cell}-{end_cell} → ({x1},{y1})-({x2},{y2})")
+        return result
+        
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        error_msg = f"Kırpma hatası: {e}"
+        _log_tool_call(
+            "crop_by_cells", "local",
+            {"start_cell": start_cell, "end_cell": end_cell},
+            error_msg, duration_ms,
+        )
+        logger.error(error_msg)
+        return error_msg
+
+
+def reset_grid_info() -> None:
+    """Grid bilgisini sıfırla."""
+    global _grid_info
+    _grid_info = {}
+
+
 def get_ocr_tools() -> list:
     """
     AgenticOCR için tüm custom tool'ları döndürür.
@@ -529,11 +1071,28 @@ def get_ocr_tools() -> list:
         List of LangChain tools
     """
     return [
-        get_image_path,  # Dosya yolunu almak için - agent'ın elle yazmasını önler
-        plan_page_crops,  # Tüm kırpma kararlarını tek seferde al
+        get_image_path,  # Dosya yolunu almak için
+        draw_grid,       # TSG-aware koordinat ızgarası çiz
+        crop_by_cells,   # TSG hücre referansı ile kırp
         ocr_cropped_image,
         mark_cropped,
         mark_skipped,
         get_page_log,
         finish_page,
+    ]
+
+
+def get_grid_tools() -> list:
+    """
+    Sadece grid ve crop tool'larını döndürür.
+    
+    Goal-driven mode için minimal tool seti.
+    
+    Returns:
+        List of LangChain tools
+    """
+    return [
+        get_image_path,
+        draw_grid,
+        crop_by_cells,
     ]

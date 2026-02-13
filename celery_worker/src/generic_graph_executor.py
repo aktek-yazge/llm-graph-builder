@@ -86,31 +86,68 @@ class GenericGraphExecutor:
 
     def ensure_entity_indexes(self):
         """
-        Entity fulltext index'lerinin varlığını kontrol eder ve gerekirse oluşturur.
+        Entity index'lerinin varlığını kontrol eder ve gerekirse oluşturur.
+        
+        Oluşturulan index'ler:
+        1. RANGE index'ler: MERGE performansı için (*.id üzerinde)
+        2. FULLTEXT index'ler: Fuzzy text search için (name, normalized_name)
+        3. Document.fileName index: Document lookup için
+        
         Bu metod sadece ilk çağrıda çalışır (class-level flag ile).
         """
         if GenericGraphExecutor._indexes_ensured:
             return
 
+        session_params = {"database": self._database} if self._database else {}
+
+        # ── 1. RANGE index'ler (MERGE performansı) ──
+        # Her entity label'ı için id property'sinde RANGE index
+        range_indexes = [
+            ("Company", "id"),
+            ("Person", "id"),
+            ("Event", "id"),
+            ("Court", "id"),
+            ("LegalCase", "id"),
+            ("Chunk", "id"),
+            ("Document", "fileName"),
+            ("Company", "normalized_name"),
+            ("Person", "normalized_name"),
+        ]
+        
+        for label, prop in range_indexes:
+            index_name = f"idx_{label.lower()}_{prop}"
+            try:
+                self.graph.query(
+                    f"CREATE INDEX {index_name} IF NOT EXISTS FOR (n:{label}) ON (n.{prop})",
+                    session_params=session_params,
+                )
+                logging.debug(f"✅ Range index: {index_name}")
+            except Exception as e:
+                if "EquivalentSchemaRuleAlreadyExists" not in str(e):
+                    logging.warning(f"⚠️ Range index {index_name} failed: {e}")
+
+        logging.info(f"✅ {len(range_indexes)} range indexes checked/created")
+
+        # ── 2. FULLTEXT index'ler (fuzzy search) ──
         try:
             # pylint: disable=import-outside-toplevel
             from src.make_relationships import create_entity_fulltext_indexes
 
             create_entity_fulltext_indexes(self.graph)
-            GenericGraphExecutor._indexes_ensured = True
             logging.info("✅ Entity fulltext indexes checked/created")
         except ImportError as e:
             logging.warning(f"⚠️ Could not import create_entity_fulltext_indexes: {e}")
-            GenericGraphExecutor._indexes_ensured = True  # Tekrar deneme
         except Exception as e:
             logging.warning(f"⚠️ Entity fulltext index creation failed: {e}")
-            GenericGraphExecutor._indexes_ensured = True  # Tekrar deneme
+
+        GenericGraphExecutor._indexes_ensured = True
 
     def create_graph_from_llm_output(
         self, llm_output: Dict[str, Any], file_name: str
     ) -> Dict[str, Any]:
         """
         LLM'den gelen JSON çıktısını Neo4j node ve relationship'lere dönüştürür.
+        İlk çalışmada gerekli index'leri otomatik oluşturur.
 
         Args:
             llm_output: LLM'den gelen JSON (nodes, relationships, document_type)
@@ -124,9 +161,13 @@ class GenericGraphExecutor:
                 "errors": [...]
             }
         """
+        # Index'leri kontrol et / oluştur (sadece ilk çalışmada)
+        self.ensure_entity_indexes()
+
         result = {
             "success": True,
             "nodes_created": 0,
+            "nodes_merged": 0,
             "relationships_created": 0,
             "chunks_created": 0,
             "entity_chunk_links": 0,
@@ -163,10 +204,16 @@ class GenericGraphExecutor:
             created_node_ids = set()
             for node in nodes:
                 try:
+                    # _merge_strategy: LLM metadata, Neo4j property değil
+                    merge_strategy = node.pop("_merge_strategy", None)
+                    
                     node_id = self._create_node(node)
                     if node_id:
                         created_node_ids.add(node_id)
-                        result["nodes_created"] += 1
+                        if merge_strategy == "merge":
+                            result["nodes_merged"] += 1
+                        else:
+                            result["nodes_created"] += 1
                 except Exception as e:
                     error_msg = (
                         f"Node creation error: {node.get('id', 'unknown')} - {e}"
@@ -219,12 +266,13 @@ class GenericGraphExecutor:
             # Set success based on errors
             if result["errors"]:
                 result["success"] = (
-                    result["nodes_created"] > 0
-                )  # Partial success if any nodes created
+                    result["nodes_created"] + result["nodes_merged"] > 0
+                )  # Partial success if any nodes created or merged
 
             logging.info(
                 f"✅ GenericGraphExecutor completed: "
-                f"{result['nodes_created']} nodes, "
+                f"{result['nodes_created']} new nodes, "
+                f"{result['nodes_merged']} merged nodes, "
                 f"{result['relationships_created']} relationships"
             )
 

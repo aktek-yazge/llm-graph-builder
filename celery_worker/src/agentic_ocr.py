@@ -81,6 +81,21 @@ except ImportError as e:
     log_llm_usage = None  # type: ignore
 
 
+# ============================================================================
+# PROMPT MODE
+# ============================================================================
+# "prescriptive" = mevcut detaylı prompt (unified_ocr_system.md)
+# "goal_driven"  = minimal, hedef odaklı prompt (goal_driven_system.md) + Neo4j tool
+OCR_PROMPT_MODE = os.getenv("OCR_PROMPT_MODE", "prescriptive")
+
+# Goal-driven modda yazma sorguları engellenir
+_CYPHER_WRITE_KEYWORDS = re.compile(
+    r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DROP|DETACH|CALL\s+\{)\b",
+    re.IGNORECASE,
+)
+_CYPHER_MAX_RESULT_CHARS = 8000  # Tool sonuç boyut limiti
+
+
 class AgenticOCR:
     """
     Full-Page Vision OCR with LangChain ChatAnthropic.
@@ -98,6 +113,7 @@ class AgenticOCR:
         self._initialized = False
         self._model_provider = None  # "gemini" or "anthropic"
         self._model_name = None
+        self._prompt_mode = OCR_PROMPT_MODE  # "prescriptive" or "goal_driven"
 
     async def initialize(self) -> None:
         """Vision client'ı başlat (model tipine göre)."""
@@ -201,12 +217,13 @@ class AgenticOCR:
 
         logger.info(
             f"🚀 Starting Vision OCR: model={model_name}, file={file_name}, "
-            f"target={target_company}, pages={len(image_list)}"
+            f"target={target_company}, pages={len(image_list)}, mode={self._prompt_mode}"
         )
         print(
             f"\n{'='*60}\n"
             f"🚀 VISION OCR START\n"
             f"   Model: {model_name}\n"
+            f"   Mode: {self._prompt_mode}\n"
             f"   Target: {target_company}\n"
             f"   Pages: {len(image_list)}\n"
             f"{'='*60}",
@@ -439,11 +456,25 @@ class AgenticOCR:
 
         # Model tipine göre API çağrısı
         if self._model_provider == "anthropic":
-            response_text = await self._call_claude(
-                image_data, mime_type, prompt, model_name,
-                page_num=page_number,
-                file_name=file_name,
-            )
+            if self._prompt_mode == "goal_driven":
+                # Goal-driven mode: tool-use destekli agent loop
+                # Grid tool'ları için mevcut görüntü yolunu ayarla
+                from src.ocr_tools import set_current_image_path, reset_page_state
+                reset_page_state()  # Önceki sayfa state'ini temizle
+                set_current_image_path(page_path)
+                
+                response_text = await self._call_claude_agent_mode(
+                    image_data, mime_type, prompt, model_name,
+                    page_num=page_number,
+                    file_name=file_name,
+                )
+            else:
+                # Prescriptive mode: tek seferlik çağrı
+                response_text = await self._call_claude(
+                    image_data, mime_type, prompt, model_name,
+                    page_num=page_number,
+                    file_name=file_name,
+                )
         else:
             response_text = await self._call_gemini(image_data, mime_type, prompt, model_name)
 
@@ -702,50 +733,14 @@ class AgenticOCR:
             # LANGFUSE - Tüm metadata'yı gönder
             # ================================================================
             if LANGFUSE_AVAILABLE and log_llm_usage:
-                # Maliyet hesaplama - Model bazlı fiyatlar (Şubat 2026)
-                # https://platform.claude.com/docs/en/about-claude/pricing
-                #
-                # Claude Opus 4.6/4.5: Input $5, Output $25, 5m Cache Write $6.25, Cache Hit $0.50
-                # Claude Opus 4.1/4:   Input $15, Output $75, 5m Cache Write $18.75, Cache Hit $1.50
-                # Claude Sonnet 4.5/4: Input $3, Output $15, 5m Cache Write $3.75, Cache Hit $0.30
-                # Claude Haiku 4.5:    Input $1, Output $5, 5m Cache Write $1.25, Cache Hit $0.10
-                
-                # Model'e göre fiyat belirleme
-                model_lower = (model_id or "").lower()
-                if "opus-4-5" in model_lower or "opus-4.5" in model_lower or "opus-4-6" in model_lower:
-                    # Opus 4.5/4.6
-                    price_input = 5.0
-                    price_output = 25.0
-                    price_cache_write = 6.25
-                    price_cache_read = 0.50
-                elif "opus-4-1" in model_lower or "opus-4" in model_lower:
-                    # Opus 4.1/4
-                    price_input = 15.0
-                    price_output = 75.0
-                    price_cache_write = 18.75
-                    price_cache_read = 1.50
-                elif "sonnet" in model_lower:
-                    # Sonnet 4.5/4
-                    price_input = 3.0
-                    price_output = 15.0
-                    price_cache_write = 3.75
-                    price_cache_read = 0.30
-                elif "haiku" in model_lower:
-                    # Haiku 4.5
-                    price_input = 1.0
-                    price_output = 5.0
-                    price_cache_write = 1.25
-                    price_cache_read = 0.10
-                else:
-                    # Default: Opus 4.5 fiyatları
-                    price_input = 5.0
-                    price_output = 25.0
-                    price_cache_write = 6.25
-                    price_cache_read = 0.50
-                
                 # Maliyet hesaplama
+                pricing = self._get_model_pricing(model_id)
+                price_input = pricing["input"]
+                price_output = pricing["output"]
+                price_cache_write = pricing["cache_write"]
+                price_cache_read = pricing["cache_read"]
+                
                 # NOT: Anthropic'in input_tokens cache tokenları İÇERMEZ
-                # input_tokens = base input (cache hariç)
                 # LangChain toplam = input_tokens + cache_read + cache_creation
                 uncached_input = max(0, input_tokens - cache_read - cache_creation)
                 cost_input = uncached_input * price_input / 1_000_000
@@ -841,10 +836,21 @@ class AgenticOCR:
         
         Bu prompt cache'lenir - her mesajda aynı olmalı.
         Değişen bilgiler (şema, sayfa) user mesajına eklenir.
+        
+        Goal-driven mode'da goal_driven_system.md yüklenir.
         """
         from prompts import get_domain, load_prompt
         
         domain = get_domain()
+        
+        # Goal-driven mode: minimal prompt
+        if self._prompt_mode == "goal_driven":
+            try:
+                system_prompt = load_prompt("goal_driven_system", domain)
+                logger.info(f"📦 Goal-driven system prompt loaded ({len(system_prompt)} chars)")
+                return system_prompt
+            except FileNotFoundError:
+                logger.warning(f"goal_driven_system.md not found for domain {domain}, falling back")
         
         try:
             # unified_ocr_system.md - sabit system prompt
@@ -876,7 +882,10 @@ Görevin: Gazete sayfalarından şirket ilanlarını okuyup bilgi grafiği için
         total_pages: int,
     ) -> str:
         """
-        unified_ocr.md template'inden prompt oluştur.
+        User prompt template'inden prompt oluştur.
+        
+        Goal-driven mode'da goal_driven_user.md, prescriptive mode'da
+        unified_ocr.md template'i yüklenir.
         
         Template içindeki placeholder'ları doldurur:
         - {target_company}
@@ -889,12 +898,21 @@ Görevin: Gazete sayfalarından şirket ilanlarını okuyup bilgi grafiği için
         
         domain = get_domain()
         
-        try:
-            # unified_ocr.md template'ini yükle
-            template = load_prompt("unified_ocr", domain)
-        except FileNotFoundError:
-            logger.warning(f"unified_ocr.md not found for domain {domain}, using fallback")
-            template = self._get_fallback_prompt()
+        # Goal-driven mode: minimal user prompt
+        if self._prompt_mode == "goal_driven":
+            try:
+                template = load_prompt("goal_driven_user", domain)
+                logger.info(f"📝 Goal-driven user prompt loaded")
+            except FileNotFoundError:
+                logger.warning(f"goal_driven_user.md not found, falling back to unified_ocr.md")
+                template = self._get_fallback_prompt()
+        else:
+            try:
+                # unified_ocr.md template'ini yükle
+                template = load_prompt("unified_ocr", domain)
+            except FileNotFoundError:
+                logger.warning(f"unified_ocr.md not found for domain {domain}, using fallback")
+                template = self._get_fallback_prompt()
         
         # Continuation context
         if continuation_note and continuation_note.strip():
@@ -946,6 +964,511 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
 - Kişi: `person_[normalized_name]`
 - Diğer: `[label_lowercase]_[normalized_identifier]`
 """
+
+    # ================================================================
+    # SHARED: Pricing
+    # ================================================================
+
+    @staticmethod
+    def _get_model_pricing(model_id: str) -> Dict[str, float]:
+        """
+        Model bazlı fiyat tablosu ($/MTok). Şubat 2026.
+        https://platform.claude.com/docs/en/about-claude/pricing
+
+        Claude Opus 4.6/4.5: Input $5, Output $25, 5m Cache Write $6.25, Cache Hit $0.50
+        Claude Opus 4.1/4:   Input $15, Output $75, 5m Cache Write $18.75, Cache Hit $1.50
+        Claude Sonnet 4.5/4: Input $3, Output $15, 5m Cache Write $3.75, Cache Hit $0.30
+        Claude Haiku 4.5:    Input $1, Output $5, 5m Cache Write $1.25, Cache Hit $0.10
+        """
+        m = (model_id or "").lower()
+        if "opus-4-5" in m or "opus-4.5" in m or "opus-4-6" in m:
+            return {"input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.50}
+        if "opus-4-1" in m or "opus-4" in m:
+            return {"input": 15.0, "output": 75.0, "cache_write": 18.75, "cache_read": 1.50}
+        if "sonnet" in m:
+            return {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30}
+        if "haiku" in m:
+            return {"input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.10}
+        # Default: Opus 4.5
+        return {"input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.50}
+
+    # ================================================================
+    # GOAL-DRIVEN MODE: Neo4j Tool & Agent Loop
+    # ================================================================
+
+    def _create_neo4j_read_tool(self):
+        """
+        Goal-driven mode için Neo4j read-only query tool oluştur.
+        
+        LangChain @tool decorator ile oluşturulur ve bind_tools() ile
+        model'e bağlanır. Yazma sorguları (CREATE, MERGE, DELETE vb.) engellenir.
+        
+        Returns:
+            LangChain tool fonksiyonu veya None (graph bağlantısı yoksa)
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            logger.warning("⚠️ Neo4j graph bağlantısı yok, tool oluşturulamadı")
+            return None
+        
+        graph = self._graph
+        
+        from langchain_core.tools import tool as langchain_tool
+        
+        @langchain_tool
+        def neo4j_query(cypher: str) -> str:
+            """Mevcut Neo4j bilgi grafiğini sorgula. Sadece okuma (MATCH/RETURN) sorguları çalıştırılabilir.
+            
+            Kullanım alanları:
+            - Mevcut entity'lerin ID ve property'lerini kontrol et
+            - Aynı şirket/kişi zaten grafta var mı bak
+            - İlişki pattern'lerini ve mevcut yapıyı incele
+            
+            Args:
+                cypher: Çalıştırılacak Cypher sorgusu (sadece read-only)
+            """
+            # Yazma sorgusu kontrolü
+            if _CYPHER_WRITE_KEYWORDS.search(cypher):
+                return "HATA: Sadece okuma sorguları çalıştırılabilir. CREATE/MERGE/DELETE/SET kullanılamaz."
+            
+            try:
+                result = graph.query(cypher)
+                result_str = json.dumps(result, default=str, ensure_ascii=False)
+                
+                # Sonuç boyutunu sınırla
+                if len(result_str) > _CYPHER_MAX_RESULT_CHARS:
+                    result_str = result_str[:_CYPHER_MAX_RESULT_CHARS] + "\n... (sonuç kısaltıldı)"
+                
+                return result_str
+            except Exception as e:
+                return f"Cypher hatası: {str(e)}"
+        
+        return neo4j_query
+
+    async def _call_claude_agent_mode(
+        self,
+        image_data: bytes,
+        mime_type: str,
+        prompt: str,
+        model_name: str,
+        page_num: int = 1,
+        file_name: str = "unknown",
+    ) -> str:
+        """
+        Goal-driven mode: Tool-use destekli agent loop.
+        
+        LLM Neo4j query tool'u kullanarak mevcut grafı sorgulayabilir,
+        entity resolution yapabilir ve sonra nihai JSON çıktısını döndürür.
+        
+        Flow:
+        1. LLM görüntüyü ve prompt'u alır
+        2. neo4j_query tool'u ile mevcut entity'leri kontrol eder (0-N kez)
+        3. Tool call bitince nihai JSON yanıtı döndürür
+        """
+        if not self._claude_model:
+            raise RuntimeError("Claude model not initialized. Call initialize() first.")
+        
+        from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+        from src.ocr_tools import get_grid_tools, set_current_image_path
+        
+        # Mevcut sayfa görüntüsünü ayarla (grid tool'ları için)
+        # page_path parametresi _process_page'den geliyor, burada image_data var
+        # image_path'i ayrı parametre olarak almamız gerekiyor
+        
+        # Neo4j tool oluştur
+        neo4j_tool = self._create_neo4j_read_tool()
+        tools = [neo4j_tool] if neo4j_tool else []
+        
+        # Grid tool'larını ekle (draw_grid, crop_by_cells, get_image_path)
+        grid_tools = get_grid_tools()
+        tools.extend(grid_tools)
+        logger.info(f"📐 Grid tools eklendi: {[t.name for t in grid_tools]}")
+        
+        # Tool'ları model'e bağla
+        if tools:
+            model_with_tools = self._claude_model.bind_tools(tools)
+            logger.info(f"🔧 Goal-driven mode: {len(tools)} tool bağlandı")
+        else:
+            model_with_tools = self._claude_model
+            logger.warning("⚠️ Goal-driven mode: Tool yok, tool-less çalışılıyor")
+        
+        # Base64 encode image
+        image_base64 = base64.b64encode(image_data).decode("utf-8")
+        
+        # System prompt (goal-driven)
+        system_prompt = self._get_system_prompt()
+        
+        logger.info(f"📦 Goal-driven system prompt: {len(system_prompt)} chars")
+        print(f"   📦 Goal-driven system prompt: {len(system_prompt)} chars", flush=True)
+        
+        # Messages oluştur
+        system_message = SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                },
+            ]
+        )
+        
+        user_message = HumanMessage(
+            content=[
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": image_base64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+            ]
+        )
+        
+        messages = [system_message, user_message]
+        
+        # Langfuse callbacks
+        callbacks = []
+        if LANGFUSE_AVAILABLE and get_langfuse_callback_handler:
+            langfuse_handler = get_langfuse_callback_handler(
+                session_id=f"ocr-goal-driven-{file_name}",
+                trace_name=f"ocr-gd-{file_name}-p{page_num}",
+                tags=["ocr", "vision", "claude", "goal_driven"],
+                metadata={
+                    "file_name": file_name,
+                    "page_num": page_num,
+                    "model": model_name,
+                    "prompt_mode": "goal_driven",
+                },
+            )
+            if langfuse_handler:
+                callbacks.append(langfuse_handler)
+        
+        # Agent loop: tool call → execute → continue → ... → final answer
+        max_iterations = 10  # Sonsuz döngü koruması
+        iteration = 0
+        total_tool_calls = 0
+        
+        # Token sayaçları (tüm iterasyonlar toplam)
+        agg_input_tokens = 0
+        agg_output_tokens = 0
+        agg_cache_read = 0
+        agg_cache_creation = 0
+        
+        start_time = time.time()
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            logger.info(f"🔄 Agent iteration {iteration}/{max_iterations}")
+            print(f"   🔄 Agent iteration {iteration}...", flush=True)
+            
+            try:
+                response = await model_with_tools.ainvoke(
+                    messages,
+                    config={"callbacks": callbacks} if callbacks else {},
+                )
+            except Exception as e:
+                logger.error(f"❌ Agent iteration {iteration} failed: {e}")
+                raise
+            
+            # ── Token bilgilerini topla ──
+            usage_metadata = getattr(response, "usage_metadata", None) or {}
+            iter_input = usage_metadata.get("input_tokens", 0) or 0
+            iter_output = usage_metadata.get("output_tokens", 0) or 0
+            input_details = usage_metadata.get("input_token_details", {}) or {}
+            iter_cache_read = input_details.get("cache_read", 0) or 0
+            iter_cache_creation = input_details.get("cache_creation", 0) or 0
+            
+            agg_input_tokens += iter_input
+            agg_output_tokens += iter_output
+            agg_cache_read += iter_cache_read
+            agg_cache_creation += iter_cache_creation
+            
+            logger.info(
+                f"   📊 Iter {iteration}: in={iter_input}, out={iter_output}, "
+                f"cache_read={iter_cache_read}, cache_create={iter_cache_creation}"
+            )
+            
+            # Tool call var mı kontrol et
+            if not hasattr(response, "tool_calls") or not response.tool_calls:
+                # Final answer - token özetini logla ve döndür
+                duration_ms = int((time.time() - start_time) * 1000)
+                agg_total = agg_input_tokens + agg_output_tokens
+                
+                logger.info(
+                    f"✅ Agent completed in {iteration} iteration(s), "
+                    f"{total_tool_calls} tool call(s), {duration_ms}ms"
+                )
+                print(
+                    f"   ✅ Agent done: {iteration} iter, {total_tool_calls} tool calls, {duration_ms}ms",
+                    flush=True,
+                )
+                
+                # ── Token / Maliyet Özeti ──
+                self._log_agent_usage(
+                    agg_input_tokens=agg_input_tokens,
+                    agg_output_tokens=agg_output_tokens,
+                    agg_cache_read=agg_cache_read,
+                    agg_cache_creation=agg_cache_creation,
+                    duration_ms=duration_ms,
+                    iterations=iteration,
+                    tool_calls=total_tool_calls,
+                    file_name=file_name,
+                    page_num=page_num,
+                    response_metadata=getattr(response, "response_metadata", None) or {},
+                )
+                
+                # Response content'i çıkar
+                if hasattr(response, "content"):
+                    if isinstance(response.content, str):
+                        return response.content
+                    elif isinstance(response.content, list):
+                        # Content blocks listesi - text olanları birleştir
+                        text_parts = []
+                        for block in response.content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                            elif isinstance(block, str):
+                                text_parts.append(block)
+                        return "\n".join(text_parts)
+                
+                return ""
+            
+            # Tool call'ları işle
+            messages.append(response)  # AI message with tool calls
+            
+            # Tool'ları isimle eşleştir (hızlı lookup için)
+            tools_by_name = {t.name: t for t in tools}
+            
+            for tc in response.tool_calls:
+                tool_name = tc.get("name", "unknown")
+                tool_args = tc.get("args", {})
+                tool_id = tc.get("id", "")
+                
+                total_tool_calls += 1
+                logger.info(f"🔧 Tool call #{total_tool_calls}: {tool_name}({tool_args})")
+                print(f"   🔧 Tool: {tool_name} → {str(tool_args)[:100]}", flush=True)
+                
+                # Tool'u bul ve çalıştır
+                tool = tools_by_name.get(tool_name)
+                if tool:
+                    try:
+                        tool_result = tool.invoke(tool_args)
+                    except Exception as e:
+                        tool_result = f"Tool hatası ({tool_name}): {str(e)}"
+                        logger.error(f"❌ Tool error: {tool_name} - {e}")
+                else:
+                    tool_result = f"Bilinmeyen tool: {tool_name}"
+                    logger.warning(f"⚠️ Unknown tool: {tool_name}")
+                
+                # Tool sonucunu mesajlara ekle
+                # Görüntü üreten tool'lar için image content block ekle
+                tool_content = self._build_tool_content(
+                    tool_name, str(tool_result)
+                )
+                messages.append(
+                    ToolMessage(
+                        content=tool_content,
+                        tool_call_id=tool_id,
+                    )
+                )
+                
+                logger.debug(f"   Tool result: {str(tool_result)[:200]}")
+        
+        # Max iteration'a ulaşıldı
+        logger.warning(f"⚠️ Agent max iteration ({max_iterations}) aşıldı!")
+        duration_ms = int((time.time() - start_time) * 1000)
+        print(f"   ⚠️ Agent max iteration aşıldı: {duration_ms}ms", flush=True)
+        
+        # Son response'u text olarak döndür
+        if messages and hasattr(messages[-1], "content"):
+            return str(messages[-1].content)
+        return ""
+
+    # ================================================================
+    # TOOL CONTENT BUILDER: Görüntü döndüren tool'lar için
+    # ================================================================
+
+    # Görüntü döndüren tool isimleri
+    _IMAGE_TOOLS = {"draw_grid", "crop_by_cells"}
+
+    def _build_tool_content(self, tool_name: str, tool_result: str):
+        """
+        Tool sonucunu content block'larına dönüştür.
+        
+        draw_grid ve crop_by_cells gibi görüntü üreten tool'lar için
+        sonuç metninden dosya yolunu çıkarıp, görüntüyü base64 olarak
+        tool mesajına ekler. Böylece LLM grid'i veya kırpılmış görüntüyü
+        görebilir.
+        
+        Args:
+            tool_name: Tool adı
+            tool_result: Tool'un döndürdüğü metin sonucu
+        
+        Returns:
+            str (sadece metin) veya list (metin + görüntü content blocks)
+        """
+        if tool_name not in self._IMAGE_TOOLS:
+            return tool_result
+        
+        # Tool sonucundan dosya yolunu çıkar
+        # draw_grid: "TSG Grid çizildi: /path..." veya "✅ Izgara çizildi: /path..."
+        # crop_by_cells: "Kırpıldı: /path..." veya "✂️ Kırpıldı: /path..."
+        image_path = None
+        for line in tool_result.split("\n"):
+            line = line.strip()
+            for prefix in (
+                "TSG Grid çizildi:",
+                "Kırpıldı:",
+                "✅ Izgara çizildi:",
+                "✂️ Kırpıldı:",
+            ):
+                if line.startswith(prefix):
+                    image_path = line[len(prefix):].strip()
+                    break
+            if image_path:
+                break
+        
+        if not image_path or not os.path.exists(image_path):
+            logger.warning(f"⚠️ Tool {tool_name}: görüntü bulunamadı, sadece metin dönüyor")
+            return tool_result
+        
+        try:
+            with open(image_path, "rb") as f:
+                img_data = f.read()
+            
+            img_base64 = base64.b64encode(img_data).decode("utf-8")
+            mime_type = "image/png" if image_path.endswith(".png") else "image/jpeg"
+            
+            # Content blocks: görüntü + metin
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": img_base64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": tool_result,
+                },
+            ]
+            
+            img_kb = len(img_data) // 1024
+            logger.info(f"📸 Tool {tool_name}: görüntü eklendi ({img_kb}KB)")
+            print(f"   📸 Tool görüntü: {image_path} ({img_kb}KB)", flush=True)
+            
+            return content
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Tool {tool_name}: görüntü eklenemedi: {e}")
+            return tool_result
+
+    def _log_agent_usage(
+        self,
+        agg_input_tokens: int,
+        agg_output_tokens: int,
+        agg_cache_read: int,
+        agg_cache_creation: int,
+        duration_ms: int,
+        iterations: int,
+        tool_calls: int,
+        file_name: str,
+        page_num: int,
+        response_metadata: Dict[str, Any],
+    ) -> None:
+        """
+        Goal-driven agent modunun toplam token kullanımını ve maliyetini loglar.
+        
+        Tüm iterasyonlardaki token'lar toplanır ve tek bir özet basılır.
+        Langfuse'a da gönderilir (aktifse).
+        """
+        agg_total = agg_input_tokens + agg_output_tokens
+        model_id = response_metadata.get("model", self._model_name or "claude-opus-4-5")
+        
+        # ── Console / Logger özeti ──
+        logger.info(
+            f"📊 Agent Tokens (total): input={agg_input_tokens}, output={agg_output_tokens}, "
+            f"total={agg_total}, cache_read={agg_cache_read}, cache_creation={agg_cache_creation}, "
+            f"duration={duration_ms}ms, model={model_id}"
+        )
+        print(
+            f"   📊 Tokens: in={agg_input_tokens}, out={agg_output_tokens}, "
+            f"total={agg_total}, {duration_ms}ms",
+            flush=True,
+        )
+        
+        # Cache status
+        if agg_cache_read > 0:
+            cache_pct = (agg_cache_read / agg_input_tokens * 100) if agg_input_tokens > 0 else 0
+            logger.info(f"✅ Cache HIT: {agg_cache_read} tokens ({cache_pct:.1f}% of input)")
+            print(f"   ✅ Cache HIT: {agg_cache_read} tokens ({cache_pct:.1f}%)", flush=True)
+        elif agg_cache_creation > 0:
+            logger.info(f"📝 Cache CREATED: {agg_cache_creation} tokens (5 min TTL)")
+            print(f"   📝 Cache CREATED: {agg_cache_creation} tokens", flush=True)
+        
+        # ── Maliyet hesaplama ──
+        pricing = self._get_model_pricing(model_id)
+        price_input = pricing["input"]
+        price_output = pricing["output"]
+        price_cache_write = pricing["cache_write"]
+        price_cache_read = pricing["cache_read"]
+        
+        uncached_input = max(0, agg_input_tokens - agg_cache_read - agg_cache_creation)
+        cost_input = uncached_input * price_input / 1_000_000
+        cost_output = agg_output_tokens * price_output / 1_000_000
+        cost_cache_read = agg_cache_read * price_cache_read / 1_000_000
+        cost_cache_write = agg_cache_creation * price_cache_write / 1_000_000
+        total_cost = cost_input + cost_output + cost_cache_read + cost_cache_write
+        
+        logger.info(
+            f"💰 Agent Cost: ${total_cost:.4f} "
+            f"(input=${cost_input:.4f}, output=${cost_output:.4f}, "
+            f"cache_read=${cost_cache_read:.4f}, cache_write=${cost_cache_write:.4f})"
+        )
+        print(
+            f"   💰 Cost: ${total_cost:.4f} "
+            f"(in=${cost_input:.4f}, out=${cost_output:.4f}, "
+            f"cache_r=${cost_cache_read:.4f}, cache_w=${cost_cache_write:.4f})",
+            flush=True,
+        )
+        
+        # ── Langfuse ──
+        if LANGFUSE_AVAILABLE and log_llm_usage:
+            log_llm_usage(
+                session_id=f"ocr-goal-driven-{file_name}",
+                model=model_id or "claude-opus-4-5",
+                input_tokens=agg_input_tokens,
+                output_tokens=agg_output_tokens,
+                cached_tokens=agg_cache_read,
+                cost_usd=total_cost,
+                latency_ms=duration_ms,
+                step_name=f"ocr-gd-page-{page_num}",
+                metadata={
+                    "file_name": file_name,
+                    "page_num": page_num,
+                    "prompt_mode": "goal_driven",
+                    "iterations": iterations,
+                    "tool_calls": tool_calls,
+                    "total_tokens": agg_total,
+                    "cache_creation": agg_cache_creation,
+                    "cache_read": agg_cache_read,
+                    "uncached_input": uncached_input,
+                    "model_id": model_id,
+                    "cost_breakdown": {
+                        "input": cost_input,
+                        "output": cost_output,
+                        "cache_read": cost_cache_read,
+                        "cache_write": cost_cache_write,
+                    },
+                },
+            )
 
     def _save_json_output(
         self,
@@ -1154,24 +1677,28 @@ Hedef şirket sayfada yoksa: {{"target_company": "{target_company}", "found": fa
         # Sadece temel temizlik yap
         data = self._basic_cleanup(raw_data)
         
-        # Devam kontrolü: chunk'larda [PAGE_BREAK] veya devam ifadesi var mı
+        # ── Devam kontrolü ──
+        # 1. LLM'in JSON'da döndürdüğü is_complete alanını öncelikle kullan
+        # 2. Ek güvenlik: TÜM chunk'ları devam ifadesi için tara (son chunk değil, hepsi)
         continuation_note = ""
-        is_complete = True
+        is_complete = data.get("is_complete", True)  # LLM'den gelen değer
         
+        # LLM is_complete=false dediyse, zaten devam ediyor
+        if not is_complete:
+            continuation_note = "LLM: İlan devam ediyor"
+        
+        # Ek güvenlik: Tüm chunk metinlerinde devam ifadesi ara
         chunks = data.get("chunks", [])
-        if chunks:
-            last_chunk_text = chunks[-1].get("text", "")
-            
-            # Devam ifadelerini kontrol et
-            devam_patterns = [
-                r"[Dd]evamı\s+(\d+)\.\s*[Ss]ayfada",
-                r"[Dd]evamı\s+[Ss]ayfa\s+(\d+)",
-                r"\(Devamı var\)",
-                r"\.{3,}$",  # ... ile biten
-            ]
-            
+        devam_patterns = [
+            r"[Dd]evamı\s+(\d+)\.\s*[Ss]ayfada",
+            r"[Dd]evamı\s+[Ss]ayfa\s+(\d+)",
+            r"\([Dd]evamı\s+var\)",
+        ]
+        
+        for chunk in chunks:
+            chunk_text = chunk.get("text", "")
             for pattern in devam_patterns:
-                match = re.search(pattern, last_chunk_text)
+                match = re.search(pattern, chunk_text)
                 if match:
                     is_complete = False
                     if match.groups():
@@ -1179,6 +1706,11 @@ Hedef şirket sayfada yoksa: {{"target_company": "{target_company}", "found": fa
                     else:
                         continuation_note = "İlan devam ediyor"
                     break
+            if not is_complete and continuation_note:
+                break
+        
+        # is_complete alanını JSON'dan kaldır (pipeline'a geçmemeli)
+        data.pop("is_complete", None)
         
         return {
             "data": data,
