@@ -6907,3 +6907,112 @@ SADECE özet metnini döndür, başka açıklama ekleme:
             logging.error(
                 f"LLM Policy ilişkisi oluşturma hatası ({relationship_type}): {e}"
             )
+
+    # ========================================================================
+    # CLEANUP FUNCTIONS - Document Re-processing için
+    # ========================================================================
+
+    @neo4j_retry
+    def cleanup_document_chunks(self, file_name: str) -> int:
+        """
+        Document'a bağlı TÜM chunk'ları sil.
+        
+        Re-processing öncesi temizlik için kullanılır.
+        
+        Args:
+            file_name: Document dosya adı
+            
+        Returns:
+            Silinen chunk sayısı
+        """
+        query = """
+        MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(first:Chunk)
+        OPTIONAL MATCH (first)-[:NEXT_CHUNK*0..]->(c:Chunk)
+        WITH collect(DISTINCT first) + collect(DISTINCT c) as all_chunks
+        UNWIND all_chunks as chunk
+        DETACH DELETE chunk
+        RETURN count(*) as deleted_count
+        """
+        
+        try:
+            result = self.graph.query(
+                query,
+                {"file_name": file_name},
+                session_params={"database": self.graph._database}
+            )
+            
+            deleted_count = result[0]["deleted_count"] if result else 0
+            logging.info(f"🧹 Cleanup: {deleted_count} chunk silindi ({file_name})")
+            return deleted_count
+            
+        except Exception as e:
+            logging.error(f"❌ Chunk cleanup hatası ({file_name}): {e}")
+            return 0
+
+    @neo4j_retry
+    def cleanup_orphan_entities(self, file_name: str) -> int:
+        """
+        Sadece bu Document'a bağlı (orphan) entity'leri sil.
+        
+        Birden fazla Document'a bağlı entity'ler KORUNUR.
+        
+        Args:
+            file_name: Document dosya adı
+            
+        Returns:
+            Silinen entity sayısı
+        """
+        query = """
+        MATCH (d:Document {fileName: $file_name})-[r:HAS_ENTITY]->(e)
+        WHERE NOT EXISTS {
+            MATCH (other:Document)-[:HAS_ENTITY]->(e)
+            WHERE other.fileName <> $file_name
+        }
+        WITH e, r
+        DELETE r
+        WITH e
+        DETACH DELETE e
+        RETURN count(*) as deleted_count
+        """
+        
+        try:
+            result = self.graph.query(
+                query,
+                {"file_name": file_name},
+                session_params={"database": self.graph._database}
+            )
+            
+            deleted_count = result[0]["deleted_count"] if result else 0
+            logging.info(f"🧹 Cleanup: {deleted_count} orphan entity silindi ({file_name})")
+            return deleted_count
+            
+        except Exception as e:
+            logging.error(f"❌ Orphan entity cleanup hatası ({file_name}): {e}")
+            return 0
+
+    @neo4j_retry
+    def cleanup_document_for_reprocessing(self, file_name: str) -> dict:
+        """
+        Document'ı yeniden işleme için temizle.
+        
+        1. Tüm chunk'ları sil
+        2. Orphan entity'leri sil
+        
+        Args:
+            file_name: Document dosya adı
+            
+        Returns:
+            {"chunks_deleted": int, "entities_deleted": int}
+        """
+        chunks_deleted = self.cleanup_document_chunks(file_name)
+        entities_deleted = self.cleanup_orphan_entities(file_name)
+        
+        logging.info(
+            f"🧹 Document temizlendi ({file_name}): "
+            f"{chunks_deleted} chunk, {entities_deleted} entity silindi"
+        )
+        
+        return {
+            "chunks_deleted": chunks_deleted,
+            "entities_deleted": entities_deleted,
+        }

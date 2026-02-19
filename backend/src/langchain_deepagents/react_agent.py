@@ -1092,20 +1092,53 @@ def _generate_file_links_markdown(file_names: set) -> str:
     return markdown_section
 
 
-def _generate_page_links_markdown(page_links: set) -> str:
-    """Page link'lerden markdown formatında görsel linkler oluşturur"""
+def _generate_page_links_markdown(
+    page_links: set,
+    session_id: str = None,
+    user_id: str = None,
+) -> str:
+    """
+    Page link'lerden markdown formatında görsel linkler oluşturur.
+    
+    Eğer session_id verilirse güvenli URL (JWT token) oluşturulur.
+    Token 10 dakika geçerli, her sayfa yüklemesinde yenilenir.
+    
+    Args:
+        page_links: Sayfa görsel dosya adları seti
+        session_id: Kullanıcı oturum ID'si (güvenli URL için)
+        user_id: Kullanıcı ID'si (güvenli URL için)
+    """
     import urllib.parse
 
     if not page_links:
         return ""
 
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    use_secure_urls = os.getenv("SECURE_IMAGE_ENABLED", "true").lower() == "true"
     markdown_section = "\n\n## 📄 İlgili Sayfa Görselleri\n\n"
 
     for page_link in sorted(page_links):
         try:
-            encoded_page_link = urllib.parse.quote(page_link, safe="", encoding="utf-8")
-            image_url = f"{base_url}/images/{encoded_page_link}"
+            # Güvenli URL oluştur (session_id varsa ve aktifse)
+            if session_id and use_secure_urls:
+                try:
+                    from src.shared.secure_image import generate_secure_image_url
+                    
+                    image_url = generate_secure_image_url(
+                        session_id=session_id,
+                        user_id=user_id or "anonymous",
+                        image_filename=page_link,
+                        base_url=base_url,
+                    )
+                except Exception as e:
+                    _log(f"⚠️ Secure URL oluşturulamadı, fallback: {e}", "warning")
+                    # Fallback: eski yöntem
+                    encoded_page_link = urllib.parse.quote(page_link, safe="", encoding="utf-8")
+                    image_url = f"{base_url}/images/{encoded_page_link}"
+            else:
+                # Eski yöntem (geçiş dönemi veya test için)
+                encoded_page_link = urllib.parse.quote(page_link, safe="", encoding="utf-8")
+                image_url = f"{base_url}/images/{encoded_page_link}"
 
             page_info = "Sayfa Görseli"
             if "_page_" in page_link:
@@ -3696,11 +3729,15 @@ class ReactAgent:
                     final_response += file_markdown
                     _log(f"📎 {len(sources['documents'])} belge kaynağı eklendi")
 
-                # Sayfa görselleri ekle
+                # Sayfa görselleri ekle (güvenli URL ile)
                 if sources["pages"]:
-                    page_markdown = _generate_page_links_markdown(sources["pages"])
+                    page_markdown = _generate_page_links_markdown(
+                        sources["pages"],
+                        session_id=session_id,
+                        user_id=getattr(self, '_current_user_id', None),
+                    )
                     final_response += page_markdown
-                    _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi")
+                    _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi (secure)")
 
                 # Hallucination uyarısı ekle
                 if hallucination_warning:
@@ -3713,7 +3750,11 @@ class ReactAgent:
                         sources["documents"]
                     )
                 if sources["pages"]:
-                    source_markdown += _generate_page_links_markdown(sources["pages"])
+                    source_markdown += _generate_page_links_markdown(
+                        sources["pages"],
+                        session_id=session_id,
+                        user_id=getattr(self, '_current_user_id', None),
+                    )
                 if hallucination_warning:
                     source_markdown += hallucination_warning
 

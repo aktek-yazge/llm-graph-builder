@@ -1138,7 +1138,14 @@ QUERY_TO_GET_CHUNKS = """
             MATCH (d:Document)
             WHERE d.fileName = $filename
             WITH d
-            OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
+            // Hem PART_OF ilişkisi hem fileName ile chunk'ları bul
+            OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+            WITH d, COLLECT(c1) AS partOfChunks
+            OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+            WITH partOfChunks + COLLECT(c2) AS allChunks
+            UNWIND allChunks AS c
+            WITH DISTINCT c
+            WHERE c IS NOT NULL
             RETURN c.id as id, c.text as text, c.position as position, c.page_number as page_number
             ORDER BY c.position
             """
@@ -1146,8 +1153,14 @@ QUERY_TO_GET_CHUNKS = """
 QUERY_TO_DELETE_EXISTING_ENTITIES = """
                                 MATCH (d:Document {fileName:$filename})
                                 WITH d
-                                MATCH (d)<-[:PART_OF]-(c:Chunk)
-                                WITH d,c
+                                // Hem PART_OF hem fileName ile chunk'ları bul
+                                OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+                                WITH d, COLLECT(c1) AS partOfChunks
+                                OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+                                WITH d, partOfChunks + COLLECT(c2) AS allChunks
+                                UNWIND allChunks AS c
+                                WITH DISTINCT d, c
+                                WHERE c IS NOT NULL
                                 MATCH (c)-[:HAS_ENTITY]->(e)
                                 WHERE NOT EXISTS { (e)<-[:HAS_ENTITY]-()<-[:PART_OF]-(d2:Document) }
                                 DETACH DELETE e

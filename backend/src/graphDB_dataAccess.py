@@ -668,11 +668,19 @@ class graphDBdataAccess:
         query_to_delete_document = """
             MATCH (d:Document)
             WHERE d.fileName IN $filename_list AND coalesce(d.fileSource, "None") IN $source_types_list
-            WITH COLLECT(d) AS documents
-            CALL (documents) {
+            WITH COLLECT(d) AS documents, COLLECT(d.fileName) AS fileNames
+            CALL (documents, fileNames) {
             UNWIND documents AS d
-            optional match (d)<-[:PART_OF]-(c:Chunk) 
-            detach delete c, d
+            // PART_OF ilişkisi ile bağlı chunk'lar
+            OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk) 
+            WITH d, fileNames, COLLECT(DISTINCT c1) AS partOfChunks
+            // fileName ile eşleşen chunk'lar (PART_OF ilişkisi olmayan)
+            OPTIONAL MATCH (c2:Chunk) WHERE c2.fileName IN fileNames
+            WITH d, partOfChunks, COLLECT(DISTINCT c2) AS fileNameChunks
+            // Tüm chunk'ları birleştir
+            WITH d, partOfChunks + fileNameChunks AS allChunks
+            FOREACH (chunk IN allChunks | DETACH DELETE chunk)
+            DETACH DELETE d
             } IN TRANSACTIONS OF 1 ROWS
             """
         # Dinamik silme query'si - tüm node tiplerini ve ilişkileri dinamik olarak bulur
@@ -680,16 +688,18 @@ class graphDBdataAccess:
         query_to_delete_document_and_entities = """
             MATCH (d:Document)
             WHERE d.fileName IN $filename_list AND coalesce(d.fileSource, "None") IN $source_types_list
-            WITH COLLECT(d) AS documents
-            CALL (documents) {
+            WITH COLLECT(d) AS documents, COLLECT(d.fileName) AS fileNames
+            CALL (documents, fileNames) {
             UNWIND documents AS d
             
-            // 1. Chunk'ları topla
-            OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-            WITH d, documents, COLLECT(DISTINCT c) AS chunks
+            // 1. Chunk'ları topla - hem PART_OF ilişkisi hem fileName ile
+            OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+            WITH d, documents, fileNames, COLLECT(DISTINCT c1) AS partOfChunks
+            OPTIONAL MATCH (c2:Chunk) WHERE c2.fileName IN fileNames
+            WITH d, documents, fileNames, partOfChunks + COLLECT(DISTINCT c2) AS chunks
             
             // 2. Chunk'lara bağlı entity'leri topla (HAS_ENTITY ilişkisi ile)
-            OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+            OPTIONAL MATCH (c:Chunk)-[:HAS_ENTITY]->(chunkEntity) WHERE c IN chunks
             WITH d, documents, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
             
             // 3. Document'a direkt bağlı TÜM node'ları topla (herhangi bir ilişki ile)
@@ -866,12 +876,14 @@ class graphDBdataAccess:
             safe_deletion_query = """
                 MATCH (d:Document {fileName: $file_name})
                 
-                // 1. Chunk'ları topla
-                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)
-                WITH d, COLLECT(DISTINCT chunk) AS chunksToDelete
+                // 1. Chunk'ları topla - hem PART_OF ilişkisi hem fileName ile
+                OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+                WITH d, COLLECT(DISTINCT c1) AS partOfChunks
+                OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+                WITH d, partOfChunks + COLLECT(DISTINCT c2) AS chunksToDelete
                 
                 // 2. Chunk'lara bağlı entity'leri topla
-                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                OPTIONAL MATCH (chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity) WHERE chunk IN chunksToDelete
                 WITH d, chunksToDelete, COLLECT(DISTINCT chunkEntity) AS chunkEntities
                 
                 // 3. Document'a direkt bağlı TÜM node'ları topla (1. seviye)

@@ -844,7 +844,7 @@ async def processing_source_v2(
         # Generic Entity Extraction (LLM çağrısı - tek LLM call)
         # Önce unified OCR tarafından entity'lerin zaten yazılıp yazılmadığını kontrol et
         start_extraction = time.time()
-        
+
         # Check if entities were already extracted by unified OCR
         entity_check_query = """
             MATCH (d:Document {fileName: $file_name})-[:HAS_ENTITY]->(e)
@@ -854,10 +854,16 @@ async def processing_source_v2(
         entity_check_result = await asyncio.to_thread(
             lambda: graph.query(entity_check_query, {"file_name": file_name})
         )
-        
-        existing_entity_count = entity_check_result[0]["entity_count"] if entity_check_result else 0
-        extraction_method = entity_check_result[0]["method"] if entity_check_result and entity_check_result[0].get("method") else None
-        
+
+        existing_entity_count = (
+            entity_check_result[0]["entity_count"] if entity_check_result else 0
+        )
+        extraction_method = (
+            entity_check_result[0]["method"]
+            if entity_check_result and entity_check_result[0].get("method")
+            else None
+        )
+
         if existing_entity_count > 0 and extraction_method == "generic_graph_executor":
             # Unified OCR already extracted entities - skip LLM extraction
             logging.info(
@@ -871,7 +877,9 @@ async def processing_source_v2(
             logging.info(f"🚀 LLM-driven entity extraction başlıyor...")
 
             max_retries = int(os.environ.get("LLM_EXTRACTION_MAX_RETRIES", "3"))
-            retry_delay = int(os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5"))  # seconds
+            retry_delay = int(
+                os.environ.get("LLM_EXTRACTION_RETRY_DELAY", "5")
+            )  # seconds
             retries = 0
             current_delay = retry_delay
             extraction_successful = False
@@ -946,9 +954,7 @@ async def processing_source_v2(
 
             if not extraction_successful:
                 elapsed_extraction = time.time() - start_extraction
-                uri_latency["entity_extraction"] = (
-                    f"FAILED - {elapsed_extraction:.2f}"
-                )
+                uri_latency["entity_extraction"] = f"FAILED - {elapsed_extraction:.2f}"
                 logging.error(f"❌ Entity extraction başarısız: {last_error}")
                 await asyncio.to_thread(
                     graphDb_data_Access.update_exception_db, file_name, str(last_error)
@@ -1283,6 +1289,17 @@ class FileProcessor:
                             from src.graphDB_dataAccess import graphDBdataAccess
 
                             graphDb_data_Access = graphDBdataAccess(graph)
+                            
+                            # 🧹 CLEANUP: Mevcut chunk ve orphan entity'leri sil
+                            # Re-processing için temiz başlangıç
+                            cleanup_result = graphDb_data_Access.cleanup_document_for_reprocessing(
+                                normalized_filename
+                            )
+                            logging.info(
+                                f"🧹 Cleanup completed: {cleanup_result.get('chunks_deleted', 0)} chunks, "
+                                f"{cleanup_result.get('entities_deleted', 0)} orphan entities deleted"
+                            )
+                            
                             graphDb_data_Access.create_source_node(
                                 normalized_filename, skip_entity_extraction=True
                             )
@@ -1726,56 +1743,201 @@ class FileProcessor:
                             logging.error(error_msg)
                             raise Exception(error_msg)
 
-                    print(f"[AGENTIC_OCR] 📸 Found {len(local_images)} images", flush=True)
-                    logging.info(
-                        f"📸 Found {len(local_images)} images for AgenticOCR"
+                    print(
+                        f"[AGENTIC_OCR] 📸 Found {len(local_images)} images", flush=True
                     )
+                    logging.info(f"📸 Found {len(local_images)} images for AgenticOCR")
 
-                    # AgenticOCR: Sayfa sayfa, koordinat takipli OCR
+                    # page_images'ı Postgres'e kaydet (image filenames only)
+                    # Bu bilgi sonradan Chunk.page_link oluşturmak için kullanılacak
+                    if local_images and file_record:
+                        try:
+                            page_image_filenames = [
+                                os.path.basename(img) for img in sorted(local_images)
+                            ]
+                            queue_db = get_file_queue_db()
+                            db_session = queue_db.get_db_session()
+                            try:
+                                db_record = (
+                                    db_session.query(UploadedFile)
+                                    .filter(UploadedFile.id == file_record.id)
+                                    .first()
+                                )
+                                if db_record:
+                                    db_record.page_images = json.dumps(
+                                        page_image_filenames
+                                    )
+                                    db_session.commit()
+                                    logging.info(
+                                        f"✅ Saved {len(page_image_filenames)} page_images to database for file_id={file_record.id}"
+                                    )
+                            finally:
+                                db_session.close()
+                        except Exception as e:
+                            logging.warning(
+                                f"⚠️ Could not save page_images to database: {e}"
+                            )
+
+                    # ================================================================
+                    # OCR PIPELINE SELECTION
+                    # ================================================================
+                    # OCR_PIPELINE env var:
+                    #   - "unified" (default): Tek seferde OCR + Entity extraction
+                    #   - "sequential": GeminiOCR -> Claude text mode
+                    # ================================================================
+                    OCR_PIPELINE = os.environ.get("OCR_PIPELINE", "unified").lower()
+
                     from langchain_core.documents import Document
                     from prompts import get_domain
-                    print("[AGENTIC_OCR] Importing process_agentic_ocr...", flush=True)
-                    from src.agentic_ocr import process_agentic_ocr
-                    print("[AGENTIC_OCR] Import successful!", flush=True)
-                    
+
                     current_domain = get_domain()
-                    print(f"[AGENTIC_OCR] 🤖 Using domain: {current_domain}", flush=True)
-                    logging.info(f"🤖 Using AgenticOCR for domain: {current_domain}")
-                    
-                    # Neo4j bağlantısını erken oluştur (şema çekmek için)
-                    ocr_graph = None
-                    try:
-                        uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
-                        userName = os.environ.get("NEO4J_USERNAME")
-                        password = os.environ.get("NEO4J_PASSWORD")
-                        database = file_record.neo4j_database or os.environ.get("NEO4J_DATABASE", "neo4j")
-                        
-                        if uri and userName and password:
-                            ocr_graph = create_graph_database_connection(uri, userName, password, database)
-                            logging.info("📊 Neo4j connection created for schema extraction")
-                    except Exception as e:
-                        logging.warning(f"⚠️ Could not create Neo4j connection for schema: {e}")
-                    
-                    print(f"[AGENTIC_OCR] Calling process_agentic_ocr with {len(local_images)} images...", flush=True)
-                    ocr_result = process_agentic_ocr(
-                        image_list=local_images,
-                        file_name=normalized_filename,
-                        file_id=file_record.id if file_record else None,
-                        domain=current_domain,
-                        graph=ocr_graph,
-                        output_dir=document_dir,  # JSON çıktısını kaydet
+
+                    if OCR_PIPELINE == "sequential":
+                        # ════════════════════════════════════════════════════════════
+                        # SEQUENTIAL PIPELINE: GeminiOCR -> Claude (text mode)
+                        # ════════════════════════════════════════════════════════════
+                        print(
+                            f"[OCR_PIPELINE] 🔄 Using SEQUENTIAL pipeline", flush=True
+                        )
+                        logging.info(
+                            f"🔄 OCR Pipeline: SEQUENTIAL (GeminiOCR -> Claude)"
+                        )
+
+                        # Stage 1: GeminiOCRAgent - Paralel OCR
+                        print(
+                            f"[OCR_PIPELINE] Stage 1: GeminiOCRAgent with {len(local_images)} images...",
+                            flush=True,
+                        )
+                        from src.agents import process_gemini_ocr
+
+                        gemini_result = process_gemini_ocr(
+                            image_list=local_images,
+                            output_dir=document_dir,
+                        )
+
+                        gemini_token_usage = gemini_result.get("token_usage", {})
+                        print(
+                            f"[OCR_PIPELINE] Stage 1 complete: {gemini_result.get('total_chars', 0)} chars, "
+                            f"tokens={gemini_token_usage.get('total_tokens', 0)}, "
+                            f"cost=${gemini_token_usage.get('cost_usd', 0):.4f}",
+                            flush=True,
+                        )
+                        logging.info(
+                            f"✅ GeminiOCR complete: {gemini_result.get('page_count', 0)} pages, "
+                            f"{gemini_result.get('total_chars', 0)} chars"
+                        )
+
+                        # Stage 2: AgenticOCR (text mode) - Entity extraction
+                        print(
+                            f"[OCR_PIPELINE] Stage 2: AgenticOCR text mode with {len(gemini_result.get('ocr_texts', []))} pages...",
+                            flush=True,
+                        )
+                        from src.agentic_ocr import process_agentic_ocr_text_mode
+
+                        ocr_result = process_agentic_ocr_text_mode(
+                            ocr_texts=gemini_result.get("ocr_texts", []),
+                            file_name=normalized_filename,
+                            file_id=file_record.id if file_record else None,
+                            domain=current_domain,
+                            output_dir=document_dir,
+                            batch_size=50,
+                        )
+
+                        # Token bilgisini birleştir
+                        if "metadata" not in ocr_result:
+                            ocr_result["metadata"] = {}
+                        ocr_result["metadata"][
+                            "gemini_token_usage"
+                        ] = gemini_token_usage
+                        ocr_result["metadata"]["pipeline"] = "sequential"
+
+                        print(
+                            f"[OCR_PIPELINE] Sequential pipeline complete", flush=True
+                        )
+
+                    else:
+                        # ════════════════════════════════════════════════════════════
+                        # UNIFIED PIPELINE: Mevcut tek seferde OCR + Entity extraction
+                        # ════════════════════════════════════════════════════════════
+                        print(f"[OCR_PIPELINE] 🎯 Using UNIFIED pipeline", flush=True)
+                        logging.info(f"🎯 OCR Pipeline: UNIFIED (single-pass)")
+
+                        print(
+                            "[AGENTIC_OCR] Importing process_agentic_ocr...", flush=True
+                        )
+                        from src.agentic_ocr import process_agentic_ocr
+
+                        print("[AGENTIC_OCR] Import successful!", flush=True)
+
+                        print(
+                            f"[AGENTIC_OCR] 🤖 Using domain: {current_domain}",
+                            flush=True,
+                        )
+                        logging.info(
+                            f"🤖 Using AgenticOCR for domain: {current_domain}"
+                        )
+
+                        # Neo4j bağlantısını erken oluştur (şema çekmek için)
+                        ocr_graph = None
+                        try:
+                            uri = file_record.neo4j_uri or os.environ.get("NEO4J_URI")
+                            userName = os.environ.get("NEO4J_USERNAME")
+                            password = os.environ.get("NEO4J_PASSWORD")
+                            database = file_record.neo4j_database or os.environ.get(
+                                "NEO4J_DATABASE", "neo4j"
+                            )
+
+                            if uri and userName and password:
+                                ocr_graph = create_graph_database_connection(
+                                    uri, userName, password, database
+                                )
+                                logging.info(
+                                    "📊 Neo4j connection created for schema extraction"
+                                )
+                        except Exception as e:
+                            logging.warning(
+                                f"⚠️ Could not create Neo4j connection for schema: {e}"
+                            )
+
+                        print(
+                            f"[AGENTIC_OCR] Calling process_agentic_ocr with {len(local_images)} images...",
+                            flush=True,
+                        )
+                        ocr_result = process_agentic_ocr(
+                            image_list=local_images,
+                            file_name=normalized_filename,
+                            file_id=file_record.id if file_record else None,
+                            domain=current_domain,
+                            graph=ocr_graph,
+                            output_dir=document_dir,
+                        )
+
+                        if "metadata" not in ocr_result:
+                            ocr_result["metadata"] = {}
+                        ocr_result["metadata"]["pipeline"] = "unified"
+                    print(
+                        f"[AGENTIC_OCR] Result status: {ocr_result.get('status')}",
+                        flush=True,
                     )
-                    print(f"[AGENTIC_OCR] Result status: {ocr_result.get('status')}", flush=True)
-                    print(f"[AGENTIC_OCR] Markdown length: {len(ocr_result.get('markdown', ''))}", flush=True)
-                    
+                    print(
+                        f"[AGENTIC_OCR] Markdown length: {len(ocr_result.get('markdown', ''))}",
+                        flush=True,
+                    )
+
                     # AgenticOCR sonucunu kontrol et
                     if ocr_result.get("status") != "success":
-                        raise Exception(f"AgenticOCR failed: {ocr_result.get('error', 'Unknown error')}")
-                    
+                        raise Exception(
+                            f"AgenticOCR failed: {ocr_result.get('error', 'Unknown error')}"
+                        )
+
                     # Yeni JSON format mı yoksa legacy markdown mı?
-                    ocr_output_format = ocr_result.get("metadata", {}).get("output_format", "markdown")
-                    ocr_has_entities = "data" in ocr_result and ocr_result["data"].get("nodes")
-                    
+                    ocr_output_format = ocr_result.get("metadata", {}).get(
+                        "output_format", "markdown"
+                    )
+                    ocr_has_entities = "data" in ocr_result and ocr_result["data"].get(
+                        "nodes"
+                    )
+
                     if ocr_output_format == "json" and ocr_has_entities:
                         # Yeni unified format: OCR + Entity extraction tek seferde yapıldı
                         ocr_data = ocr_result.get("data", {})
@@ -1785,13 +1947,13 @@ class FileProcessor:
                             f"{len(ocr_data.get('nodes', []))} nodes, "
                             f"{len(ocr_data.get('relationships', []))} relationships"
                         )
-                        
+
                         # Chunk'lardan markdown oluştur (legacy uyumluluk için)
                         markdown_parts = []
                         for chunk in ocr_data.get("chunks", []):
                             markdown_parts.append(chunk.get("text", ""))
                         markdown_text = "\n\n".join(markdown_parts)
-                        
+
                         ocr_result = {
                             "markdown": markdown_text,
                             "metadata": ocr_result.get("metadata", {}),
@@ -1873,6 +2035,17 @@ class FileProcessor:
 
                             graphDb_data_Access = graphDBdataAccess(graph)
 
+                            # 🧹 CLEANUP: Mevcut chunk ve orphan entity'leri sil
+                            # Re-processing için temiz başlangıç
+                            cleanup_result = graphDb_data_Access.cleanup_document_for_reprocessing(
+                                normalized_filename
+                            )
+                            if cleanup_result.get("chunks_deleted", 0) > 0 or cleanup_result.get("entities_deleted", 0) > 0:
+                                logging.info(
+                                    f"🧹 Cleanup: {cleanup_result.get('chunks_deleted', 0)} chunks, "
+                                    f"{cleanup_result.get('entities_deleted', 0)} orphan entities deleted"
+                                )
+
                             # Document node'u oluştur veya güncelle
                             graphDb_data_Access.create_source_node(
                                 normalized_filename,
@@ -1891,14 +2064,16 @@ class FileProcessor:
                                 logging.info(
                                     f"🎯 Using unified OCR+Entity data for graph creation"
                                 )
-                                
-                                from src.generic_graph_executor import GenericGraphExecutor
-                                
+
+                                from src.generic_graph_executor import (
+                                    GenericGraphExecutor,
+                                )
+
                                 executor = GenericGraphExecutor(graph)
                                 graph_result = executor.create_graph_from_llm_output(
                                     unified_data, normalized_filename
                                 )
-                                
+
                                 logging.info(
                                     f"✅ Unified graph creation completed: "
                                     f"{graph_result.get('chunks_created', 0)} chunks, "
@@ -1906,10 +2081,10 @@ class FileProcessor:
                                     f"{graph_result.get('relationships_created', 0)} relationships, "
                                     f"{graph_result.get('entity_chunk_links', 0)} entity-chunk links"
                                 )
-                                
+
                                 # Entity extraction zaten yapıldı, flag'i ayarla
                                 ocr_result["_entities_extracted"] = True
-                                
+
                                 # Skip legacy chunk processing
                                 # (Unified data'da chunk'lar zaten GenericGraphExecutor tarafından yazıldı)
                             else:
@@ -1918,8 +2093,10 @@ class FileProcessor:
 
                             # 2. Markdown'ı chunk'lara ayır (legacy flow)
                             # Unified data varsa bu bölümü atla - chunk'lar zaten yazıldı
-                            skip_legacy_chunking = unified_data and unified_data.get("chunks")
-                            
+                            skip_legacy_chunking = unified_data and unified_data.get(
+                                "chunks"
+                            )
+
                             # Minimum chunk boyutu (karakter)
                             min_chunk_size = 150
 

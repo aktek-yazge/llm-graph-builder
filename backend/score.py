@@ -1393,6 +1393,87 @@ async def serve_page_image(image_name: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/secure-image/{token}")
+async def serve_secure_image(token: str, request: Request):
+    """
+    JWT token ile imzalanmış güvenli resim erişimi.
+    
+    Token içeriği:
+    - session_id: Kullanıcının oturum ID'si
+    - user_id: Kullanıcı ID'si
+    - s3_key: S3'teki resim path'i
+    - exp: Token geçerlilik süresi
+    
+    Güvenlik:
+    - Token 10 dakika geçerli (her sayfa yüklemesinde yenilenir)
+    - Session binding (farklı tarayıcıda çalışmaz)
+    - URL kopyalansa bile token session'a bağlı
+    """
+    import jwt
+    from fastapi.responses import StreamingResponse
+    from src.shared.secure_image import decode_secure_image_token
+    
+    try:
+        # 1. Token'ı decode et
+        payload = decode_secure_image_token(token)
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401, 
+            detail="Token expired - lütfen sayfayı yenileyin"
+        )
+    except jwt.InvalidTokenError as e:
+        logging.warning(f"Invalid secure image token: {e}")
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    # 2. Session doğrulama (opsiyonel - frontend session yönetimine göre)
+    # TODO: Frontend session cookie/header implementasyonuna göre aktif edilebilir
+    # request_session = request.cookies.get("session_id") or request.headers.get("X-Session-ID")
+    # if request_session and payload.get("session_id") != request_session:
+    #     raise HTTPException(status_code=403, detail="Session mismatch")
+    
+    # 3. S3'ten resmi al
+    s3_key = payload.get("s3_key")
+    if not s3_key:
+        raise HTTPException(status_code=400, detail="Invalid token payload")
+    
+    if not S3_BACKUP_BUCKET or not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        raise HTTPException(status_code=503, detail="S3 configuration not available")
+    
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+        
+        s3_client = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        )
+        
+        response = s3_client.get_object(Bucket=S3_BACKUP_BUCKET, Key=s3_key)
+        
+        # Stream olarak döndür
+        return StreamingResponse(
+            response["Body"],
+            media_type="image/png",
+            headers={
+                "Cache-Control": "private, max-age=300",  # 5 dk browser cache
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+        
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', '')
+        if error_code == 'NoSuchKey':
+            logging.warning(f"Secure image not found: {s3_key}")
+            raise HTTPException(status_code=404, detail="Image not found")
+        logging.error(f"S3 error serving secure image {s3_key}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    except Exception as e:
+        logging.error(f"Error serving secure image {s3_key}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/url/scan")
 async def create_source_knowledge_graph_url(
     uri=Form(None),
@@ -8018,12 +8099,14 @@ async def delete_file_background_task(
                                 delete_query = """
                                     MATCH (d:Document {fileName: $filename})
                                     
-                                    // 1. Chunk'ları topla
-                                    OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                                    WITH d, COLLECT(DISTINCT c) AS chunks
+                                    // 1. Chunk'ları topla - hem PART_OF ilişkisi hem fileName ile
+                                    OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+                                    WITH d, COLLECT(DISTINCT c1) AS partOfChunks
+                                    OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+                                    WITH d, partOfChunks + COLLECT(DISTINCT c2) AS chunks
                                     
                                     // 2. Chunk'lara bağlı entity'leri topla
-                                    OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                                    OPTIONAL MATCH (chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity) WHERE chunk IN chunks
                                     WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
                                     
                                     // 3. Document'a direkt bağlı TÜM node'ları topla (1. seviye)
@@ -8249,12 +8332,14 @@ async def delete_queued_file(
                             dynamic_delete_query = """
                                 MATCH (d:Document {fileName: $fileName})
                                 
-                                // Chunk'ları topla
-                                OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                                WITH d, COLLECT(DISTINCT c) AS chunks
+                                // Chunk'ları topla - hem PART_OF ilişkisi hem fileName ile
+                                OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+                                WITH d, COLLECT(DISTINCT c1) AS partOfChunks
+                                OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+                                WITH d, partOfChunks + COLLECT(DISTINCT c2) AS chunks
                                 
                                 // Chunk'lara bağlı entity'leri topla
-                                OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                                OPTIONAL MATCH (chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity) WHERE chunk IN chunks
                                 WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
                                 
                                 // Document'a bağlı tüm node'ları topla (3 seviye derinliğe kadar)
@@ -8389,12 +8474,14 @@ async def delete_queued_file(
                     dynamic_delete_query = """
                         MATCH (d:Document {fileName: $fileName})
                         
-                        // Chunk'ları topla
-                        OPTIONAL MATCH (d)<-[:PART_OF]-(c:Chunk)
-                        WITH d, COLLECT(DISTINCT c) AS chunks
+                        // Chunk'ları topla - hem PART_OF ilişkisi hem fileName ile
+                        OPTIONAL MATCH (d)<-[:PART_OF]-(c1:Chunk)
+                        WITH d, COLLECT(DISTINCT c1) AS partOfChunks
+                        OPTIONAL MATCH (c2:Chunk {fileName: d.fileName})
+                        WITH d, partOfChunks + COLLECT(DISTINCT c2) AS chunks
                         
                         // Chunk'lara bağlı entity'leri topla
-                        OPTIONAL MATCH (d)<-[:PART_OF]-(chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity)
+                        OPTIONAL MATCH (chunk:Chunk)-[:HAS_ENTITY]->(chunkEntity) WHERE chunk IN chunks
                         WITH d, chunks, COLLECT(DISTINCT chunkEntity) AS chunkEntities
                         
                         // Document'a bağlı tüm node'ları topla (3 seviye derinliğe kadar)

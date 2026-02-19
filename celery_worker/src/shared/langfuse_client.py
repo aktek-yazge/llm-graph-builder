@@ -9,6 +9,15 @@ Kullanım değişmedi:
     from src.shared.langfuse_client import get_langfuse, trace_llm_call, log_llm_usage
 """
 
+import sys
+import os
+
+# Circular import'u önle: /workspace/shared path'ini ekle
+_workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+
+# Şimdi workspace/shared modülünü doğrudan import et
 from shared.langfuse_client import *  # noqa: F401,F403
 from shared.langfuse_client import (  # noqa: F401 - explicit re-exports for IDE support
     is_langfuse_enabled,

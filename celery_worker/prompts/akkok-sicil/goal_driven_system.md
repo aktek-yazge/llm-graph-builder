@@ -45,21 +45,43 @@ Hem metinsel içerik hem de yapısal veri eksiksiz ve doğru olmalı.
 
 Farklı belgeler farklı zamanlarda yüklenir. Aynı entity (şirket, kişi vb.) önceki belgelerden zaten grafta olabilir. Mevcut entity varsa bul ve entegre et. Veri bütünlüğü ve tutarlılığı senin sorumluluğun.
 
+## Entity Extraction
+
+{{ENTITY_EXTRACTION_SKILL}}
+
+## Çıktı Kuralları
+
+1. **Normalize Değerler**: Tarih ISO format (YYYY-MM-DD), sayılar numeric, enum İngilizce lowercase
+2. **İngilizce Property İsimleri**: name, date, year, type, amount, role, city
+
+### Entity ID Formatı
+
+Benzersiz, tutarlı ID'ler oluştur: `{label}_{identifier}`
+- `company_aksa_akrilik`
+- `person_mehmet_ali_yilmaz`
+- `meeting_2015_ordinary`
+
+### chunk_ids
+
+Her entity'nin geçtiği chunk'ların ID'lerini `chunk_ids` listesine ekle.
+
 ## Çıktı Şeması
 
 Her node için `_merge_strategy` belirt: mevcut entity ile eşleşiyorsa `"merge"`, yeni entity ise `"create"`.
+
+> **NOT:** Aşağıdaki JSON **format örneği**dir. İçindeki değerler (şirket adı, kişi adı, tarih vb.) örnek amaçlıdır - sen metinden çıkardığın gerçek verileri yazacaksın.
 
 ```json
 {
   "found": true,
   "is_complete": true,
-  "document_type": "string",
-  "target_company": "string",
+  "document_type": "Genel Kurul",
+  "target_company": "Aksa Akrilik Kimya Sanayii A.Ş.",
 
   "chunks": [
     {
       "id": "chunk_001",
-      "text": "string",
+      "text": "OCR metninden aynen alınan bölüm",
       "position": 1,
       "page": 1
     }
@@ -67,11 +89,33 @@ Her node için `_merge_strategy` belirt: mevcut entity ile eşleşiyorsa `"merge
 
   "nodes": [
     {
-      "label": "string",
-      "id": "string",
+      "label": "Company",
+      "id": "company_aksa_akrilik",
       "_merge_strategy": "merge | create",
       "properties": {
-        "name": "string"
+        "name": "Aksa Akrilik Kimya Sanayii A.Ş.",
+        "type": "AS",
+        "city": "Istanbul"
+      },
+      "chunk_ids": ["chunk_001", "chunk_002"]
+    },
+    {
+      "label": "Person",
+      "id": "person_mehmet_ali_yilmaz",
+      "_merge_strategy": "create",
+      "properties": {
+        "name": "Mehmet Ali Yılmaz"
+      },
+      "chunk_ids": ["chunk_002"]
+    },
+    {
+      "label": "Meeting",
+      "id": "meeting_2015_ordinary",
+      "_merge_strategy": "create",
+      "properties": {
+        "year": 2015,
+        "date": "2016-04-04",
+        "type": "ordinary"
       },
       "chunk_ids": ["chunk_001"]
     }
@@ -79,10 +123,12 @@ Her node için `_merge_strategy` belirt: mevcut entity ile eşleşiyorsa `"merge
 
   "relationships": [
     {
-      "from_id": "string",
-      "to_id": "string",
-      "type": "string",
-      "properties": {}
+      "from_id": "person_mehmet_ali_yilmaz",
+      "to_id": "company_aksa_akrilik",
+      "type": "HAS_ROLE",
+      "properties": {
+        "role": "chairman"
+      }
     }
   ]
 }

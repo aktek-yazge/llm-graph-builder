@@ -1,0 +1,201 @@
+# =============================================================================
+# MCP CONTEXT FORGE GATEWAY - Production Deployment
+# =============================================================================
+#
+# ÖN KOŞUL:
+#   Infrastructure stack çalışıyor olmalı:
+#   cd ../infrastructure && docker compose -p infrastructure up -d
+#
+# KULLANIM:
+#   # Infisical ile çalıştırma (önerilen)
+#   infisical run --env=staging --path=/infrastructure -- \
+#     docker compose -p mcp-gateway up -d
+#
+#   # Manuel .env dosyası ile
+#   docker compose --env-file .env up -d
+#
+# ERİŞİM (Traefik routing):
+#   Admin UI:     https://mcp-gateway.${BASE_DOMAIN}/admin
+#   Health:       https://mcp-gateway.${BASE_DOMAIN}/health
+#   MCP Endpoint: https://mcp-gateway.${BASE_DOMAIN}/mcp
+#
+# SONRAKI ADIMLAR:
+#   1. JWT token oluştur:
+#      docker compose exec mcp-gateway python3 -m mcpgateway.utils.create_jwt_token \
+#        --username admin@example.com --exp 10080 --secret $MCP_GATEWAY_JWT_SECRET
+#
+#   2. MCP sunucularını register et:
+#      curl -X POST -H "Authorization: Bearer $TOKEN" \
+#        -H "Content-Type: application/json" \
+#        -d '{"name":"neo4j-cypher","url":"http://mcp-neo4j-cypher:8002/mcp/"}' \
+#        http://mcp-gateway:4444/gateways
+#
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # MCP CONTEXT FORGE GATEWAY
+  # ===========================================================================
+  mcp-gateway:
+    image: ghcr.io/ibm/mcp-context-forge:1.0.0-RC-1
+    container_name: mcp-gateway
+    restart: always
+    expose:
+      - "4444"
+    environment:
+      # Server Configuration
+      - HOST=0.0.0.0
+      - PORT=4444
+      - ENVIRONMENT=production
+      - APP_DOMAIN=https://mcp-gateway.${BASE_DOMAIN}
+      # Database - MariaDB
+      - DATABASE_URL=mysql+pymysql://mcp:${MCP_GATEWAY_DB_PASSWORD}@mcp-gateway-mariadb:3306/mcpgateway
+      # Cache - Redis
+      - CACHE_TYPE=redis
+      - REDIS_URL=redis://mcp-gateway-redis:6379/0
+      - REDIS_PARSER=hiredis
+      - REDIS_MAX_CONNECTIONS=100
+      # Authentication
+      - JWT_SECRET_KEY=${MCP_GATEWAY_JWT_SECRET}
+      - JWT_ALGORITHM=HS256
+      - JWT_AUDIENCE=mcpgateway-api
+      - JWT_ISSUER=mcpgateway
+      - AUTH_REQUIRED=true
+      - REQUIRE_TOKEN_EXPIRATION=true
+      - REQUIRE_JTI=true
+      - PLATFORM_ADMIN_EMAIL=${MCP_GATEWAY_ADMIN_EMAIL:-admin@example.com}
+      - PLATFORM_ADMIN_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD}
+      - PLATFORM_ADMIN_FULL_NAME=Platform Administrator
+      # UI & API
+      - MCPGATEWAY_UI_ENABLED=true
+      - MCPGATEWAY_ADMIN_API_ENABLED=true
+      - SECURE_COOKIES=true
+      - SECURITY_HEADERS_ENABLED=true
+      # Transport
+      - TRANSPORT_TYPE=streamablehttp
+      # Performance
+      - GUNICORN_WORKERS=4
+      - GUNICORN_TIMEOUT=120
+      - DB_POOL_SIZE=20
+      - DB_MAX_OVERFLOW=10
+      # Logging
+      - LOG_LEVEL=WARNING
+      - STRUCTURED_LOGGING_DATABASE_ENABLED=false
+      - AUDIT_TRAIL_ENABLED=false
+      # Auth Cache
+      - AUTH_CACHE_ENABLED=true
+      - AUTH_CACHE_USER_TTL=300
+      # MCP Session Pool
+      - MCP_SESSION_POOL_ENABLED=true
+      - MCP_SESSION_POOL_MAX_PER_KEY=100
+      - MCP_SESSION_POOL_TTL=300.0
+    depends_on:
+      mcp-gateway-mariadb:
+        condition: service_healthy
+      mcp-gateway-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4444/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "logging=alloy"
+      - "traefik.enable=true"
+      # MCP Gateway - Subdomain routing
+      - "traefik.http.routers.mcp-gateway.rule=Host(`mcp-gateway.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.mcp-gateway.entrypoints=web,websecure"
+      - "traefik.http.routers.mcp-gateway.tls=true"
+      - "traefik.http.routers.mcp-gateway.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mcp-gateway.loadbalancer.server.port=4444"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "10"
+    networks:
+      - internal
+      - infrastructure
+      - traefik-public
+      - observability
+
+  # ===========================================================================
+  # MariaDB - Database for MCP Gateway
+  # ===========================================================================
+  mcp-gateway-mariadb:
+    image: mariadb:10.6
+    container_name: mcp-gateway-mariadb
+    restart: always
+    expose:
+      - "3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MCP_GATEWAY_DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=mcpgateway
+      - MYSQL_USER=mcp
+      - MYSQL_PASSWORD=${MCP_GATEWAY_DB_PASSWORD}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    networks:
+      - internal
+      - observability
+
+  # ===========================================================================
+  # Redis - Cache for MCP Gateway
+  # ===========================================================================
+  mcp-gateway-redis:
+    image: redis:7-alpine
+    container_name: mcp-gateway-redis
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "logging=alloy"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - internal
+      - observability
+
+volumes:
+  mariadb_data:
+    name: mcp_gateway_mariadb_data
+  redis_data:
+    name: mcp_gateway_redis_data
+
+networks:
+  internal:
+    driver: bridge
+  infrastructure:
+    external: true
+    name: infrastructure_infrastructure
+  traefik-public:
+    external: true
+    name: traefik-public
+  observability:
+    external: true
+    name: observability

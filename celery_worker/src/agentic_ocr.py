@@ -49,18 +49,41 @@ print(f"[AGENTIC_OCR_MODULE] Loaded at {datetime.now()}", flush=True)
 # ============================================================================
 
 if TYPE_CHECKING:
-    from langchain_anthropic import ChatAnthropic
+    from langchain_core.language_models import BaseChatModel
 
-# LangChain Anthropic import
+# ============================================================================
+# LANGCHAIN PROVIDER IMPORTS (tak-çıkar yapı)
+# ============================================================================
+
+# Anthropic (Claude)
 try:
     from langchain_anthropic import ChatAnthropic
-
     LANGCHAIN_ANTHROPIC_AVAILABLE = True
     logger.info("✅ LangChain ChatAnthropic imported")
 except ImportError as e:
     logger.warning(f"⚠️ LangChain Anthropic not available: {e}")
     LANGCHAIN_ANTHROPIC_AVAILABLE = False
     ChatAnthropic = None  # type: ignore
+
+# OpenAI (GPT)
+try:
+    from langchain_openai import ChatOpenAI
+    LANGCHAIN_OPENAI_AVAILABLE = True
+    logger.info("✅ LangChain ChatOpenAI imported")
+except ImportError as e:
+    logger.warning(f"⚠️ LangChain OpenAI not available: {e}")
+    LANGCHAIN_OPENAI_AVAILABLE = False
+    ChatOpenAI = None  # type: ignore
+
+# Google (Gemini) - LangChain version
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    LANGCHAIN_GOOGLE_AVAILABLE = True
+    logger.info("✅ LangChain ChatGoogleGenerativeAI imported")
+except ImportError as e:
+    logger.warning(f"⚠️ LangChain Google GenAI not available: {e}")
+    LANGCHAIN_GOOGLE_AVAILABLE = False
+    ChatGoogleGenerativeAI = None  # type: ignore
 
 # Langfuse LLM Observability
 try:
@@ -98,20 +121,25 @@ _CYPHER_MAX_RESULT_CHARS = 8000  # Tool sonuç boyut limiti
 
 class AgenticOCR:
     """
-    Full-Page Vision OCR with LangChain ChatAnthropic.
+    Full-Page Vision OCR with Multi-Provider LangChain Support.
 
     Her sayfayı doğrudan vision modeline gönderir.
     Model sayfanın multi-column yapısını anlar ve sadece hedef şirketin
     içeriğini markdown veya JSON olarak döndürür.
     
-    LangChain ChatAnthropic + Prompt Caching + Langfuse entegrasyonu.
+    Desteklenen provider'lar (tak-çıkar):
+    - Anthropic: claude-opus-4.5, claude-sonnet-4, ...
+    - OpenAI: gpt-4o, gpt-4.1, o3-mini, ...
+    - Google: gemini-2.5-pro, gemini-2.0-flash, ...
+    
+    LangChain + Tool-Use + Langfuse entegrasyonu.
     """
 
     def __init__(self):
-        self._gemini_client = None
-        self._claude_model: Optional[ChatAnthropic] = None
+        self._llm_model: Optional["BaseChatModel"] = None  # LangChain ortak interface
+        self._gemini_client = None  # Legacy: native Gemini client (fallback)
         self._initialized = False
-        self._model_provider = None  # "gemini" or "anthropic"
+        self._model_provider = None  # "anthropic" | "openai" | "google"
         self._model_name = None
         self._prompt_mode = OCR_PROMPT_MODE  # "prescriptive" or "goal_driven"
 
@@ -123,8 +151,10 @@ class AgenticOCR:
         model_name = os.environ.get("OCR_VISION_MODEL", "gemini-2.5-pro")
         self._model_name = model_name
         
+        # ================================================================
+        # ANTHROPIC (Claude)
+        # ================================================================
         if model_name.startswith("claude"):
-            # LangChain ChatAnthropic
             if not LANGCHAIN_ANTHROPIC_AVAILABLE or ChatAnthropic is None:
                 raise ImportError(
                     "langchain-anthropic paketi kurulu değil. `uv add langchain-anthropic` ile kurun."
@@ -136,26 +166,32 @@ class AgenticOCR:
             
             # Model name mapping
             model_mapping = {
+                "claude-opus-4.6": "claude-opus-4-6",
+                "claude-opus-4-6": "claude-opus-4-6",
                 "claude-opus-4.5": "claude-opus-4-5-20251101",
                 "claude-opus-4-5": "claude-opus-4-5-20251101",
                 "claude-opus-4": "claude-opus-4-20250514",
-                "claude-sonnet-4": "claude-sonnet-4-20250514",
+                "claude-sonnet-4.6": "claude-sonnet-4-6",
+                "claude-sonnet-4-6": "claude-sonnet-4-6",
+                "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
                 "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+                "claude-sonnet-4": "claude-sonnet-4-20250514",
                 "claude-sonnet": "claude-sonnet-4-20250514",
+                "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+                "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+                "claude-haiku": "claude-haiku-4-5-20251001",
             }
             actual_model = model_mapping.get(model_name, model_name)
             
             # Extended thinking budget
             thinking_budget = int(os.environ.get("OCR_THINKING_BUDGET", "10000"))
             
-            # Model parametreleri
             model_kwargs: Dict[str, Any] = {
                 "model": actual_model,
                 "api_key": SecretStr(api_key),
                 "max_tokens": 16384,
             }
             
-            # Extended thinking (budget > 0 ise)
             if thinking_budget > 0:
                 model_kwargs["thinking"] = {
                     "type": "enabled",
@@ -165,41 +201,129 @@ class AgenticOCR:
             else:
                 logger.info(f"🤖 Vision OCR: {actual_model} (thinking=disabled)")
             
-            self._claude_model = ChatAnthropic(**model_kwargs)
+            self._llm_model = ChatAnthropic(**model_kwargs)
             self._model_provider = "anthropic"
-            
             print(f"   ✅ LangChain ChatAnthropic initialized: {actual_model}", flush=True)
-        else:
-            # Google (Gemini) client
-            from google import genai
-            api_key = os.environ.get("GEMINI_API_KEY")
+        
+        # ================================================================
+        # OPENAI (GPT)
+        # ================================================================
+        elif model_name.startswith("gpt") or model_name.startswith("o3") or model_name.startswith("o1"):
+            if not LANGCHAIN_OPENAI_AVAILABLE or ChatOpenAI is None:
+                raise ImportError(
+                    "langchain-openai paketi kurulu değil. `uv add langchain-openai` ile kurun."
+                )
+            
+            api_key = os.environ.get("OPENAI_API_KEY")
             if not api_key:
-                raise ValueError("GEMINI_API_KEY environment variable not set")
-            self._gemini_client = genai.Client(api_key=api_key)
-            self._model_provider = "gemini"
-            logger.info(f"🤖 Vision OCR initialized: {model_name} (Gemini)")
+                raise ValueError("OPENAI_API_KEY environment variable not set")
+            
+            # Model name mapping (kısa isimler)
+            model_mapping = {
+                "gpt-5.2": "gpt-5.2",
+                "gpt-5.1": "gpt-5.1",
+                "gpt-5": "gpt-5",
+                "gpt-5-mini": "gpt-5-mini",
+                "gpt-4o": "gpt-4o-2024-11-20",
+                "gpt-4.1": "gpt-4.1",
+                "gpt-4.1-mini": "gpt-4.1-mini",
+                "o3": "o3",
+                "o3-mini": "o3-mini-2025-01-31",
+                "o4-mini": "o4-mini",
+                "o1": "o1",
+                "o1-mini": "o1-mini",
+            }
+            actual_model = model_mapping.get(model_name, model_name)
+            
+            model_kwargs: Dict[str, Any] = {
+                "model": actual_model,
+                "api_key": SecretStr(api_key),
+                "max_tokens": 16384,
+                "temperature": 0,
+            }
+            
+            logger.info(f"🤖 Vision OCR: {actual_model} (OpenAI)")
+            
+            self._llm_model = ChatOpenAI(**model_kwargs)
+            self._model_provider = "openai"
+            print(f"   ✅ LangChain ChatOpenAI initialized: {actual_model}", flush=True)
+        
+        # ================================================================
+        # GOOGLE (Gemini) - LangChain version
+        # ================================================================
+        elif model_name.startswith("gemini"):
+            if not LANGCHAIN_GOOGLE_AVAILABLE or ChatGoogleGenerativeAI is None:
+                # Fallback to native Gemini client
+                logger.warning("⚠️ langchain-google-genai not available, using native client")
+                from google import genai
+                api_key = os.environ.get("GEMINI_API_KEY")
+                if not api_key:
+                    raise ValueError("GEMINI_API_KEY environment variable not set")
+                self._gemini_client = genai.Client(api_key=api_key)
+                self._model_provider = "gemini_native"
+                logger.info(f"🤖 Vision OCR initialized: {model_name} (Gemini Native)")
+            else:
+                api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                if not api_key:
+                    raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
+                
+                # Model name mapping - LangChain Google GenAI doğrudan model adlarını kullanır
+                model_mapping = {
+                    "gemini-3-pro-preview": "gemini-3-pro-preview",
+                    "gemini-2.5-pro": "gemini-2.5-pro",
+                    "gemini-2.5-flash": "gemini-2.5-flash",
+                    "gemini-2.0-flash": "gemini-2.0-flash",
+                    "gemini-1.5-pro": "gemini-1.5-pro",
+                    "gemini-1.5-flash": "gemini-1.5-flash",
+                }
+                actual_model = model_mapping.get(model_name, model_name)
+                
+                model_kwargs: Dict[str, Any] = {
+                    "model": actual_model,
+                    "google_api_key": api_key,
+                    "max_output_tokens": 65536,  # Gemini 2.5 supports up to 65k
+                    "temperature": 0,
+                }
+                
+                logger.info(f"🤖 Vision OCR: {actual_model} (Google LangChain)")
+                
+                self._llm_model = ChatGoogleGenerativeAI(**model_kwargs)
+                self._model_provider = "google"
+                print(f"   ✅ LangChain ChatGoogleGenerativeAI initialized: {actual_model}", flush=True)
+        
+        else:
+            raise ValueError(f"Desteklenmeyen model: {model_name}. claude/gpt/gemini prefix'i kullanın.")
         
         self._initialized = True
 
     async def process(
         self,
-        image_list: List[str],
-        file_name: str,
+        image_list: Optional[List[str]] = None,
+        file_name: str = "",
         file_id: Optional[int] = None,
         domain: Optional[str] = None,
         graph: Optional[Neo4jGraph] = None,
         output_dir: Optional[str] = None,
+        # ──────────────────────────────────────────
+        # TEXT MODE: Görsel yerine OCR metni işler
+        # ──────────────────────────────────────────
+        text_mode: bool = False,
+        ocr_texts: Optional[List[str]] = None,
+        batch_size: int = 50,
     ) -> Dict[str, Any]:
         """
         Sayfaları tek tek işle.
 
         Args:
-            image_list: İşlenecek image path'leri
+            image_list: İşlenecek image path'leri (text_mode=False ise zorunlu)
             file_name: Dosya adı (prompt'ta şirket adı çıkarılır)
             file_id: Tracking için
             domain: Domain (opsiyonel)
             graph: Neo4j graph bağlantısı (şema çekmek için)
             output_dir: JSON çıktısı için dizin (opsiyonel)
+            text_mode: True ise görsel yerine OCR metni işler
+            ocr_texts: OCR metinleri (text_mode=True ise zorunlu)
+            batch_size: Text mode'da batch boyutu (default: 50 sayfa)
 
         Returns:
             {"markdown": "...", "metadata": {...}, "status": "success"|"error"}
@@ -207,6 +331,27 @@ class AgenticOCR:
         self._graph = graph  # Şema çekmek için sakla
         if not self._initialized:
             await self.initialize()
+
+        # ══════════════════════════════════════════════════════════════════
+        # TEXT MODE: Görsel yerine OCR metni işle
+        # ══════════════════════════════════════════════════════════════════
+        if text_mode:
+            if not ocr_texts:
+                raise ValueError("text_mode=True requires ocr_texts parameter")
+            return await self._process_text_mode(
+                ocr_texts=ocr_texts,
+                file_name=file_name,
+                file_id=file_id,
+                domain=domain,
+                output_dir=output_dir,
+                batch_size=batch_size,
+            )
+
+        # ══════════════════════════════════════════════════════════════════
+        # IMAGE MODE: Mevcut görsel işleme mantığı
+        # ══════════════════════════════════════════════════════════════════
+        if not image_list:
+            raise ValueError("image_list required when text_mode=False")
 
         from prompts import get_domain
         from src.shared.langfuse_client import get_langfuse, flush_langfuse
@@ -455,39 +600,46 @@ class AgenticOCR:
         print(f"   🤖 Calling {model_name}...", flush=True)
 
         # Model tipine göre API çağrısı
-        if self._model_provider == "anthropic":
-            if self._prompt_mode == "goal_driven":
-                # Goal-driven mode: tool-use destekli agent loop
-                # Grid tool'ları için mevcut görüntü yolunu ayarla
-                from src.ocr_tools import set_current_image_path, reset_page_state
-                reset_page_state()  # Önceki sayfa state'ini temizle
-                set_current_image_path(page_path)
-                
-                response_text = await self._call_claude_agent_mode(
-                    image_data, mime_type, prompt, model_name,
-                    page_num=page_number,
-                    file_name=file_name,
-                )
-            else:
-                # Prescriptive mode: tek seferlik çağrı
-                response_text = await self._call_claude(
-                    image_data, mime_type, prompt, model_name,
-                    page_num=page_number,
-                    file_name=file_name,
-                )
-        else:
+        # Goal-driven mode: tüm LangChain provider'lar için tool-use destekli agent loop
+        if self._prompt_mode == "goal_driven" and self._model_provider in ("anthropic", "openai", "google"):
+            from src.ocr_tools import set_current_image_path, reset_page_state
+            reset_page_state()  # Önceki sayfa state'ini temizle
+            set_current_image_path(page_path)
+            
+            response_text = await self._call_agent_mode(
+                image_data, mime_type, prompt, model_name,
+                page_num=page_number,
+                file_name=file_name,
+            )
+        elif self._model_provider == "anthropic":
+            # Prescriptive mode: tek seferlik çağrı (Anthropic)
+            response_text = await self._call_llm_vision(
+                image_data, mime_type, prompt, model_name,
+                page_num=page_number,
+                file_name=file_name,
+            )
+        elif self._model_provider == "gemini_native":
+            # Native Gemini client (LangChain olmadan fallback)
             response_text = await self._call_gemini(image_data, mime_type, prompt, model_name)
+        else:
+            # LangChain LLM ile basit çağrı (prescriptive mode - OpenAI/Google)
+            response_text = await self._call_langchain_simple(
+                image_data, mime_type, prompt, model_name
+            )
 
         # Yanıtı parse et
         if not response_text:
             logger.warning(f"Empty response from {model_name}")
             return {"data": {"found": False}, "continuation_note": "", "is_complete": True}
 
-        # Claude (Anthropic) için JSON parse, Gemini için markdown
-        if self._model_provider == "anthropic":
+        # Goal-driven mode: tüm provider'lar için JSON parse
+        # Prescriptive/native Gemini mode: markdown parse
+        if self._prompt_mode == "goal_driven":
             return self._parse_json_response(response_text)
-        else:
+        elif self._model_provider == "gemini_native":
             return self._parse_markdown_response(response_text)
+        else:
+            return self._parse_json_response(response_text)
 
     async def _call_gemini(
         self,
@@ -522,7 +674,71 @@ class AgenticOCR:
             return ""
         return response.text
 
-    async def _call_claude(
+    async def _call_langchain_simple(
+        self,
+        image_data: bytes,
+        mime_type: str,
+        prompt: str,
+        model_name: str,
+    ) -> str:
+        """
+        Prescriptive mode için LangChain basit çağrı (tool olmadan).
+        
+        OpenAI ve Google LangChain modelleri için kullanılır.
+        """
+        if not self._llm_model:
+            raise RuntimeError("LLM model not initialized. Call initialize() first.")
+        
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        image_base64 = base64.b64encode(image_data).decode("utf-8")
+        system_prompt = self._get_system_prompt()
+        
+        # Provider'a göre image format
+        if self._model_provider == "openai":
+            image_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64}",
+                    "detail": "high",
+                },
+            }
+        else:  # google
+            image_content = {
+                "type": "image_url",
+                "image_url": f"data:{mime_type};base64,{image_base64}",
+            }
+        
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=[
+                    image_content,
+                    {"type": "text", "text": prompt},
+                ]
+            ),
+        ]
+        
+        try:
+            response = await self._llm_model.ainvoke(messages)
+            
+            if hasattr(response, "content"):
+                if isinstance(response.content, str):
+                    return response.content
+                elif isinstance(response.content, list):
+                    text_parts = []
+                    for block in response.content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    return "\n".join(text_parts)
+            return ""
+        except Exception as e:
+            logger.error(f"❌ LangChain simple call failed: {e}")
+            raise
+
+    async def _call_llm_vision(
         self,
         image_data: bytes,
         mime_type: str,
@@ -532,12 +748,14 @@ class AgenticOCR:
         file_name: str = "unknown",
     ) -> str:
         """
-        Claude API çağrısı via LangChain ChatAnthropic.
+        LLM Vision API çağrısı via LangChain.
+        
+        Model-agnostic: Anthropic, OpenAI, Google destekler.
         
         LangChain entegrasyonu sayesinde:
         - Otomatik prompt caching
         - Langfuse observability
-        - Extended thinking desteği
+        - Extended thinking desteği (Anthropic)
         
         Args:
             image_data: Görsel verisi (bytes)
@@ -547,8 +765,8 @@ class AgenticOCR:
             page_num: Sayfa numarası (Langfuse trace için)
             file_name: Dosya adı (Langfuse trace için)
         """
-        if not self._claude_model:
-            raise RuntimeError("Claude model not initialized. Call initialize() first.")
+        if not self._llm_model:
+            raise RuntimeError("LLM model not initialized. Call initialize() first.")
         
         # Base64 encode image
         image_base64 = base64.b64encode(image_data).decode("utf-8")
@@ -628,7 +846,7 @@ class AgenticOCR:
             # DEBUG: Gerçek API payload'ını yakala
             # _get_request_payload ile son payload'ı görelim
             try:
-                _dbg_payload = self._claude_model._get_request_payload(messages)
+                _dbg_payload = self._llm_model._get_request_payload(messages)
                 _dbg_sys = _dbg_payload.get("system")
                 _dbg_thinking = _dbg_payload.get("thinking")
                 
@@ -664,7 +882,7 @@ class AgenticOCR:
             except Exception as dbg_err:
                 logger.warning(f"🔍 Cache debug failed: {dbg_err}")
             
-            response = await self._claude_model.ainvoke(
+            response = await self._llm_model.ainvoke(
                 messages,
                 config={"callbacks": callbacks} if callbacks else None,
             )
@@ -830,35 +1048,62 @@ class AgenticOCR:
         
         return ""
     
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, text_mode: bool = False) -> str:
         """
-        Sabit system prompt'u yükle.
+        Sabit system prompt'u yükle ve skill'leri inject et.
         
         Bu prompt cache'lenir - her mesajda aynı olmalı.
         Değişen bilgiler (şema, sayfa) user mesajına eklenir.
         
-        Goal-driven mode'da goal_driven_system.md yüklenir.
+        Args:
+            text_mode: True ise text mode prompt (goal_driven_text_system.md) yüklenir
+        
+        Returns:
+            System prompt string
         """
-        from prompts import get_domain, load_prompt
+        from prompts import get_domain, load_prompt, load_skill
         
         domain = get_domain()
+        system_prompt = None
         
-        # Goal-driven mode: minimal prompt
-        if self._prompt_mode == "goal_driven":
+        # Text mode: görsel tool'lar olmadan sadece metin işleme
+        if text_mode:
+            try:
+                system_prompt = load_prompt("goal_driven_text_system", domain)
+                logger.info(f"📦 Text mode system prompt loaded ({len(system_prompt)} chars)")
+            except FileNotFoundError:
+                logger.warning(f"goal_driven_text_system.md not found for domain {domain}, falling back to goal_driven")
+        
+        # Goal-driven mode: görsel işleme için tool'lu prompt
+        if system_prompt is None and self._prompt_mode == "goal_driven":
             try:
                 system_prompt = load_prompt("goal_driven_system", domain)
                 logger.info(f"📦 Goal-driven system prompt loaded ({len(system_prompt)} chars)")
-                return system_prompt
             except FileNotFoundError:
                 logger.warning(f"goal_driven_system.md not found for domain {domain}, falling back")
         
-        try:
-            # unified_ocr_system.md - sabit system prompt
-            system_prompt = load_prompt("unified_ocr_system", domain)
-            return system_prompt
-        except FileNotFoundError:
-            logger.warning(f"unified_ocr_system.md not found for domain {domain}")
-            return self._get_fallback_system_prompt()
+        # Fallback to unified_ocr_system
+        if system_prompt is None:
+            try:
+                system_prompt = load_prompt("unified_ocr_system", domain)
+            except FileNotFoundError:
+                logger.warning(f"unified_ocr_system.md not found for domain {domain}")
+                return self._get_fallback_system_prompt()
+        
+        # Skill injection: {{ENTITY_EXTRACTION_SKILL}} placeholder'ı varsa inject et
+        if "{{ENTITY_EXTRACTION_SKILL}}" in system_prompt:
+            try:
+                skill = load_skill("entity_extraction_skill", domain)
+                system_prompt = system_prompt.replace(
+                    "{{ENTITY_EXTRACTION_SKILL}}", 
+                    skill["content"]
+                )
+                logger.info(f"📦 Entity extraction skill injected ({len(skill['content'])} chars)")
+            except FileNotFoundError:
+                logger.warning(f"entity_extraction_skill.md not found for domain {domain}, removing placeholder")
+                system_prompt = system_prompt.replace("{{ENTITY_EXTRACTION_SKILL}}", "")
+        
+        return system_prompt
     
     def _get_fallback_system_prompt(self) -> str:
         """Fallback system prompt."""
@@ -973,14 +1218,32 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
     def _get_model_pricing(model_id: str) -> Dict[str, float]:
         """
         Model bazlı fiyat tablosu ($/MTok). Şubat 2026.
+        
+        Anthropic Claude:
         https://platform.claude.com/docs/en/about-claude/pricing
-
         Claude Opus 4.6/4.5: Input $5, Output $25, 5m Cache Write $6.25, Cache Hit $0.50
         Claude Opus 4.1/4:   Input $15, Output $75, 5m Cache Write $18.75, Cache Hit $1.50
         Claude Sonnet 4.5/4: Input $3, Output $15, 5m Cache Write $3.75, Cache Hit $0.30
         Claude Haiku 4.5:    Input $1, Output $5, 5m Cache Write $1.25, Cache Hit $0.10
+        
+        OpenAI:
+        https://platform.openai.com/docs/models
+        GPT-4o:       Input $2.50, Output $10
+        GPT-4.1:      Input $2.00, Output $8.00
+        GPT-4.1-mini: Input $0.40, Output $1.60
+        o3-mini:      Input $1.10, Output $4.40
+        o1:           Input $15, Output $60
+        
+        Google Gemini:
+        https://ai.google.dev/pricing
+        Gemini 2.5 Pro:   Input $1.25, Output $10 (pay-as-you-go)
+        Gemini 2.5 Flash: Input $0.075, Output $0.30
+        Gemini 2.0 Flash: Input $0.10, Output $0.40
+        Gemini 1.5 Pro:   Input $1.25, Output $5.00
         """
         m = (model_id or "").lower()
+        
+        # ── ANTHROPIC (Claude) ──
         if "opus-4-5" in m or "opus-4.5" in m or "opus-4-6" in m:
             return {"input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.50}
         if "opus-4-1" in m or "opus-4" in m:
@@ -989,6 +1252,43 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
             return {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30}
         if "haiku" in m:
             return {"input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.10}
+        
+        # ── OPENAI (GPT) ──
+        if "gpt-4o" in m:
+            return {"input": 2.50, "output": 10.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "gpt-4.1-mini" in m or "gpt-4-1-mini" in m:
+            return {"input": 0.40, "output": 1.60, "cache_write": 0.0, "cache_read": 0.0}
+        if "gpt-4.1" in m or "gpt-4-1" in m:
+            return {"input": 2.0, "output": 8.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "gpt-5-mini" in m:
+            return {"input": 1.0, "output": 4.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "o3-mini" in m:
+            return {"input": 1.10, "output": 4.40, "cache_write": 0.0, "cache_read": 0.0}
+        if "o1-mini" in m:
+            return {"input": 3.0, "output": 12.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "o1" in m:
+            return {"input": 15.0, "output": 60.0, "cache_write": 0.0, "cache_read": 0.0}
+        
+        # ── GOOGLE (Gemini) ── Şubat 2026
+        # https://ai.google.dev/gemini-api/docs/pricing
+        if "gemini-2.5-pro" in m or "gemini-2-5-pro" in m:
+            return {"input": 1.25, "output": 10.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-2.5-flash-lite" in m or "gemini-2-5-flash-lite" in m:
+            return {"input": 0.10, "output": 0.40, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-2.5-flash" in m or "gemini-2-5-flash" in m:
+            return {"input": 0.30, "output": 2.50, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-2.0-flash-lite" in m or "gemini-2-0-flash-lite" in m:
+            return {"input": 0.075, "output": 0.30, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-2.0-flash" in m or "gemini-2-0-flash" in m:
+            return {"input": 0.10, "output": 0.40, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-1.5-pro" in m or "gemini-1-5-pro" in m:
+            return {"input": 1.25, "output": 5.0, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini-1.5-flash" in m or "gemini-1-5-flash" in m:
+            return {"input": 0.075, "output": 0.30, "cache_write": 0.0, "cache_read": 0.0}
+        if "gemini" in m:
+            # Default Gemini (2.5 Pro)
+            return {"input": 1.25, "output": 10.0, "cache_write": 0.0, "cache_read": 0.0}
+        
         # Default: Opus 4.5
         return {"input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.50}
 
@@ -1044,7 +1344,7 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         
         return neo4j_query
 
-    async def _call_claude_agent_mode(
+    async def _call_agent_mode(
         self,
         image_data: bytes,
         mime_type: str,
@@ -1064,8 +1364,8 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         2. neo4j_query tool'u ile mevcut entity'leri kontrol eder (0-N kez)
         3. Tool call bitince nihai JSON yanıtı döndürür
         """
-        if not self._claude_model:
-            raise RuntimeError("Claude model not initialized. Call initialize() first.")
+        if not self._llm_model:
+            raise RuntimeError("LLM model not initialized. Call initialize() first.")
         
         from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
         from src.ocr_tools import get_grid_tools, set_current_image_path
@@ -1085,10 +1385,10 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         
         # Tool'ları model'e bağla
         if tools:
-            model_with_tools = self._claude_model.bind_tools(tools)
+            model_with_tools = self._llm_model.bind_tools(tools)
             logger.info(f"🔧 Goal-driven mode: {len(tools)} tool bağlandı")
         else:
-            model_with_tools = self._claude_model
+            model_with_tools = self._llm_model
             logger.warning("⚠️ Goal-driven mode: Tool yok, tool-less çalışılıyor")
         
         # Base64 encode image
@@ -1100,27 +1400,54 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         logger.info(f"📦 Goal-driven system prompt: {len(system_prompt)} chars")
         print(f"   📦 Goal-driven system prompt: {len(system_prompt)} chars", flush=True)
         
-        # Messages oluştur
-        system_message = SystemMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        # Messages oluştur (provider'a göre)
+        if self._model_provider == "anthropic":
+            # Anthropic: cache_control destekli
+            system_message = SystemMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                    },
+                ]
+            )
+        else:
+            # OpenAI/Google: basit string format
+            system_message = SystemMessage(content=system_prompt)
+        
+        # Provider'a göre image format (LangChain multi-modal)
+        if self._model_provider == "anthropic":
+            # Anthropic Claude format
+            image_content = {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": image_base64,
                 },
-            ]
-        )
+            }
+        elif self._model_provider == "openai":
+            # OpenAI GPT-4o format
+            image_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64}",
+                    "detail": "high",  # high resolution for OCR
+                },
+            }
+        elif self._model_provider == "google":
+            # Google Gemini LangChain format
+            image_content = {
+                "type": "image_url",
+                "image_url": f"data:{mime_type};base64,{image_base64}",
+            }
+        else:
+            raise ValueError(f"Unsupported provider for image: {self._model_provider}")
         
         user_message = HumanMessage(
             content=[
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": image_base64,
-                    },
-                },
+                image_content,
                 {
                     "type": "text",
                     "text": prompt,
@@ -1136,7 +1463,7 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
             langfuse_handler = get_langfuse_callback_handler(
                 session_id=f"ocr-goal-driven-{file_name}",
                 trace_name=f"ocr-gd-{file_name}-p{page_num}",
-                tags=["ocr", "vision", "claude", "goal_driven"],
+                tags=["ocr", "vision", self._model_provider or "unknown", "goal_driven"],
                 metadata={
                     "file_name": file_name,
                     "page_num": page_num,
@@ -1305,6 +1632,9 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         tool mesajına ekler. Böylece LLM grid'i veya kırpılmış görüntüyü
         görebilir.
         
+        NOT: OpenAI ToolMessage'larda görüntü desteklemiyor. Bu nedenle
+        OpenAI için görüntü yerine sadece dosya yolu döndürülür.
+        
         Args:
             tool_name: Tool adı
             tool_result: Tool'un döndürdüğü metin sonucu
@@ -1312,6 +1642,11 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         Returns:
             str (sadece metin) veya list (metin + görüntü content blocks)
         """
+        # OpenAI ve Google: ToolMessage'larda image desteklenmiyor
+        # Sadece Anthropic (Claude) tool response'larında görsel kabul ediyor
+        if self._model_provider in ("openai", "google"):
+            return tool_result
+        
         if tool_name not in self._IMAGE_TOOLS:
             return tool_result
         
@@ -1344,16 +1679,43 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
             img_base64 = base64.b64encode(img_data).decode("utf-8")
             mime_type = "image/png" if image_path.endswith(".png") else "image/jpeg"
             
-            # Content blocks: görüntü + metin
-            content = [
-                {
+            # Provider'a göre image content format
+            if self._model_provider == "anthropic":
+                image_content = {
                     "type": "image",
                     "source": {
                         "type": "base64",
                         "media_type": mime_type,
                         "data": img_base64,
                     },
-                },
+                }
+            elif self._model_provider == "openai":
+                image_content = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{img_base64}",
+                        "detail": "high",
+                    },
+                }
+            elif self._model_provider == "google":
+                image_content = {
+                    "type": "image_url",
+                    "image_url": f"data:{mime_type};base64,{img_base64}",
+                }
+            else:
+                # Fallback: Anthropic format
+                image_content = {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": img_base64,
+                    },
+                }
+            
+            # Content blocks: görüntü + metin
+            content = [
+                image_content,
                 {
                     "type": "text",
                     "text": tool_result,
@@ -1470,6 +1832,414 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
                 },
             )
 
+    # ========================================================================
+    # TEXT MODE: Görsel yerine OCR metni işle
+    # ========================================================================
+
+    async def _process_text_mode(
+        self,
+        ocr_texts: List[str],
+        file_name: str,
+        file_id: Optional[int] = None,
+        domain: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        batch_size: int = 50,  # Artık kullanılmıyor, geriye uyumluluk için
+    ) -> Dict[str, Any]:
+        """
+        OCR metinlerini tek seferde işle.
+
+        GeminiOCRAgent'tan gelen OCR metinlerini alır ve
+        tümünü tek bir LLM çağrısında işler.
+
+        Args:
+            ocr_texts: Sayfa bazlı OCR metinleri
+            file_name: Dosya adı
+            file_id: Tracking için
+            domain: Domain (opsiyonel)
+            output_dir: JSON çıktısı için dizin
+            batch_size: Kullanılmıyor (geriye uyumluluk)
+
+        Returns:
+            JSON output
+        """
+        from prompts import get_domain
+        from src.shared.langfuse_client import get_langfuse, flush_langfuse
+
+        domain = domain or get_domain()
+        target_company = self._extract_company_from_filename(file_name)
+        model_name = os.environ.get("OCR_VISION_MODEL", "claude-opus-4.5")
+        total_pages = len(ocr_texts)
+
+        logger.info(
+            f"🚀 Starting TEXT MODE: model={model_name}, file={file_name}, "
+            f"target={target_company}, pages={total_pages}"
+        )
+        print(
+            f"\n{'='*60}\n"
+            f"🚀 TEXT MODE START\n"
+            f"   Model: {model_name}\n"
+            f"   Target: {target_company}\n"
+            f"   Pages: {total_pages}\n"
+            f"{'='*60}",
+            flush=True,
+        )
+
+        # Langfuse trace
+        langfuse = get_langfuse()
+        trace = None
+        if langfuse:
+            try:
+                trace = langfuse.start_span(
+                    name="text_mode_ocr",
+                    input={
+                        "file_name": file_name,
+                        "page_count": total_pages,
+                        "target_company": target_company,
+                    },
+                    metadata={
+                        "domain": domain,
+                        "file_id": file_id,
+                        "model": model_name,
+                        "mode": "text",
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Langfuse trace failed: {e}")
+
+        try:
+            start_time = time.time()
+
+            # Tüm OCR metinlerini tek seferde işle
+            result = await self._process_text_batch(
+                ocr_texts=ocr_texts,
+                target_company=target_company,
+                model_name=model_name,
+                file_name=file_name,
+            )
+
+            duration = time.time() - start_time
+
+            # Sonucu işle
+            page_data = result.get("data", {})
+            found = page_data.get("found", False)
+
+            if found:
+                # Chunk'lardan markdown oluştur (legacy uyumluluk için)
+                markdown_parts = []
+                for chunk in page_data.get("chunks", []):
+                    markdown_parts.append(chunk.get("text", ""))
+                markdown_text = "\n\n".join(markdown_parts)
+
+                output = {
+                    "data": page_data,
+                    "markdown": markdown_text,
+                    "metadata": {
+                        "target_company": target_company,
+                        "pages_processed": total_pages,
+                        "total_pages": total_pages,
+                        "model": model_name,
+                        "output_format": "json",
+                        "mode": "text",
+                    },
+                    "status": "success",
+                }
+
+                # JSON çıktısını dosyaya kaydet
+                if output_dir:
+                    self._save_json_output(output, file_name, output_dir)
+            else:
+                output = {
+                    "data": {"found": False, "target_company": target_company},
+                    "markdown": "",
+                    "metadata": {
+                        "target_company": target_company,
+                        "pages_processed": total_pages,
+                        "total_pages": total_pages,
+                        "model": model_name,
+                        "output_format": "json",
+                        "mode": "text",
+                    },
+                    "status": "success",
+                }
+
+            if trace:
+                try:
+                    trace.update(output=output, metadata={"status": "success"})
+                    trace.end()
+                    flush_langfuse()
+                except Exception:
+                    pass
+
+            # Output summary
+            chunks_count = len(page_data.get("chunks", []))
+            nodes_count = len(page_data.get("nodes", []))
+            rels_count = len(page_data.get("relationships", []))
+
+            print(
+                f"\n{'='*60}\n"
+                f"✅ TEXT MODE COMPLETE ({duration:.1f}s)\n"
+                f"   Found: {found}\n"
+                f"   Chunks: {chunks_count}, Nodes: {nodes_count}, Relationships: {rels_count}\n"
+                f"   Pages: {total_pages}\n"
+                f"{'='*60}\n",
+                flush=True,
+            )
+            logger.info(
+                f"✅ Text mode completed: {chunks_count} chunks, {nodes_count} nodes, "
+                f"{rels_count} relationships, {total_pages} pages, {duration:.1f}s"
+            )
+
+            return output
+
+        except Exception as e:
+            logger.error(f"❌ Text mode failed: {e}", exc_info=True)
+            if trace:
+                try:
+                    trace.update(level="ERROR", status_message=str(e))
+                    trace.end()
+                    flush_langfuse()
+                except Exception:
+                    pass
+            return {"data": {}, "metadata": {}, "status": "error", "error": str(e)}
+
+    async def _process_text_batch(
+        self,
+        ocr_texts: List[str],
+        target_company: str,
+        model_name: str,
+        file_name: str = "unknown",
+    ) -> Dict[str, Any]:
+        """
+        OCR metinlerini tek seferde işle.
+
+        Args:
+            ocr_texts: Tüm OCR metinleri (sayfa bazlı)
+            target_company: Hedef şirket
+            model_name: Model adı
+            file_name: Dosya adı
+
+        Returns:
+            {"data": {...}}
+        """
+        # OCR metinlerini birleştir (sayfa 1'den başla)
+        merged_text = self._merge_ocr_texts(ocr_texts, start_page=1)
+        total_pages = len(ocr_texts)
+
+        logger.info(
+            f"📄 Processing text: {total_pages} pages, {len(merged_text)} chars"
+        )
+
+        # Text mode için prompt oluştur
+        prompt = self._build_text_mode_prompt(
+            target_company=target_company,
+            ocr_text=merged_text,
+        )
+
+        print(f"   🤖 Calling {model_name} (text mode)...", flush=True)
+
+        # LLM'e gönder (görsel olmadan, sadece metin)
+        response_text = await self._call_llm_text(
+            prompt=prompt,
+            model_name=model_name,
+            page_range=f"1-{total_pages}",
+            file_name=file_name,
+        )
+
+        # Yanıtı parse et
+        if not response_text:
+            logger.warning(f"Empty response from {model_name}")
+            return {"data": {"found": False}}
+
+        return self._parse_json_response(response_text)
+
+    def _merge_ocr_texts(self, ocr_texts: List[str], start_page: int = 1) -> str:
+        """
+        OCR metinlerini tek metin olarak birleştir.
+
+        Args:
+            ocr_texts: Sayfa bazlı OCR metinleri
+            start_page: Başlangıç sayfa numarası
+
+        Returns:
+            Birleştirilmiş metin
+        """
+        parts = []
+        for i, text in enumerate(ocr_texts):
+            page_num = start_page + i
+            if text and text.strip():
+                parts.append(f"[[PAGE:{page_num}]]\n{text.strip()}\n")
+
+        return "\n".join(parts)
+
+    def _build_text_mode_prompt(
+        self,
+        target_company: str,
+        ocr_text: str,
+    ) -> str:
+        """
+        Text mode için user prompt oluştur.
+        
+        System prompt'ta chunking, entity ve relationship kuralları tanımlı.
+        User prompt sadece hedef şirket ve OCR metnini içerir.
+
+        Args:
+            target_company: Hedef şirket
+            ocr_text: Birleştirilmiş OCR metni ([[PAGE:X]] marker'lı)
+
+        Returns:
+            Oluşturulan prompt
+        """
+        return f"""# Hedef Şirket: {target_company}
+
+## OCR Metni
+{ocr_text}
+"""
+
+    async def _call_llm_text(
+        self,
+        prompt: str,
+        model_name: str,
+        page_range: str = "1",
+        file_name: str = "unknown",
+    ) -> str:
+        """
+        LLM'e görsel olmadan sadece metin gönder.
+
+        Text mode için - görsel işleme yapmadan LLM çağrısı.
+        Model-agnostic: Anthropic, OpenAI, Google destekler.
+
+        Args:
+            prompt: Tam prompt (OCR metni dahil)
+            model_name: Model adı
+            page_range: Sayfa aralığı (loglama için)
+            file_name: Dosya adı (Langfuse için)
+
+        Returns:
+            LLM yanıtı
+        """
+        if not self._llm_model:
+            raise RuntimeError("LLM model not initialized. Call initialize() first.")
+
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        # Text mode için özel system prompt yükle (görsel tool'lar olmadan)
+        system_prompt = self._get_system_prompt(text_mode=True)
+
+        logger.info(f"📦 Text mode system prompt: {len(system_prompt)} chars")
+        print(f"   📦 Text mode system prompt: {len(system_prompt)} chars", flush=True)
+
+        # System message with cache_control
+        system_message = SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                },
+            ]
+        )
+
+        # User message - sadece metin (görsel yok)
+        user_message = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+            ]
+        )
+
+        messages = [system_message, user_message]
+
+        start_time = time.time()
+
+        try:
+            # Langfuse callback handler
+            callbacks = []
+            if LANGFUSE_AVAILABLE and get_langfuse_callback_handler:
+                langfuse_handler = get_langfuse_callback_handler(
+                    session_id=f"ocr-text-{file_name}",
+                    trace_name=f"ocr-text-{file_name}-p{page_range}",
+                    tags=["ocr", "text-mode", "claude"],
+                    metadata={"file_name": file_name, "page_range": page_range},
+                )
+                if langfuse_handler:
+                    callbacks.append(langfuse_handler)
+
+            response = await self._llm_model.ainvoke(
+                messages,
+                config={"callbacks": callbacks} if callbacks else None,
+            )
+
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # Usage metadata
+            usage_metadata = getattr(response, "usage_metadata", None) or {}
+            input_tokens = usage_metadata.get("input_tokens", 0) or 0
+            output_tokens = usage_metadata.get("output_tokens", 0) or 0
+            total_tokens = usage_metadata.get("total_tokens", 0) or 0
+
+            input_token_details = usage_metadata.get("input_token_details", {}) or {}
+            cache_read = input_token_details.get("cache_read", 0) or 0
+            cache_creation = input_token_details.get("cache_creation", 0) or 0
+
+            logger.info(
+                f"📊 Tokens: input={input_tokens}, output={output_tokens}, total={total_tokens}, "
+                f"cache_read={cache_read}, cache_creation={cache_creation}, {duration_ms}ms"
+            )
+            print(
+                f"   📊 Tokens: in={input_tokens}, out={output_tokens}, "
+                f"cache_read={cache_read}, {duration_ms}ms",
+                flush=True,
+            )
+
+            # Langfuse logging
+            if LANGFUSE_AVAILABLE and log_llm_usage:
+                response_metadata = getattr(response, "response_metadata", None) or {}
+                model_id = response_metadata.get("model", self._model_name)
+
+                pricing = self._get_model_pricing(model_id)
+                uncached_input = max(0, input_tokens - cache_read - cache_creation)
+                cost_input = uncached_input * pricing["input"] / 1_000_000
+                cost_output = output_tokens * pricing["output"] / 1_000_000
+                cost_cache_read = cache_read * pricing["cache_read"] / 1_000_000
+                cost_cache_write = cache_creation * pricing["cache_write"] / 1_000_000
+                total_cost = cost_input + cost_output + cost_cache_read + cost_cache_write
+
+                log_llm_usage(
+                    session_id=f"ocr-text-{file_name}",
+                    model=model_id or "claude-opus-4-5",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_tokens=cache_read,
+                    cost_usd=total_cost,
+                    latency_ms=duration_ms,
+                    step_name=f"ocr-text-pages-{page_range}",
+                    metadata={
+                        "file_name": file_name,
+                        "page_range": page_range,
+                        "mode": "text",
+                        "cache_creation": cache_creation,
+                    },
+                )
+
+            # Response içeriği
+            if hasattr(response, "content"):
+                content = response.content
+
+                if isinstance(content, str):
+                    return content
+
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            return block.get("text", "")
+                        elif isinstance(block, str):
+                            return block
+
+            return ""
+
+        except Exception as e:
+            logger.error(f"❌ Claude text-only call failed: {e}")
+            raise
+
     def _save_json_output(
         self,
         output: Dict[str, Any],
@@ -1501,8 +2271,24 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
             logger.info(f"📁 JSON output saved: {json_file}")
             print(f"📁 JSON output saved: {json_file}", flush=True)
             
+            # Markdown dosyası oluştur (chunk text'lerini birleştir)
+            md_file = output_path / f"{base_name}.md"
+            chunks = output.get("data", {}).get("chunks", [])
+            
+            if chunks:
+                # Chunk'ları position'a göre sırala ve text'leri birleştir
+                sorted_chunks = sorted(chunks, key=lambda c: c.get("position", 0))
+                markdown_parts = [chunk.get("text", "") for chunk in sorted_chunks]
+                markdown_content = "\n\n---\n\n".join(markdown_parts)
+                
+                with open(md_file, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+                
+                logger.info(f"📄 Markdown saved: {md_file} ({len(chunks)} chunks)")
+                print(f"📄 Markdown saved: {md_file} ({len(chunks)} chunks)", flush=True)
+            
         except Exception as e:
-            logger.error(f"❌ Failed to save JSON output: {e}")
+            logger.error(f"❌ Failed to save output: {e}")
     
     def _merge_pages_data(
         self,
@@ -1646,9 +2432,20 @@ Hedef şirket sayfada yoksa: {{"target_company": "{target_company}", "found": fa
         json_text = text
         
         # Markdown code block içindeyse çıkar
+        # Önce kapalı code block dene
         json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if json_match:
             json_text = json_match.group(1).strip()
+        else:
+            # Kapanış ``` yoksa, açılıştan sonrasını al
+            if text.startswith("```json"):
+                json_text = text[7:].strip()  # "```json" = 7 karakter
+            elif text.startswith("```"):
+                json_text = text[3:].strip()  # "```" = 3 karakter
+            
+            # Sonda kalan ``` varsa temizle
+            if json_text.endswith("```"):
+                json_text = json_text[:-3].strip()
         
         # JSON parse et
         try:
@@ -1859,6 +2656,56 @@ def process_agentic_ocr(
             domain=domain,
             graph=graph,
             output_dir=output_dir,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        import nest_asyncio
+
+        nest_asyncio.apply()
+        return loop.run_until_complete(_run())
+    except RuntimeError:
+        return asyncio.run(_run())
+
+
+def process_agentic_ocr_text_mode(
+    ocr_texts: List[str],
+    file_name: str,
+    file_id: Optional[int] = None,
+    domain: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    batch_size: int = 50,
+) -> Dict[str, Any]:
+    """
+    Sync wrapper for AgenticOCR.process() in TEXT MODE.
+    Sequential pipeline için: GeminiOCRAgent sonrası çağrılır.
+    
+    Args:
+        ocr_texts: Sayfa bazlı OCR metinleri (GeminiOCRAgent çıktısı)
+        file_name: Dosya adı
+        file_id: Tracking için
+        domain: Domain (opsiyonel)
+        output_dir: JSON çıktısı için dizin (opsiyonel)
+        batch_size: Batch boyutu (default: 50 sayfa)
+    
+    Returns:
+        process_agentic_ocr ile aynı formatta sonuç
+    """
+    print(
+        f"[TEXT_MODE_OCR] Called with {len(ocr_texts)} pages, file={file_name}",
+        flush=True,
+    )
+
+    async def _run():
+        ocr = await get_agentic_ocr()
+        return await ocr.process(
+            text_mode=True,
+            ocr_texts=ocr_texts,
+            file_name=file_name,
+            file_id=file_id,
+            domain=domain,
+            output_dir=output_dir,
+            batch_size=batch_size,
         )
 
     try:

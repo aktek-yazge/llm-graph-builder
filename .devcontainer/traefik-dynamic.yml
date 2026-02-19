@@ -63,3 +63,15 @@ http:
         servers:
           - url: 'http://devcontainer:5173'
 
+# =============================================================================
+# NOT: Aşağıdaki servisler Docker labels ile yönetilir (docker-compose.shared.yml)
+# =============================================================================
+# MCP Gateway: mcp-gateway.dev.local -> mcp-gateway:4444
+#   - Admin UI: http://mcp-gateway.dev.local/admin
+#   - Health: http://mcp-gateway.dev.local/health
+#   - MCP Endpoint: http://mcp-gateway.dev.local/mcp
+#
+# MCP Inspector: mcp-inspector.dev.local -> mcp-inspector:6274
+# MCP Neo4j Cypher: mcp.dev.local -> mcp-neo4j-cypher:8002
+# RabbitMQ: rabbitmq.dev.local -> rabbitmq:15672
+# Traefik Dashboard: traefik.dev.local -> traefik:8080
