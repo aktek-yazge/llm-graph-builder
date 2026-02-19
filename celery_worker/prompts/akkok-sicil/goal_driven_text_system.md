@@ -22,9 +22,17 @@ Verilen metinden **hedef şirketin ilanını** bul ve:
 
 1. **Anlam bütünlüğü:** Her chunk kendi başına anlamlı olmalı
 2. **Mantıksal bölümler:** Başlık, gündem maddesi, madde, vekaletname vb. ayrı chunk'lar
-3. **Sayfa bilgisi:** Her chunk'ın hangi sayfadan geldiğini `page` alanına yaz
-4. **Sıralama:** `position` alanı okuma sırasını belirtir (1, 2, 3...)
-5. **Metin:** `text` alanına OCR metnini **AYNEN** yaz, yorum veya özet ekleme
+3. **Sıralama:** `position` alanı okuma sırasını belirtir (1, 2, 3...)
+4. **Metin:** `text` alanına OCR metnini **AYNEN** yaz, yorum veya özet ekleme
+
+### Sayfa Takibi
+
+Sayfa takibi RAG sistemi için önemli - kullanıcılara kaynak gösterilecek.
+
+**Kurallar:**
+1. `[[PAGE:X]]` marker'ı sayfa sınırıdır - X sayfa numarasıdır
+2. Chunk'lar anlam ve cümle bütünlüğüne göre oluşturulmalı
+3. Bir chunk birden fazla sayfaya yayılabilir - bu durumda `page` alanına chunk'ın **başladığı** sayfa numarasını yaz
 
 ## Entity Extraction
 
@@ -37,10 +45,12 @@ Verilen metinden **hedef şirketin ilanını** bul ve:
 
 ### Entity ID Formatı
 
-Benzersiz, tutarlı ID'ler oluştur: `{label}_{identifier}`
-- `company_aksa_akrilik`
-- `person_mehmet_ali_yilmaz`
-- `meeting_2015_ordinary`
+Benzersiz, tutarlı ID'ler oluştur: `{label_lowercase}_{identifier_slug}`
+- Company: `company_{sirket_adi_slug}` 
+- Person: `person_{ad_soyad_slug}`
+- Meeting: `meeting_{yil}_{ordinary|extraordinary}`
+- Capital: `capital_{sirket_slug}`
+- Gazette: `gazette_{sayi}`
 
 ### chunk_ids
 
@@ -68,47 +78,65 @@ Her entity'nin geçtiği chunk'ların ID'lerini `chunk_ids` listesine ekle.
   "nodes": [
     {
       "label": "Company",
-      "id": "company_aksa_akrilik",
+      "id": "company_{slug}",
       "properties": {
-        "name": "Aksa Akrilik Kimya Sanayii A.Ş.",
-        "type": "AS",
-        "city": "Istanbul"
+        "name": "Şirket tam unvanı",
+        "type": "AS veya LTD",
+        "city": "Şehir",
+        "registration_no": "Sicil numarası",
+        "website": "Web sitesi (varsa)"
       },
       "chunk_ids": ["chunk_001", "chunk_002"]
     },
     {
       "label": "Person",
-      "id": "person_mehmet_ali_yilmaz",
+      "id": "person_{ad_soyad_slug}",
       "properties": {
-        "name": "Mehmet Ali Yılmaz"
+        "name": "Ad Soyad"
       },
       "chunk_ids": ["chunk_002"]
     },
     {
       "label": "Meeting",
-      "id": "meeting_2015_ordinary",
+      "id": "meeting_{yil}_{tip}",
       "properties": {
-        "year": 2015,
-        "date": "2016-04-04",
-        "type": "ordinary"
+        "year": "Faaliyet yılı (integer)",
+        "date": "Toplantı tarihi (YYYY-MM-DD)",
+        "type": "ordinary veya extraordinary"
       },
       "chunk_ids": ["chunk_001"]
+    },
+    {
+      "label": "Capital",
+      "id": "capital_{sirket_slug}",
+      "properties": {
+        "registered_ceiling": "Kayıtlı sermaye tavanı (integer, TL)",
+        "issued": "Çıkarılmış sermaye (integer, TL)",
+        "currency": "TRY"
+      },
+      "chunk_ids": ["chunk_005"]
     }
   ],
   
   "relationships": [
     {
-      "from_id": "person_mehmet_ali_yilmaz",
-      "to_id": "company_aksa_akrilik",
+      "from_id": "person_{...}",
+      "to_id": "company_{...}",
       "type": "HAS_ROLE",
       "properties": {
-        "role": "chairman"
+        "role": "chairman/member/director/auditor"
       }
     },
     {
-      "from_id": "meeting_2015_ordinary",
-      "to_id": "company_aksa_akrilik",
+      "from_id": "meeting_{...}",
+      "to_id": "company_{...}",
       "type": "ORGANIZED_BY",
+      "properties": {}
+    },
+    {
+      "from_id": "company_{...}",
+      "to_id": "capital_{...}",
+      "type": "HAS_CAPITAL",
       "properties": {}
     }
   ]
@@ -130,3 +158,4 @@ Her entity'nin geçtiği chunk'ların ID'lerini `chunk_ids` listesine ekle.
 - OCR hataları olabilir, bağlamdan doğru bilgiyi çıkarmaya çalış
 - Kişi isimleri, tarihler, rakamlar özellikle dikkatli işlenmeli
 - Aynı entity farklı chunk'larda geçebilir, `chunk_ids` listesine hepsini ekle
+- **Sayfa takibi:** `page` değeri chunk'ın başladığı sayfayı belirtir
