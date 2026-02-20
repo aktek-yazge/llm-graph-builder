@@ -1803,9 +1803,13 @@ class FileProcessor:
                             f"🔄 OCR Pipeline: SEQUENTIAL (GeminiOCR -> Claude)"
                         )
 
-                        # Stage 1: GeminiOCRAgent - Paralel OCR
+                        # Stage 1: GeminiOCRAgent - Paralel OCR + Hedef Sirket Extraction
                         print(
                             f"[OCR_PIPELINE] Stage 1: GeminiOCRAgent with {len(local_images)} images...",
+                            flush=True,
+                        )
+                        print(
+                            f"[OCR_PIPELINE] File name: {normalized_filename}",
                             flush=True,
                         )
                         from src.agents import process_gemini_ocr
@@ -1813,6 +1817,7 @@ class FileProcessor:
                         gemini_result = process_gemini_ocr(
                             image_list=local_images,
                             output_dir=document_dir,
+                            file_name=normalized_filename,
                         )
 
                         gemini_token_usage = gemini_result.get("token_usage", {})

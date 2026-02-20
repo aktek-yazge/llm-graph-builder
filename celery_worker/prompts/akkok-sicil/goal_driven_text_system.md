@@ -18,6 +18,10 @@ Verilen metinden **hedef şirketin ilanını** bul ve:
 
 Çıkardığın veriler bir chatbot tarafından kullanılacak.
 
+### ⚠️ Hedef Şirket Filtreleme
+
+Bir sayfada birden fazla şirketin ilanı olabilir. **SADECE hedef şirketin içeriğini chunk'la.** Diğer şirketlerin içeriğini TAMAMEN atla - chunk olarak ekleme.
+
 ## Chunking Kuralları
 
 1. **Anlam bütünlüğü:** Her chunk kendi başına anlamlı olmalı
@@ -154,7 +158,7 @@ Her entity'nin geçtiği chunk'ların ID'lerini `chunk_ids` listesine ekle.
 
 ## Önemli Notlar
 
-- Metin içinde birden fazla şirket olabilir, sadece **hedef şirketin** ilanını işle
+- **Hedef şirket dışındaki içerikleri ATLA** - diğer şirketlerin ilanlarını chunk'lama
 - OCR hataları olabilir, bağlamdan doğru bilgiyi çıkarmaya çalış
 - Kişi isimleri, tarihler, rakamlar özellikle dikkatli işlenmeli
 - Aynı entity farklı chunk'larda geçebilir, `chunk_ids` listesine hepsini ekle

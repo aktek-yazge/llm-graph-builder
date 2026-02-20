@@ -87,14 +87,16 @@ class GeminiOCRAgent:
         self,
         image_list: List[str],
         output_dir: str,
+        file_name: Optional[str] = None,
         max_concurrent: int = GEMINI_MAX_CONCURRENT,
     ) -> Dict[str, Any]:
         """
-        Tüm sayfaları paralel OCR yap.
+        Tüm sayfaları paralel OCR yap ve opsiyonel olarak hedef şirketi ayıkla.
 
         Args:
             image_list: Görüntü dosya yolları listesi
             output_dir: OCR çıktı dizini
+            file_name: Dosya adı (verilirse hedef şirket bu isimden tespit edilip extraction yapılır)
             max_concurrent: Maksimum paralel istek sayısı
 
         Returns:
@@ -111,6 +113,13 @@ class GeminiOCRAgent:
                     "output_tokens": int,
                     "total_tokens": int,
                     "cost_usd": float,
+                },
+                # file_name verilmişse ek alanlar:
+                "extraction": {
+                    "extracted_text": str,
+                    "extracted_file": str,
+                    "found": bool,
+                    ...
                 }
             }
         """
@@ -191,9 +200,9 @@ class GeminiOCRAgent:
         # Metinleri birleştir
         merged_text = self._merge_texts(ocr_texts)
 
-        # Final log
+        # Final log (OCR stage)
         logger.info(
-            f"✅ GeminiOCRAgent complete: {total_chars} chars, "
+            f"✅ GeminiOCRAgent OCR complete: {total_chars} chars, "
             f"tokens(in={self._total_input_tokens}, out={self._total_output_tokens}, total={total_tokens}), "
             f"cost=${total_cost:.4f}, {duration_ms}ms"
         )
@@ -209,7 +218,7 @@ class GeminiOCRAgent:
             flush=True,
         )
 
-        return {
+        result = {
             "ocr_files": ocr_files,
             "ocr_texts": ocr_texts,
             "merged_text": merged_text,
@@ -224,6 +233,24 @@ class GeminiOCRAgent:
                 "cost_usd": total_cost,
             },
         }
+        
+        # Hedef şirket extraction (file_name'den tespit edilir)
+        if file_name and merged_text:
+            extraction_result = await self.extract_target_company(
+                merged_text=merged_text,
+                output_dir=output_dir,
+                file_name=file_name,
+            )
+            result["extraction"] = extraction_result
+            
+            # Token kullanımını güncelle
+            result["token_usage"]["input_tokens"] += extraction_result["token_usage"]["input_tokens"]
+            result["token_usage"]["output_tokens"] += extraction_result["token_usage"]["output_tokens"]
+            result["token_usage"]["total_tokens"] += extraction_result["token_usage"]["total_tokens"]
+            result["token_usage"]["cost_usd"] += extraction_result["token_usage"]["cost_usd"]
+            result["duration_ms"] += extraction_result["duration_ms"]
+        
+        return result
 
     async def _ocr_single_page(
         self,
@@ -340,6 +367,165 @@ KRİTİK HATA (YAPMA):
 
         return "\n".join(parts)
 
+    def _load_extraction_prompt(self, file_name: str) -> str:
+        """Hedef şirket çıkarım prompt'unu yükle."""
+        prompt_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "prompts",
+            "akkok-sicil",
+            "gemini_extraction_prompt.md",
+        )
+        
+        if os.path.exists(prompt_path):
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                prompt = f.read()
+            return prompt.replace("{{FILE_NAME}}", file_name)
+        else:
+            return f"""Dosya adı: "{file_name}"
+
+Bu dosya adından hedef şirketin hangisi olduğunu tespit et.
+Verilen OCR metninden SADECE bu hedef şirketin ilanını ayıkla.
+Diğer şirketlerin içeriklerini TAMAMEN atla.
+Sayfa bilgilerini koru: [[PAGE:X]]
+İlan metnini AYNEN kopyala, değiştirme."""
+
+    async def extract_target_company(
+        self,
+        merged_text: str,
+        output_dir: str,
+        file_name: str = "extracted",
+    ) -> Dict[str, Any]:
+        """
+        Birleştirilmiş OCR metninden hedef şirketin içeriğini çıkar.
+        
+        Args:
+            merged_text: Tüm sayfaların birleşmiş OCR metni
+            output_dir: Çıktı dizini
+            file_name: Dosya adı (hedef şirket bu dosya adından tespit edilir)
+        
+        Returns:
+            {
+                "extracted_text": str,
+                "extracted_file": str,
+                "char_count": int,
+                "found": bool,
+                "token_usage": {...},
+                "duration_ms": int,
+            }
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        start_time = time.time()
+        
+        logger.info(f"🎯 Extracting from file: {file_name}")
+        print(
+            f"\n{'='*60}\n"
+            f"🎯 GEMINI EXTRACTION START\n"
+            f"   File: {file_name}\n"
+            f"   Input: {len(merged_text):,} chars\n"
+            f"{'='*60}",
+            flush=True,
+        )
+        
+        # Prompt'u yükle (file_name'den hedef şirket tespit edilecek)
+        extraction_prompt = self._load_extraction_prompt(file_name)
+        
+        # Gemini API çağrısı (metin modunda)
+        user_prompt = f"""{extraction_prompt}
+
+---
+
+# OCR Metni
+
+{merged_text}
+
+---
+
+**HATIRLATMA: Dosya adından ({file_name}) hangi şirket olduğunu tespit et ve sadece o şirketin içeriğini çıkar.**"""
+        
+        response = await asyncio.to_thread(
+            self._gemini_client.models.generate_content,
+            model=GEMINI_OCR_MODEL,
+            contents=[
+                genai_types.Content(
+                    role="user",
+                    parts=[
+                        genai_types.Part.from_text(text=user_prompt),
+                    ],
+                ),
+            ],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=32000,
+            ),
+        )
+        
+        extracted_text = response.text.strip() if response and response.text else ""
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        # Token bilgisi
+        input_tokens = 0
+        output_tokens = 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            input_tokens = (
+                getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+            )
+            output_tokens = (
+                getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            )
+        
+        # Maliyet hesapla
+        pricing = self._get_model_pricing(GEMINI_OCR_MODEL)
+        cost_input = input_tokens * pricing["input"] / 1_000_000
+        cost_output = output_tokens * pricing["output"] / 1_000_000
+        total_cost = cost_input + cost_output
+        
+        # Hedef şirket bulundu mu?
+        found = "[[HEDEF ŞİRKET BULUNAMADI]]" not in extracted_text and len(extracted_text) > 100
+        
+        # Dosyaya kaydet
+        os.makedirs(output_dir, exist_ok=True)
+        extracted_file = os.path.join(output_dir, f"{file_name}_extracted.md")
+        with open(extracted_file, "w", encoding="utf-8") as f:
+            f.write(f"# {file_name} - Extracted Content\n\n")
+            f.write(f"_Extraction Date: {datetime.now().isoformat()}_\n\n")
+            f.write("---\n\n")
+            f.write(extracted_text)
+        
+        logger.info(
+            f"✅ Extraction complete: {len(extracted_text):,} chars, "
+            f"found={found}, cost=${total_cost:.4f}, {duration_ms}ms"
+        )
+        print(
+            f"\n{'='*60}\n"
+            f"✅ GEMINI EXTRACTION COMPLETE\n"
+            f"   Found: {found}\n"
+            f"   Output: {len(extracted_text):,} chars\n"
+            f"   📊 Tokens: in={input_tokens:,}, out={output_tokens:,}\n"
+            f"   💰 Cost: ${total_cost:.4f}\n"
+            f"   Duration: {duration_ms}ms\n"
+            f"   File: {extracted_file}\n"
+            f"{'='*60}\n",
+            flush=True,
+        )
+        
+        return {
+            "extracted_text": extracted_text,
+            "extracted_file": extracted_file,
+            "char_count": len(extracted_text),
+            "found": found,
+            "token_usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cost_usd": total_cost,
+            },
+            "duration_ms": duration_ms,
+        }
+
     @staticmethod
     def _get_model_pricing(model_id: str) -> Dict[str, float]:
         """
@@ -396,18 +582,28 @@ async def get_gemini_ocr_agent() -> GeminiOCRAgent:
 def process_gemini_ocr(
     image_list: List[str],
     output_dir: str,
+    file_name: Optional[str] = None,
     max_concurrent: int = GEMINI_MAX_CONCURRENT,
 ) -> Dict[str, Any]:
     """
     Sync wrapper for Celery tasks.
+    
+    Args:
+        image_list: Görüntü dosya yolları listesi
+        output_dir: OCR çıktı dizini
+        file_name: Dosya adı (verilirse hedef şirket bu isimden tespit edilir)
+        max_concurrent: Maksimum paralel istek sayısı
     """
     print(f"[GEMINI_OCR_AGENT] Called with {len(image_list)} images", flush=True)
+    if file_name:
+        print(f"[GEMINI_OCR_AGENT] File name: {file_name}", flush=True)
 
     async def _run():
         agent = await get_gemini_ocr_agent()
         return await agent.process(
             image_list=image_list,
             output_dir=output_dir,
+            file_name=file_name,
             max_concurrent=max_concurrent,
         )
 
