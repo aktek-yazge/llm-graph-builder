@@ -45,6 +45,8 @@ export ENV=development
 # OCR Model Settings
 export OCR_VISION_MODEL="${OCR_VISION_MODEL:-gemini-2.5-flash}"
 export OCR_THINKING_BUDGET="${OCR_THINKING_BUDGET:-0}"
+# OCR Pipeline: unified | sequential | hybrid
+export OCR_PIPELINE="${OCR_PIPELINE:-hybrid}"
 # Fix for Mac fork safety with prefork pool
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 # PostgreSQL/RabbitMQ bağlantıları (.env'den gelir - fallback yok, eksikse hata verir)
@@ -77,6 +79,7 @@ log "📊 Pool: ${POOL_TYPE}"
 log "📊 Main Worker Concurrency: ${MAIN_CONCURRENCY}"
 log "📊 DB/Neo4j Writer Concurrency: ${WRITER_CONCURRENCY}"
 log "🤖 OCR Model: ${OCR_VISION_MODEL} (thinking: ${OCR_THINKING_BUDGET} tokens)"
+log "🔄 OCR Pipeline: ${OCR_PIPELINE}"
 # log "📊 Flower dashboard: http://localhost:5555"
 log "📁 Log directory: ${LOG_DIR}"
 log ""

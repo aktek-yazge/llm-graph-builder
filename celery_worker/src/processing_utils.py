@@ -1783,7 +1783,8 @@ class FileProcessor:
                     # ================================================================
                     # OCR_PIPELINE env var:
                     #   - "unified" (default): Tek seferde OCR + Entity extraction
-                    #   - "sequential": GeminiOCR -> Claude text mode
+                    #   - "sequential": GeminiOCR + Extraction -> Text mode
+                    #   - "hybrid": GeminiOCR (no extraction) -> Text mode (daha verimli)
                     # ================================================================
                     OCR_PIPELINE = os.environ.get("OCR_PIPELINE", "unified").lower()
 
@@ -1792,7 +1793,72 @@ class FileProcessor:
 
                     current_domain = get_domain()
 
-                    if OCR_PIPELINE == "sequential":
+                    if OCR_PIPELINE == "hybrid":
+                        # ════════════════════════════════════════════════════════════
+                        # HYBRID PIPELINE: GeminiOCR (sadece OCR) -> Text mode (filter + chunk + entity)
+                        # Extraction adımı atlanır, text mode prompt'u filtreleme yapar
+                        # ════════════════════════════════════════════════════════════
+                        print(
+                            f"[OCR_PIPELINE] 🚀 Using HYBRID pipeline", flush=True
+                        )
+                        logging.info(
+                            f"🚀 OCR Pipeline: HYBRID (GeminiOCR -> Text mode, no extraction)"
+                        )
+
+                        # Stage 1: GeminiOCRAgent - Sadece paralel OCR (extraction yok)
+                        print(
+                            f"[OCR_PIPELINE] Stage 1: GeminiOCRAgent with {len(local_images)} images (no extraction)...",
+                            flush=True,
+                        )
+                        from src.agents import process_gemini_ocr
+
+                        gemini_result = process_gemini_ocr(
+                            image_list=local_images,
+                            output_dir=document_dir,
+                            file_name=None,  # Extraction yapılmaz
+                        )
+
+                        gemini_token_usage = gemini_result.get("token_usage", {})
+                        print(
+                            f"[OCR_PIPELINE] Stage 1 complete: {gemini_result.get('total_chars', 0)} chars, "
+                            f"tokens={gemini_token_usage.get('total_tokens', 0)}, "
+                            f"cost=${gemini_token_usage.get('cost_usd', 0):.4f}",
+                            flush=True,
+                        )
+                        logging.info(
+                            f"✅ GeminiOCR complete: {gemini_result.get('page_count', 0)} pages, "
+                            f"{gemini_result.get('total_chars', 0)} chars"
+                        )
+
+                        # Stage 2: AgenticOCR (text mode) - Filter + Chunk + Entity
+                        print(
+                            f"[OCR_PIPELINE] Stage 2: Text mode (filter + chunk + entity)...",
+                            flush=True,
+                        )
+                        from src.agentic_ocr import process_agentic_ocr_text_mode
+
+                        ocr_result = process_agentic_ocr_text_mode(
+                            ocr_texts=gemini_result.get("ocr_texts", []),
+                            file_name=normalized_filename,
+                            file_id=file_record.id if file_record else None,
+                            domain=current_domain,
+                            output_dir=document_dir,
+                            batch_size=50,
+                        )
+
+                        # Token bilgisini birleştir
+                        if "metadata" not in ocr_result:
+                            ocr_result["metadata"] = {}
+                        ocr_result["metadata"][
+                            "gemini_token_usage"
+                        ] = gemini_token_usage
+                        ocr_result["metadata"]["pipeline"] = "hybrid"
+
+                        print(
+                            f"[OCR_PIPELINE] Hybrid pipeline complete", flush=True
+                        )
+
+                    elif OCR_PIPELINE == "sequential":
                         # ════════════════════════════════════════════════════════════
                         # SEQUENTIAL PIPELINE: GeminiOCR -> Claude (text mode)
                         # ════════════════════════════════════════════════════════════
