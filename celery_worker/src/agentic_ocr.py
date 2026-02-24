@@ -296,6 +296,94 @@ class AgenticOCR:
         
         self._initialized = True
 
+    async def _load_skill_with_fallback(self, skill_id: str):
+        """
+        Skill'i Agent Builder API'den yüklemeyi dene.
+        
+        Öncelik sırası:
+        1. Agent Builder API (http://localhost:8001)
+        2. Fallback: None döndür → mevcut domain/prompt klasör yapısı kullanılır
+        
+        Returns:
+            SkillExecution veya None (None ise domain mode devam eder)
+        """
+        import os
+        import httpx
+        
+        # Agent Builder API URL
+        agent_builder_url = os.getenv("AGENT_BUILDER_URL", "http://localhost:8001")
+        api_endpoint = f"{agent_builder_url}/api/v2/agent-builder/skills/{skill_id}/execution"
+        
+        # API'den yüklemeyi dene
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(api_endpoint)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # SkillExecution benzeri dataclass oluştur
+                    from dataclasses import dataclass, field
+                    from typing import Dict, Any, List
+                    import json
+                    
+                    @dataclass
+                    class SkillExecution:
+                        skill_id: str
+                        name: str
+                        category: str
+                        prompt_template: str
+                        input_schema: Dict[str, Any]
+                        output_schema: Dict[str, Any]
+                        entity_schemas: List[Dict[str, Any]] = field(default_factory=list)
+                        relationship_schemas: List[Dict[str, Any]] = field(default_factory=list)
+                        version: int = 1
+                        effectiveness_score: float = 0.5
+                        
+                        @property
+                        def entity_schemas_json(self) -> str:
+                            return json.dumps(self.entity_schemas, ensure_ascii=False, indent=2)
+                        
+                        @property
+                        def entity_types_list(self) -> List[str]:
+                            return [e["entity_type"] for e in self.entity_schemas if e.get("entity_type")]
+                        
+                        def format_prompt(self, **kwargs) -> str:
+                            format_params = {
+                                "entity_schemas": self.entity_schemas_json,
+                                "entity_types": ", ".join(self.entity_types_list),
+                                **kwargs
+                            }
+                            try:
+                                return self.prompt_template.format(**format_params)
+                            except KeyError:
+                                return self.prompt_template
+                    
+                    skill = SkillExecution(
+                        skill_id=data.get("skill_id", skill_id),
+                        name=data.get("name", ""),
+                        category=data.get("category", "extraction"),
+                        prompt_template=data.get("prompt_template", ""),
+                        input_schema=data.get("input_schema", {}),
+                        output_schema=data.get("output_schema", {}),
+                        entity_schemas=data.get("entity_schemas", []),
+                        relationship_schemas=data.get("relationship_schemas", []),
+                        version=data.get("version", 1),
+                        effectiveness_score=data.get("effectiveness_score", 0.5)
+                    )
+                    
+                    logger.info(f"✅ Loaded skill via API: {skill.name} (v{skill.version})")
+                    return skill
+                else:
+                    logger.warning(f"⚠️ API returned {response.status_code} for skill {skill_id}")
+                    
+        except Exception as api_error:
+            logger.warning(f"⚠️ Agent Builder API not available: {api_error}")
+        
+        # Fallback: None döndür → mevcut domain/prompt klasör yapısı (load_prompt) kullanılır
+        logger.info(f"📁 Fallback to domain mode: skill_id={skill_id} ignored, using prompts/{self._domain}/ folder")
+        return None
+
     async def process(
         self,
         image_list: Optional[List[str]] = None,
@@ -310,6 +398,11 @@ class AgenticOCR:
         text_mode: bool = False,
         ocr_texts: Optional[List[str]] = None,
         batch_size: int = 50,
+        # ──────────────────────────────────────────
+        # DYNAMIC SKILL MODE: Ontology DB'den skill yükle
+        # Agent Builder ile oluşturulan skill'leri kullanır
+        # ──────────────────────────────────────────
+        skill_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Sayfaları tek tek işle.
@@ -324,11 +417,23 @@ class AgenticOCR:
             text_mode: True ise görsel yerine OCR metni işler
             ocr_texts: OCR metinleri (text_mode=True ise zorunlu)
             batch_size: Text mode'da batch boyutu (default: 50 sayfa)
+            skill_id: Ontology DB'den yüklenecek skill ID (Agent Builder)
+                      Verilirse, domain parametresi yerine skill'den prompt ve
+                      entity schema'lar alınır.
 
         Returns:
             {"markdown": "...", "metadata": {...}, "status": "success"|"error"}
         """
         self._graph = graph  # Şema çekmek için sakla
+        
+        # ══════════════════════════════════════════════════════════════════
+        # DYNAMIC SKILL MODE: Ontology DB'den skill yükle
+        # Agent Builder ile oluşturulan skill'leri kullanır
+        # Önce API'den çekmeyi dene, API yoksa fallback olarak klasör yapısını kullan
+        # ══════════════════════════════════════════════════════════════════
+        self._dynamic_skill = None
+        if skill_id:
+            self._dynamic_skill = await self._load_skill_with_fallback(skill_id)
         if not self._initialized:
             await self.initialize()
 
@@ -2629,6 +2734,7 @@ def process_agentic_ocr(
     domain: Optional[str] = None,
     graph: Optional[Neo4jGraph] = None,
     output_dir: Optional[str] = None,
+    skill_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Sync wrapper for AgenticOCR.process().
@@ -2641,9 +2747,10 @@ def process_agentic_ocr(
         domain: Domain (opsiyonel)
         graph: Neo4j graph bağlantısı (şema çekmek için)
         output_dir: JSON çıktısı için dizin (opsiyonel)
+        skill_id: Ontology DB'den yüklenecek skill ID (Agent Builder)
     """
     print(
-        f"[VISION_OCR] Called with {len(image_list)} images, file={file_name}",
+        f"[VISION_OCR] Called with {len(image_list)} images, file={file_name}, skill={skill_id}",
         flush=True,
     )
 
@@ -2656,6 +2763,7 @@ def process_agentic_ocr(
             domain=domain,
             graph=graph,
             output_dir=output_dir,
+            skill_id=skill_id,
         )
 
     try:

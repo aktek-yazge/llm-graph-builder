@@ -1141,6 +1141,10 @@ app.add_api_route("/health", health([healthy_condition, healthy]))
 # Auth routes - JWT authentication
 app.include_router(auth_router, prefix="/api")
 
+# Agent Builder ayrı bir proje olarak çalışır: /workspace/agent-builder/
+# Kendi FastAPI servisi: http://localhost:8001
+# API Docs: http://localhost:8001/docs
+
 
 @app.get("/system/stats")
 def get_system_stats():

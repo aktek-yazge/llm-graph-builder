@@ -1,0 +1,161 @@
+# =============================================================================
+# MCP CONTEXT-FORGE GATEWAY + ONTOLOGY NEO4J DEPLOYMENT
+# =============================================================================
+# Bu dosya Agent Builder için gerekli servisleri tanımlar:
+# - mcp-gateway: IBM MCP Context-Forge Gateway (merkezi tool hub)
+# - neo4j-ontology: Agent metadata veritabanı (Goals, Skills, Schemas)
+#
+# Kullanım:
+#   docker-compose -f docker-compose.mcp-gateway.yml up -d
+#
+# Notlar:
+# - neo4j-ontology, mevcut Documents DB'den AYRI bir instance
+# - Gateway Admin UI: http://localhost:4444/admin
+# - Ontology Neo4j Browser: http://localhost:7475
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # NEO4J ONTOLOGY DATABASE
+  # ===========================================================================
+  # Agent metadata için ayrı Neo4j instance
+  # Goals, Skills, Schemas, Agents, Learnings burada tutulur
+  # Documents DB'den izole - tenant verisi burada OLMAZ
+  neo4j-ontology:
+    image: neo4j:5.15-enterprise
+    container_name: neo4j-ontology
+    hostname: neo4j-ontology
+    restart: unless-stopped
+    ports:
+      # HTTP Browser - Documents DB'den farklı port
+      - "7475:7474"
+      # Bolt - Documents DB'den farklı port
+      - "7688:7687"
+    environment:
+      # Enterprise license kabul
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      # Authentication
+      - NEO4J_AUTH=${ONTOLOGY_NEO4J_USERNAME:-neo4j}/${ONTOLOGY_NEO4J_PASSWORD:-ontology_secret}
+      # Memory settings (adjust based on available RAM)
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+      # Database settings
+      - NEO4J_dbms_default__database=ontology
+      # Plugin'ler (GDS için)
+      - NEO4J_PLUGINS=["graph-data-science"]
+      # Security
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+    volumes:
+      # Persistent data
+      - neo4j_ontology_data:/data
+      - neo4j_ontology_logs:/logs
+      - neo4j_ontology_plugins:/plugins
+      # Schema initialization scripts (optional)
+      - ./neo4j-ontology-init:/var/lib/neo4j/import
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # MCP CONTEXT-FORGE GATEWAY
+  # ===========================================================================
+  # IBM'in MCP Gateway'i - tüm MCP server'ların merkezi hub'ı
+  # Virtual server'lar, tool registry, authentication burada yönetilir
+  mcp-gateway:
+    image: ghcr.io/ibm/mcp-context-forge:1.0.0-RC-1
+    container_name: mcp-gateway
+    hostname: mcp-gateway
+    restart: unless-stopped
+    depends_on:
+      neo4j-ontology:
+        condition: service_healthy
+    ports:
+      # Gateway API + Admin UI
+      - "4444:4444"
+    environment:
+      # Server settings
+      - HOST=0.0.0.0
+      - PORT=4444
+      # Database (SQLite for simplicity, can use PostgreSQL)
+      - DATABASE_URL=sqlite:////data/mcp-gateway.db
+      # Authentication
+      - JWT_SECRET_KEY=${MCP_GATEWAY_JWT_SECRET:-your-super-secret-key-change-in-production}
+      - AUTH_REQUIRED=true
+      - BASIC_AUTH_USER=${MCP_GATEWAY_ADMIN_USER:-admin}
+      - BASIC_AUTH_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-changeme}
+      # Admin settings
+      - PLATFORM_ADMIN_EMAIL=${MCP_GATEWAY_ADMIN_EMAIL:-admin@example.com}
+      - PLATFORM_ADMIN_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-changeme}
+      - PLATFORM_ADMIN_FULL_NAME=Agent Builder Admin
+      # UI
+      - MCPGATEWAY_UI_ENABLED=true
+      - MCPGATEWAY_ADMIN_API_ENABLED=true
+      - SECURE_COOKIES=false  # true for HTTPS
+      # Security defaults (keep enabled)
+      - REQUIRE_JTI=true
+      - REQUIRE_TOKEN_EXPIRATION=true
+      - PUBLIC_REGISTRATION_ENABLED=false
+    volumes:
+      # Persistent data
+      - mcp_gateway_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4444/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # GATEWAY INITIALIZER
+  # ===========================================================================
+  # Mevcut MCP server'ları Gateway'e kaydeden init container
+  mcp-gateway-init:
+    image: curlimages/curl:latest
+    container_name: mcp-gateway-init
+    depends_on:
+      mcp-gateway:
+        condition: service_healthy
+    environment:
+      - GATEWAY_URL=http://mcp-gateway:4444
+      - GATEWAY_ADMIN_EMAIL=${MCP_GATEWAY_ADMIN_EMAIL:-admin@example.com}
+      - GATEWAY_ADMIN_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-changeme}
+    volumes:
+      - ./scripts/init-gateway.sh:/init-gateway.sh:ro
+    entrypoint: ["/bin/sh", "/init-gateway.sh"]
+    networks:
+      - agent-builder-network
+    restart: "no"
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  neo4j_ontology_data:
+    driver: local
+  neo4j_ontology_logs:
+    driver: local
+  neo4j_ontology_plugins:
+    driver: local
+  mcp_gateway_data:
+    driver: local
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  agent-builder-network:
+    driver: bridge
+    # Mevcut backend network'üne bağlanmak için external olarak tanımlanabilir
+    # external: true
+    # name: llm-graph-builder_default

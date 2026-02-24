@@ -1123,3 +1123,146 @@ def batch_entity_resolution_task(self, neo4j_uri: str = None):
         import traceback
         logging.error(f"Traceback: {traceback.format_exc()}")
         raise self.retry(exc=e, countdown=120, max_retries=1)
+
+
+# =============================================================================
+# SKILL-BASED PROCESSING TASK
+# Agent Builder tarafından oluşturulan skill'lerle belge işleme
+# =============================================================================
+
+@app.task(bind=True, name="celery_worker.src.tasks.skill_processing.process_file_with_skill", max_retries=3)
+def process_file_with_skill(self, file_id: str, skill_id: str, tenant_id: str = None):
+    """
+    Agent Builder skill'i ile dosya işle.
+    
+    Bu task, Agent Builder API'den skill bilgilerini alır ve
+    agentic_ocr.process(skill_id=...) çağırarak belgeyi işler.
+    
+    Args:
+        file_id: İşlenecek dosya ID'si (PostgreSQL'den)
+        skill_id: Kullanılacak skill ID'si (Neo4j Ontology'den)
+        tenant_id: Tenant ID (opsiyonel)
+    
+    Returns:
+        İşleme sonuçları
+    """
+    logging.info(f"🎯 Skill Processing Task started")
+    logging.info(f"   File ID: {file_id}")
+    logging.info(f"   Skill ID: {skill_id}")
+    logging.info(f"   Tenant ID: {tenant_id}")
+    
+    try:
+        # 1. Dosya bilgilerini al
+        db = get_db()
+        
+        # Integer file_id kontrolü
+        try:
+            file_id_int = int(file_id)
+        except (ValueError, TypeError):
+            logging.error("❌ Invalid file_id: %s", file_id)
+            return {"status": "error", "error": f"Invalid file_id: {file_id}"}
+        
+        file_record = db.get_file_by_id(file_id_int)
+        
+        if not file_record:
+            logging.error("❌ File not found: %s", file_id)
+            return {"status": "error", "error": f"File not found: {file_id}"}
+        
+        # 2. Dosyanın resimlerini al
+        file_name = file_record.file_name
+        logging.info("📄 Processing file: %s", file_name)
+        
+        # Dosyanın image path'lerini al (PostgreSQL'deki images alanından)
+        image_list = []
+        
+        # file_record.images JSON array olabilir
+        if hasattr(file_record, 'images') and file_record.images:
+            if isinstance(file_record.images, list):
+                image_list = file_record.images
+            elif isinstance(file_record.images, str):
+                import json
+                try:
+                    image_list = json.loads(file_record.images)
+                except json.JSONDecodeError:
+                    image_list = []
+        
+        # Eğer images alanı yoksa, output_dir'den al
+        if not image_list and hasattr(file_record, 'output_dir') and file_record.output_dir:
+            output_dir = Path(file_record.output_dir)
+            if output_dir.exists():
+                image_list = sorted([str(p) for p in output_dir.glob("*.png")])
+                image_list.extend(sorted([str(p) for p in output_dir.glob("*.jpg")]))
+        
+        if not image_list:
+            logging.error(f"❌ No images found for file {file_id}")
+            return {"status": "error", "error": "No images found"}
+        
+        # 3. Agentic OCR ile işle (skill_id parametresiyle)
+        from src.agentic_ocr import vision_ocr_process
+        from src.shared.common_fn import create_graph_database_connection
+        
+        neo4j_uri = os.environ.get("NEO4J_URI")
+        graph = create_graph_database_connection(neo4j_uri) if neo4j_uri else None
+        
+        logging.info(f"🤖 Starting Agentic OCR with skill: {skill_id}")
+        
+        # Async function'ı sync olarak çalıştır
+        result = asyncio.run(
+            vision_ocr_process(
+                image_list=image_list,
+                file_name=file_name,
+                file_id=file_id_int,
+                domain=tenant_id,  # tenant_id'yi domain olarak kullan
+                graph=graph,
+                skill_id=skill_id,  # Skill ID'yi geç
+            )
+        )
+        
+        logging.info(f"✅ Skill Processing completed for file {file_id}")
+        logging.info(f"   Status: {result.get('status', 'unknown')}")
+        
+        # 4. Dosya durumunu güncelle
+        if result.get("status") == "success":
+            enqueue_chunking_update(
+                file_id=file_id_int,
+                chunking_status="completed",
+                total_chunks=result.get("total_chunks", 0),
+                total_pages=len(image_list),
+            )
+            
+            # Graph oluştur
+            if result.get("entities"):
+                enqueue_graph_update(
+                    file_id=file_id_int,
+                    graph_status="completed",
+                    node_count=result.get("node_count", 0),
+                    relationship_count=result.get("relationship_count", 0),
+                )
+        
+        # Flush Langfuse
+        flush_langfuse()
+        
+        return {
+            "status": "success",
+            "file_id": file_id,
+            "skill_id": skill_id,
+            "pages_processed": len(image_list),
+            "result": result,
+        }
+        
+    except Exception as e:
+        logging.error(f"❌ Skill Processing Task error: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Hata durumunu kaydet
+        try:
+            enqueue_error_update(
+                file_id=int(file_id),
+                status_field="chunking_status",
+                error_message=str(e),
+            )
+        except Exception:
+            pass
+        
+        raise self.retry(exc=e, countdown=60, max_retries=3)

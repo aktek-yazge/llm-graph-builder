@@ -1,0 +1,122 @@
+services:
+  # =============================================================================
+  # Neo4j Ontology Database
+  # Agent metadata, Goals, Skills, Schemas için ayrı Neo4j instance
+  # =============================================================================
+  neo4j-ontology:
+    image: neo4j:5.15-enterprise
+    container_name: neo4j-ontology
+    ports:
+      - "7475:7474"  # Browser
+      - "7688:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_ONTOLOGY_PASSWORD:-ontology123}
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_default__database=ontology
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+      - NEO4J_dbms_memory_pagecache_size=512m
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j-ontology-data:/data
+      - neo4j-ontology-logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-builder-network
+
+  # =============================================================================
+  # MCP Context-Forge Gateway
+  # Tool registry, virtual servers, authentication
+  # =============================================================================
+  mcp-gateway:
+    image: ghcr.io/ibm/mcp-context-forge:latest
+    container_name: mcp-gateway
+    ports:
+      - "4444:4444"
+    environment:
+      - DATABASE_URL=sqlite:///./mcp.db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      - MCPGATEWAY_UI_ENABLED=true
+      - MCPGATEWAY_ADMIN_API_ENABLED=true
+      - HOST=0.0.0.0
+      - PORT=4444
+      - AUTH_REQUIRED=true
+      - SECURE_COOKIES=false
+      - PLATFORM_ADMIN_EMAIL=admin@example.com
+      - PLATFORM_ADMIN_PASSWORD=changeme
+      - PLATFORM_ADMIN_FULL_NAME=Platform Administrator
+    depends_on:
+      neo4j-ontology:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4444/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-builder-network
+
+  # =============================================================================
+  # Gateway Initializer
+  # Registers MCP servers on startup (inline script)
+  # =============================================================================
+  mcp-gateway-init:
+    image: curlimages/curl:latest
+    container_name: mcp-gateway-init
+    depends_on:
+      mcp-gateway:
+        condition: service_started
+    environment:
+      - GATEWAY_URL=http://mcp-gateway:4444
+      - NEO4J_DOCUMENTS_URL=${NEO4J_DOCUMENTS_URL:-bolt://neo4j-documents:7687}
+      - NEO4J_ONTOLOGY_URL=${NEO4J_ONTOLOGY_URL:-bolt://neo4j-ontology:7688}
+    networks:
+      - agent-builder-network
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for MCP Gateway..."
+        sleep 10
+        
+        echo "Registering neo4j-ontology server..."
+        curl -X POST "$${GATEWAY_URL}/api/v1/servers" \
+          -H "Content-Type: application/json" \
+          -d '{"name":"neo4j-ontology","type":"stdio","command":"npx","args":["-y","@neo4j-contrib/mcp-neo4j","$${NEO4J_ONTOLOGY_URL}"]}'
+        
+        echo "MCP Gateway initialization complete!"
+
+  # =============================================================================
+  # Agent Builder Backend API
+  # =============================================================================
+  agent-builder-api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: agent-builder-api
+    ports:
+      - "8001:8001"
+    environment:
+      - ONTOLOGY_NEO4J_URI=bolt://neo4j-ontology:7687
+      - ONTOLOGY_NEO4J_USERNAME=neo4j
+      - ONTOLOGY_NEO4J_PASSWORD=${NEO4J_ONTOLOGY_PASSWORD:-ontology123}
+      - ONTOLOGY_NEO4J_DATABASE=ontology
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - MCP_GATEWAY_URL=http://mcp-gateway:4444
+    depends_on:
+      neo4j-ontology:
+        condition: service_healthy
+    networks:
+      - agent-builder-network
+
+volumes:
+  neo4j-ontology-data:
+  neo4j-ontology-logs:
+
+networks:
+  agent-builder-network:
+    driver: bridge
+    name: agent-builder-network

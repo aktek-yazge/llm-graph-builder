@@ -64,6 +64,8 @@ app.conf.update(
         "src.neo4j_writer.neo4j_batch_write_task": {"queue": "neo4j_write"},
         # Main tasks stay in default queue
         "src.tasks.*": {"queue": "celery"},
+        # Agent Builder skill processing task
+        "celery_worker.src.tasks.skill_processing.process_file_with_skill": {"queue": "celery"},
     },
     
     # Worker prefetch - reduce for DB writer to ensure ordered processing
