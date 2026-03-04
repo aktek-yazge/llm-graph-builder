@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AgentBuilderAPI } from '../services/agentBuilderApi';
+import Breadcrumb from '../components/Breadcrumb';
 
 interface Skill {
   id: string;
@@ -119,18 +120,14 @@ export default function AgentDetail() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <Breadcrumb items={[
+        { label: 'Dashboard', to: '/dashboard' },
+        { label: 'Agents', to: '/dashboard' },
+        { label: agent.name },
+      ]} />
+
       {/* Header */}
       <div className="mb-8">
-        <button
-          onClick={() => navigate('/dashboard')}
-          className="flex items-center text-gray-600 hover:text-gray-900 mb-4"
-        >
-          <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-          Dashboard
-        </button>
-
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">{agent.name}</h1>

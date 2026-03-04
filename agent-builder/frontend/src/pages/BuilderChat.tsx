@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AgentBuilderAPI } from '../services/agentBuilderApi';
+import Breadcrumb from '../components/Breadcrumb';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -106,15 +107,10 @@ export default function BuilderChat() {
       {/* Sidebar */}
       <div className="w-64 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-4 border-b border-gray-200">
-          <button
-            onClick={() => navigate('/dashboard')}
-            className="flex items-center text-gray-600 hover:text-gray-900"
-          >
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-            Dashboard
-          </button>
+          <Breadcrumb items={[
+            { label: 'Dashboard', to: '/dashboard' },
+            { label: 'Builder' },
+          ]} />
         </div>
         
         <div className="p-4 flex-1">

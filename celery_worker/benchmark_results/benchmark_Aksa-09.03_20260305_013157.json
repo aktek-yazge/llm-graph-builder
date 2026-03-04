@@ -1,0 +1,1085 @@
+{
+  "file_name": "Aksa-09.03.2016-9028-GENEL KURUL TOPLANTIYA ÇAĞIRI",
+  "timestamp": "2026-03-05T01:31:57.266957",
+  "comparison": {
+    "baseline": {
+      "found": true,
+      "nodes_count": 14,
+      "relationships_count": 12,
+      "chunks_count": 18,
+      "node_labels": {
+        "Company": 1,
+        "Meeting": 1,
+        "Gazette": 1,
+        "Address": 3,
+        "Capital": 1,
+        "Regulation": 7
+      },
+      "relationship_types": {
+        "PUBLISHED_IN": 1,
+        "ORGANIZED_BY": 1,
+        "HELD_AT": 1,
+        "HAS_CAPITAL": 1,
+        "REFERENCES": 8
+      },
+      "timing": {
+        "ner_ms": 0,
+        "llm_ms": 77462,
+        "total_ms": 77462
+      }
+    },
+    "ner_augmented": {
+      "found": true,
+      "nodes_count": 13,
+      "relationships_count": 14,
+      "chunks_count": 21,
+      "node_labels": {
+        "Company": 1,
+        "Meeting": 1,
+        "Gazette": 1,
+        "Address": 3,
+        "Regulation": 6,
+        "Capital": 1
+      },
+      "relationship_types": {
+        "PUBLISHED_IN": 1,
+        "ORGANIZED_BY": 1,
+        "HELD_AT": 1,
+        "HAS_ADDRESS": 2,
+        "REFERENCES": 8,
+        "HAS_CAPITAL": 1
+      },
+      "ner_entity_count": 9,
+      "timing": {
+        "ner_ms": 12916,
+        "llm_ms": 59555,
+        "total_ms": 72471
+      }
+    },
+    "diff": {
+      "nodes_delta": -1,
+      "relationships_delta": 2,
+      "only_in_baseline": [
+        "regulation_spk_ii_30_1",
+        "regulation_spk_ii_19_1",
+        "address_aksa_yalova_factory",
+        "regulation_spk_ii_17_1",
+        "regulation_spk_kurumsal_yonetim_tebligi",
+        "address_aksa_headquarters"
+      ],
+      "only_in_ner_augmented": [
+        "regulation_spk_ii_30_1_vekaleten_oy_kullanilmasi_ve_cagri_yoluyla_vekalet_toplantisi_tebligi",
+        "address_aksa_yalova_fabrika",
+        "regulation_spk_ii_17_1_kurumsal_yonetim_tebligi",
+        "regulation_spk_ii_19_1_kar_payi_tebligi",
+        "address_aksa_headquarters_beyoglu"
+      ],
+      "common_nodes": 8,
+      "llm_time_delta_ms": -17907,
+      "total_time_delta_ms": -4991
+    }
+  },
+  "baseline_full": {
+    "pipeline": "baseline",
+    "result": {
+      "data": {
+        "found": true,
+        "target_company": "Aksa Akrilik Kimya Sanayii Anonim Şirketi",
+        "document_type": "Olağan Genel Kurul Toplantısı Daveti ve Esas Sözleşme Tadil Metni",
+        "chunks": [
+          {
+            "id": "chunk_001",
+            "text": "9 MART 2016 SAYI : 9028\nTÜRKİYE TİCARET SİCİLİ GAZETESİ\nSAYFA : 1371\n\nUMUMİ HEYET TOPLANTILARI\nİstanbul Ticaret Sicili\nMemurluğu\nSicil No: 100775\nTicaret Ünvanı:\nAKSA AKRİLİK KİMYA\nSANAYİİ ANONİM ŞİRKETİ\nYönetim Kurulu\nBaşkanlığı'ndan\n2015 Yılına Ait Olağan Genel\nKurul Toplantısına Davet",
+            "position": 1,
+            "page": 1
+          },
+          {
+            "id": "chunk_002",
+            "text": "Şirketimizin 2015 yılına ait\nOlağan Genel Kurul'u 04.04.2016\ntarihinde saat 11:00'da aşağıda\nyazılı gündem maddelerini\ngörüşmek ve karara bağlamak\nüzere, Taşkışla Caddesi, No:1,\n34437, Taksim, İstanbul\nadresindeki Grand Hyatt İstanbul\nOteli, Efes Bizans Salonu'nda\ntoplanacaktır.",
+            "position": 2,
+            "page": 1
+          },
+          {
+            "id": "chunk_003",
+            "text": "Toplantıya bizzat iştirak\nedemeyecek ortaklarımızın,\nvekaletnamelerini ekteki örneğe\nuygun olarak düzenlemeleri veya\nGümüşsuyu, Miralay Şefik Bey\nSokak, Akhan, No: 15, Beyoğlu,\nİstanbul adresindeki Şirket\nmerkezimizden veya\nwww.aksa.com adresindeki\nŞirketimizin kurumsal internet\nsitesinden temin etmeleri ve\n24.12.2013 tarihli ve 28862 sayılı\nResmi Gazete'de yayımlanan\nSermaye Piyasası Kurulu'nun (II-\n30.1) sayılı Vekaleten Oy\nKullanılması Ve Çağrı Yoluyla\nVekalet Toplantısı Tebliği'nde\n('Tebliğ') öngörülen hususları\nyerine getirmeleri gerekmektedir.\nGenel kurul toplantısında\nvekaletname ile temsil, ekteki\nvekaletname formunun\nkullanılması ile mümkündür.\n\nTebliğ'de belirlenen esaslara\nuyumlu olması kaydıyla, Merkezi\nKayıt Kuruluşu A.Ş. (MKK)\ndüzenlemeleri çerçevesinde\nElektronik Genel Kurul\nSisteminden (Egks) vekil tayini\nyapılarak toplantıya elektronik ortamda\nkatılım, pay sahiplerinin veya\ntemsilcilerinin güvenli elektronik\nimzaları ile mümkündür. Bu\nsebeple Egks işlemi yapacak pay\nsahiplerinin öncelikle güvenli\nelektronik imza sahibi olmaları ve\nMKK'nın E-MKK Bilgi Portalı'na\nkaydolmaları gerekmektedir. E-\nMKK Bilgi Portalı'na\nkaydolmayan ve güvenli elektronik\nimzaları bulunmayan pay sahipleri\nveya temsilcilerinin Egks\nüzerinden elektronik ortamda genel\nkurul toplantısına katılmaları\nmümkün olmayacaktır.\nToplantıya elektronik ortamda\nkatılmak isteyen pay\nsahiplerimizin veya vekillerinin\n28.08.2012 tarihli ve 28395 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerde Elektronik\nOrtamda Yapılacak Genel\nKurullara İlişkin Yönetmelik\" ve\n29.08.2012 tarihli ve 28396 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerin Genel\nKurullarında Uygulanacak\nElektronik Genel Kurul Sistemi\nHakkında Tebliğ\" hükümlerine\nuygun olarak işlemlerini\ntamamlamaları gerekmektedir.\nAksi halde toplantıya iştirak\netmeleri mümkün olmayacaktır.\nGenel kurul toplantısı elektronik\nortamda gerçekleştirileceğinden,\ntoplantının saatinde başlayabilmesi\niçin Sayın Pay sahiplerimizin\ntoplantı saatinden önce toplantı\nmahallinde hazır bulunması rica\nolunur.",
+            "position": 3,
+            "page": 1
+          },
+          {
+            "id": "chunk_004",
+            "text": "Sermaye Piyasası Kurulu'nun ve\nT.C. Gümrük ve Ticaret\nBakanlığı'nın ilgili mevzuat\nhükümleri çerçevesinde hazırlanan\n2015 yılı Yönetim Kurulu Faaliyet\nRaporu, Denetçi Raporu, Finansal\nTablolar, Kar Dağıtımına İlişkin\nTeklif, Esas Sözleşme Tadil metni\nile gündem maddelerine ilişkin\nzorunlu Kurumsal Yönetim İlkeleri\nçerçevesinde gerekli açıklamaları\nve ilgili belgeleri içeren ayrıntılı\nBilgilendirme Dokümanı, ilan ve\ntoplantı günleri hariç olmak üzere\ngenel kurul toplantı tarihinden\nhafta önce kanuni süresi içinde\nŞirket merkezimizde, şubemizde\n(Yalova Fabrika), www.aksa.com\nadresindeki Şirketin kurumsal\ninternet sitesinde, MKK'nın\nelektronik genel kurul portalında\nve www.kap.gov.tr adresli\nKamuyu Aydınlatma\nPlatformu'nda (Kap) Sayın Pay\nsahiplerimizin incelemelerine hazır\nbulundurulacaktır.\nSayın Pay Sahiplerine\nDuyurulur.\nSaygılarımızla,\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi\n(Kaşe ve İmzalar)",
+            "position": 4,
+            "page": 1
+          },
+          {
+            "id": "chunk_005",
+            "text": "Aksa Akrilik Kimya Sanayii\nAnonim Şirketi'nin\n2015 Yılına Ait Olağan Genel\nKurul Toplantı Gündemi\n\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması,\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporu'nun okunması,\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,\n\n6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin ücretlerinin\nbelirlenmesi,",
+            "position": 5,
+            "page": 1
+          },
+          {
+            "id": "chunk_006",
+            "text": "8. Sermaye Piyasası Kurulu\ntarafından yayımlanan 'Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ' ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşkası hesabına yapması ya da\naynı tür ticari işlerle uğraşan bir\nbaşka ortaklığa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,\n\n10. Türk Ticaret Kanunu'nun\n395. ve 396. madde hükümlerinde\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasıda belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nYönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,\n\n15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'nın\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n(Devamı 1372 . Sayfada)",
+            "position": 6,
+            "page": 1
+          },
+          {
+            "id": "chunk_007",
+            "text": "SAYFA : 1372\nAKSA AKRİLİK KİMYA SANAYİİ\nANONİM ŞİRKETİ ESAS SÖZLEŞME\nTADİL METNİ\n\n(Baştafı 1371. Sayfada)\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurulun onayına sunulması\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi Esas Sözleşme\nTadil Metni",
+            "position": 7,
+            "page": 1372
+          },
+          {
+            "id": "chunk_008",
+            "text": "Eski Şekil\nSermaye:\nMadde 6-\nŞirket, 6362 Sayılı Kanun\nhükümlerine göre kayıtlı sermaye\nsistemini kabul etmiş ve Sermaye\nPiyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.\nŞirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1- Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2012-2017 yılları (5 yıl) için\ngeçerlidir. 2017 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2017\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, Şirket kayıtlı sermaye\nsisteminden çıkmış sayılır.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-\n(Yüksekseçbenmilyon) Türk\nLirası'dır.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nYönetim Kurulu, 2016- 2020\nyılları arasında, Sermaye Piyasası\nKanunu hükümlerine uygun olarak\ngerek gördüğü zamanlarda kayıtlı\nsermaye tavanına kadar paylar\nihraç ederek çıkarılmış sermayeyi\nartırmaya, nominal değerinin\nüzerinde veya altında pay\nçıkarmaya, pay sahiplerinin yeni\npay alma haklarını sınırlandırmaya\nve primli pay ihracı konusunda\nkarar almaya yetkilidir. Yeni pay\nalma hakkını kısıtlama yetkisi, pay\nsahipleri arasında eşitsizliğe yol\naçacak şekilde kullanılamaz.\nŞirket hisselerinin tamamı nama\nyazılıdır. Şirket hamiline yazılı\nhisse çıkaramaz.\nŞirket Enerji Piyasası\nDüzenleme Kurulu'nun onayı da\nalınmış olmak kaydı ile, kendi\npaylarını, Türk Ticaret Kanunu ve\nSermaye Piyasası\nKanunu'nda belirtilen\nsınırlamalara tabi olmak kaydıyla\niktisap edebilir ve rehin olarak\nkabul edebilir.",
+            "position": 8,
+            "page": 1372
+          },
+          {
+            "id": "chunk_009",
+            "text": "Yeni Şekil\nSermaye:\nMadde 6-\nŞirket, Sermaye Piyasası\nKanunu hükümlerine göre kayıtlı\nsermaye sistemini kabul etmiş ve\nSermaye Piyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.\nŞirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1-Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2016- 2020 yılları (5 yıl) için\ngeçerlidir. 2020 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2020\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, yönetim kurulu kararı\nile sermaye artırımı yapılamaz.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-",
+            "position": 9,
+            "page": 1372
+          },
+          {
+            "id": "chunk_010",
+            "text": "Yönetim Kurulunun Yetkileri:\nMadde 9-\nKanun ve bu Esas Sözleşme\nhükümleri gereğince Genel Kurul\nKararı Alınması Gereken İşlemler\nHaricinde Tüm Kararlarda\nYönetim Kurulu Yetkilidir.\nYönetim Kurulu, görev ve\nsorumluluklarını sağlıklı bir\nbiçimde yerine getirmek, şirketin\nvarlığını ve gelişmesini\nsürdürebilmek üzere Türk Ticaret\nKanunu ve SPK mevzuatında\nöngörülen komiteleri kurar ve\nmevzuat hükümleri doğrultusunda\nuygulanmasını sağlar. Ayrıca Türk\nTicaret Kanunu'nun 378. maddesi\nuyarınca riskin erken saptanması\namacıyla bir komite kurulur.\nYönetim Kurulu bünyesinde\nkomitelerin oluşturulması,\nkomitelerin görev alanları, çalışma\nesasları Türk Ticaret Kanunu,\nSermaye Piyasası Kanunu,\nSermaye Piyasası Kurulu'nun\nkurumsal yönetime ilişkin\ndüzenlemeleri ve diğer mevzuat\nhükümlerine göre gerçekleştirilir.\nŞirket'in Genel Müdür'ünün\ngörevleri Şirket'in iç yönergesinde\ntanımlanmış olup, Genel Müdür ile\nYönetim Kurulu Başkanı aynı\nkişiler olamaz ve aynı yetkilere\nsahip olamaz. Yönetim kurulu\nbaşkanı Türk Ticaret Kanunu ve\nSPK mevzuatından doğan\ngörevlerini yerine getirir.",
+            "position": 10,
+            "page": 1372
+          },
+          {
+            "id": "chunk_011",
+            "text": "Genel Kurul:\nMadde 12-\nGenel kurul, olağan ve\nolağanüstü olarak toplanır.\nOlağan genel kurul, Şirket'in\nhesap devresinin sonundan itibaren\nüç ay içinde ve yılda en az bir defa\ntoplanır ve gerekli kararları alır.\nOlağanüstü genel kurul, gerektiği\ntakdirde Türk Ticaret Kanunu ve\nbu Esas Sözleşme'de yazılı\nhükümlere göre toplanır ve gerekli\nkararları alır.\nYönetim Kurulu tarafından Türk\nTicaret Kanunu uyarınca Genel\nKurul çalışma esas ve usulüne\nilişkin bir iç yönerge hazırlanır ve\nGenel Kurul onayıyla yürürlüğe\nkonulur, tescil ve ilan ettirilir.\nGenel Kurul tarafından aksine\nkarar verilmedikçe toplantılar\nfiziki imkanlar müsait olduğu\nsürece ilgililere açık olarak yapılır;\nancak söz ve oy hakkı, pay sahibi\nveya oy kullanmaya yetkili\ntemsilcisine aittir.",
+            "position": 11,
+            "page": 1372
+          },
+          {
+            "id": "chunk_012",
+            "text": "Toplantı Yeri:\nMadde 14-\nGenel Kurul Şirketin idare\nmerkezinin ve pay sahiplerinin\nsayısal olarak çoğunlukta olduğu\nİstanbul'da veya Yönetim\nKurulunca alınacak karar üzerine\nŞirket şubelerinin veya sınai\ntesislerinin bulunduğu diğer\nmahallelerde toplanabilir.",
+            "position": 12,
+            "page": 1372
+          },
+          {
+            "id": "chunk_013",
+            "text": "Oy Hakkı Ve Azlık Hakları:\nMadde 17-\nGenel kurul toplantılarında her\npay sahibinin her pay için bir oy\nhakkı vardır.\nOy hakkı ile ilgili olarak Türk\nTicaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nuygulanır.",
+            "position": 13,
+            "page": 1372
+          },
+          {
+            "id": "chunk_014",
+            "text": "Vekaletname\nAksa Akrilik Kimya Sanayi\nAnonim Şirketi'nin 04.04.2016\ntarihinde saat 11:00'da Taşkışla\nCaddesi, No:1, 34437, Taksim,\nİstanbul adresindeki Grand Hyatt\nİstanbul Oteli, Efes Bizans\nSalonu'nda yapılacak 2015 yılına\nait Olağan Genel Kurul\ntoplantısında\naşağıda\nbelirttiğim/belirttiğimiz görüşler\ndoğrultusunda beni/Şirketimi\ntemsile, oy vermeye, teklifte\nbulunmaya ve gerekli belgeleri\nimzalamaya yetkili olmak üzere\naşağıda detaylı olarak tanıtılan\n....................................................'yi vekil\ntayin ediyorum/ediyoruz.",
+            "position": 14,
+            "page": 1372
+          },
+          {
+            "id": "chunk_015",
+            "text": "Vekilin(*);\nAdı Soyadı/Ticaret Unvanı:\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası:\n(*)Yabancı uyruklu vekiller için\nanılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.\nA) Temsil Yetkisinin Kapsamı\nAşağıda verilen 1 ve 2 numaralı\nbölümler için (a), (b) veya (c)\nşıklarından biri seçilerek temsil\nyetkisinin kapsamı belirlenmelidir.\n1. Genel Kurul Gündeminde Yer\nAlan Hususlar Hakkında;\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil ortaklık yönetiminin\nönerileri doğrultusunda oy\nkullanmaya yetkilidir.\nc) Vekil aşağıda tabloda\nbelirtilen talimatlar doğrultusunda\noy kullanmaya yetkilidir.\n\nTalimatlar:\nPay sahibi tarafından (c) şıkkının\nseçilmesi durumunda, gündem\nmaddesi özelinde talimatlar ilgili\ngenel kurul gündem maddesinin\nkarşısında verilen seçeneklerden\nbirini işaretlemek (kabul veya red)\nve red seçeneğinin seçilmesi\ndurumunda varsa genel kurul\ntutanağına yazılması talep edilen\nmuhalefet şerhini belirtilmek\nsuretiyle verilir.",
+            "position": 15,
+            "page": 1372
+          },
+          {
+            "id": "chunk_016",
+            "text": "Gündem Maddeleri (*)\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması ve\nmüzakeresi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporunun okunması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin\nücretlerinin\nbelirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n8. Sermaye Piyasası Kurulu\ntarafından yayımlanan \"Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ\" ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşka ortağa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -",
+            "position": 16,
+            "page": 1372
+          },
+          {
+            "id": "chunk_017",
+            "text": "(Baştarafı 1372. Sayfada)\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasında belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nyönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'ndan\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurul'un onayına sunulması\nKabul: -\nRed: -\nMuhalefet Şerhi: -",
+            "position": 17,
+            "page": 1372
+          },
+          {
+            "id": "chunk_018",
+            "text": "(*) Genel Kurul gündeminde yer\nalan hususlar tek tek sıralanır.\nAzlığın ayrı bir karar taslağı varsa\nbu da vekaleten oy verilmesini\nteminen ayrıca belirtilir.\n2. Genel Kurul toplantısında\nortaya çıkabilecek diğer konulara\nve özellikle azlık haklarının\nkullanılmasına ilişkin özel talimat:\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil bu konularda temsile\nyetkili değildir.\nc) Vekil aşağıdaki özel talimatlar\ndoğrultusunda oy kullanmaya\nyetkilidir.\nÖzel Talimatlar: Varsa pay\nsahibi tarafından vekile verilecek\nözel talimatlar burada belirtilir.\nB) Pay sahibi aşağıdaki\nseçeneklerden birini seçerek\nvekilin temsil etmesini istediği\npayları belirtir.\n1. Aşağıda detayı belirtilen\npaylarımın vekil tarafından\ntemsilini onaylıyorum.\na) Tertip ve serisi:*\nb) Numarası/Grubu:**\nc) Adet-Nominal değeri:\nç) Oyda imtiyazı olup olmadığı:\nd) Hamiline-Nama yazılı\nolduğu:*\ne) Pay sahibinin sahip olduğu\ntoplam paylara/oy haklarına oranı:\n*Kayden izlenen izlenen paylar\niçin bu bilgiler talep\nedilmemektedir.\n**Kayden izlenen paylar için\nnumara yerine varsa gruba ilişkin\nbilgiye yer verilecektir.\n2. Genel kurul gününden bir gün\nönce MKK tarafından hazırlanan\ngenel kurula katılabilecek pay\nsahiplerine ilişkin listede yer alan\npaylarımın tümünün vekil\ntarafından temsilini onaylıyorum.\nPay Sahibinin Adı Soyadı veya\nÜnvanı(*)\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası: Adresi: İmzası\n(*)Yabancı uyruklu pay sahipleri\niçin anılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.",
+            "position": 18,
+            "page": 1372
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Company",
+            "id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "properties": {
+              "name": "AKSA AKRİLİK KİMYA SANAYİİ ANONİM ŞİRKETİ",
+              "type": "AS",
+              "city": "İstanbul",
+              "registration_no": "100775",
+              "website": "www.aksa.com"
+            },
+            "chunk_ids": [
+              "chunk_001",
+              "chunk_002",
+              "chunk_003",
+              "chunk_004",
+              "chunk_005",
+              "chunk_006",
+              "chunk_007",
+              "chunk_008",
+              "chunk_009",
+              "chunk_010",
+              "chunk_011",
+              "chunk_012",
+              "chunk_013",
+              "chunk_014",
+              "chunk_015",
+              "chunk_016",
+              "chunk_017",
+              "chunk_018"
+            ]
+          },
+          {
+            "label": "Meeting",
+            "id": "meeting_2015_ordinary",
+            "properties": {
+              "year": 2015,
+              "date": "2016-04-04",
+              "type": "ordinary"
+            },
+            "chunk_ids": [
+              "chunk_001",
+              "chunk_002",
+              "chunk_005",
+              "chunk_014"
+            ]
+          },
+          {
+            "label": "Gazette",
+            "id": "gazette_9028",
+            "properties": {
+              "number": 9028,
+              "date": "2016-03-09"
+            },
+            "chunk_ids": [
+              "chunk_001"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_grand_hyatt_istanbul_efes_bizans_salonu",
+            "properties": {
+              "city": "İstanbul",
+              "district": "Taksim",
+              "type": "meeting_venue"
+            },
+            "chunk_ids": [
+              "chunk_002",
+              "chunk_014"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_aksa_headquarters",
+            "properties": {
+              "city": "İstanbul",
+              "district": "Beyoğlu",
+              "type": "headquarters"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_aksa_yalova_factory",
+            "properties": {
+              "city": "Yalova",
+              "district": null,
+              "type": "factory"
+            },
+            "chunk_ids": [
+              "chunk_004"
+            ]
+          },
+          {
+            "label": "Capital",
+            "id": "capital_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "properties": {
+              "registered_ceiling": 425000000,
+              "issued": 185000000,
+              "currency": "TRY"
+            },
+            "chunk_ids": [
+              "chunk_008",
+              "chunk_009"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_30_1",
+            "properties": {
+              "name": "Vekaleten Oy Kullanılması Ve Çağrı Yoluyla Vekalet Toplantısı Tebliği",
+              "code": "II-30.1",
+              "gazette": 28862,
+              "date": "2013-12-24",
+              "issuer": "SPK"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_anonim_sirketlerde_elektronik_ortamda_yapilacak_genel_kurullara_iliskin_yonetmelik",
+            "properties": {
+              "name": "Anonim Şirketlerde Elektronik Ortamda Yapılacak Genel Kurullara İlişkin Yönetmelik",
+              "code": null,
+              "gazette": 28395,
+              "date": "2012-08-28",
+              "issuer": null
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_anonim_sirketlerin_genel_kurullarinda_uygulanacak_elektronik_genel_kurul_sistemi_hakkinda_teblig",
+            "properties": {
+              "name": "Anonim Şirketlerin Genel Kurullarında Uygulanacak Elektronik Genel Kurul Sistemi Hakkında Tebliğ",
+              "code": null,
+              "gazette": 28396,
+              "date": "2012-08-29",
+              "issuer": null
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_sermaye_piyasasinda_bagimsiz_denetim_standartlari_hakkinda_teblig",
+            "properties": {
+              "name": "Sermaye Piyasasında Bağımsız Denetim Standartları Hakkında Tebliğ",
+              "code": null,
+              "gazette": null,
+              "date": null,
+              "issuer": "SPK"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_016"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_kurumsal_yonetim_tebligi",
+            "properties": {
+              "name": "Kurumsal Yönetim Tebliği",
+              "code": null,
+              "gazette": null,
+              "date": null,
+              "issuer": "SPK"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_016",
+              "chunk_017"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_19_1",
+            "properties": {
+              "name": "Kar Payı Tebliği",
+              "code": "II-19.1",
+              "gazette": null,
+              "date": null,
+              "issuer": "SPK"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_017"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_17_1",
+            "properties": {
+              "name": "Kurumsal Yönetim Tebliği",
+              "code": "II-17.1",
+              "gazette": null,
+              "date": null,
+              "issuer": "SPK"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_017"
+            ]
+          }
+        ],
+        "relationships": [
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "gazette_9028",
+            "type": "PUBLISHED_IN",
+            "properties": {},
+            "chunk_ids": [
+              "chunk_001"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "type": "ORGANIZED_BY",
+            "properties": {},
+            "chunk_ids": [
+              "chunk_001",
+              "chunk_002",
+              "chunk_005",
+              "chunk_014"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "address_grand_hyatt_istanbul_efes_bizans_salonu",
+            "type": "HELD_AT",
+            "properties": {},
+            "chunk_ids": [
+              "chunk_002",
+              "chunk_014"
+            ]
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "capital_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "type": "HAS_CAPITAL",
+            "properties": {},
+            "chunk_ids": [
+              "chunk_008",
+              "chunk_009"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_spk_ii_30_1",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Vekaleten oy kullanılması"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_anonim_sirketlerde_elektronik_ortamda_yapilacak_genel_kurullara_iliskin_yonetmelik",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Elektronik ortamda genel kurula katılım"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_anonim_sirketlerin_genel_kurullarinda_uygulanacak_elektronik_genel_kurul_sistemi_hakkinda_teblig",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Elektronik ortamda genel kurula katılım"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_sermaye_piyasasinda_bagimsiz_denetim_standartlari_hakkinda_teblig",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Bağımsız Denetçi seçimi"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_016"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_spk_kurumsal_yonetim_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Çıkar çatışması işlemleri hakkında bilgi verilmesi"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_016"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_spk_ii_19_1",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Bağış ve yardım politikası"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_017"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_spk_ii_17_1",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Ücretlendirme Politikası hakkında bilgi verilmesi"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_017"
+            ]
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "regulation_spk_kurumsal_yonetim_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Teminat, rehin, ipotek ve kefaletler hakkında bilgi verilmesi"
+            },
+            "chunk_ids": [
+              "chunk_006",
+              "chunk_017"
+            ]
+          }
+        ]
+      },
+      "markdown": "9 MART 2016 SAYI : 9028\nTÜRKİYE TİCARET SİCİLİ GAZETESİ\nSAYFA : 1371\n\nUMUMİ HEYET TOPLANTILARI\nİstanbul Ticaret Sicili\nMemurluğu\nSicil No: 100775\nTicaret Ünvanı:\nAKSA AKRİLİK KİMYA\nSANAYİİ ANONİM ŞİRKETİ\nYönetim Kurulu\nBaşkanlığı'ndan\n2015 Yılına Ait Olağan Genel\nKurul Toplantısına Davet\n\nŞirketimizin 2015 yılına ait\nOlağan Genel Kurul'u 04.04.2016\ntarihinde saat 11:00'da aşağıda\nyazılı gündem maddelerini\ngörüşmek ve karara bağlamak\nüzere, Taşkışla Caddesi, No:1,\n34437, Taksim, İstanbul\nadresindeki Grand Hyatt İstanbul\nOteli, Efes Bizans Salonu'nda\ntoplanacaktır.\n\nToplantıya bizzat iştirak\nedemeyecek ortaklarımızın,\nvekaletnamelerini ekteki örneğe\nuygun olarak düzenlemeleri veya\nGümüşsuyu, Miralay Şefik Bey\nSokak, Akhan, No: 15, Beyoğlu,\nİstanbul adresindeki Şirket\nmerkezimizden veya\nwww.aksa.com adresindeki\nŞirketimizin kurumsal internet\nsitesinden temin etmeleri ve\n24.12.2013 tarihli ve 28862 sayılı\nResmi Gazete'de yayımlanan\nSermaye Piyasası Kurulu'nun (II-\n30.1) sayılı Vekaleten Oy\nKullanılması Ve Çağrı Yoluyla\nVekalet Toplantısı Tebliği'nde\n('Tebliğ') öngörülen hususları\nyerine getirmeleri gerekmektedir.\nGenel kurul toplantısında\nvekaletname ile temsil, ekteki\nvekaletname formunun\nkullanılması ile mümkündür.\n\nTebliğ'de belirlenen esaslara\nuyumlu olması kaydıyla, Merkezi\nKayıt Kuruluşu A.Ş. (MKK)\ndüzenlemeleri çerçevesinde\nElektronik Genel Kurul\nSisteminden (Egks) vekil tayini\nyapılarak toplantıya elektronik ortamda\nkatılım, pay sahiplerinin veya\ntemsilcilerinin güvenli elektronik\nimzaları ile mümkündür. Bu\nsebeple Egks işlemi yapacak pay\nsahiplerinin öncelikle güvenli\nelektronik imza sahibi olmaları ve\nMKK'nın E-MKK Bilgi Portalı'na\nkaydolmaları gerekmektedir. E-\nMKK Bilgi Portalı'na\nkaydolmayan ve güvenli elektronik\nimzaları bulunmayan pay sahipleri\nveya temsilcilerinin Egks\nüzerinden elektronik ortamda genel\nkurul toplantısına katılmaları\nmümkün olmayacaktır.\nToplantıya elektronik ortamda\nkatılmak isteyen pay\nsahiplerimizin veya vekillerinin\n28.08.2012 tarihli ve 28395 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerde Elektronik\nOrtamda Yapılacak Genel\nKurullara İlişkin Yönetmelik\" ve\n29.08.2012 tarihli ve 28396 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerin Genel\nKurullarında Uygulanacak\nElektronik Genel Kurul Sistemi\nHakkında Tebliğ\" hükümlerine\nuygun olarak işlemlerini\ntamamlamaları gerekmektedir.\nAksi halde toplantıya iştirak\netmeleri mümkün olmayacaktır.\nGenel kurul toplantısı elektronik\nortamda gerçekleştirileceğinden,\ntoplantının saatinde başlayabilmesi\niçin Sayın Pay sahiplerimizin\ntoplantı saatinden önce toplantı\nmahallinde hazır bulunması rica\nolunur.\n\nSermaye Piyasası Kurulu'nun ve\nT.C. Gümrük ve Ticaret\nBakanlığı'nın ilgili mevzuat\nhükümleri çerçevesinde hazırlanan\n2015 yılı Yönetim Kurulu Faaliyet\nRaporu, Denetçi Raporu, Finansal\nTablolar, Kar Dağıtımına İlişkin\nTeklif, Esas Sözleşme Tadil metni\nile gündem maddelerine ilişkin\nzorunlu Kurumsal Yönetim İlkeleri\nçerçevesinde gerekli açıklamaları\nve ilgili belgeleri içeren ayrıntılı\nBilgilendirme Dokümanı, ilan ve\ntoplantı günleri hariç olmak üzere\ngenel kurul toplantı tarihinden\nhafta önce kanuni süresi içinde\nŞirket merkezimizde, şubemizde\n(Yalova Fabrika), www.aksa.com\nadresindeki Şirketin kurumsal\ninternet sitesinde, MKK'nın\nelektronik genel kurul portalında\nve www.kap.gov.tr adresli\nKamuyu Aydınlatma\nPlatformu'nda (Kap) Sayın Pay\nsahiplerimizin incelemelerine hazır\nbulundurulacaktır.\nSayın Pay Sahiplerine\nDuyurulur.\nSaygılarımızla,\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi\n(Kaşe ve İmzalar)\n\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi'nin\n2015 Yılına Ait Olağan Genel\nKurul Toplantı Gündemi\n\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması,\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporu'nun okunması,\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,\n\n6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin ücretlerinin\nbelirlenmesi,\n\n8. Sermaye Piyasası Kurulu\ntarafından yayımlanan 'Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ' ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşkası hesabına yapması ya da\naynı tür ticari işlerle uğraşan bir\nbaşka ortaklığa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,\n\n10. Türk Ticaret Kanunu'nun\n395. ve 396. madde hükümlerinde\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasıda belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nYönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,\n\n15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'nın\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n(Devamı 1372 . Sayfada)\n\nSAYFA : 1372\nAKSA AKRİLİK KİMYA SANAYİİ\nANONİM ŞİRKETİ ESAS SÖZLEŞME\nTADİL METNİ\n\n(Baştafı 1371. Sayfada)\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurulun onayına sunulması\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi Esas Sözleşme\nTadil Metni\n\nEski Şekil\nSermaye:\nMadde 6-\nŞirket, 6362 Sayılı Kanun\nhükümlerine göre kayıtlı sermaye\nsistemini kabul etmiş ve Sermaye\nPiyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.\nŞirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1- Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2012-2017 yılları (5 yıl) için\ngeçerlidir. 2017 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2017\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, Şirket kayıtlı sermaye\nsisteminden çıkmış sayılır.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-\n(Yüksekseçbenmilyon) Türk\nLirası'dır.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nYönetim Kurulu, 2016- 2020\nyılları arasında, Sermaye Piyasası\nKanunu hükümlerine uygun olarak\ngerek gördüğü zamanlarda kayıtlı\nsermaye tavanına kadar paylar\nihraç ederek çıkarılmış sermayeyi\nartırmaya, nominal değerinin\nüzerinde veya altında pay\nçıkarmaya, pay sahiplerinin yeni\npay alma haklarını sınırlandırmaya\nve primli pay ihracı konusunda\nkarar almaya yetkilidir. Yeni pay\nalma hakkını kısıtlama yetkisi, pay\nsahipleri arasında eşitsizliğe yol\naçacak şekilde kullanılamaz.\nŞirket hisselerinin tamamı nama\nyazılıdır. Şirket hamiline yazılı\nhisse çıkaramaz.\nŞirket Enerji Piyasası\nDüzenleme Kurulu'nun onayı da\nalınmış olmak kaydı ile, kendi\npaylarını, Türk Ticaret Kanunu ve\nSermaye Piyasası\nKanunu'nda belirtilen\nsınırlamalara tabi olmak kaydıyla\niktisap edebilir ve rehin olarak\nkabul edebilir.\n\nYeni Şekil\nSermaye:\nMadde 6-\nŞirket, Sermaye Piyasası\nKanunu hükümlerine göre kayıtlı\nsermaye sistemini kabul etmiş ve\nSermaye Piyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.\nŞirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1-Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2016- 2020 yılları (5 yıl) için\ngeçerlidir. 2020 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2020\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, yönetim kurulu kararı\nile sermaye artırımı yapılamaz.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-\n\nYönetim Kurulunun Yetkileri:\nMadde 9-\nKanun ve bu Esas Sözleşme\nhükümleri gereğince Genel Kurul\nKararı Alınması Gereken İşlemler\nHaricinde Tüm Kararlarda\nYönetim Kurulu Yetkilidir.\nYönetim Kurulu, görev ve\nsorumluluklarını sağlıklı bir\nbiçimde yerine getirmek, şirketin\nvarlığını ve gelişmesini\nsürdürebilmek üzere Türk Ticaret\nKanunu ve SPK mevzuatında\nöngörülen komiteleri kurar ve\nmevzuat hükümleri doğrultusunda\nuygulanmasını sağlar. Ayrıca Türk\nTicaret Kanunu'nun 378. maddesi\nuyarınca riskin erken saptanması\namacıyla bir komite kurulur.\nYönetim Kurulu bünyesinde\nkomitelerin oluşturulması,\nkomitelerin görev alanları, çalışma\nesasları Türk Ticaret Kanunu,\nSermaye Piyasası Kanunu,\nSermaye Piyasası Kurulu'nun\nkurumsal yönetime ilişkin\ndüzenlemeleri ve diğer mevzuat\nhükümlerine göre gerçekleştirilir.\nŞirket'in Genel Müdür'ünün\ngörevleri Şirket'in iç yönergesinde\ntanımlanmış olup, Genel Müdür ile\nYönetim Kurulu Başkanı aynı\nkişiler olamaz ve aynı yetkilere\nsahip olamaz. Yönetim kurulu\nbaşkanı Türk Ticaret Kanunu ve\nSPK mevzuatından doğan\ngörevlerini yerine getirir.\n\nGenel Kurul:\nMadde 12-\nGenel kurul, olağan ve\nolağanüstü olarak toplanır.\nOlağan genel kurul, Şirket'in\nhesap devresinin sonundan itibaren\nüç ay içinde ve yılda en az bir defa\ntoplanır ve gerekli kararları alır.\nOlağanüstü genel kurul, gerektiği\ntakdirde Türk Ticaret Kanunu ve\nbu Esas Sözleşme'de yazılı\nhükümlere göre toplanır ve gerekli\nkararları alır.\nYönetim Kurulu tarafından Türk\nTicaret Kanunu uyarınca Genel\nKurul çalışma esas ve usulüne\nilişkin bir iç yönerge hazırlanır ve\nGenel Kurul onayıyla yürürlüğe\nkonulur, tescil ve ilan ettirilir.\nGenel Kurul tarafından aksine\nkarar verilmedikçe toplantılar\nfiziki imkanlar müsait olduğu\nsürece ilgililere açık olarak yapılır;\nancak söz ve oy hakkı, pay sahibi\nveya oy kullanmaya yetkili\ntemsilcisine aittir.\n\nToplantı Yeri:\nMadde 14-\nGenel Kurul Şirketin idare\nmerkezinin ve pay sahiplerinin\nsayısal olarak çoğunlukta olduğu\nİstanbul'da veya Yönetim\nKurulunca alınacak karar üzerine\nŞirket şubelerinin veya sınai\ntesislerinin bulunduğu diğer\nmahallelerde toplanabilir.\n\nOy Hakkı Ve Azlık Hakları:\nMadde 17-\nGenel kurul toplantılarında her\npay sahibinin her pay için bir oy\nhakkı vardır.\nOy hakkı ile ilgili olarak Türk\nTicaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nuygulanır.\n\nVekaletname\nAksa Akrilik Kimya Sanayi\nAnonim Şirketi'nin 04.04.2016\ntarihinde saat 11:00'da Taşkışla\nCaddesi, No:1, 34437, Taksim,\nİstanbul adresindeki Grand Hyatt\nİstanbul Oteli, Efes Bizans\nSalonu'nda yapılacak 2015 yılına\nait Olağan Genel Kurul\ntoplantısında\naşağıda\nbelirttiğim/belirttiğimiz görüşler\ndoğrultusunda beni/Şirketimi\ntemsile, oy vermeye, teklifte\nbulunmaya ve gerekli belgeleri\nimzalamaya yetkili olmak üzere\naşağıda detaylı olarak tanıtılan\n....................................................'yi vekil\ntayin ediyorum/ediyoruz.\n\nVekilin(*);\nAdı Soyadı/Ticaret Unvanı:\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası:\n(*)Yabancı uyruklu vekiller için\nanılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.\nA) Temsil Yetkisinin Kapsamı\nAşağıda verilen 1 ve 2 numaralı\nbölümler için (a), (b) veya (c)\nşıklarından biri seçilerek temsil\nyetkisinin kapsamı belirlenmelidir.\n1. Genel Kurul Gündeminde Yer\nAlan Hususlar Hakkında;\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil ortaklık yönetiminin\nönerileri doğrultusunda oy\nkullanmaya yetkilidir.\nc) Vekil aşağıda tabloda\nbelirtilen talimatlar doğrultusunda\noy kullanmaya yetkilidir.\n\nTalimatlar:\nPay sahibi tarafından (c) şıkkının\nseçilmesi durumunda, gündem\nmaddesi özelinde talimatlar ilgili\ngenel kurul gündem maddesinin\nkarşısında verilen seçeneklerden\nbirini işaretlemek (kabul veya red)\nve red seçeneğinin seçilmesi\ndurumunda varsa genel kurul\ntutanağına yazılması talep edilen\nmuhalefet şerhini belirtilmek\nsuretiyle verilir.\n\nGündem Maddeleri (*)\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması ve\nmüzakeresi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporunun okunması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin\nücretlerinin\nbelirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n8. Sermaye Piyasası Kurulu\ntarafından yayımlanan \"Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ\" ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşka ortağa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n(Baştarafı 1372. Sayfada)\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasında belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nyönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'ndan\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurul'un onayına sunulması\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n(*) Genel Kurul gündeminde yer\nalan hususlar tek tek sıralanır.\nAzlığın ayrı bir karar taslağı varsa\nbu da vekaleten oy verilmesini\nteminen ayrıca belirtilir.\n2. Genel Kurul toplantısında\nortaya çıkabilecek diğer konulara\nve özellikle azlık haklarının\nkullanılmasına ilişkin özel talimat:\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil bu konularda temsile\nyetkili değildir.\nc) Vekil aşağıdaki özel talimatlar\ndoğrultusunda oy kullanmaya\nyetkilidir.\nÖzel Talimatlar: Varsa pay\nsahibi tarafından vekile verilecek\nözel talimatlar burada belirtilir.\nB) Pay sahibi aşağıdaki\nseçeneklerden birini seçerek\nvekilin temsil etmesini istediği\npayları belirtir.\n1. Aşağıda detayı belirtilen\npaylarımın vekil tarafından\ntemsilini onaylıyorum.\na) Tertip ve serisi:*\nb) Numarası/Grubu:**\nc) Adet-Nominal değeri:\nç) Oyda imtiyazı olup olmadığı:\nd) Hamiline-Nama yazılı\nolduğu:*\ne) Pay sahibinin sahip olduğu\ntoplam paylara/oy haklarına oranı:\n*Kayden izlenen izlenen paylar\niçin bu bilgiler talep\nedilmemektedir.\n**Kayden izlenen paylar için\nnumara yerine varsa gruba ilişkin\nbilgiye yer verilecektir.\n2. Genel kurul gününden bir gün\nönce MKK tarafından hazırlanan\ngenel kurula katılabilecek pay\nsahiplerine ilişkin listede yer alan\npaylarımın tümünün vekil\ntarafından temsilini onaylıyorum.\nPay Sahibinin Adı Soyadı veya\nÜnvanı(*)\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası: Adresi: İmzası\n(*)Yabancı uyruklu pay sahipleri\niçin anılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.",
+      "metadata": {
+        "target_company": "Aksa",
+        "pages_processed": 1,
+        "total_pages": 1,
+        "model": "gemini-2.5-flash",
+        "output_format": "json",
+        "mode": "text"
+      },
+      "status": "success"
+    },
+    "timing": {
+      "ner_ms": 0,
+      "llm_ms": 77462,
+      "total_ms": 77462
+    }
+  },
+  "ner_augmented_full": {
+    "pipeline": "ner_augmented",
+    "result": {
+      "data": {
+        "found": true,
+        "target_company": "AKSA AKRİLİK KİMYA SANAYİİ ANONİM ŞİRKETİ",
+        "document_type": "Olağan Genel Kurul Toplantı Daveti ve Esas Sözleşme Tadili",
+        "chunks": [
+          {
+            "id": "chunk_001",
+            "text": "9 MART 2016 SAYI : 9028\nTÜRKİYE TİCARET SİCİLİ GAZETESİ\nSAYFA : 1371\n\nUMUMİ HEYET TOPLANTILARI\nİstanbul Ticaret Sicili\nMemurluğu\nSicil No: 100775\nTicaret Ünvanı:\nAKSA AKRİLİK KİMYA\nSANAYİİ ANONİM ŞİRKETİ\nYönetim Kurulu\nBaşkanlığı'ndan\n2015 Yılına Ait Olağan Genel\nKurul Toplantısına Davet",
+            "position": 1,
+            "page": 1
+          },
+          {
+            "id": "chunk_002",
+            "text": "Şirketimizin 2015 yılına ait\nOlağan Genel Kurul'u 04.04.2016\ntarihinde saat 11:00'da aşağıda\nyazılı gündem maddelerini\ngörüşmek ve karara bağlamak\nüzere, Taşkışla Caddesi, No:1,\n34437, Taksim, İstanbul\nadresindeki Grand Hyatt İstanbul\nOteli, Efes Bizans Salonu'nda\ntoplanacaktır.",
+            "position": 2,
+            "page": 1
+          },
+          {
+            "id": "chunk_003",
+            "text": "Toplantıya bizzat iştirak\nedemeyecek ortaklarımızın,\nvekaletnamelerini ekteki örneğe\nuygun olarak düzenlemeleri veya\nGümüşsuyu, Miralay Şefik Bey\nSokak, Akhan, No: 15, Beyoğlu,\nİstanbul adresindeki Şirket\nmerkezimizden veya\nwww.aksa.com adresindeki\nŞirketimizin kurumsal internet\nsitesinden temin etmeleri ve\n24.12.2013 tarihli ve 28862 sayılı\nResmi Gazete'de yayımlanan\nSermaye Piyasası Kurulu'nun (II-\n30.1) sayılı Vekaleten Oy\nKullanılması Ve Çağrı Yoluyla\nVekalet Toplantısı Tebliği'nde\n('Tebliğ') öngörülen hususları\nyerine getirmeleri gerekmektedir.\nGenel kurul toplantısında\nvekaletname ile temsil, ekteki\nvekaletname formunun\nkullanılması ile mümkündür.",
+            "position": 3,
+            "page": 1
+          },
+          {
+            "id": "chunk_004",
+            "text": "Tebliğ'de belirlenen esaslara\nuyumlu olması kaydıyla, Merkezi\nKayıt Kuruluşu A.Ş. (MKK)\ndüzenlemeleri çerçevesinde\nElektronik Genel Kurul\nSisteminden (Egks) vekil tayini\nyapılarak toplantıya elektronik ortamda\nkatılım, pay sahiplerinin veya\ntemsilcilerinin güvenli elektronik\nimzaları ile mümkündür. Bu\nsebeple Egks işlemi yapacak pay\nsahiplerinin öncelikle güvenli\nelektronik imza sahibi olmaları ve\nMKK'nın E-MKK Bilgi Portalı'na\nkaydolmaları gerekmektedir. E-\nMKK Bilgi Portalı'na\nkaydolmayan ve güvenli elektronik\nimzaları bulunmayan pay sahipleri\nveya temsilcilerinin Egks\nüzerinden elektronik ortamda genel\nkurul toplantısına katılmaları\nmümkün olmayacaktır.\nToplantıya elektronik ortamda\nkatılmak isteyen pay\nsahiplerimizin veya vekillerinin\n28.08.2012 tarihli ve 28395 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerde Elektronik\nOrtamda Yapılacak Genel\nKurullara İlişkin Yönetmelik\" ve\n29.08.2012 tarihli ve 28396 sayılı\nResmi Gazete'de yayınlanan\n\"Anonim Şirketlerin Genel\nKurullarında Uygulanacak\nElektronik Genel Kurul Sistemi\nHakkında Tebliğ\" hükümlerine\nuygun olarak işlemlerini\ntamamlamaları gerekmektedir.\nAksi halde toplantıya iştirak\netmeleri mümkün olmayacaktır.\nGenel kurul toplantısı elektronik\nortamda gerçekleştirileceğinden,\ntoplantının saatinde başlayabilmesi\niçin Sayın Pay sahiplerimizin\ntoplantı saatinden önce toplantı\nmahallinde hazır bulunması rica\nolunur.",
+            "position": 4,
+            "page": 1
+          },
+          {
+            "id": "chunk_005",
+            "text": "Sermaye Piyasası Kurulu'nun ve\nT.C. Gümrük ve Ticaret\nBakanlığı'nın ilgili mevzuat\nhükümleri çerçevesinde hazırlanan\n2015 yılı Yönetim Kurulu Faaliyet\nRaporu, Denetçi Raporu, Finansal\nTablolar, Kar Dağıtımına İlişkin\nTeklif, Esas Sözleşme Tadil metni\nile gündem maddelerine ilişkin\nzorunlu Kurumsal Yönetim İlkeleri\nçerçevesinde gerekli açıklamaları\nve ilgili belgeleri içeren ayrıntılı\nBilgilendirme Dokümanı, ilan ve\ntoplantı günleri hariç olmak üzere\ngenel kurul toplantı tarihinden\nhafta önce kanuni süresi içinde\nŞirket merkezimizde, şubemizde\n(Yalova Fabrika), www.aksa.com\nadresindeki Şirketin kurumsal\ninternet sitesinde, MKK'nın\nelektronik genel kurul portalında\nve www.kap.gov.tr adresli\nKamuyu Aydınlatma\nPlatformu'nda (Kap) Sayın Pay\nsahiplerimizin incelemelerine hazır\nbulundurulacaktır.\nSayın Pay Sahiplerine\nDuyurulur.\nSaygılarımızla,\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi\n(Kaşe ve İmzalar)",
+            "position": 5,
+            "page": 1
+          },
+          {
+            "id": "chunk_006",
+            "text": "Aksa Akrilik Kimya Sanayii\nAnonim Şirketi'nin\n2015 Yılına Ait Olağan Genel\nKurul Toplantı Gündemi\n\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması,\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporu'nun okunması,\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,",
+            "position": 6,
+            "page": 1
+          },
+          {
+            "id": "chunk_007",
+            "text": "6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin ücretlerinin\nbelirlenmesi,\n\n8. Sermaye Piyasası Kurulu\ntarafından yayımlanan 'Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ' ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşkası hesabına yapması ya da\naynı tür ticari işlerle uğraşan bir\nbaşka ortaklığa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,",
+            "position": 7,
+            "page": 1
+          },
+          {
+            "id": "chunk_008",
+            "text": "10. Türk Ticaret Kanunu'nun\n395. ve 396. madde hükümlerinde\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasıda belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nYönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,",
+            "position": 8,
+            "page": 1
+          },
+          {
+            "id": "chunk_009",
+            "text": "15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'nın\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n(Devamı 1372 . Sayfada)",
+            "position": 9,
+            "page": 1
+          },
+          {
+            "id": "chunk_010",
+            "text": "SAYFA : 1372\nAKSA AKRİLİK KİMYA SANAYİİ\nANONİM ŞİRKETİ ESAS SÖZLEŞME\nTADİL METNİ\n\n(Baştafı 1371. Sayfada)\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurulun onayına sunulması\nAksa Akrilik Kimya Sanayii\nAnonim Şirketi Esas Sözleşme\nTadil Metni\n\nEski Şekil\nSermaye:\nMadde 6-\nŞirket, 6362 Sayılı Kanun\nhükümlerine göre kayıtlı sermaye\nsistemini kabul etmiş ve Sermaye\nPiyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.",
+            "position": 10,
+            "page": 2
+          },
+          {
+            "id": "chunk_011",
+            "text": "Şirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1- Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2012-2017 yılları (5 yıl) için\ngeçerlidir. 2017 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2017\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, Şirket kayıtlı sermaye\nsisteminden çıkmış sayılır.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-\n(Yüksekseçbenmilyon) Türk\nLirası'dır.\nSermayeyi temsil eden paylar\nkaydileştirme esasları çerçevesinde\nkayden izlenir.\nYönetim Kurulu, 2016- 2020\nyılları arasında, Sermaye Piyasası\nKanunu hükümlerine uygun olarak\ngerek gördüğü zamanlarda kayıtlı\nsermaye tavanına kadar paylar\nihraç ederek çıkarılmış sermayeyi\nartırmaya, nominal değerinin\nüzerinde veya altında pay\nçıkarmaya, pay sahiplerinin yeni\npay alma haklarını sınırlandırmaya\nve primli pay ihracı konusunda\nkarar almaya yetkilidir. Yeni pay\nalma hakkını kısıtlama yetkisi, pay\nsahipleri arasında eşitsizliğe yol\naçacak şekilde kullanılamaz.\nŞirket hisselerinin tamamı nama\nyazılıdır. Şirket hamiline yazılı\nhisse çıkaramaz.\nŞirket Enerji Piyasası\nDüzenleme Kurulu'nun onayı da\nalınmış olmak kaydı ile, kendi\npaylarını, Türk Ticaret Kanunu ve\nSermaye Piyasası\nKanunu'nda belirtilen\nsınırlamalara tabi olmak kaydıyla\niktisap edebilir ve rehin olarak\nkabul edebilir.",
+            "position": 11,
+            "page": 2
+          },
+          {
+            "id": "chunk_012",
+            "text": "Yeni Şekil\nSermaye:\nMadde 6-\nŞirket, Sermaye Piyasası\nKanunu hükümlerine göre kayıtlı\nsermaye sistemini kabul etmiş ve\nSermaye Piyasası Kurulu'nun\n20.02.1992 tarih ve 90 sayılı izni\nile bu sisteme geçmiştir.\nŞirket'in kayıtlı sermaye tavanı\n425.000.000\n(dörtyüzyirmibeşmilyon) Türk\nLirası olup, her biri 1-Kr (Bir\nKuruş) itibari değerde\n42.500.000.000 adet paya\nbölünmüştür.\nŞirket'in sermayesi, gerektiğinde\nTürk Ticaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nçerçevesinde artırılabilir veya\nazaltılabilir.\nSermaye Piyasası Kurulu'nca\nverilen kayıtlı sermaye tavanı izni,\n2016- 2020 yılları (5 yıl) için\ngeçerlidir. 2020 yılı sonunda izin\nverilen kayıtlı sermaye tavanına\nulaşılamamış olsa dahi, 2020\nyılından sonra Yönetim\nKurulu'nun sermaye artırımı kararı\nalabilmesi için; daha önce izin\nverilen tavan ya da yeni bir tavan\ntutarı için Sermaye Piyasası\nKurulu'ndan izin almak sureti ile\ngenel kuruldan yeni bir süre için\nyetki alması zorunludur. Söz\nkonusu yetkinin alınmaması\ndurumunda, yönetim kurulu kararı\nile sermaye artırımı yapılamaz.\nŞirket'in çıkarılmış sermayesi\ntamamı ödenmiş 185.000.000-",
+            "position": 12,
+            "page": 2
+          },
+          {
+            "id": "chunk_013",
+            "text": "Yönetim Kurulunun Yetkileri:\nMadde 9-\nKanun ve bu Esas Sözleşme\nhükümleri gereğince Genel Kurul\nKararı Alınması Gereken İşlemler\nHaricinde Tüm Kararlarda\nYönetim Kurulu Yetkilidir.\nYönetim Kurulu, görev ve\nsorumluluklarını sağlıklı bir\nbiçimde yerine getirmek, şirketin\nvarlığını ve gelişmesini\nsürdürebilmek üzere Türk Ticaret\nKanunu ve SPK mevzuatında\nöngörülen komiteleri kurar ve\nmevzuat hükümleri doğrultusunda\nuygulanmasını sağlar. Ayrıca Türk\nTicaret Kanunu'nun 378. maddesi\nuyarınca riskin erken saptanması\namacıyla bir komite kurulur.\nYönetim Kurulu bünyesinde\nkomitelerin oluşturulması,\nkomitelerin görev alanları, çalışma\nesasları Türk Ticaret Kanunu,\nSermaye Piyasası Kanunu,\nSermaye Piyasası Kurulu'nun\nkurumsal yönetime ilişkin\ndüzenlemeleri ve diğer mevzuat\nhükümlerine göre gerçekleştirilir.\nŞirket'in Genel Müdür'ünün\ngörevleri Şirket'in iç yönergesinde\ntanımlanmış olup, Genel Müdür ile\nYönetim Kurulu Başkanı aynı\nkişiler olamaz ve aynı yetkilere\nsahip olamaz. Yönetim kurulu\nbaşkanı Türk Ticaret Kanunu ve\nSPK mevzuatından doğan\ngörevlerini yerine getirir.",
+            "position": 13,
+            "page": 2
+          },
+          {
+            "id": "chunk_014",
+            "text": "Genel Kurul:\nMadde 12-\nGenel kurul, olağan ve\nolağanüstü olarak toplanır.\nOlağan genel kurul, Şirket'in\nhesap devresinin sonundan itibaren\nüç ay içinde ve yılda en az bir defa\ntoplanır ve gerekli kararları alır.\nOlağanüstü genel kurul, gerektiği\ntakdirde Türk Ticaret Kanunu ve\nbu Esas Sözleşme'de yazılı\nhükümlere göre toplanır ve gerekli\nkararları alır.\nYönetim Kurulu tarafından Türk\nTicaret Kanunu uyarınca Genel\nKurul çalışma esas ve usulüne\nilişkin bir iç yönerge hazırlanır ve\nGenel Kurul onayıyla yürürlüğe\nkonulur, tescil ve ilan ettirilir.\nGenel Kurul tarafından aksine\nkarar verilmedikçe toplantılar\nfiziki imkanlar müsait olduğu\nsürece ilgililere açık olarak yapılır;\nancak söz ve oy hakkı, pay sahibi\nveya oy kullanmaya yetkili\ntemsilcisine aittir.",
+            "position": 14,
+            "page": 2
+          },
+          {
+            "id": "chunk_015",
+            "text": "Toplantı Yeri:\nMadde 14-\nGenel Kurul Şirketin idare\nmerkezinin ve pay sahiplerinin\nsayısal olarak çoğunlukta olduğu\nİstanbul'da veya Yönetim\nKurulunca alınacak karar üzerine\nŞirket şubelerinin veya sınai\ntesislerinin bulunduğu diğer\nmahallelerde toplanabilir.\n\nOy Hakkı Ve Azlık Hakları:\nMadde 17-\nGenel kurul toplantılarında her\npay sahibinin her pay için bir oy\nhakkı vardır.\nOy hakkı ile ilgili olarak Türk\nTicaret Kanunu ve Sermaye\nPiyasası mevzuatı hükümleri\nuygulanır.",
+            "position": 15,
+            "page": 2
+          },
+          {
+            "id": "chunk_016",
+            "text": "Vekaletname\nAksa Akrilik Kimya Sanayi\nAnonim Şirketi'nin 04.04.2016\ntarihinde saat 11:00'da Taşkışla\nCaddesi, No:1, 34437, Taksim,\nİstanbul adresindeki Grand Hyatt\nİstanbul Oteli, Efes Bizans\nSalonu'nda yapılacak 2015 yılına\nait Olağan Genel Kurul\ntoplantısında\naşağıda\nbelirttiğim/belirttiğimiz görüşler\ndoğrultusunda beni/Şirketimi\ntemsile, oy vermeye, teklifte\nbulunmaya ve gerekli belgeleri\nimzalamaya yetkili olmak üzere\naşağıda detaylı olarak tanıtılan\n....................................................'yi vekil\ntayin ediyorum/ediyoruz.",
+            "position": 16,
+            "page": 2
+          },
+          {
+            "id": "chunk_017",
+            "text": "Vekilin(*);\nAdı Soyadı/Ticaret Unvanı:\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası:\n(*)Yabancı uyruklu vekiller için\nanılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.\nA) Temsil Yetkisinin Kapsamı\nAşağıda verilen 1 ve 2 numaralı\nbölümler için (a), (b) veya (c)\nşıklarından biri seçilerek temsil\nyetkisinin kapsamı belirlenmelidir.\n1. Genel Kurul Gündeminde Yer\nAlan Hususlar Hakkında;\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil ortaklık yönetiminin\nönerileri doğrultusunda oy\nkullanmaya yetkilidir.\nc) Vekil aşağıda tabloda\nbelirtilen talimatlar doğrultusunda\noy kullanmaya yetkilidir.",
+            "position": 17,
+            "page": 2
+          },
+          {
+            "id": "chunk_018",
+            "text": "Talimatlar:\nPay sahibi tarafından (c) şıkkının\nseçilmesi durumunda, gündem\nmaddesi özelinde talimatlar ilgili\ngenel kurul gündem maddesinin\nkarşısında verilen seçeneklerden\nbirini işaretlemek (kabul veya red)\nve red seçeneğinin seçilmesi\ndurumunda varsa genel kurul\ntutanağına yazılması talep edilen\nmuhalefet şerhini belirtilmek\nsuretiyle verilir.\n\nGündem Maddeleri (*)\n1. Toplantının açılışı ve Toplantı\nBaşkanlığı'nın oluşturulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n2. Yönetim Kurulu'nca\nhazırlanan 2015 yılına ait Yıllık\nFaaliyet Raporu'nun okunması ve\nmüzakeresi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n3. 2015 yılına ait Bağımsız\nDenetim Raporunun okunması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n4. 2015 yılına ait Finansal\nTabloların okunması, müzakeresi\nve tasdiki,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n5. Şirketin 2015 yılı\nfaaliyetlerinden dolayı Yönetim\nKurulu Üyeleri'nin ayrı ayrı ibra\nedilmeleri,\nKabul: -\nRed: -\nMuhalefet Şerhi: -",
+            "position": 18,
+            "page": 2
+          },
+          {
+            "id": "chunk_019",
+            "text": "6. Karın kullanım şeklinin,\ndağıtılacak kar ve kazanç payları\noranlarının belirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n7. Yönetim Kurulu üyelerinin ve\nBağımsız Yönetim Kurulu\nüyelerinin\nücretlerinin\nbelirlenmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n8. Sermaye Piyasası Kurulu\ntarafından yayımlanan \"Sermaye\nPiyasasında Bağımsız Denetim\nStandartları Hakkında Tebliğ\" ve\nTürk Ticaret Kanunu uyarınca ve\nYönetim Kurulu'nun konuya\nilişkin kararına istinaden Bağımsız\nDenetçi seçiminin onaya\nsunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n9. Yönetim kontrolünü elinde\nbulunduran pay sahiplerinin,\nYönetim Kurulu Üyelerinin, idari\nsorumluluğu bulunan yöneticilerin\nve bunların eş ve ikinci dereceye\nkadar kan ve sıhri hısımlarının,\nŞirket veya bağlı ortaklıkları ile\nçıkar çatışmasına neden olabilecek\nönemli bir işlem yapması ve/veya\nŞirketin veya bağlı ortaklıklarının\nişletme konusuna giren ticari iş\ntüründen bir işlemi kendi veya\nbaşka ortağa sorumluluğu\nsınırsız ortak sıfatıyla girmesi\ndurumunda; Sermaye Piyasası\nKurulu'nun Kurumsal Yönetim\nTebliği uyarınca pay sahiplerine bu\nişlemlere ilişkin olarak bilgi\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -",
+            "position": 19,
+            "page": 2
+          },
+          {
+            "id": "chunk_020",
+            "text": "(Baştarafı 1372. Sayfada)\nbelirtilen izin ve yetkilerin\nYönetim Kurulu Üyelerine\nverilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n11. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n19.1) sayılı 'Kar Payı Tebliği'\nuyarınca, Şirketin bağış ve yardım\npolitikasında belirlenmiş olan\nbağış ve yardımlar üst sınırının\nartırılması hususunun genel\nkurulun onayına sunulması,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n12. Sermaye Piyasası Kanunu ve\nSermaye Piyasası Kurulu'nun (II-\n17.1) sayılı 'Kurumsal Yönetim\nTebliği' 4.6.2 no'lu kurumsal\nyönetim ilkesi uyarınca Şirketin\nyönetim kurulu üyeleri ve üst\ndüzey yöneticilere ait\n\"Ücretlendirme Politikası\"\nhakkında bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n13. Sermaye Piyasası Mevzuatı\nuyarınca Şirketimiz tarafından\n2015 yılında yapılan bağış ve\nyardımlar hakkında pay sahiplerine\nbilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n14. Kurumsal Yönetim\nTebliği'nin 12. maddesi uyarınca\n2015 yılında Şirketimiz tarafından\nüçüncü kişiler lehine verilen\nteminat, rehin, ipotek ve kefaletler\nile elde edilen gelir veya\nmenfaatlere ilişkin olarak pay\nsahiplerine bilgi verilmesi,\nKabul: -\nRed: -\nMuhalefet Şerhi: -\n\n15. Enerji Piyasası Düzenleme\nKurulu, Sermaye Piyasası Kurulu\nile T.C. Gümrük ve Ticaret\nBakanlığı'ndan gerekli izinlerin\nalınmış olması kaydı ile ve Enerji\nPiyasası Düzenleme Kurulu,\nSermaye Piyasası Kurulu ve T.C.\nGümrük ve Ticaret Bakanlığı'ndan\nonaylayacağı hali ile; Şirket Esas\nSözleşmesi'nin \"Sermaye\" başlıklı\n6. maddesinin, \"Yönetim\nKurulunun Yetkileri\" başlıklı 9.\nmaddesinin, \"Genel Kurul\" başlıklı\n12. maddesinin, \"Toplantı Yeri\"\nbaşlıklı 14. maddesinin, \"Oy\nHakkı\" başlıklı 17. maddesinin\ntadiline dair tadil tasarısının Genel\nKurul'un onayına sunulması\nKabul: -\nRed: -\nMuhalefet Şerhi: -",
+            "position": 20,
+            "page": 2
+          },
+          {
+            "id": "chunk_021",
+            "text": "(*) Genel Kurul gündeminde yer\nalan hususlar tek tek sıralanır.\nAzlığın ayrı bir karar taslağı varsa\nbu da vekaleten oy verilmesini\nteminen ayrıca belirtilir.\n2. Genel Kurul toplantısında\nortaya çıkabilecek diğer konulara\nve özellikle azlık haklarının\nkullanılmasına ilişkin özel talimat:\na) Vekil kendi görüşü\ndoğrultusunda oy kullanmaya\nyetkilidir.\nb) Vekil bu konularda temsile\nyetkili değildir.\nc) Vekil aşağıdaki özel talimatlar\ndoğrultusunda oy kullanmaya\nyetkilidir.\nÖzel Talimatlar: Varsa pay\nsahibi tarafından vekile verilecek\nözel talimatlar burada belirtilir.\nB) Pay sahibi aşağıdaki\nseçeneklerden birini seçerek\nvekilin temsil etmesini istediği\npayları belirtir.\n1. Aşağıda detayı belirtilen\npaylarımın vekil tarafından\ntemsilini onaylıyorum.\na) Tertip ve serisi:*\nb) Numarası/Grubu:**\nc) Adet-Nominal değeri:\nç) Oyda imtiyazı olup olmadığı:\nd) Hamiline-Nama yazılı\nolduğu:*\ne) Pay sahibinin sahip olduğu\ntoplam paylara/oy haklarına oranı:\n*Kayden izlenen izlenen paylar\niçin bu bilgiler talep\nedilmemektedir.\n**Kayden izlenen paylar için\nnumara yerine varsa gruba ilişkin\nbilgiye yer verilecektir.\n2. Genel kurul gününden bir gün\nönce MKK tarafından hazırlanan\ngenel kurula katılabilecek pay\nsahiplerine ilişkin listede yer alan\npaylarımın tümünün vekil\ntarafından temsilini onaylıyorum.\nPay Sahibinin Adı Soyadı veya\nÜnvanı(*)\nTC Kimlik No/Vergi No, Ticaret\nSicili ve Numarası ile Mersis\nnumarası: Adresi: İmzası\n(*)Yabancı uyruklu pay sahipleri\niçin anılan bilgilerin varsa\nmuadillerinin sunulması\nzorunludur.",
+            "position": 21,
+            "page": 2
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Company",
+            "id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "properties": {
+              "name": "AKSA AKRİLİK KİMYA SANAYİİ ANONİM ŞİRKETİ",
+              "type": "AS",
+              "city": "İstanbul",
+              "registration_no": "100775",
+              "website": "www.aksa.com, www.kap.gov.tr"
+            },
+            "chunk_ids": [
+              "chunk_001",
+              "chunk_002",
+              "chunk_003",
+              "chunk_004",
+              "chunk_005",
+              "chunk_006",
+              "chunk_007",
+              "chunk_008",
+              "chunk_009",
+              "chunk_010",
+              "chunk_011",
+              "chunk_012",
+              "chunk_013",
+              "chunk_014",
+              "chunk_015",
+              "chunk_016",
+              "chunk_018",
+              "chunk_019",
+              "chunk_020"
+            ]
+          },
+          {
+            "label": "Meeting",
+            "id": "meeting_2015_ordinary",
+            "properties": {
+              "year": 2015,
+              "date": "2016-04-04",
+              "type": "ordinary"
+            },
+            "chunk_ids": [
+              "chunk_001",
+              "chunk_002",
+              "chunk_003",
+              "chunk_004",
+              "chunk_005",
+              "chunk_006",
+              "chunk_016",
+              "chunk_018",
+              "chunk_019",
+              "chunk_020",
+              "chunk_021"
+            ]
+          },
+          {
+            "label": "Gazette",
+            "id": "gazette_9028",
+            "properties": {
+              "number": 9028,
+              "date": "2016-03-09"
+            },
+            "chunk_ids": [
+              "chunk_001"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_grand_hyatt_istanbul_efes_bizans_salonu",
+            "properties": {
+              "city": "İstanbul",
+              "district": "Taksim",
+              "type": "meeting_venue"
+            },
+            "chunk_ids": [
+              "chunk_002",
+              "chunk_016"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_aksa_headquarters_beyoglu",
+            "properties": {
+              "city": "İstanbul",
+              "district": "Beyoğlu",
+              "type": "headquarters"
+            },
+            "chunk_ids": [
+              "chunk_003",
+              "chunk_005"
+            ]
+          },
+          {
+            "label": "Address",
+            "id": "address_aksa_yalova_fabrika",
+            "properties": {
+              "city": "Yalova",
+              "district": null,
+              "type": "factory"
+            },
+            "chunk_ids": [
+              "chunk_005"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_30_1_vekaleten_oy_kullanilmasi_ve_cagri_yoluyla_vekalet_toplantisi_tebligi",
+            "properties": {
+              "name": "Vekaleten Oy Kullanılması Ve Çağrı Yoluyla Vekalet Toplantısı Tebliği",
+              "code": "II-30.1",
+              "gazette": 28862,
+              "date": "2013-12-24",
+              "issuer": "Sermaye Piyasası Kurulu"
+            },
+            "chunk_ids": [
+              "chunk_003"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_anonim_sirketlerde_elektronik_ortamda_yapilacak_genel_kurullara_iliskin_yonetmelik",
+            "properties": {
+              "name": "Anonim Şirketlerde Elektronik Ortamda Yapılacak Genel Kurullara İlişkin Yönetmelik",
+              "code": null,
+              "gazette": 28395,
+              "date": "2012-08-28",
+              "issuer": "T.C. Gümrük ve Ticaret Bakanlığı"
+            },
+            "chunk_ids": [
+              "chunk_004"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_anonim_sirketlerin_genel_kurullarinda_uygulanacak_elektronik_genel_kurul_sistemi_hakkinda_teblig",
+            "properties": {
+              "name": "Anonim Şirketlerin Genel Kurullarında Uygulanacak Elektronik Genel Kurul Sistemi Hakkında Tebliğ",
+              "code": null,
+              "gazette": 28396,
+              "date": "2012-08-29",
+              "issuer": "T.C. Gümrük ve Ticaret Bakanlığı"
+            },
+            "chunk_ids": [
+              "chunk_004"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_sermaye_piyasasinda_bagimsiz_denetim_standartlari_hakkinda_teblig",
+            "properties": {
+              "name": "Sermaye Piyasasında Bağımsız Denetim Standartları Hakkında Tebliğ",
+              "code": null,
+              "gazette": null,
+              "date": null,
+              "issuer": "Sermaye Piyasası Kurulu"
+            },
+            "chunk_ids": [
+              "chunk_007",
+              "chunk_019"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_19_1_kar_payi_tebligi",
+            "properties": {
+              "name": "Kar Payı Tebliği",
+              "code": "II-19.1",
+              "gazette": null,
+              "date": null,
+              "issuer": "Sermaye Piyasası Kurulu"
+            },
+            "chunk_ids": [
+              "chunk_008",
+              "chunk_020"
+            ]
+          },
+          {
+            "label": "Regulation",
+            "id": "regulation_spk_ii_17_1_kurumsal_yonetim_tebligi",
+            "properties": {
+              "name": "Kurumsal Yönetim Tebliği",
+              "code": "II-17.1",
+              "gazette": null,
+              "date": null,
+              "issuer": "Sermaye Piyasası Kurulu"
+            },
+            "chunk_ids": [
+              "chunk_007",
+              "chunk_008",
+              "chunk_019",
+              "chunk_020"
+            ]
+          },
+          {
+            "label": "Capital",
+            "id": "capital_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "properties": {
+              "registered_ceiling": 425000000,
+              "issued": 185000000,
+              "currency": "TRY"
+            },
+            "chunk_ids": [
+              "chunk_011",
+              "chunk_012"
+            ]
+          }
+        ],
+        "relationships": [
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "gazette_9028",
+            "type": "PUBLISHED_IN",
+            "properties": {}
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "type": "ORGANIZED_BY",
+            "properties": {}
+          },
+          {
+            "from_id": "meeting_2015_ordinary",
+            "to_id": "address_grand_hyatt_istanbul_efes_bizans_salonu",
+            "type": "HELD_AT",
+            "properties": {}
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "address_aksa_headquarters_beyoglu",
+            "type": "HAS_ADDRESS",
+            "properties": {}
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "address_aksa_yalova_fabrika",
+            "type": "HAS_ADDRESS",
+            "properties": {}
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_spk_ii_30_1_vekaleten_oy_kullanilmasi_ve_cagri_yoluyla_vekalet_toplantisi_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Vekaletname düzenleme"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_anonim_sirketlerde_elektronik_ortamda_yapilacak_genel_kurullara_iliskin_yonetmelik",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Elektronik Genel Kurul Sistemi katılımı"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_anonim_sirketlerin_genel_kurullarinda_uygulanacak_elektronik_genel_kurul_sistemi_hakkinda_teblig",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Elektronik Genel Kurul Sistemi katılımı"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "capital_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "type": "HAS_CAPITAL",
+            "properties": {}
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_sermaye_piyasasinda_bagimsiz_denetim_standartlari_hakkinda_teblig",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Gündem maddesi 8: Bağımsız Denetçi seçimi"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_spk_ii_17_1_kurumsal_yonetim_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Gündem maddesi 9: Çıkar çatışması işlemleri hakkında bilgi verilmesi"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_spk_ii_19_1_kar_payi_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Gündem maddesi 11: Bağış ve yardım politikası"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_spk_ii_17_1_kurumsal_yonetim_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Gündem maddesi 12: Ücretlendirme Politikası"
+            }
+          },
+          {
+            "from_id": "company_aksa_akrilik_kimya_sanayii_anonim_sirketi",
+            "to_id": "regulation_spk_ii_17_1_kurumsal_yonetim_tebligi",
+            "type": "REFERENCES",
+            "properties": {
+              "context": "Gündem maddesi 14: Teminat, rehin, ipotek ve kefaletler"
+            }
+          }
+        ]
+      },
+      "continuation_note": "",
+      "is_complete": true
+    },
+    "ner_entities": [
+      {
+        "text": "İstanbul",
+        "label": "city",
+        "score": 0.755,
+        "start": 106,
+        "end": 114
+      },
+      {
+        "text": "AKSA AKRİLİK KİMYA\nSANAYİİ ANONİM ŞİRKETİ",
+        "label": "company",
+        "score": 0.747,
+        "start": 173,
+        "end": 214
+      },
+      {
+        "text": "04.04.2016",
+        "label": "date",
+        "score": 0.679,
+        "start": 351,
+        "end": 361
+      },
+      {
+        "text": "Taşkışla Caddesi",
+        "label": "address",
+        "score": 0.568,
+        "start": 455,
+        "end": 471
+      },
+      {
+        "text": "Taksim",
+        "label": "city",
+        "score": 0.511,
+        "start": 486,
+        "end": 492
+      },
+      {
+        "text": "İstanbul",
+        "label": "city",
+        "score": 0.731,
+        "start": 494,
+        "end": 502
+      },
+      {
+        "text": "İstanbul",
+        "label": "city",
+        "score": 0.592,
+        "start": 527,
+        "end": 535
+      },
+      {
+        "text": "Beyoğlu",
+        "label": "city",
+        "score": 0.664,
+        "start": 750,
+        "end": 757
+      },
+      {
+        "text": "İstanbul",
+        "label": "city",
+        "score": 0.769,
+        "start": 759,
+        "end": 767
+      }
+    ],
+    "ner_entity_count": 9,
+    "timing": {
+      "ner_ms": 12916,
+      "llm_ms": 59555,
+      "total_ms": 72471
+    }
+  }
+}

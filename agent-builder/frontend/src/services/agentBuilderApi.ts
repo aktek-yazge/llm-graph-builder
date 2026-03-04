@@ -75,6 +75,20 @@ export interface SchemaProposal {
   reasoning: string;
 }
 
+export interface RichMessagePart {
+  type: 'text' | 'upload_zone' | 'action_buttons' | 'card' | 'suggestion' | 'progress' | 'table' | 'status' | 'trigger_side_upload';
+  content: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface AgentChatResult {
+  response: string;
+  session_id: string;
+  agent_id: string;
+  rich_parts: RichMessagePart[];
+  phase?: string;
+}
+
 // =============================================================================
 // API BASE
 // =============================================================================
@@ -321,6 +335,28 @@ export const agentBuilderApi = {
    */
   async healthCheck(): Promise<{ status: string; version: string }> {
     return apiRequest('/health');
+  },
+
+  // ===========================================================================
+  // AGENT RUNTIME CHAT API
+  // ===========================================================================
+
+  async chatWithAgent(
+    agentId: string,
+    message: string,
+    sessionId?: string,
+  ): Promise<AgentChatResult> {
+    return apiRequest(`/agents/${agentId}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ message, session_id: sessionId || null }),
+    });
+  },
+
+  async getAgentChatHistory(
+    agentId: string,
+    sessionId: string,
+  ): Promise<{ messages: Array<{ role: string; content: string; created_at?: string }>; count: number }> {
+    return apiRequest(`/agents/${agentId}/chat/history?session_id=${sessionId}`);
   },
 };
 

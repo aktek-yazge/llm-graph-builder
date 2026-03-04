@@ -1,0 +1,25 @@
+[project]
+name = "code-agent"
+version = "0.1.0"
+description = "MCP server that indexes codebases into a Kuzu graph database with temporal tracking"
+requires-python = ">=3.11"
+dependencies = [
+    "kuzu",
+    "tree-sitter",
+    "tree-sitter-python",
+    "tree-sitter-typescript",
+    "fastmcp>=2.0.0",
+    "gitpython",
+    "watchdog",
+    "google-genai",
+]
+
+[project.scripts]
+code-agent = "code_agent.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_agent"]

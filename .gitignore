@@ -223,3 +223,6 @@ llm_graph_builder_backup.sql
 .infisical-token
 infisical/.env
 *.infisical-token
+
+# Agent Builder frontend
+agent-builder/frontend/node_modules/

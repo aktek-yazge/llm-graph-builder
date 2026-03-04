@@ -1,7 +1,7 @@
 [project]
 name = "agent-builder-backend"
-version = "0.1.0"
-description = "Agent Builder Backend - Goal-driven agent creation API"
+version = "0.2.0"
+description = "Agent Builder Backend - LLM-driven agent creation platform with MCP Gateway"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.109.0",
@@ -12,6 +12,35 @@ dependencies = [
     "celery>=5.3.0",
     "httpx>=0.25.0",
     "python-multipart>=0.0.6",
+    # LLM providers
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langchain-google-genai>=2.1.0",
+    # Agent framework
+    "langgraph>=0.3.0",
+    "langchain-mcp-adapters>=0.1.0",
+    # Streaming
+    "sse-starlette>=2.0.0",
+    # JWT
+    "PyJWT>=2.8.0",
+    # Event Store
+    "asyncpg>=0.29.0",
+    # PDF → PNG conversion
+    "PyMuPDF>=1.24.0",
+    # MinIO object storage
+    "minio>=7.2.0",
+    # MCP Client for connecting to MCP services
+    "fastmcp>=2.0.0",
+    # ReactAgentV2 shared module dependencies
+    "psycopg2-binary>=2.9.0",
+    "sqlalchemy>=2.0.0",
+    "langfuse>=2.0.0",
+    "redis>=5.0.0",
+    "tiktoken>=0.7.0",
+    # LangChain agent (create_agent, middleware)
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
 ]
 
 [project.optional-dependencies]
@@ -28,8 +57,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
 ]

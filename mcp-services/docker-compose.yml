@@ -1,0 +1,89 @@
+services:
+  mcp-unified:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-unified
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8010}:${MCP_PORT:-8010}"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=${MCP_PORT:-8010}
+      - MCP_PATH=/mcp/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_SECURE=false
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SAMPLING_FALLBACK_MODEL=${SAMPLING_FALLBACK_MODEL:-gpt-4o-mini}
+      - SAMPLING_BEHAVIOR=${SAMPLING_BEHAVIOR:-fallback}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openai}
+      - NEO4J_READ_TIMEOUT=${NEO4J_READ_TIMEOUT:-30}
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./servers:/app/servers
+      - ./prompts:/app/prompts
+      - ./utils:/app/utils
+      - ./main.py:/app/main.py
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8010/mcp/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - mcp-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: mcp-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9010}:9000"
+      - "${MINIO_CONSOLE_PORT:-9011}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - mcp-network
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: mcp-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb --ignore-existing local/documents;
+      mc mb --ignore-existing local/prompts;
+      mc mb --ignore-existing local/ocr-output;
+      echo 'Buckets created successfully';
+      mc ls local;
+      "
+    restart: "no"
+    networks:
+      - mcp-network
+
+volumes:
+  minio_data:
+    driver: local
+
+networks:
+  mcp-network:
+    driver: bridge
+    name: mcp-network

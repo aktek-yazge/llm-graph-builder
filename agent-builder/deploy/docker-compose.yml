@@ -90,6 +90,30 @@ services:
         echo "MCP Gateway initialization complete!"
 
   # =============================================================================
+  # PostgreSQL Event Store
+  # Immutable event log for graph mutation versioning & rollback
+  # =============================================================================
+  postgres-event-store:
+    image: postgres:16-alpine
+    container_name: postgres-event-store
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=${EVENT_STORE_DB:-event_store}
+      - POSTGRES_USER=${EVENT_STORE_USER:-event_user}
+      - POSTGRES_PASSWORD=${EVENT_STORE_PASSWORD:-event_secret}
+    volumes:
+      - postgres-event-data:/var/lib/postgresql/data
+      - ../backend/src/event_store/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EVENT_STORE_USER:-event_user} -d ${EVENT_STORE_DB:-event_store}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-builder-network
+
+  # =============================================================================
   # Agent Builder Backend API
   # =============================================================================
   agent-builder-api:
@@ -104,10 +128,13 @@ services:
       - ONTOLOGY_NEO4J_USERNAME=neo4j
       - ONTOLOGY_NEO4J_PASSWORD=${NEO4J_ONTOLOGY_PASSWORD:-ontology123}
       - ONTOLOGY_NEO4J_DATABASE=ontology
+      - EVENT_STORE_DSN=postgresql://${EVENT_STORE_USER:-event_user}:${EVENT_STORE_PASSWORD:-event_secret}@postgres-event-store:5432/${EVENT_STORE_DB:-event_store}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
       - MCP_GATEWAY_URL=http://mcp-gateway:4444
     depends_on:
       neo4j-ontology:
+        condition: service_healthy
+      postgres-event-store:
         condition: service_healthy
     networks:
       - agent-builder-network
@@ -115,6 +142,7 @@ services:
 volumes:
   neo4j-ontology-data:
   neo4j-ontology-logs:
+  postgres-event-data:
 
 networks:
   agent-builder-network:

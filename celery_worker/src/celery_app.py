@@ -28,6 +28,8 @@ app = Celery("llm_graph_builder", broker=broker_url, backend=result_backend)
 default_exchange = Exchange("default", type="direct")
 db_exchange = Exchange("db_write", type="direct")
 neo4j_exchange = Exchange("neo4j_write", type="direct")
+workspace_exchange = Exchange("workspace", type="direct")
+resource_exchange = Exchange("resource", type="direct")
 
 # Configure Celery
 app.conf.update(
@@ -49,6 +51,8 @@ app.conf.update(
         Queue("celery", default_exchange, routing_key="celery"),
         Queue("db_write", db_exchange, routing_key="db_write"),
         Queue("neo4j_write", neo4j_exchange, routing_key="neo4j_write"),
+        Queue("workspace", workspace_exchange, routing_key="workspace"),
+        Queue("resource", resource_exchange, routing_key="resource"),
     ),
     
     # Default queue
@@ -66,6 +70,9 @@ app.conf.update(
         "src.tasks.*": {"queue": "celery"},
         # Agent Builder skill processing task
         "celery_worker.src.tasks.skill_processing.process_file_with_skill": {"queue": "celery"},
+        # Workspace document processing tasks (hybrid + MCP)
+        "workspace.*": {"queue": "workspace"},
+        "resource.*": {"queue": "resource"},
     },
     
     # Worker prefetch - reduce for DB writer to ensure ordered processing
@@ -74,7 +81,7 @@ app.conf.update(
 )
 
 # Auto-discover tasks from all modules
-app.autodiscover_tasks(["src.tasks", "src.db_writer", "src.neo4j_writer"])
+app.autodiscover_tasks(["src.tasks", "src.db_writer", "src.neo4j_writer", "src.workspace_tasks", "src.resource_tasks"])
 
 
 # ============================================================================

@@ -88,6 +88,7 @@ log ""
 MAIN_WORKER_ID="main-worker-${RANDOM}"
 DB_WRITER_ID="db-writer-${RANDOM}"
 NEO4J_WRITER_ID="neo4j-writer-${RANDOM}"
+WORKSPACE_WORKER_ID="workspace-worker-${RANDOM}"
 
 # Start Main Worker - handles celery and default queues (chunking, graph, embeddings)
 log "🔧 Starting Main Worker (${MAIN_WORKER_ID})..."
@@ -112,6 +113,20 @@ uv run python -m celery -A src.celery_app worker \
     -n "${DB_WRITER_ID}@%h" 2>&1 | tee -a "$DB_LOG" &
 DB_WRITER_PID=$!
 log "✅ DB Writer PID: $DB_WRITER_PID, Log: $DB_LOG"
+
+# Start Workspace Worker - Agent Builder document processing + resource extraction
+WORKSPACE_LOG="${LOG_DIR}/workspace-worker_${DATE_STAMP}.log"
+WORKSPACE_CONCURRENCY="${CELERY_WORKSPACE_CONCURRENCY:-4}"
+log "📄 Starting Workspace Worker (${WORKSPACE_WORKER_ID})..."
+uv run python -m celery -A src.celery_app worker \
+    --loglevel=info \
+    --pool=${POOL_TYPE} \
+    --concurrency=${WORKSPACE_CONCURRENCY} \
+    -Q workspace,resource \
+    -E \
+    -n "${WORKSPACE_WORKER_ID}@%h" 2>&1 | tee -a "$WORKSPACE_LOG" &
+WORKSPACE_WORKER_PID=$!
+log "✅ Workspace Worker PID: $WORKSPACE_WORKER_PID, Log: $WORKSPACE_LOG"
 
 # ⚠️ DISABLED: main_worker doğrudan Neo4j'ye yazıyor
 # Neo4j Writer Worker - dedicated for Neo4j writes
@@ -169,6 +184,12 @@ monitor_workers() {
             log "   Check log: $DB_LOG"
         fi
         
+        # Workspace Worker kontrolü
+        if ! kill -0 $WORKSPACE_WORKER_PID 2>/dev/null; then
+            log "💀 ALERT: Workspace Worker (PID: $WORKSPACE_WORKER_PID) DIED!"
+            log "   Check log: $WORKSPACE_LOG"
+        fi
+        
         # Neo4j Writer kontrolü (disabled - main_worker handles Neo4j writes)
         # if [ -n "$NEO4J_WRITER_PID" ] && ! kill -0 $NEO4J_WRITER_PID 2>/dev/null; then
         #     log "💀 ALERT: Neo4j Writer (PID: $NEO4J_WRITER_PID) DIED!"
@@ -193,11 +214,12 @@ cleanup() {
     # Bu, uv run'ın spawn ettiği child process'leri de yakalar
     pkill -9 -f "celery.*${MAIN_WORKER_ID}" 2>/dev/null
     pkill -9 -f "celery.*${DB_WRITER_ID}" 2>/dev/null
+    pkill -9 -f "celery.*${WORKSPACE_WORKER_ID}" 2>/dev/null
     # pkill -9 -f "celery.*${NEO4J_WRITER_ID}" 2>/dev/null
     # pkill -9 -f "celery.*flower.*5555" 2>/dev/null
     
     # 2. Kayıtlı PID'leri ve child'larını öldür (yedek)
-    for pid in $MAIN_WORKER_PID $DB_WRITER_PID; do
+    for pid in $MAIN_WORKER_PID $DB_WRITER_PID $WORKSPACE_WORKER_PID; do
         if [ -n "$pid" ]; then
             # Child process'leri öldür
             pkill -9 -P $pid 2>/dev/null
@@ -212,6 +234,7 @@ cleanup() {
     # Bu script'in başlattığı tüm uv/celery process'lerini temizle
     pkill -9 -f "uv run.*celery.*${MAIN_WORKER_ID}" 2>/dev/null
     pkill -9 -f "uv run.*celery.*${DB_WRITER_ID}" 2>/dev/null
+    pkill -9 -f "uv run.*celery.*${WORKSPACE_WORKER_ID}" 2>/dev/null
     # pkill -9 -f "uv run.*celery.*${NEO4J_WRITER_ID}" 2>/dev/null
     
     log "✅ All workers stopped."

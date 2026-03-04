@@ -38,7 +38,7 @@ curl -X POST "${GATEWAY_URL}/api/servers" \
         "server": {
             "name": "neo4j-documents",
             "description": "Neo4j Document Database - Tenant-specific document storage",
-            "server_type": "sse",
+            "server_type": "STREAMABLEHTTP",
             "url": "'"${NEO4J_DOCUMENTS_URL:-bolt://neo4j-documents:7687}"'",
             "metadata": {
                 "category": "database",
@@ -57,7 +57,7 @@ curl -X POST "${GATEWAY_URL}/api/servers" \
         "server": {
             "name": "neo4j-ontology",
             "description": "Neo4j Ontology Database - Agent metadata, Goals, Skills, Schemas",
-            "server_type": "sse",
+            "server_type": "STREAMABLEHTTP",
             "url": "'"${NEO4J_ONTOLOGY_URL:-bolt://neo4j-ontology:7688}"'",
             "metadata": {
                 "category": "ontology",
@@ -76,7 +76,7 @@ curl -X POST "${GATEWAY_URL}/api/servers" \
         "server": {
             "name": "embedding",
             "description": "Embedding Server - Semantic search and vector operations",
-            "server_type": "sse",
+            "server_type": "STREAMABLEHTTP",
             "url": "'"${EMBEDDING_SERVER_URL:-http://embedding-server:8003}"'",
             "metadata": {
                 "category": "ml",
@@ -95,7 +95,7 @@ curl -X POST "${GATEWAY_URL}/api/servers" \
         "server": {
             "name": "agent-builder",
             "description": "Agent Builder API - Create and manage custom agents",
-            "server_type": "sse",
+            "server_type": "STREAMABLEHTTP",
             "url": "http://agent-builder-api:8001",
             "metadata": {
                 "category": "agent",
@@ -103,6 +103,24 @@ curl -X POST "${GATEWAY_URL}/api/servers" \
             }
         }
     }' || echo "Warning: agent-builder registration may have failed or already exists"
+
+# =============================================================================
+# Register NotebookLM MCP Server (optional - requires NOTEBOOKLM_MCP_URL)
+# =============================================================================
+if [ -n "${NOTEBOOKLM_MCP_URL}" ]; then
+    echo "Registering notebooklm server..."
+    curl -X POST "${GATEWAY_URL}/gateways" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "name": "notebooklm",
+            "url": "'"${NOTEBOOKLM_MCP_URL}"'",
+            "transport": "STREAMABLEHTTP"
+        }' || echo "Warning: notebooklm registration may have failed or already exists"
+    echo ""
+    echo "NotebookLM MCP registered as upstream gateway"
+else
+    echo "Skipping NotebookLM registration (NOTEBOOKLM_MCP_URL not set)"
+fi
 
 echo ""
 echo "=== MCP Gateway Initialization Complete ==="

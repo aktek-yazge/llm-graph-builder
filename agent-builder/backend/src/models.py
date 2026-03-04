@@ -494,10 +494,341 @@ class ProcessResult(BaseModel):
 
 
 # =============================================================================
+# WORKSPACE MODELS
+# =============================================================================
+
+class WorkspaceStatus(str, Enum):
+    """Workspace durumlari"""
+    CREATED = "created"
+    SAMPLING = "sampling"
+    SCHEMA_PROPOSED = "schema_proposed"
+    SCHEMA_REVIEW = "schema_review"
+    SCHEMA_APPROVED = "schema_approved"
+    AGENT_READY = "agent_ready"
+    READY = "ready"
+    PROCESSING = "processing"
+    QUALITY_CHECK = "quality_check"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class BatchJobStatus(str, Enum):
+    """Batch job durumlari"""
+    CREATED = "created"
+    UPLOADING = "uploading"
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    QUALITY_CHECK = "quality_check"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class DocumentStatus(str, Enum):
+    """Tek belge isleme durumu"""
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    LOW_CONFIDENCE = "low_confidence"
+    SKIPPED = "skipped"
+
+
+class WorkspaceCreate(BaseModel):
+    """Workspace olusturma"""
+    name: str = Field(..., min_length=2, max_length=200, description="Workspace adi")
+    description: str = Field(default="", max_length=2000, description="Workspace aciklamasi")
+    tenant_id: str = Field(..., description="Tenant ID")
+    ocr_mode: str = Field(default="hybrid", description="OCR modu: hybrid, vision, text")
+    batch_size: int = Field(default=100, ge=1, le=500, description="Batch boyutu")
+
+
+class Workspace(BaseModel):
+    """Workspace response"""
+    id: str
+    name: str
+    description: str
+    tenant_id: str
+    status: WorkspaceStatus = WorkspaceStatus.CREATED
+    ocr_mode: str = "hybrid"
+    batch_size: int = 100
+    agent_id: Optional[str] = None
+    skill_id: Optional[str] = None
+    document_count: int = 0
+    sample_count: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BatchJob(BaseModel):
+    """Batch job response"""
+    id: str
+    workspace_id: str
+    status: BatchJobStatus = BatchJobStatus.CREATED
+    total_documents: int = 0
+    processed_documents: int = 0
+    successful_documents: int = 0
+    failed_documents: int = 0
+    low_confidence_documents: int = 0
+    celery_group_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    estimated_duration_seconds: Optional[int] = None
+    error_message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BatchProgress(BaseModel):
+    """Batch isleme ilerleme bilgisi (SSE icin)"""
+    batch_job_id: str
+    workspace_id: str
+    status: BatchJobStatus
+    total: int = 0
+    processed: int = 0
+    successful: int = 0
+    failed: int = 0
+    low_confidence: int = 0
+    percent_complete: float = 0.0
+    elapsed_seconds: int = 0
+    estimated_remaining_seconds: Optional[int] = None
+    current_file: Optional[str] = None
+
+
+class ReviewItem(BaseModel):
+    """Review queue item"""
+    document_id: str
+    file_name: str
+    status: DocumentStatus
+    confidence_score: float = 0.0
+    extracted_entities: List[Dict[str, Any]] = Field(default_factory=list)
+    extracted_relationships: List[Dict[str, Any]] = Field(default_factory=list)
+    error_message: Optional[str] = None
+
+
+class ReviewQueue(BaseModel):
+    """Review queue response"""
+    workspace_id: str
+    total_items: int = 0
+    low_confidence_items: List[ReviewItem] = Field(default_factory=list)
+    failed_items: List[ReviewItem] = Field(default_factory=list)
+
+
+class SchemaApproval(BaseModel):
+    """Schema onay request"""
+    entity_schema_ids: List[str] = Field(default_factory=list)
+    relationship_schema_ids: List[str] = Field(default_factory=list)
+    approved: bool = True
+    modifications: Optional[Dict[str, Any]] = None
+
+
+class WorkspaceSummary(BaseModel):
+    """Dashboard icin workspace ozet"""
+    id: str
+    name: str
+    status: WorkspaceStatus
+    document_count: int = 0
+    processed_count: int = 0
+    success_rate: float = 0.0
+    created_at: Optional[datetime] = None
+
+
+# =============================================================================
+# RESOURCE MODELS
+# =============================================================================
+
+class ResourceType(str, Enum):
+    MINIO = "minio"
+    LINK = "link"
+    YOUTUBE = "youtube"
+    IMAGE = "image"
+    NOTEBOOKLM = "notebooklm"
+
+
+class ResourceStatus(str, Enum):
+    CREATED = "created"
+    UPLOADING = "uploading"
+    EXTRACTING = "extracting"
+    READY = "ready"
+
+
+class ExtractionStatus(str, Enum):
+    PENDING = "pending"
+    EXTRACTING = "extracting"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class ProcessingStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    ESCALATED = "escalated"
+    SKIPPED = "skipped"
+
+
+class ResourceCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=256, description="Resource adi")
+    type: ResourceType = Field(default=ResourceType.MINIO, description="Resource tipi")
+    description: str = Field(default="", max_length=2000)
+    tenant_id: str = Field(default="default")
+    url: Optional[str] = Field(default=None, description="URL (link, youtube tipleri icin)")
+    notebook_id: Optional[str] = Field(default=None, description="NotebookLM notebook ID")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Ek metadata key-value")
+
+
+class ResourceDocumentSummary(BaseModel):
+    id: str
+    file_name: str
+    file_type: Optional[str] = None
+    file_size: int = 0
+    page_count: int = 0
+    extraction_status: ExtractionStatus = ExtractionStatus.PENDING
+    processing_status: ProcessingStatus = ProcessingStatus.PENDING
+    confidence_score: float = 0.0
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class ResourceStatusBreakdown(BaseModel):
+    extraction: Dict[str, int] = Field(default_factory=dict)
+    processing: Dict[str, int] = Field(default_factory=dict)
+
+
+class ResourceDetail(BaseModel):
+    id: str
+    name: str
+    type: ResourceType
+    description: str = ""
+    status: ResourceStatus = ResourceStatus.CREATED
+    workspace_id: Optional[str] = None
+    tenant_id: str = "default"
+    minio_bucket: str = "resources"
+    minio_prefix: Optional[str] = None
+    total_documents: int = 0
+    extracted_documents: int = 0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    documents: List[ResourceDocumentSummary] = Field(default_factory=list)
+    status_breakdown: ResourceStatusBreakdown = Field(default_factory=ResourceStatusBreakdown)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ResourceSummary(BaseModel):
+    id: str
+    name: str
+    type: ResourceType
+    status: ResourceStatus
+    total_documents: int = 0
+    extracted_documents: int = 0
+    workspace_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+
+
+class ChatAgentStatus(str, Enum):
+    DRAFT = "draft"
+    DEPLOYING = "deploying"
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    ERROR = "error"
+
+
+class ChatAgentCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=256)
+    description: str = Field(default="", max_length=2000)
+    tenant_id: str = Field(default="default")
+    workspace_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    associated_tool_ids: List[str] = Field(default_factory=list, description="Gateway tool UUID listesi")
+    associated_prompt_ids: List[str] = Field(default_factory=list, description="Gateway prompt UUID listesi")
+    associated_resource_ids: List[str] = Field(default_factory=list, description="Gateway resource UUID listesi")
+    kb_resource_id: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatAgentUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=256)
+    description: Optional[str] = Field(None, max_length=2000)
+    system_prompt: Optional[str] = None
+    associated_tool_ids: Optional[List[str]] = None
+    associated_prompt_ids: Optional[List[str]] = None
+    associated_resource_ids: Optional[List[str]] = None
+    kb_resource_id: Optional[str] = None
+    tags: Optional[List[str]] = None
+    config: Optional[Dict[str, Any]] = None
+
+
+class ChatAgentSummary(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    status: ChatAgentStatus = ChatAgentStatus.DRAFT
+    tenant_id: str = "default"
+    workspace_id: Optional[str] = None
+    gateway_server_id: Optional[str] = None
+    tool_count: int = 0
+    prompt_count: int = 0
+    resource_count: int = 0
+    created_at: Optional[datetime] = None
+
+
+class ChatAgentDetail(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    status: ChatAgentStatus = ChatAgentStatus.DRAFT
+    tenant_id: str = "default"
+    workspace_id: Optional[str] = None
+    gateway_server_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    associated_tools: List[str] = Field(default_factory=list)
+    associated_prompts: List[str] = Field(default_factory=list)
+    associated_resources: List[str] = Field(default_factory=list)
+    kb_resource_id: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    mcp_endpoint: Optional[str] = None
+    sse_endpoint: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ChatAgentDeployRequest(BaseModel):
+    """Deploy edilmis agenti Gateway'de aktiflestirir veya yeni Virtual Server yaratir."""
+    activate: bool = True
+
+
+class AgentChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=10000)
+    session_id: Optional[str] = Field(None, description="Devam eden sohbet icin session ID")
+
+
+class RichMessagePart(BaseModel):
+    """Zengin mesaj parcasi - frontend'de ozel render edilir."""
+    type: str = Field(default="text", description="text|upload_zone|action_buttons|card|suggestion|progress|table|status|trigger_side_upload")
+    content: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentChatResponse(BaseModel):
+    response: str
+    session_id: str
+    agent_id: str
+    rich_parts: List[RichMessagePart] = Field(default_factory=list)
+    phase: Optional[str] = Field(None, description="Mevcut workspace fazi (stepper icin)")
+
+
+# =============================================================================
 # FORWARD REFERENCES
 # =============================================================================
 
-# Pydantic v2 için forward reference'ları güncelle
 GoalWithSkills.model_rebuild()
 SkillWithDependencies.model_rebuild()
 AgentWithDetails.model_rebuild()

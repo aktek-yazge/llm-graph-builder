@@ -22,14 +22,25 @@ import os
 import sys
 
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
 
 # src klasörünü path'e ekle
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.router import router as agent_builder_router
+from src.workspace_router import router as workspace_router
+from src.event_router import router as event_router
+from src.comms_router import router as comms_router
+from src.dashboard_router import router as dashboard_router
+from src.resource_router import router as resource_router
+from src.chat_agent_router import router as chat_agent_router
 from src.ontology import get_ontology_client, initialize_ontology_db
+from src.gateway import get_gateway_client
+from src.event_store import get_postgres_client
 
 # Logging
 logging.basicConfig(
@@ -47,27 +58,57 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """
     Application lifespan handler.
-    Startup'da Ontology DB bağlantısı ve schema initialization.
+    PostgreSQL is the primary metadata store; Neo4j is for KB graph only.
     """
-    logger.info("🚀 Agent Builder starting...")
-    
+    logger.info("Agent Builder starting...")
+
+    # 1. PostgreSQL — primary metadata store (must succeed)
     try:
-        # Ontology DB bağlantısı
+        pg = await get_postgres_client()
+        await pg.initialize_schema()
+        es_health = await pg.health_check()
+        logger.info("PostgreSQL connected: %s", es_health.get("status", "ok"))
+    except Exception as e:
+        logger.error("PostgreSQL not available: %s — service cannot start properly", e)
+
+    # 2. Neo4j — KB graph store (optional at startup)
+    try:
         client = await get_ontology_client()
-        logger.info("✅ Connected to Ontology DB")
-        
-        # Schema initialization (ilk çalıştırmada)
+        logger.info("Connected to Neo4j (KB graph store)")
         initialized = await initialize_ontology_db()
         if initialized:
-            logger.info("✅ Ontology schema initialized")
+            logger.info("Neo4j KB schema initialized")
     except Exception as e:
-        logger.warning(f"⚠️ Ontology DB not available: {e}")
-        logger.warning("   Agent Builder will run with limited functionality")
-    
+        logger.warning("Neo4j not available: %s (KB graph features limited)", e)
+
+    # 3. MCP Gateway (optional)
+    try:
+        gateway = await get_gateway_client()
+        health = await gateway.health_check()
+        logger.info("Connected to MCP Gateway: %s", health.get("status", "ok"))
+    except Exception as e:
+        logger.warning("MCP Gateway not available: %s", e)
+
+    # 4. Agent Event Bus (optional)
+    try:
+        from src.agent.event_bus import AgentEventBus
+        bus = AgentEventBus.get_instance()
+        connected = await bus.connect_rabbitmq()
+        if connected:
+            logger.info("Agent Event Bus connected to RabbitMQ")
+        else:
+            logger.info("Agent Event Bus running in-process mode")
+    except Exception as e:
+        logger.warning("Agent Event Bus init warning: %s", e)
+
     yield
-    
-    # Shutdown
-    logger.info("🛑 Agent Builder shutting down...")
+
+    logger.info("Agent Builder shutting down...")
+    try:
+        pg = await get_postgres_client()
+        await pg.disconnect()
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -77,7 +118,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Agent Builder API",
     description="Goal-driven ve Ontology-driven agent oluşturma servisi",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -92,8 +133,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Router
+# Routers
 app.include_router(agent_builder_router, prefix="/api/v2/agent-builder")
+app.include_router(workspace_router)
+app.include_router(event_router)
+app.include_router(comms_router)
+app.include_router(dashboard_router)
+app.include_router(resource_router)
+app.include_router(chat_agent_router)
 
 
 # =============================================================================
@@ -105,7 +152,7 @@ async def root():
     """API root"""
     return {
         "service": "Agent Builder",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "docs": "/docs",
         "api": "/api/v2/agent-builder"
     }
@@ -115,19 +162,24 @@ async def root():
 async def health():
     """Health check"""
     from src.ontology import get_ontology_client
-    
+
+    status = "healthy"
+    result: dict = {}
+
     try:
         client = await get_ontology_client()
-        health_status = await client.health_check()
-        return {
-            "status": "healthy",
-            "ontology_db": health_status
-        }
+        result["ontology_db"] = await client.health_check()
     except Exception as e:
-        return {
-            "status": "degraded",
-            "error": str(e)
-        }
+        status = "degraded"
+        result["ontology_db"] = {"status": "unavailable", "error": str(e)}
+
+    try:
+        pg = await get_postgres_client()
+        result["event_store"] = await pg.health_check()
+    except Exception as e:
+        result["event_store"] = {"status": "unavailable", "error": str(e)}
+
+    return {"status": status, **result}
 
 
 # =============================================================================

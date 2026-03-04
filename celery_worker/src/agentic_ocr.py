@@ -2783,6 +2783,7 @@ def process_agentic_ocr_text_mode(
     domain: Optional[str] = None,
     output_dir: Optional[str] = None,
     batch_size: int = 50,
+    skill_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Sync wrapper for AgenticOCR.process() in TEXT MODE.
@@ -2795,12 +2796,13 @@ def process_agentic_ocr_text_mode(
         domain: Domain (opsiyonel)
         output_dir: JSON çıktısı için dizin (opsiyonel)
         batch_size: Batch boyutu (default: 50 sayfa)
+        skill_id: Workspace skill ID (Ontology DB'den skill yukler)
     
     Returns:
         process_agentic_ocr ile aynı formatta sonuç
     """
     print(
-        f"[TEXT_MODE_OCR] Called with {len(ocr_texts)} pages, file={file_name}",
+        f"[TEXT_MODE_OCR] Called with {len(ocr_texts)} pages, file={file_name}, skill={skill_id}",
         flush=True,
     )
 
@@ -2814,6 +2816,7 @@ def process_agentic_ocr_text_mode(
             domain=domain,
             output_dir=output_dir,
             batch_size=batch_size,
+            skill_id=skill_id,
         )
 
     try:

@@ -98,6 +98,8 @@ services:
     container_name: akkok-sicil-redis
     expose:
       - "6379"
+    ports:
+      - "16379:6379"
     environment:
       - REDIS_ARGS=--save 60 1 --loglevel warning
     volumes:
@@ -124,6 +126,8 @@ services:
     container_name: akkok-sicil-postgres
     expose:
       - "5432"
+    ports:
+      - "15432:5432"
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${AKKOK_POSTGRES_PASSWORD}

@@ -9117,6 +9117,13 @@ CRITICAL: Return ONLY the JSON object, no markdown code blocks (```), no explana
                     context_str = f"\n\nCONTEXT FROM PREVIOUS PAGE (Use this to handle split sentences/paragraphs):\n{previous_page_context}\n"
 
                 # Send to Gemini with new SDK
+                repetitive_hint = (
+                    "- IGNORE headers and footers that are repeated from the first page "
+                    "(e.g., document titles, logos, standard footers).\n"
+                    "- Extract ONLY the unique content of this page.\n"
+                    "- Do NOT extract the main document title if it appears again."
+                    if idx > 1 else ""
+                )
                 prompt_text = f"""You are an AI expert in OCR and Semantic Chunking.
 This is page {idx} of {len(sorted_images)} of a document.
 
@@ -9143,7 +9150,7 @@ CRITICAL CHUNKING RULES:
 5. **GENERAL:** Avoid creating very small chunks (1-2 lines) unless they are completely independent. Prefer merging with the preceding or following context.
 
 REPETITIVE CONTENT HANDLING:
-{f"- IGNORE headers and footers that are repeated from the first page (e.g., document titles, logos, standard footers).\n- Extract ONLY the unique content of this page.\n- Do NOT extract the main document title if it appears again." if idx > 1 else ""}
+{repetitive_hint}
 
 CONTEXT HANDLING:
 {context_str}

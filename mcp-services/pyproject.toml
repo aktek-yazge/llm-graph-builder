@@ -1,0 +1,29 @@
+[project]
+name = "mcp-services"
+version = "1.0.0"
+description = "Unified MCP server for LLM Graph Builder - Neo4j, Embedding, Storage (MinIO)"
+readme = {text = "Unified MCP server for LLM Graph Builder", content-type = "text/plain"}
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.10.5",
+    "neo4j>=5.26.0",
+    "pydantic>=2.10.1",
+    "tiktoken>=0.11.0",
+    "langchain-openai>=0.3.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "minio>=7.2.0",
+    "starlette>=0.40.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.389",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.3",
+    "ruff>=0.11.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

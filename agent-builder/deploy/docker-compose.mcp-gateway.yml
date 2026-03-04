@@ -14,8 +14,6 @@
 # - Ontology Neo4j Browser: http://localhost:7475
 # =============================================================================
 
-version: '3.8'
-
 services:
   # ===========================================================================
   # NEO4J ONTOLOGY DATABASE
@@ -24,44 +22,101 @@ services:
   # Goals, Skills, Schemas, Agents, Learnings burada tutulur
   # Documents DB'den izole - tenant verisi burada OLMAZ
   neo4j-ontology:
-    image: neo4j:5.15-enterprise
+    image: neo4j:2025.07.1
     container_name: neo4j-ontology
     hostname: neo4j-ontology
     restart: unless-stopped
     ports:
-      # HTTP Browser - Documents DB'den farklı port
       - "7475:7474"
-      # Bolt - Documents DB'den farklı port
       - "7688:7687"
     environment:
-      # Enterprise license kabul
+      - NEO4J_AUTH=neo4j/${ONTOLOGY_NEO4J_PASSWORD:-ontology_secret}
+      - NEO4J_PLUGINS=["apoc","graph-data-science","apoc-extended"]
       - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
-      # Authentication
-      - NEO4J_AUTH=${ONTOLOGY_NEO4J_USERNAME:-neo4j}/${ONTOLOGY_NEO4J_PASSWORD:-ontology_secret}
-      # Memory settings (adjust based on available RAM)
+      - NEO4J_dbms_usage__report_enabled=false
       - NEO4J_server_memory_heap_initial__size=512m
       - NEO4J_server_memory_heap_max__size=1G
       - NEO4J_server_memory_pagecache_size=512m
-      # Database settings
-      - NEO4J_dbms_default__database=ontology
-      # Plugin'ler (GDS için)
-      - NEO4J_PLUGINS=["graph-data-science"]
-      # Security
       - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
     volumes:
-      # Persistent data
       - neo4j_ontology_data:/data
-      - neo4j_ontology_logs:/logs
       - neo4j_ontology_plugins:/plugins
-      # Schema initialization scripts (optional)
-      - ./neo4j-ontology-init:/var/lib/neo4j/import
+      - neo4j_ontology_import:/var/lib/neo4j/import
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 10
       start_period: 60s
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # POSTGRESQL - EVENT STORE
+  # ===========================================================================
+  # Immutable event log for all graph mutations (append-only)
+  event-store-postgres:
+    image: postgres:16-alpine
+    container_name: event-store-postgres
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      - POSTGRES_DB=event_store
+      - POSTGRES_USER=event_user
+      - POSTGRES_PASSWORD=event_secret
+    volumes:
+      - event_store_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U event_user -d event_store"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # MariaDB - Database for MCP Gateway
+  # ===========================================================================
+  mcp-gateway-mariadb:
+    image: mariadb:10.6
+    container_name: mcp-gateway-mariadb
+    restart: unless-stopped
+    expose:
+      - "3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MCP_GATEWAY_DB_ROOT_PASSWORD:-rootpass123}
+      - MYSQL_DATABASE=mcpgateway
+      - MYSQL_USER=mcp
+      - MYSQL_PASSWORD=${MCP_GATEWAY_DB_PASSWORD:-mcppass123}
+    volumes:
+      - mcp_gateway_mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
     networks:
       - agent-builder-network
 
@@ -71,48 +126,128 @@ services:
   # IBM'in MCP Gateway'i - tüm MCP server'ların merkezi hub'ı
   # Virtual server'lar, tool registry, authentication burada yönetilir
   mcp-gateway:
-    image: ghcr.io/ibm/mcp-context-forge:1.0.0-RC-1
+    image: ghcr.io/ibm/mcp-context-forge:latest
     container_name: mcp-gateway
     hostname: mcp-gateway
     restart: unless-stopped
     depends_on:
       neo4j-ontology:
         condition: service_healthy
+      mcp-gateway-mariadb:
+        condition: service_healthy
     ports:
-      # Gateway API + Admin UI
       - "4444:4444"
     environment:
       # Server settings
       - HOST=0.0.0.0
       - PORT=4444
-      # Database (SQLite for simplicity, can use PostgreSQL)
-      - DATABASE_URL=sqlite:////data/mcp-gateway.db
+      # Performance (dev mode - fewer workers)
+      - GUNICORN_WORKERS=2
+      - GUNICORN_TIMEOUT=120
+      # Database - MariaDB
+      - DATABASE_URL=mysql+pymysql://mcp:${MCP_GATEWAY_DB_PASSWORD:-mcppass123}@mcp-gateway-mariadb:3306/mcpgateway
       # Authentication
-      - JWT_SECRET_KEY=${MCP_GATEWAY_JWT_SECRET:-your-super-secret-key-change-in-production}
+      - JWT_SECRET_KEY=${MCP_GATEWAY_JWT_SECRET:-dev-secret-key-32-chars-minimum!!}
+      - AUTH_ENCRYPTION_SECRET=${AUTH_ENCRYPTION_SECRET:-dev-encryption-secret-32chars!!}
       - AUTH_REQUIRED=true
       - BASIC_AUTH_USER=${MCP_GATEWAY_ADMIN_USER:-admin}
-      - BASIC_AUTH_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-changeme}
+      - BASIC_AUTH_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-DevPass123!}
       # Admin settings
       - PLATFORM_ADMIN_EMAIL=${MCP_GATEWAY_ADMIN_EMAIL:-admin@example.com}
-      - PLATFORM_ADMIN_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-changeme}
+      - PLATFORM_ADMIN_PASSWORD=${MCP_GATEWAY_ADMIN_PASSWORD:-DevPass123!}
       - PLATFORM_ADMIN_FULL_NAME=Agent Builder Admin
       # UI
       - MCPGATEWAY_UI_ENABLED=true
       - MCPGATEWAY_ADMIN_API_ENABLED=true
-      - SECURE_COOKIES=false  # true for HTTPS
-      # Security defaults (keep enabled)
-      - REQUIRE_JTI=true
-      - REQUIRE_TOKEN_EXPIRATION=true
+      - SECURE_COOKIES=false
+      # Security (relaxed for dev)
+      - REQUIRE_JTI=false
+      - REQUIRE_TOKEN_EXPIRATION=false
       - PUBLIC_REGISTRATION_ENABLED=false
-    volumes:
-      # Persistent data
-      - mcp_gateway_data:/data
+      # SSRF (allow internal/private network access for dev)
+      - SSRF_ALLOW_PRIVATE_NETWORKS=true
+      - SSRF_ALLOW_LOCALHOST=true
+      # Logging
+      - LOG_LEVEL=INFO
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4444/health"]
-      interval: 30s
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # RABBITMQ - Message Broker for Celery
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: agent-builder-rabbitmq
+    hostname: rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-rabbitmq}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-RabbitMQ!654*}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+    networks:
+      - agent-builder-network
+
+  # ===========================================================================
+  # CELERY WORKSPACE WORKER
+  # ===========================================================================
+  # Hybrid pipeline: PDF -> PyMuPDF -> PNG -> GeminiOCR -> AgenticOCR
+  celery-workspace-worker:
+    build:
+      context: ../../celery_worker
+      dockerfile: Dockerfile
+    container_name: celery-workspace-worker
+    hostname: workspace-worker
+    restart: unless-stopped
+    command: >
+      python -m celery -A src.celery_app worker
+      --loglevel=info
+      --pool=prefork
+      --autoscale=8,2
+      -Q workspace
+      -n workspace-worker@%h
+      -E
+    environment:
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER:-rabbitmq}:${RABBITMQ_PASSWORD:-RabbitMQ!654*}@rabbitmq:5672//
+      - AGENT_BUILDER_CALLBACK_URL=http://agent-builder-api:8001/api/v2/workspaces/callback/document-status
+      - NEO4J_URI=bolt://neo4j-ontology:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=${ONTOLOGY_NEO4J_PASSWORD:-ontology_secret}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OCR_VISION_MODEL=${OCR_VISION_MODEL:-gemini-2.5-flash}
+      - OUTPUT_DIR=output_workspace
+      - PYTHONPATH=/app
+    volumes:
+      - workspace_uploads:/tmp/workspace_uploads
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
     networks:
       - agent-builder-network
 
@@ -143,11 +278,17 @@ services:
 volumes:
   neo4j_ontology_data:
     driver: local
-  neo4j_ontology_logs:
-    driver: local
   neo4j_ontology_plugins:
     driver: local
-  mcp_gateway_data:
+  neo4j_ontology_import:
+    driver: local
+  mcp_gateway_mariadb_data:
+    driver: local
+  event_store_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  workspace_uploads:
     driver: local
 
 # =============================================================================

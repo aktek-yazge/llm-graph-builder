@@ -707,32 +707,15 @@ Sorguyu düzeltip TEKRAR DENE!"""
     ) -> str:
         """
         Execute a semantic search in document content (Chunks) using embeddings.
-        
+
         MULTI-TENANT MODE: db_url, db_username, db_password are REQUIRED.
-        No environment variable fallback - credentials must be explicitly provided.
-        
-        ⚠️ USE THIS TOOL WHEN:
-        - Question asks for DETAILS, LISTS, TABLES, or EXPLANATIONS
-        - Question contains: "neler?", "listele", "detayları", "ne diyor?", "var mı?"
-        - Question asks about: installments, payments, coverage details, terms, conditions
-        - Graph query returned FEW results (≤3) but more detail is expected
-        - Information is NOT in graph nodes but IN DOCUMENT CONTENT
-        
-        WORKFLOW:
-        1. First use read_neo4j_cypher to find the relevant entity (Policy, Document, etc.)
-        2. Then use THIS tool to search within that entity's Chunks for detailed content
-        
-        PARAMETERS:
-        - query_text: The CONCEPT you're searching for (e.g., "payment installment plan")
-          DO NOT include metadata (names, dates, IDs) in query_text!
-        - cypher_query: Must filter to specific entity's Chunks and use $embedding_vector
-        
-        Example usage:
-        - query_text: "taksit ödeme planı"
-        - cypher_query: "MATCH (c:Chunk) WHERE c.embedding IS NOT NULL AND gds.similarity.cosine(c.embedding, $embedding_vector) > 0.8 RETURN c.text, gds.similarity.cosine(c.embedding, $embedding_vector) as score ORDER BY score DESC LIMIT 10"
-        - params: {} (optional additional parameters)
-        
-        ⚠️ CRITICAL: Always include 'c.embedding IS NOT NULL' check to avoid NullPointerException!
+
+        USE THIS TOOL WHEN: question asks for details, lists, tables, explanations,
+        or document content. First use read_neo4j_cypher to find the entity, then
+        use this tool to search within its Chunks.
+
+        query_text should contain only content keywords (not metadata like names/dates).
+        cypher_query MUST include $embedding_vector and 'c.embedding IS NOT NULL' check.
         """
         
         # 📊 Tool Call Logging

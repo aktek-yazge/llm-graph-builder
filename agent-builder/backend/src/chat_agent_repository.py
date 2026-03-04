@@ -1,0 +1,165 @@
+"""
+Chat Agent Repository
+=====================
+
+PostgreSQL repository for Chat Agent records.
+A Chat Agent maps to a Virtual Server on the MCP Context Forge Gateway.
+"""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+from .event_store.postgres_client import PostgresClient
+
+logger = logging.getLogger(__name__)
+
+
+class ChatAgentRepository:
+    def __init__(self, pg: PostgresClient):
+        self._pg = pg
+
+    async def create(
+        self,
+        name: str,
+        tenant_id: str = "default",
+        description: str = "",
+        workspace_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        associated_tools: Optional[List[str]] = None,
+        associated_prompts: Optional[List[str]] = None,
+        associated_resources: Optional[List[str]] = None,
+        kb_resource_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        row = await self._pg.fetchrow(
+            """
+            INSERT INTO chat_agents
+                (name, description, tenant_id, workspace_id, system_prompt,
+                 associated_tools, associated_prompts, associated_resources,
+                 kb_resource_id, tags, config)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::uuid, $10, $11::jsonb)
+            RETURNING *
+            """,
+            name,
+            description,
+            tenant_id,
+            workspace_id,
+            system_prompt,
+            json.dumps(associated_tools or []),
+            json.dumps(associated_prompts or []),
+            json.dumps(associated_resources or []),
+            kb_resource_id,
+            tags or [],
+            json.dumps(config or {}),
+        )
+        return dict(row)
+
+    async def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        row = await self._pg.fetchrow(
+            "SELECT * FROM chat_agents WHERE id = $1::uuid", agent_id
+        )
+        return dict(row) if row else None
+
+    async def list_by_tenant(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if status:
+            rows = await self._pg.fetch(
+                """
+                SELECT * FROM chat_agents
+                WHERE tenant_id = $1 AND status = $2
+                ORDER BY created_at DESC
+                LIMIT $3 OFFSET $4
+                """,
+                tenant_id, status, limit, offset,
+            )
+        else:
+            rows = await self._pg.fetch(
+                """
+                SELECT * FROM chat_agents
+                WHERE tenant_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                tenant_id, limit, offset,
+            )
+        return [dict(r) for r in rows]
+
+    async def list_by_workspace(self, workspace_id: str) -> List[Dict[str, Any]]:
+        rows = await self._pg.fetch(
+            "SELECT * FROM chat_agents WHERE workspace_id = $1 ORDER BY created_at DESC",
+            workspace_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def update(self, agent_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+        sets = []
+        args = []
+        idx = 1
+
+        field_map = {
+            "name": "name",
+            "description": "description",
+            "status": "status",
+            "system_prompt": "system_prompt",
+            "gateway_server_id": "gateway_server_id",
+            "workspace_id": "workspace_id",
+            "kb_resource_id": "kb_resource_id",
+        }
+        json_fields = {"associated_tools", "associated_prompts", "associated_resources", "config"}
+        array_fields = {"tags"}
+
+        for key, val in kwargs.items():
+            if val is None:
+                continue
+            if key in field_map:
+                sets.append(f"{field_map[key]} = ${idx}")
+                args.append(val)
+                idx += 1
+            elif key in json_fields:
+                sets.append(f"{key} = ${idx}::jsonb")
+                args.append(json.dumps(val))
+                idx += 1
+            elif key in array_fields:
+                sets.append(f"{key} = ${idx}")
+                args.append(val)
+                idx += 1
+
+        if not sets:
+            return await self.get(agent_id)
+
+        sets.append(f"updated_at = NOW()")
+        args.append(agent_id)
+
+        query = f"""
+            UPDATE chat_agents
+            SET {', '.join(sets)}
+            WHERE id = ${idx}::uuid
+            RETURNING *
+        """
+        row = await self._pg.fetchrow(query, *args)
+        return dict(row) if row else None
+
+    async def delete(self, agent_id: str) -> bool:
+        result = await self._pg.execute(
+            "DELETE FROM chat_agents WHERE id = $1::uuid", agent_id
+        )
+        return "DELETE 1" in result
+
+    async def set_gateway_server_id(
+        self, agent_id: str, gateway_server_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return await self.update(
+            agent_id, gateway_server_id=gateway_server_id, status="active"
+        )
+
+    async def count_by_tenant(self, tenant_id: str) -> int:
+        return await self._pg.fetchval(
+            "SELECT COUNT(*) FROM chat_agents WHERE tenant_id = $1", tenant_id
+        )
