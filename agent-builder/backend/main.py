@@ -38,6 +38,7 @@ from src.comms_router import router as comms_router
 from src.dashboard_router import router as dashboard_router
 from src.resource_router import router as resource_router
 from src.chat_agent_router import router as chat_agent_router
+from src.chat_agent_router import orchestrator_router
 from src.ontology import get_ontology_client, initialize_ontology_db
 from src.gateway import get_gateway_client
 from src.event_store import get_postgres_client
@@ -141,6 +142,7 @@ app.include_router(comms_router)
 app.include_router(dashboard_router)
 app.include_router(resource_router)
 app.include_router(chat_agent_router)
+app.include_router(orchestrator_router)
 
 
 # =============================================================================

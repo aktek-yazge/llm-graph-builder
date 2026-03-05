@@ -585,6 +585,92 @@ class MCPGatewayClient:
         return await self._get(f"/llmchat/status/{user_id}")
 
     # =========================================================================
+    # A2A AGENTS
+    # =========================================================================
+
+    async def list_a2a_agents(self) -> List[Dict[str, Any]]:
+        """List all registered A2A agents."""
+        return await self._get("/a2a/")
+
+    async def get_a2a_agent(self, agent_id: str) -> Dict[str, Any]:
+        """Get A2A agent details."""
+        return await self._get(f"/a2a/{agent_id}")
+
+    async def register_a2a_agent(
+        self,
+        name: str,
+        endpoint_url: str,
+        agent_type: str = "Generic",
+        description: str = "",
+        tags: List[str] | None = None,
+        visibility: str = "public",
+        auth_type: str | None = None,
+        capabilities: Dict[str, Any] | None = None,
+        config: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Register a new A2A agent on the ContextForge Gateway.
+
+        Args:
+            name: Agent name (unique slug generated automatically)
+            endpoint_url: HTTP endpoint for A2A invocations
+            agent_type: Generic, openai, anthropic, etc.
+            description: Agent description
+            tags: Tag list
+            visibility: public | team | private
+            auth_type: None, Bearer, Basic, etc.
+            capabilities: Agent capabilities dict
+            config: Extra configuration
+        """
+        agent_data: Dict[str, Any] = {
+            "name": name,
+            "endpoint_url": endpoint_url,
+            "agent_type": agent_type,
+            "description": description,
+        }
+        if tags:
+            agent_data["tags"] = tags
+        if auth_type:
+            agent_data["auth_type"] = auth_type
+        if capabilities:
+            agent_data["capabilities"] = capabilities
+        if config:
+            agent_data["config"] = config
+
+        payload: Dict[str, Any] = {"agent": agent_data, "visibility": visibility}
+        result = await self._post("/a2a/", json=payload)
+        logger.info("Registered A2A agent: %s (id=%s)", name, result.get("id", ""))
+        return result
+
+    async def update_a2a_agent(self, agent_id: str, **kwargs) -> Dict[str, Any]:
+        """Update an A2A agent."""
+        result = await self._put(f"/a2a/{agent_id}", json=kwargs)
+        logger.info("Updated A2A agent: %s", agent_id)
+        return result
+
+    async def delete_a2a_agent(self, agent_id: str) -> None:
+        """Delete an A2A agent from the registry."""
+        await self._delete(f"/a2a/{agent_id}")
+        logger.info("Deleted A2A agent: %s", agent_id)
+
+    async def set_a2a_agent_state(self, agent_id: str, active: bool) -> Dict[str, Any]:
+        """Activate or deactivate an A2A agent."""
+        return await self._post(
+            f"/a2a/{agent_id}/state", json={"activate": active}
+        )
+
+    async def toggle_a2a_agent(self, agent_id: str) -> Dict[str, Any]:
+        """Toggle A2A agent enabled status."""
+        return await self._post(f"/a2a/{agent_id}/toggle")
+
+    async def invoke_a2a_agent(
+        self, agent_name: str, message: str, **kwargs
+    ) -> Dict[str, Any]:
+        """Invoke an A2A agent by name."""
+        payload = {"message": message, **kwargs}
+        return await self._post(f"/a2a/{agent_name}/invoke", json=payload)
+
+    # =========================================================================
     # EXPORT / IMPORT
     # =========================================================================
 

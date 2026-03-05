@@ -31,12 +31,16 @@ export interface ChatAgentSummary {
   name: string;
   description: string;
   status: ChatAgentStatus;
+  agent_type: string;
   tenant_id: string;
   workspace_id?: string;
+  workspace_ids: string[];
   gateway_server_id?: string;
+  a2a_agent_id?: string;
   tool_count: number;
   prompt_count: number;
   resource_count: number;
+  connected_agent_count: number;
   created_at?: string;
 }
 
@@ -45,9 +49,12 @@ export interface ChatAgentDetail {
   name: string;
   description: string;
   status: ChatAgentStatus;
+  agent_type: string;
   tenant_id: string;
   workspace_id?: string;
+  workspace_ids: string[];
   gateway_server_id?: string;
+  a2a_agent_id?: string;
   system_prompt?: string;
   associated_tools: string[];
   associated_prompts: string[];
@@ -55,8 +62,11 @@ export interface ChatAgentDetail {
   kb_resource_id?: string;
   tags: string[];
   config: Record<string, unknown>;
+  delegation_config: Record<string, unknown>;
+  connected_agent_ids: string[];
   mcp_endpoint?: string;
   sse_endpoint?: string;
+  a2a_endpoint?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -66,6 +76,8 @@ export interface ChatAgentCreatePayload {
   description?: string;
   tenant_id?: string;
   workspace_id?: string;
+  workspace_ids?: string[];
+  agent_type?: string;
   system_prompt?: string;
   associated_tool_ids?: string[];
   associated_prompt_ids?: string[];
@@ -73,11 +85,15 @@ export interface ChatAgentCreatePayload {
   kb_resource_id?: string;
   tags?: string[];
   config?: Record<string, unknown>;
+  delegation_config?: Record<string, unknown>;
+  connected_agent_ids?: string[];
 }
 
 export interface ChatAgentUpdatePayload {
   name?: string;
   description?: string;
+  agent_type?: string;
+  workspace_ids?: string[];
   system_prompt?: string;
   associated_tool_ids?: string[];
   associated_prompt_ids?: string[];
@@ -85,6 +101,8 @@ export interface ChatAgentUpdatePayload {
   kb_resource_id?: string;
   tags?: string[];
   config?: Record<string, unknown>;
+  delegation_config?: Record<string, unknown>;
+  connected_agent_ids?: string[];
 }
 
 export interface GatewayItem {
@@ -301,4 +319,223 @@ export async function disconnectChat(agentId: string, userId: string) {
 export async function chatStatus(agentId: string, userId: string) {
   const params = new URLSearchParams({ user_id: userId });
   return api<{ connected: boolean; error?: string }>(`/${agentId}/chat/status?${params}`);
+}
+
+// =============================================================================
+// A2A — Agent-to-Agent
+// =============================================================================
+
+export async function registerA2A(agentId: string) {
+  return api<{ agent_id: string; a2a_agent_id: string; message: string }>(
+    `/${agentId}/register-a2a`,
+    { method: 'POST' },
+  );
+}
+
+export async function unregisterA2A(agentId: string) {
+  return api<{ agent_id: string; message: string }>(
+    `/${agentId}/unregister-a2a`,
+    { method: 'DELETE' },
+  );
+}
+
+export async function getDelegationHistory(agentId: string, limit = 20) {
+  return api<{ delegations: Array<Record<string, unknown>>; count: number }>(
+    `/${agentId}/delegations?limit=${limit}`,
+  );
+}
+
+export async function getAvailableAgents(agentId: string) {
+  return api<{ agents: Array<Record<string, unknown>>; count: number }>(
+    `/${agentId}/available-agents`,
+  );
+}
+
+export async function getWorkspaceAgents(agentId: string) {
+  return api<{ agents: ChatAgentSummary[]; count: number }>(
+    `/${agentId}/workspace-agents`,
+  );
+}
+
+// =============================================================================
+// AGENT CREATOR ASSISTANT
+// =============================================================================
+
+export interface CreatorChatPayload {
+  message: string;
+  session_id?: string;
+  workspace_ids?: string[];
+  agent_name?: string;
+  agent_type?: string;
+}
+
+export async function sendCreatorChat(
+  payload: CreatorChatPayload,
+  onChunk: (data: string) => void,
+  onDone: () => void,
+  onError: (err: Error) => void,
+): Promise<AbortController> {
+  const controller = new AbortController();
+
+  fetch(`${BASE}/creator/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) onChunk(line.slice(6));
+        }
+      }
+      if (buffer.startsWith('data: ')) onChunk(buffer.slice(6));
+      onDone();
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') onError(err);
+    });
+
+  return controller;
+}
+
+export async function getCreatorSession(sessionId: string) {
+  return api<{
+    session_id: string;
+    step: string;
+    agent_name: string;
+    workspace_ids: string[];
+    has_analysis: boolean;
+    agent_id?: string;
+  }>(`/creator/sessions/${sessionId}`);
+}
+
+// =============================================================================
+// ORCHESTRATOR API
+// =============================================================================
+
+const ORCH_BASE = '/api/v2/chat';
+
+export interface OrchestratorConnectResult {
+  session_id: string;
+  user_id: string;
+  status: string;
+  agent_id?: string;
+  agent_name?: string;
+  engine?: string;
+  expert_count?: number;
+  message?: string;
+}
+
+export interface OrchestratorExpert {
+  id: string;
+  name: string;
+  description: string;
+  workspace_ids: string[];
+  status: string;
+}
+
+export interface OrchestratorStatus {
+  orchestrator: {
+    configured: boolean;
+    agent_id: string | null;
+    name: string | null;
+    deployed: boolean;
+  };
+  experts: {
+    total: number;
+    names: string[];
+  };
+}
+
+export async function orchestratorConnect(
+  userId?: string,
+  model?: string,
+  tenantId?: string,
+): Promise<OrchestratorConnectResult> {
+  const res = await fetch(`${ORCH_BASE}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId || '',
+      model: model || 'gpt-4o',
+      tenant_id: tenantId || 'default',
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function orchestratorChat(
+  message: string,
+  sessionId: string,
+  onChunk: (data: string) => void,
+  onDone: () => void,
+  onError: (err: Error) => void,
+  model?: string,
+): Promise<AbortController> {
+  const controller = new AbortController();
+
+  fetch(`${ORCH_BASE}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message,
+      session_id: sessionId,
+      model: model || '',
+    }),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) onChunk(line.slice(6));
+        }
+      }
+      if (buffer.startsWith('data: ')) onChunk(buffer.slice(6));
+      onDone();
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') onError(err);
+    });
+
+  return controller;
+}
+
+export async function getOrchestratorExperts(tenantId = 'default') {
+  const res = await fetch(`${ORCH_BASE}/experts?tenant_id=${tenantId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ experts: OrchestratorExpert[]; count: number }>;
+}
+
+export async function getOrchestratorStatus(tenantId = 'default') {
+  const res = await fetch(`${ORCH_BASE}/status?tenant_id=${tenantId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<OrchestratorStatus>;
 }

@@ -15,6 +15,10 @@ import {
   connectChat,
   sendChatMessage,
   disconnectChat,
+  registerA2A,
+  unregisterA2A,
+  getDelegationHistory,
+  getAvailableAgents,
 } from '../services/chatAgentApi';
 import Breadcrumb from '../components/Breadcrumb';
 
@@ -34,7 +38,7 @@ const statusLabels: Record<ChatAgentStatus, string> = {
   error: 'Hata',
 };
 
-type Tab = 'overview' | 'tools' | 'prompts' | 'resources' | 'chat';
+type Tab = 'overview' | 'tools' | 'prompts' | 'resources' | 'chat' | 'delegation' | 'a2a';
 
 export default function ChatAgentDetailPage() {
   const { agentId } = useParams<{ agentId: string }>();
@@ -149,7 +153,7 @@ export default function ChatAgentDetailPage() {
     if (!agentId || !confirm('Bu agent silinecek. Emin misiniz?')) return;
     try {
       await deleteChatAgent(agentId);
-      navigate('/chat-agents');
+      navigate('/admin/agents');
     } catch (err) {
       console.error('Delete failed:', err);
     }
@@ -171,6 +175,8 @@ export default function ChatAgentDetailPage() {
     { key: 'tools', label: 'Tools', count: selectedTools.length },
     { key: 'prompts', label: 'Prompts', count: selectedPrompts.length },
     { key: 'resources', label: 'Resources', count: selectedResources.length },
+    { key: 'delegation', label: 'Delegasyon', count: agent.connected_agent_ids?.length || 0 },
+    { key: 'a2a', label: 'A2A' },
     { key: 'chat', label: 'Chat' },
   ];
 
@@ -178,7 +184,7 @@ export default function ChatAgentDetailPage() {
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <Breadcrumb items={[
         { label: 'Dashboard', to: '/dashboard' },
-        { label: 'Chat Agents', to: '/chat-agents' },
+        { label: 'Agent\'lar', to: '/admin/agents' },
         { label: agent.name },
       ]} />
 
@@ -190,6 +196,11 @@ export default function ChatAgentDetailPage() {
             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[agent.status]}`}>
               {statusLabels[agent.status]}
             </span>
+            {agent.a2a_agent_id && (
+              <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
+                A2A
+              </span>
+            )}
           </div>
           {agent.description && (
             <p className="text-gray-500 mt-1">{agent.description}</p>
@@ -248,6 +259,12 @@ export default function ChatAgentDetailPage() {
               <div>
                 <span className="font-medium">SSE:</span>{' '}
                 <code className="bg-blue-100 px-1 rounded">{agent.sse_endpoint}</code>
+              </div>
+            )}
+            {agent.a2a_endpoint && (
+              <div>
+                <span className="font-medium">A2A:</span>{' '}
+                <code className="bg-blue-100 px-1 rounded">{agent.a2a_endpoint}</code>
               </div>
             )}
           </div>
@@ -323,21 +340,37 @@ export default function ChatAgentDetailPage() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
+                  <span className="text-gray-500">Agent Tipi:</span>{' '}
+                  <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                    {agent.agent_type || 'expert'}
+                  </span>
+                </div>
+                <div>
                   <span className="text-gray-500">Tenant:</span>{' '}
                   <span className="text-gray-900">{agent.tenant_id}</span>
                 </div>
                 <div>
-                  <span className="text-gray-500">Workspace:</span>{' '}
-                  <span className="text-gray-900">{agent.workspace_id || '-'}</span>
+                  <span className="text-gray-500">Workspace'ler:</span>{' '}
+                  <span className="text-gray-900">
+                    {agent.workspace_ids?.length
+                      ? `${agent.workspace_ids.length} bagli`
+                      : agent.workspace_id || '-'}
+                  </span>
                 </div>
                 <div>
-                  <span className="text-gray-500">Oluşturulma:</span>{' '}
+                  <span className="text-gray-500">Bagli Agent'lar:</span>{' '}
+                  <span className="text-gray-900">
+                    {agent.connected_agent_ids?.length || 0}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Olusturulma:</span>{' '}
                   <span className="text-gray-900">
                     {agent.created_at ? new Date(agent.created_at).toLocaleString('tr-TR') : '-'}
                   </span>
                 </div>
                 <div>
-                  <span className="text-gray-500">Son Güncelleme:</span>{' '}
+                  <span className="text-gray-500">Son Guncelleme:</span>{' '}
                   <span className="text-gray-900">
                     {agent.updated_at ? new Date(agent.updated_at).toLocaleString('tr-TR') : '-'}
                   </span>
@@ -404,11 +437,216 @@ export default function ChatAgentDetailPage() {
         />
       )}
 
+      {activeTab === 'delegation' && (
+        <DelegationPanel agentId={agentId!} connectedAgentIds={agent.connected_agent_ids || []} />
+      )}
+
+      {activeTab === 'a2a' && (
+        <A2APanel
+          agentId={agentId!}
+          a2aAgentId={agent.a2a_agent_id}
+          isDeployed={!!agent.gateway_server_id}
+          a2aEndpoint={agent.a2a_endpoint}
+          onUpdate={loadAgent}
+        />
+      )}
+
       {activeTab === 'chat' && (
         <ChatPanel
           agentId={agentId!}
           isDeployed={!!agent.gateway_server_id}
         />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Delegation Panel
+// ---------------------------------------------------------------------------
+
+function DelegationPanel({
+  agentId,
+  connectedAgentIds,
+}: {
+  agentId: string;
+  connectedAgentIds: string[];
+}) {
+  const [available, setAvailable] = useState<Array<Record<string, unknown>>>([]);
+  const [history, setHistory] = useState<Array<Record<string, unknown>>>([]);
+  const [loadingAvail, setLoadingAvail] = useState(true);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+
+  useEffect(() => {
+    getAvailableAgents(agentId)
+      .then((r) => setAvailable(r.agents))
+      .catch(console.error)
+      .finally(() => setLoadingAvail(false));
+    getDelegationHistory(agentId)
+      .then((r) => setHistory(r.delegations))
+      .catch(console.error)
+      .finally(() => setLoadingHistory(false));
+  }, [agentId]);
+
+  return (
+    <div className="space-y-6">
+      {/* Available Agents */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Delegasyon Yapilabilir Agent'lar</h3>
+        {loadingAvail ? (
+          <p className="text-gray-400 text-sm">Yukleniyor...</p>
+        ) : available.length === 0 ? (
+          <p className="text-gray-400 text-sm">Delegasyon yapilabilir agent bulunamadi.</p>
+        ) : (
+          <div className="grid gap-3">
+            {available.map((a) => (
+              <div key={String(a.id)} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div>
+                  <div className="font-medium text-gray-900 text-sm">{String(a.name)}</div>
+                  <div className="text-xs text-gray-500">{String(a.description || '')}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full text-xs bg-purple-100 text-purple-700">
+                    {String(a.agent_type || 'expert')}
+                  </span>
+                  {connectedAgentIds.includes(String(a.id)) && (
+                    <span className="px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700">Bagli</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Delegation History */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Delegasyon Gecmisi</h3>
+        {loadingHistory ? (
+          <p className="text-gray-400 text-sm">Yukleniyor...</p>
+        ) : history.length === 0 ? (
+          <p className="text-gray-400 text-sm">Henuz delegasyon yapilmamis.</p>
+        ) : (
+          <div className="space-y-2">
+            {history.map((h) => (
+              <div key={String(h.id)} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg text-sm">
+                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                  h.message_type === 'delegation_request'
+                    ? 'bg-blue-100 text-blue-700'
+                    : h.message_type === 'delegation_response'
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-red-100 text-red-700'
+                }`}>
+                  {h.message_type === 'delegation_request'
+                    ? 'Istek'
+                    : h.message_type === 'delegation_response'
+                      ? 'Yanit'
+                      : 'Hata'}
+                </span>
+                <span className="text-gray-400 text-xs">
+                  {String(h.from_agent || '').slice(0, 8)} &rarr; {String(h.to_agent || '').slice(0, 8)}
+                </span>
+                <span className="text-gray-600 truncate flex-1">{String(h.message || '')}</span>
+                <span className="text-gray-300 text-xs shrink-0">{String(h.created_at || '')}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A2A Panel
+// ---------------------------------------------------------------------------
+
+function A2APanel({
+  agentId,
+  a2aAgentId,
+  isDeployed,
+  a2aEndpoint,
+  onUpdate,
+}: {
+  agentId: string;
+  a2aAgentId?: string;
+  isDeployed: boolean;
+  a2aEndpoint?: string;
+  onUpdate: () => void;
+}) {
+  const [registering, setRegistering] = useState(false);
+
+  async function handleRegister() {
+    setRegistering(true);
+    try {
+      await registerA2A(agentId);
+      onUpdate();
+    } catch (err) {
+      console.error('A2A register failed:', err);
+    } finally {
+      setRegistering(false);
+    }
+  }
+
+  async function handleUnregister() {
+    setRegistering(true);
+    try {
+      await unregisterA2A(agentId);
+      onUpdate();
+    } catch (err) {
+      console.error('A2A unregister failed:', err);
+    } finally {
+      setRegistering(false);
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">ContextForge A2A Kaydi</h3>
+
+      {!isDeployed ? (
+        <div className="text-center py-8 text-gray-400">
+          <p className="mb-2">A2A kaydi icin once agent'i deploy edin.</p>
+        </div>
+      ) : a2aAgentId ? (
+        <div className="space-y-4">
+          <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+            <div className="text-sm font-medium text-green-800 mb-2">A2A Kaydi Aktif</div>
+            <div className="space-y-1 text-xs text-green-700">
+              <div>
+                <span className="font-medium">A2A ID:</span>{' '}
+                <code className="bg-green-100 px-1 rounded">{a2aAgentId}</code>
+              </div>
+              {a2aEndpoint && (
+                <div>
+                  <span className="font-medium">A2A Endpoint:</span>{' '}
+                  <code className="bg-green-100 px-1 rounded">{a2aEndpoint}</code>
+                </div>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={handleUnregister}
+            disabled={registering}
+            className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
+          >
+            {registering ? 'Isleniyor...' : 'A2A Kaydini Kaldir'}
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <p className="text-sm text-gray-500">
+            Bu agent henuz ContextForge A2A registry'sine kayitli degil.
+            Kaydettikten sonra diger agent'lar bu agent'a soru yonlendirebilir.
+          </p>
+          <button
+            onClick={handleRegister}
+            disabled={registering}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium"
+          >
+            {registering ? 'Kaydediliyor...' : 'A2A Olarak Kaydet'}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -452,8 +452,11 @@ CREATE TABLE IF NOT EXISTS chat_agents (
     description             TEXT DEFAULT '',
     tenant_id               VARCHAR(128) NOT NULL DEFAULT 'default',
     workspace_id            VARCHAR(256),
+    workspace_ids           JSONB DEFAULT '[]',
     gateway_server_id       VARCHAR(256),
+    a2a_agent_id            VARCHAR(256),
     status                  VARCHAR(32) NOT NULL DEFAULT 'draft',
+    agent_type              VARCHAR(32) NOT NULL DEFAULT 'expert',
     system_prompt           TEXT,
     associated_tools        JSONB DEFAULT '[]',
     associated_prompts      JSONB DEFAULT '[]',
@@ -461,6 +464,8 @@ CREATE TABLE IF NOT EXISTS chat_agents (
     kb_resource_id          UUID REFERENCES resources(id) ON DELETE SET NULL,
     tags                    TEXT[] DEFAULT '{}',
     config                  JSONB DEFAULT '{}',
+    delegation_config       JSONB DEFAULT '{"auto_threshold": 0.8, "max_depth": 3, "enabled": true}',
+    connected_agent_ids     JSONB DEFAULT '[]',
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -470,6 +475,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_agents_workspace ON chat_agents (workspace_i
 CREATE INDEX IF NOT EXISTS idx_chat_agents_gateway ON chat_agents (gateway_server_id)
     WHERE gateway_server_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_agents_status ON chat_agents (status);
+CREATE INDEX IF NOT EXISTS idx_chat_agents_a2a ON chat_agents (a2a_agent_id)
+    WHERE a2a_agent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_agents_type ON chat_agents (agent_type);
 
 -- =============================================================================
 -- Prevent mutation of events (immutability guard)

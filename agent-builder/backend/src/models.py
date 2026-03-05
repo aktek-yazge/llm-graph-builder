@@ -744,6 +744,8 @@ class ChatAgentCreate(BaseModel):
     description: str = Field(default="", max_length=2000)
     tenant_id: str = Field(default="default")
     workspace_id: Optional[str] = None
+    workspace_ids: List[str] = Field(default_factory=list, description="Coklu workspace baglama")
+    agent_type: str = Field(default="expert", description="expert, analyst, assistant")
     system_prompt: Optional[str] = None
     associated_tool_ids: List[str] = Field(default_factory=list, description="Gateway tool UUID listesi")
     associated_prompt_ids: List[str] = Field(default_factory=list, description="Gateway prompt UUID listesi")
@@ -751,18 +753,27 @@ class ChatAgentCreate(BaseModel):
     kb_resource_id: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     config: Dict[str, Any] = Field(default_factory=dict)
+    delegation_config: Dict[str, Any] = Field(
+        default_factory=lambda: {"auto_threshold": 0.8, "max_depth": 3, "enabled": True},
+        description="Delegasyon ayarlari",
+    )
+    connected_agent_ids: List[str] = Field(default_factory=list, description="Delegasyon yapilabilecek agent ID listesi")
 
 
 class ChatAgentUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=256)
     description: Optional[str] = Field(None, max_length=2000)
     system_prompt: Optional[str] = None
+    agent_type: Optional[str] = None
+    workspace_ids: Optional[List[str]] = None
     associated_tool_ids: Optional[List[str]] = None
     associated_prompt_ids: Optional[List[str]] = None
     associated_resource_ids: Optional[List[str]] = None
     kb_resource_id: Optional[str] = None
     tags: Optional[List[str]] = None
     config: Optional[Dict[str, Any]] = None
+    delegation_config: Optional[Dict[str, Any]] = None
+    connected_agent_ids: Optional[List[str]] = None
 
 
 class ChatAgentSummary(BaseModel):
@@ -770,12 +781,16 @@ class ChatAgentSummary(BaseModel):
     name: str
     description: str = ""
     status: ChatAgentStatus = ChatAgentStatus.DRAFT
+    agent_type: str = "expert"
     tenant_id: str = "default"
     workspace_id: Optional[str] = None
+    workspace_ids: List[str] = Field(default_factory=list)
     gateway_server_id: Optional[str] = None
+    a2a_agent_id: Optional[str] = None
     tool_count: int = 0
     prompt_count: int = 0
     resource_count: int = 0
+    connected_agent_count: int = 0
     created_at: Optional[datetime] = None
 
 
@@ -784,9 +799,12 @@ class ChatAgentDetail(BaseModel):
     name: str
     description: str = ""
     status: ChatAgentStatus = ChatAgentStatus.DRAFT
+    agent_type: str = "expert"
     tenant_id: str = "default"
     workspace_id: Optional[str] = None
+    workspace_ids: List[str] = Field(default_factory=list)
     gateway_server_id: Optional[str] = None
+    a2a_agent_id: Optional[str] = None
     system_prompt: Optional[str] = None
     associated_tools: List[str] = Field(default_factory=list)
     associated_prompts: List[str] = Field(default_factory=list)
@@ -794,8 +812,11 @@ class ChatAgentDetail(BaseModel):
     kb_resource_id: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     config: Dict[str, Any] = Field(default_factory=dict)
+    delegation_config: Dict[str, Any] = Field(default_factory=dict)
+    connected_agent_ids: List[str] = Field(default_factory=list)
     mcp_endpoint: Optional[str] = None
     sse_endpoint: Optional[str] = None
+    a2a_endpoint: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

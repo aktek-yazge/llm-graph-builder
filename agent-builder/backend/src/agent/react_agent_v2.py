@@ -1924,12 +1924,56 @@ Lütfen sorguyu düzelt ve tekrar dene."""
     for mcp_tool in agent_mcp_tools:
         tools.append(mcp_tool)
 
-    custom_count = len(tools) - len(agent_mcp_tools)
+    # Orchestrator tools (replaces old delegation tools)
+    orchestrator_tools = _create_orchestrator_tools()
+    tools.extend(orchestrator_tools)
+
+    custom_count = len(tools) - len(agent_mcp_tools) - len(orchestrator_tools)
     _log(
-        f"🔧 Total tools: {len(tools)} (custom: {custom_count}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)})"
+        f"🔧 Total tools: {len(tools)} (custom: {custom_count}, mcp_agent: {len(agent_mcp_tools)}, mcp_internal: {len(mcp_tools) - len(agent_mcp_tools)}, orchestrator: {len(orchestrator_tools)})"
     )
 
     return tools
+
+
+def _create_orchestrator_tools():
+    """Create orchestrator tools for parallel expert agent querying."""
+    if not LANGCHAIN_AVAILABLE or tool is None:
+        return []
+
+    orchestrator_tools = []
+
+    @tool
+    async def query_experts(
+        question: str,
+        context: str = "",
+    ) -> str:
+        """Soruyu ilgili uzman agentlara paralel olarak ilet ve yanitlari topla.
+        Her expert kendi bilgi tabaninda (workspace KB) derinlemesine arastirma yapar.
+        Sonuclari kaynak bilgisiyle birlikte dondurur.
+
+        Bu tool'u su durumlarda kullan:
+        - Domain-specific sorular (mali veriler, hukuki bilgiler, teknik detaylar)
+        - Multi-domain sorular (hem finans hem hukuk gibi farkli alanlari ilgilendiren)
+        - Bilgi tabaninda derinlemesine arastirma gerektiren sorular
+
+        Bu tool'u kullanma:
+        - Basit selamlasma veya genel bilgi sorulari icin
+        - Zaten yeterli bilgiye sahipsen"""
+        try:
+            from .orchestrator_service import OrchestratorService
+            orchestrator = await OrchestratorService.create()
+            experts = await orchestrator.select_relevant_experts(question)
+            if not experts:
+                return "Ilgili uzman agent bulunamadi. Sisteme henuz expert agent eklenmemis olabilir."
+            responses = await orchestrator.fan_out_query(question, experts, context)
+            return orchestrator.format_expert_responses(responses)
+        except Exception as e:
+            return f"Expert sorgulama hatasi: {e}"
+
+    orchestrator_tools.append(query_experts)
+
+    return orchestrator_tools
 
 
 # ============================================================================
@@ -2149,65 +2193,73 @@ class ReactAgentV2:
     async def _build_system_prompt(self, schema_info: str, session_id: str = "") -> str:
         """
         Gateway Virtual Server'dan system prompt al ve schema_info ile render et.
+        Gateway bos donerse veya prompt yetersizse deep research fallback kullan.
 
-        Prompt Kaynak Sirasi (yalnizca Gateway):
+        Prompt Kaynak Sirasi:
         1. Gateway Virtual Server'daki "system" role'lu prompt
         2. Prompt icinde {{schema_info}} / {schema_info} placeholder'i varsa render_prompt ile doldur
         3. Yoksa prompt + schema_info birlestir
-        4. Gateway'de prompt yoksa bos string don
-
-        Fallback YOK: Promptlar tamamen Gateway'den gelir.
+        4. Gateway'de prompt yoksa veya cok kisaysa -> deep research fallback
         """
         _log(f"📋 Building system prompt from Gateway server_id={self.server_id}")
 
+        gateway_prompt = ""
         try:
             gw = await get_gateway_client()
             prompts = await gw.get_server_prompts(self.server_id)
 
-            if not prompts:
-                _log("⚠️ No prompts found on Gateway server, returning empty", "warning")
-                return ""
+            if prompts:
+                system_prompt_data = None
+                for p in prompts:
+                    if p.get("role") == "system" or p.get("name", "").lower().startswith("system"):
+                        system_prompt_data = p
+                        break
 
-            system_prompt_data = None
-            for p in prompts:
-                if p.get("role") == "system" or p.get("name", "").lower().startswith("system"):
-                    system_prompt_data = p
-                    break
+                if not system_prompt_data:
+                    system_prompt_data = prompts[0]
+                    _log(f"📋 No 'system' role prompt found, using first prompt: {system_prompt_data.get('name', 'unknown')}")
 
-            if not system_prompt_data:
-                system_prompt_data = prompts[0]
-                _log(f"📋 No 'system' role prompt found, using first prompt: {system_prompt_data.get('name', 'unknown')}")
+                prompt_id = system_prompt_data.get("id") or system_prompt_data.get("name", "")
+                prompt_text = system_prompt_data.get("text", "") or system_prompt_data.get("content", "")
 
-            prompt_id = system_prompt_data.get("id") or system_prompt_data.get("name", "")
-            prompt_text = system_prompt_data.get("text", "") or system_prompt_data.get("content", "")
+                has_schema_placeholder = "{{schema_info}}" in prompt_text or "{schema_info}" in prompt_text
 
-            has_schema_placeholder = "{{schema_info}}" in prompt_text or "{schema_info}" in prompt_text
+                if has_schema_placeholder and prompt_id:
+                    try:
+                        rendered = await gw.render_prompt(prompt_id, {"schema_info": schema_info})
+                        if isinstance(rendered, dict):
+                            rendered_text = rendered.get("text", "") or rendered.get("content", "")
+                            if rendered_text:
+                                _log(f"📋 Gateway prompt rendered with schema_info ({len(rendered_text)} chars)")
+                                gateway_prompt = rendered_text
+                    except Exception as e:
+                        _log(f"⚠️ Gateway render_prompt failed: {e}, manual replace", "warning")
 
-            if has_schema_placeholder and prompt_id:
-                try:
-                    rendered = await gw.render_prompt(prompt_id, {"schema_info": schema_info})
-                    if isinstance(rendered, dict):
-                        rendered_text = rendered.get("text", "") or rendered.get("content", "")
-                        if rendered_text:
-                            _log(f"📋 Gateway prompt rendered with schema_info ({len(rendered_text)} chars)")
-                            return rendered_text
-                except Exception as e:
-                    _log(f"⚠️ Gateway render_prompt failed: {e}, manual replace", "warning")
+                    if not gateway_prompt:
+                        gateway_prompt = prompt_text.replace("{{schema_info}}", schema_info).replace("{schema_info}", schema_info)
 
-                compiled = prompt_text.replace("{{schema_info}}", schema_info).replace("{schema_info}", schema_info)
-                return compiled
-
-            if prompt_text:
-                full_prompt = prompt_text + "\n\n" + schema_info if schema_info else prompt_text
-                _log(f"📋 Gateway prompt loaded ({len(full_prompt)} chars)")
-                return full_prompt
-
-            _log("⚠️ Gateway prompt empty, returning empty", "warning")
-            return ""
+                elif prompt_text:
+                    gateway_prompt = prompt_text + "\n\n" + schema_info if schema_info else prompt_text
+                    _log(f"📋 Gateway prompt loaded ({len(gateway_prompt)} chars)")
 
         except Exception as e:
             _log(f"⚠️ Gateway prompt fetch failed: {e}", "warning")
-            return ""
+
+        if gateway_prompt and len(gateway_prompt) >= 200:
+            return gateway_prompt
+
+        _log("📋 Gateway prompt empty or too short, applying deep research fallback", "warning")
+        try:
+            from .deep_research_prompts import build_deep_research_prompt
+            fallback = build_deep_research_prompt(
+                schema_info=schema_info,
+                domain_context=gateway_prompt if gateway_prompt else "",
+            )
+            _log(f"📋 Deep research fallback prompt built ({len(fallback)} chars)")
+            return fallback
+        except Exception as e:
+            _log(f"⚠️ Deep research fallback failed: {e}", "warning")
+            return gateway_prompt or ""
 
     # _ensure_prompt_in_langfuse KALDIRILDI - V2'de promptlar Gateway'den gelir
 

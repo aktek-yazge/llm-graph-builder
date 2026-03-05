@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import {
   workspaceApi,
   workspaceChatApi,
@@ -120,13 +120,14 @@ export default function WorkspaceDetail() {
           {phase === 'results' && <ResultsPane workspaceId={workspace.id} />}
         </div>
 
-        {/* Right: Status Panel */}
-        <div className="w-72 flex-shrink-0 border-l border-gray-200 bg-gray-50 overflow-y-auto p-4">
+        {/* Right: Status Panel + Related Agents */}
+        <div className="w-72 flex-shrink-0 border-l border-gray-200 bg-gray-50 overflow-y-auto p-4 space-y-4">
           <StatusPanel
             workspaceId={workspace.id}
             showUpload={showSideUpload}
             onUploadComplete={() => setShowSideUpload(false)}
           />
+          <WorkspaceAgentsList workspaceId={workspace.id} />
         </div>
       </div>
     </div>
@@ -474,6 +475,73 @@ function ResultsPane({ workspaceId }: { workspaceId: string }) {
         <h3 className="text-lg font-semibold text-green-800">Isleme Tamamlandi</h3>
         <p className="text-green-600 mt-1">Knowledge Base hazir. KB Agent ile sorgulama yapabilirsiniz.</p>
       </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// WORKSPACE AGENTS LIST (sidebar)
+// =============================================================================
+
+function WorkspaceAgentsList({ workspaceId }: { workspaceId: string }) {
+  const [agents, setAgents] = useState<Array<{ id: string; name: string; status: string; agent_type: string }>>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    import('../services/chatAgentApi')
+      .then(({ listChatAgents }) => listChatAgents('default'))
+      .then((data) => {
+        const related = data.agents.filter(
+          (a: any) =>
+            a.workspace_id === workspaceId ||
+            (a.workspace_ids || []).includes(workspaceId),
+        );
+        setAgents(related.map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          status: a.status,
+          agent_type: a.agent_type || 'expert',
+        })));
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-xs font-semibold text-gray-700 uppercase">Bagli Agent'lar</h4>
+        <Link
+          to={`/admin/agents`}
+          className="text-xs text-blue-600 hover:text-blue-700"
+        >
+          Tumu
+        </Link>
+      </div>
+      {loading ? (
+        <p className="text-xs text-gray-400">Yukleniyor...</p>
+      ) : agents.length === 0 ? (
+        <p className="text-xs text-gray-400">Bu workspace'e bagli agent yok.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {agents.map((a) => (
+            <Link
+              key={a.id}
+              to={`/admin/agents/${a.id}`}
+              className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-50 text-xs"
+            >
+              <span className="text-gray-800 truncate">{a.name}</span>
+              <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
+                a.status === 'active'
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-gray-100 text-gray-500'
+              }`}>
+                {a.status === 'active' ? 'Aktif' : a.status}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

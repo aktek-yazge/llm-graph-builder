@@ -168,11 +168,11 @@ export default function Dashboard() {
             desc="Belge koleksiyonlarini yonetin"
           />
           <QuickAction
-            onClick={() => navigate('/chat-agents')}
+            onClick={() => navigate('/admin/agents')}
             icon={<AgentIcon />}
             gradient="from-violet-500 to-purple-600"
-            title="Chat Agent"
-            desc="Agent olusturun ve yonetin"
+            title="Agent Yonetimi"
+            desc="Uzman agentlar olusturun ve yonetin"
           />
           <QuickAction
             onClick={() => navigate('/resources')}
@@ -182,6 +182,9 @@ export default function Dashboard() {
             desc="Kaynaklari duzenleyin"
           />
         </motion.div>
+
+        {/* Chat CTA */}
+        <ChatCTA />
 
         {/* Stat Cards */}
         {s && (
@@ -497,6 +500,66 @@ export default function Dashboard() {
 }
 
 /* ─── Sub-components ─── */
+
+function ChatCTA() {
+  const navigate = useNavigate();
+  const [expertCount, setExpertCount] = useState(0);
+  const [expertNames, setExpertNames] = useState<string[]>([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getOrchestratorStatus } = await import('../services/chatAgentApi');
+        const s = await getOrchestratorStatus();
+        setExpertCount(s.experts.total);
+        setExpertNames(s.experts.names);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  return (
+    <motion.div
+      variants={fadeUp}
+      initial="hidden"
+      animate="show"
+      className="mb-6"
+    >
+      <button
+        onClick={() => navigate('/chat')}
+        className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-5 text-white
+                   hover:from-indigo-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg
+                   active:scale-[0.99] group"
+      >
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center text-2xl font-bold shrink-0">
+            ?
+          </div>
+          <div className="text-left flex-1">
+            <div className="text-lg font-semibold">Soru Sor</div>
+            <div className="text-sm text-white/70 mt-0.5">
+              {expertCount > 0
+                ? `${expertCount} uzman agent otomatik olarak sorgulanir`
+                : 'Uzman agentlara sorunuzu iletin'}
+            </div>
+          </div>
+          <svg className="w-6 h-6 text-white/60 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </div>
+        {expertNames.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            {expertNames.map((name) => (
+              <span key={name} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-white/15 text-white/90">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                {name}
+              </span>
+            ))}
+          </div>
+        )}
+      </button>
+    </motion.div>
+  );
+}
 
 function StatCard({ icon, label, value, sub, accent }: {
   icon: React.ReactNode;

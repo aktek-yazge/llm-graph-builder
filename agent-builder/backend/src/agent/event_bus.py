@@ -253,6 +253,7 @@ class EventTypes:
     SCHEMA_PROPOSED = "workspace.schema_proposed"
     SCHEMA_APPROVED = "workspace.schema_approved"
     SCHEMA_REJECTED = "workspace.schema_rejected"
+    SCHEMA_CHANGED = "workspace.schema_changed"
     KB_AGENT_CREATED = "agent.kb_agent_created"
     PROCESSING_STARTED = "processing.started"
     PROCESSING_PROGRESS = "processing.progress"
@@ -262,3 +263,53 @@ class EventTypes:
     ELICITATION_RESOLVED = "elicitation.resolved"
     AGENT_MESSAGE = "agent.message"
     AGENT_STATUS_CHANGED = "agent.status_changed"
+    DELEGATION_REQUESTED = "delegation.requested"
+    DELEGATION_COMPLETED = "delegation.completed"
+    DELEGATION_FAILED = "delegation.failed"
+
+
+async def register_schema_change_notifier():
+    """
+    Register an event handler that notifies connected agents
+    when a workspace's schema changes.
+    """
+    bus = AgentEventBus.get_instance()
+
+    async def _on_schema_change(event: AgentEvent):
+        workspace_id = event.workspace_id
+        if not workspace_id:
+            return
+
+        try:
+            from ..event_store.postgres_client import get_postgres_client
+            from ..chat_agent_repository import ChatAgentRepository
+            from ..comms_repository import CommsRepository
+
+            pg = await get_postgres_client()
+            repo = ChatAgentRepository(pg)
+            comms = CommsRepository(pg)
+
+            agents = await repo.list_by_workspace(workspace_id)
+            for agent in agents:
+                agent_id = str(agent["id"])
+                await comms.send_message(
+                    from_agent="system",
+                    to_agent=agent_id,
+                    message=f"Workspace {workspace_id} schemasi degisti: {event.payload.get('change_type', 'update')}",
+                    message_type="schema_notification",
+                    metadata={
+                        "workspace_id": workspace_id,
+                        "event_type": event.event_type,
+                        "change_type": event.payload.get("change_type", ""),
+                    },
+                )
+            logger.info(
+                "Schema change notification sent to %d agents for workspace %s",
+                len(agents), workspace_id,
+            )
+        except Exception as e:
+            logger.error("Schema change notification failed: %s", e)
+
+    bus.subscribe(EventTypes.SCHEMA_CHANGED, _on_schema_change)
+    bus.subscribe(EventTypes.SCHEMA_APPROVED, _on_schema_change)
+    logger.info("Schema change notifier registered")
