@@ -10,6 +10,7 @@ paralel olarak sorgular ve yanitlari sentezleyip attribution ile sunar.
 import asyncio
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 EXPERT_QUERY_TIMEOUT = 120
 MIN_RELEVANCE_THRESHOLD = 0.1
+
+
+def _detect_default_model() -> str:
+    """Mevcut API anahtarina gore en uygun modeli sec."""
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini-2.5-flash"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "gpt-4o"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "claude-sonnet-4-20250514"
+    return "gemini-2.5-flash"
 
 
 @dataclass
@@ -160,7 +172,15 @@ class OrchestratorService:
                 error="Agent deployed degil (gateway_server_id yok)",
             )
 
-        model = (expert.get("config") or {}).get("model", "gpt-4o")
+        config = expert.get("config") or {}
+        if isinstance(config, str):
+            import json as _json
+            try:
+                config = _json.loads(config)
+            except Exception:
+                config = {}
+        default_model = _detect_default_model()
+        model = config.get("model", default_model) if isinstance(config, dict) else default_model
         session_id = f"orch-{uuid.uuid4().hex[:8]}"
         question_id = f"orch-q-{uuid.uuid4().hex[:8]}"
 
@@ -253,9 +273,57 @@ class OrchestratorService:
     async def get_or_create_orchestrator(
         self, tenant_id: str = "default"
     ) -> Optional[Dict[str, Any]]:
-        """Get the default orchestrator agent, or return None if not configured."""
-        agents = await self._repo.list_active_agents(tenant_id)
-        for a in agents:
-            if a.get("agent_type") == "orchestrator":
-                return a
-        return None
+        """Get the default orchestrator agent, auto-create if not exists."""
+        from ..event_store.postgres_client import get_postgres_client
+
+        pg = await get_postgres_client()
+
+        row = await pg.fetchrow(
+            "SELECT * FROM chat_agents WHERE agent_type = 'orchestrator' AND tenant_id = $1 LIMIT 1",
+            tenant_id,
+        )
+        if row:
+            return dict(row)
+
+        logger.info("Orchestrator agent not found, auto-creating for tenant=%s", tenant_id)
+
+        from .deep_research_prompts import get_orchestrator_system_prompt
+
+        try:
+            agent_row = await self._repo.create(
+                name="Orkestrator Agent",
+                description="Kullanicinin tek giris noktasi. Soruyu analiz eder, ilgili uzman agentlari paralel sorgular ve yanitlari sentezler.",
+                tenant_id=tenant_id,
+                agent_type="orchestrator",
+                system_prompt=get_orchestrator_system_prompt(),
+                config={"model": _detect_default_model()},
+                delegation_config={"auto_threshold": 0.5, "max_depth": 1, "enabled": True},
+            )
+            agent_id = str(agent_row["id"])
+            logger.info("Orchestrator agent created: %s", agent_id)
+
+            try:
+                from ..gateway import get_gateway_client
+                gw = await get_gateway_client()
+                vs_result = await gw.create_virtual_server(
+                    name="Orkestrator Agent",
+                    description="Default orchestrator - paralel expert sorgulama ve sentez",
+                    tags=["orchestrator", "auto-created"],
+                )
+                gw_id = vs_result.get("id", vs_result.get("server", {}).get("id", ""))
+                if gw_id:
+                    await self._repo.set_gateway_server_id(agent_id, gw_id)
+                    logger.info("Orchestrator deployed to Gateway: %s", gw_id)
+
+                    updated = await self._repo.get(agent_id)
+                    if updated:
+                        return updated
+            except Exception as e:
+                logger.warning("Orchestrator Gateway deploy failed (will work without): %s", e)
+
+            created = await self._repo.get(agent_id)
+            return created
+
+        except Exception as e:
+            logger.error("Failed to auto-create orchestrator: %s", e)
+            return None

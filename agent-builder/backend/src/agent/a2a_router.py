@@ -257,7 +257,14 @@ class A2ARouter:
         if not gw_id:
             raise ValueError(f"Agent {agent['name']} is not deployed (no gateway_server_id)")
 
-        model = (agent.get("config") or {}).get("model", "gpt-4o")
+        config = agent.get("config") or {}
+        if isinstance(config, str):
+            import json as _json
+            try:
+                config = _json.loads(config)
+            except Exception:
+                config = {}
+        model = config.get("model", "gpt-4o") if isinstance(config, dict) else "gpt-4o"
         agent_id = str(agent["id"])
         session_id = f"delegation-{uuid.uuid4().hex[:8]}"
 

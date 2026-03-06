@@ -62,11 +62,19 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_root_backend_env = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "backend", ".env")
+_agent_builder_env = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+load_dotenv(dotenv_path=_root_backend_env, override=False)
+load_dotenv(dotenv_path=_agent_builder_env, override=False)
+load_dotenv(override=False)
+
+if os.environ.get("GEMINI_API_KEY") and os.environ.get("GOOGLE_API_KEY"):
+    if os.environ["GEMINI_API_KEY"] == os.environ["GOOGLE_API_KEY"]:
+        del os.environ["GOOGLE_API_KEY"]
 
 # ============ DEBUG: Environment Variables Check ============
 print("\n" + "=" * 60)
-print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent.py)")
+print("🔑 ENVIRONMENT VARIABLES CHECK (react_agent_v2.py)")
 print("=" * 60)
 _debug_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "REACT_MODEL"]
 for _key in _debug_keys:
@@ -1973,6 +1981,60 @@ def _create_orchestrator_tools():
 
     orchestrator_tools.append(query_experts)
 
+    @tool
+    async def list_system_info(
+        info_type: str = "all",
+    ) -> str:
+        """Sistemdeki agent'lari, workspace'leri veya her ikisini listele.
+
+        info_type: "agents", "workspaces" veya "all" (varsayilan)
+
+        Bu tool'u su durumlarda kullan:
+        - Kullanici sistemde hangi agentlar/workspaceler oldugunu sorarsa
+        - Mevcut kaynaklari listelemek gerektiginde
+        - Sistem durumu hakkinda bilgi istendiginde"""
+        try:
+            from .orchestrator_service import OrchestratorService
+            from ..workspace_repository import WorkspaceRepository
+            from ..event_store.postgres_client import PostgresClient
+
+            parts = []
+
+            if info_type in ("agents", "all"):
+                orchestrator = await OrchestratorService.create()
+                experts = await orchestrator.get_all_experts("default-tenant")
+                if experts:
+                    parts.append("## Uzman Agent'lar")
+                    for e in experts:
+                        ws_ids = e.get("workspace_ids") or []
+                        ws_info = f" (Workspace: {', '.join(ws_ids)})" if ws_ids else ""
+                        parts.append(f"- **{e['name']}** [{e.get('agent_type', 'expert')}] - {e.get('description', 'Aciklama yok')}{ws_info} (Durum: {e['status']})")
+                else:
+                    parts.append("## Uzman Agent'lar\nHenuz uzman agent olusturulmamis.")
+
+            if info_type in ("workspaces", "all"):
+                pg = PostgresClient()
+                await pg.connect()
+                try:
+                    repo = WorkspaceRepository(pg)
+                    workspaces = await repo.list_workspaces("default-tenant")
+                    if workspaces:
+                        parts.append("## Workspace'ler (Bilgi Tabanlari)")
+                        for ws in workspaces:
+                            doc_count = ws.get("document_count", 0)
+                            processed = ws.get("processed_count", 0)
+                            parts.append(f"- **{ws['name']}** (ID: {ws['id']}) - Durum: {ws['status']}, {doc_count} belge, {processed} islenmis")
+                    else:
+                        parts.append("## Workspace'ler\nHenuz workspace olusturulmamis.")
+                finally:
+                    await pg.disconnect()
+
+            return "\n".join(parts) if parts else "Sistem bilgisi alinamadi."
+        except Exception as e:
+            return f"Sistem bilgisi sorgulama hatasi: {e}"
+
+    orchestrator_tools.append(list_system_info)
+
     return orchestrator_tools
 
 
@@ -2068,15 +2130,17 @@ class ReactAgentV2:
         except Exception as e:
             _log(f"⚠️ Gateway resource fetch failed: {e}, trying Neo4j", "warning")
 
-        # 2. Fallback: Neo4j direct query
-        try:
-            database_url = self._get_neo4j_url()
-            schema = get_cached_schema(database_url, self.graph)
-            self._schema_cache[session_id] = schema
-            return schema
-        except Exception as e:
-            _log(f"⚠️ Schema fetch error: {e}", "warning")
-            return ""
+        # 2. Fallback: Neo4j direct query (only if graph connection exists)
+        if self.graph is not None:
+            try:
+                database_url = self._get_neo4j_url()
+                schema = get_cached_schema(database_url, self.graph)
+                self._schema_cache[session_id] = schema
+                return schema
+            except Exception as e:
+                _log(f"⚠️ Schema fetch error: {e}", "warning")
+
+        return ""
 
     def _get_neo4j_url(self) -> str:
         """Neo4j URL'ini al - sunucu başlangıcıyla aynı format kullan"""
@@ -2248,7 +2312,7 @@ class ReactAgentV2:
         if gateway_prompt and len(gateway_prompt) >= 200:
             return gateway_prompt
 
-        _log("📋 Gateway prompt empty or too short, applying deep research fallback", "warning")
+        _log("📋 Gateway prompt empty or too short, applying deep research fallback")
         try:
             from .deep_research_prompts import build_deep_research_prompt
             fallback = build_deep_research_prompt(
@@ -2298,11 +2362,13 @@ class ReactAgentV2:
             if MultiServerMCPClient is None:
                 raise ImportError("MCP Adapters not available")
             gw = await get_gateway_client()
+            await gw.ensure_auth()
             mcp_endpoint = gw.get_server_mcp_endpoint(self.server_id)
             config = {
                 "gateway": {
                     "url": mcp_endpoint,
                     "transport": "streamable_http",
+                    "headers": {"Authorization": f"Bearer {gw._token}"},
                 }
             }
             _log(f"📡 MCP connecting to Gateway: {mcp_endpoint}")
@@ -2324,6 +2390,7 @@ class ReactAgentV2:
             os.getcwd(), "agent_findings", "react", "_system_prompt.txt"
         )
         try:
+            os.makedirs(os.path.dirname(prompt_log_path), exist_ok=True)
             with open(prompt_log_path, "w", encoding="utf-8") as f:
                 f.write(system_prompt)
             _log(f"📝 System prompt saved: {prompt_log_path}")
@@ -2372,6 +2439,18 @@ class ReactAgentV2:
         actual_model = self.model_name
         if ":" in self.model_name:
             actual_model = self.model_name.split(":", 1)[1]
+
+        # ========== GOOGLE GEMINI ==========
+        if actual_model.lower().startswith("gemini"):
+            gemini_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if not gemini_api_key:
+                raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable gerekli.")
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            _log(f"🔧 Model: {actual_model} (Gemini)")
+            return ChatGoogleGenerativeAI(
+                model=actual_model,
+                google_api_key=gemini_api_key,
+            )
 
         # ========== ANTHROPIC CLAUDE ==========
         if actual_model.lower().startswith("claude"):
@@ -2627,19 +2706,15 @@ class ReactAgentV2:
 
             # Sema al (Gateway resources + Neo4j fallback)
             schema_info = await self._get_schema_for_session(session_id)
-            if not schema_info:
+            if schema_info:
                 yield {
-                    "type": "error",
-                    "message": "Veritabanı şema bilgisi alınamadı.",
+                    "type": "thinking_step",
+                    "message": "📊 Veritabanı yapısı yüklendi",
                     "session_id": session_id,
                 }
-                return
-
-            yield {
-                "type": "thinking_step",
-                "message": "📊 Veritabanı yapısı yüklendi",
-                "session_id": session_id,
-            }
+            else:
+                _log("Schema not available (no graph connection), proceeding without schema")
+                schema_info = ""
 
             # History al
             conversation_history = self._get_conversation_history(session_id)

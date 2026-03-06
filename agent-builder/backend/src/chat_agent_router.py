@@ -34,6 +34,17 @@ async def _get_repo() -> ChatAgentRepository:
     return ChatAgentRepository(pg)
 
 
+def _safe_config(agent: dict) -> dict:
+    """DB'den gelen config JSONB'yi guvenli dict'e cevir."""
+    config = agent.get("config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    return config if isinstance(config, dict) else {}
+
+
 def _to_summary(row: dict) -> dict:
     tools = row.get("associated_tools") or []
     prompts = row.get("associated_prompts") or []
@@ -606,7 +617,7 @@ async def _handle_v2_chat(agent: dict, body: ChatMessageRequest, session_id: str
     if not gw_id:
         raise HTTPException(status_code=400, detail="Agent not deployed to Gateway")
 
-    model = agent.get("config", {}).get("model", "gpt-4o") if agent.get("config") else "gpt-4o"
+    model = _safe_config(agent).get("model", "gpt-4o")
 
     async def v2_sse_generator():
         try:
@@ -709,7 +720,7 @@ async def a2a_endpoint(
             "error": result.error,
         }
 
-    model = (agent.get("config") or {}).get("model", "gpt-4o")
+    model = _safe_config(agent).get("model", "gpt-4o")
     from .agent.react_agent_v2 import stream_react_agent_v2_response
 
     async def a2a_sse():
@@ -896,12 +907,11 @@ async def orchestrator_connect(body: OrchestratorConnectRequest):
     orch_agent = await orch_svc.get_or_create_orchestrator(body.tenant_id)
 
     if not orch_agent:
-        experts = await orch_svc.get_all_experts(body.tenant_id)
         return {
             "session_id": f"orch-{uuid.uuid4().hex[:12]}",
             "status": "no_orchestrator",
-            "message": "Orkestrator agent henuz yaratilmamis. Admin panelinden olusturun.",
-            "expert_count": len(experts),
+            "message": "Orkestrator agent otomatik olusturulamadi. Veritabani baglantisinizi kontrol edin.",
+            "expert_count": 0,
         }
 
     session_id = f"orch-{uuid.uuid4().hex[:12]}"
@@ -926,7 +936,7 @@ async def orchestrator_connect(body: OrchestratorConnectRequest):
                 "gateway_result": connect_result,
             }
         except Exception as e:
-            logger.warning("Gateway connect failed for orchestrator: %s", e)
+            logger.debug("Gateway connect skipped for orchestrator (not needed for ReactAgentV2): %s", e)
 
     return {
         "session_id": session_id,
@@ -955,14 +965,17 @@ async def orchestrator_chat(
     if not orch_agent:
         raise HTTPException(
             status_code=503,
-            detail="Orkestrator agent yapilandirilmamis. Admin panelinden agent_type='orchestrator' olan bir agent olusturun.",
+            detail="Orkestrator agent otomatik olusturulamadi. Veritabani baglantisinizi kontrol edin.",
         )
 
     gw_id = orch_agent.get("gateway_server_id")
     if not gw_id:
-        raise HTTPException(status_code=400, detail="Orkestrator agent deploy edilmemis")
+        raise HTTPException(
+            status_code=400,
+            detail="Orkestrator agent olusturuldu ama Gateway'e deploy edilemedi. Gateway sunucusunu kontrol edin.",
+        )
 
-    model = body.model or (orch_agent.get("config") or {}).get("model", "gpt-4o")
+    model = body.model or _safe_config(orch_agent).get("model", "gpt-4o")
     session_id = body.session_id or f"orch-{uuid.uuid4().hex[:12]}"
 
     async def orch_sse_generator():

@@ -312,9 +312,14 @@ ORCHESTRATOR_SYSTEM_PROMPT = """Sen bir orkestrator agentsin. Kullanicinin sorus
 
 ## GOREV
 1. Soruyu anla ve analiz et
-2. Gerektiginde `query_experts` tool'unu cagirarak uzman agentlara sor
-3. Expert yanitlarini sentezle, cross-domain cikarimlar yap
-4. Attribution ile kullaniciya sun
+2. Sistem hakkinda sorularda `list_system_info` tool'unu cagir (agentlar, workspace'ler, kaynaklar)
+3. Gerektiginde `query_experts` tool'unu cagirarak uzman agentlara sor
+4. Expert yanitlarini sentezle, cross-domain cikarimlar yap
+5. Attribution ile kullaniciya sun
+
+## SISTEM BILGISI KURALLARI
+- "Hangi agentlar var?", "Workspace'ler neler?", "Sistemde ne var?" gibi sorularda -> `list_system_info` cagir
+- info_type: "agents" (sadece agentlar), "workspaces" (sadece workspace'ler), "all" (her ikisi)
 
 ## EXPERT SORGULAMA KURALLARI
 - Basit, genel sorularda (selamlasma, genel bilgi) expert'lere sormaya GEREK YOK

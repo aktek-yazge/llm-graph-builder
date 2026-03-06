@@ -10,7 +10,7 @@ import {
 import { workspaceApi } from '../services/workspaceApi';
 import Breadcrumb from '../components/Breadcrumb';
 
-const TENANT_ID = 'default';
+const TENANT_ID = 'default-tenant';
 
 const statusColors: Record<ChatAgentStatus, string> = {
   draft: 'bg-gray-100 text-gray-700',
