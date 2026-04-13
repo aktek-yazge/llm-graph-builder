@@ -84,6 +84,24 @@ class GenericGraphExecutor:
         self.graph = graph
         self._database = getattr(graph, "_database", None)
 
+    def _fetch_ontology_labels(self) -> list[str]:
+        """Fetch entity labels from Agent Builder API (if available)."""
+        import os
+        api_url = os.environ.get("AGENT_BUILDER_API_URL", "")
+        agent_id = os.environ.get("ACTIVE_AGENT_ID", "")
+        if not api_url or not agent_id:
+            return []
+        try:
+            import httpx
+            resp = httpx.get(f"{api_url}/api/v2/evolving/agents/{agent_id}/ontology", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                ontology = data.get("ontology", {})
+                return [e["name"] for e in ontology.get("entity_classes", []) if e.get("name")]
+        except Exception as e:
+            logging.debug(f"Ontology fetch failed (using fallback): {e}")
+        return []
+
     def ensure_entity_indexes(self):
         """
         Entity index'lerinin varlığını kontrol eder ve gerekirse oluşturur.
@@ -101,19 +119,22 @@ class GenericGraphExecutor:
         session_params = {"database": self._database} if self._database else {}
 
         # ── 1. RANGE index'ler (MERGE performansı) ──
-        # Her entity label'ı için id property'sinde RANGE index
         range_indexes = [
-            ("Company", "id"),
-            ("Person", "id"),
-            ("Event", "id"),
-            ("Court", "id"),
-            ("LegalCase", "id"),
             ("Chunk", "id"),
             ("Document", "fileName"),
-            ("Company", "normalized_name"),
-            ("Person", "normalized_name"),
         ]
-        
+
+        dynamic_labels = self._fetch_ontology_labels()
+        for label in dynamic_labels:
+            range_indexes.append((label, "id"))
+            range_indexes.append((label, "normalized_name"))
+
+        if not dynamic_labels:
+            for label in ("Company", "Person", "Event", "Court", "LegalCase"):
+                range_indexes.append((label, "id"))
+            range_indexes.append(("Company", "normalized_name"))
+            range_indexes.append(("Person", "normalized_name"))
+
         for label, prop in range_indexes:
             index_name = f"idx_{label.lower()}_{prop}"
             try:
@@ -121,12 +142,12 @@ class GenericGraphExecutor:
                     f"CREATE INDEX {index_name} IF NOT EXISTS FOR (n:{label}) ON (n.{prop})",
                     session_params=session_params,
                 )
-                logging.debug(f"✅ Range index: {index_name}")
+                logging.debug(f"RANGE index: {index_name}")
             except Exception as e:
                 if "EquivalentSchemaRuleAlreadyExists" not in str(e):
-                    logging.warning(f"⚠️ Range index {index_name} failed: {e}")
+                    logging.warning(f"Range index {index_name} failed: {e}")
 
-        logging.info(f"✅ {len(range_indexes)} range indexes checked/created")
+        logging.info(f"{len(range_indexes)} range indexes checked/created")
 
         # ── 2. FULLTEXT index'ler (fuzzy search) ──
         try:

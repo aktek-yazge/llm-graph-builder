@@ -8,6 +8,7 @@ import ResourceList from './pages/ResourceList';
 import ChatAgentList from './pages/ChatAgentList';
 import ChatAgentDetailPage from './pages/ChatAgentDetail';
 import OrchestratorChat from './pages/OrchestratorChat';
+import EvolvingAgentPage from './pages/EvolvingAgentPage';
 
 function App() {
   return (
@@ -17,6 +18,9 @@ function App() {
           {/* Son kullanici */}
           <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<OrchestratorChat />} />
+
+          {/* Evolving Agent */}
+          <Route path="/evolving" element={<EvolvingAgentPage />} />
 
           {/* Admin / Yonetim */}
           <Route path="/dashboard" element={<Dashboard />} />

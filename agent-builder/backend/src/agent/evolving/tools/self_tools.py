@@ -220,6 +220,248 @@ def create_self_tools(
         await store.save_ontology(agent_id, ontology, source="conversation")
         return f"Relationship '{name}' kaldirildi."
 
+    # ─── AUTO-DISCOVERY TOOLS ────────────────────────────────────
+
+    @tool
+    async def analyze_extraction_results(batch_id: str = "", limit: int = 50) -> str:
+        """Extraction sonuclarini analiz et, ontolojide olmayan yeni entity/relation tiplerini kesfet.
+
+        Her extraction'dan donen node label ve relationship type'lari ontoloji ile
+        karsilastirir. Yeni bulunanlar ontology_discoveries tablosuna kaydedilir.
+
+        Args:
+            batch_id: Belirli bir batch'i analiz et (bos birakılırsa tum belgeler)
+            limit: Analiz edilecek maksimum belge sayisi
+        """
+        ontology = await store.load_ontology(agent_id)
+        known_entities = {e.name for e in ontology.entity_classes}
+        known_rels = {r.name for r in ontology.relationship_predicates}
+        system_labels = {"Document", "Chunk", "__Entity__", "_Bloom_Perspective_", "_Bloom_Scene_"}
+
+        conditions = ["agent_id = $1", "extraction_result IS NOT NULL"]
+        params: list[Any] = [agent_id]
+        idx = 2
+        if batch_id:
+            conditions.append(f"batch_id = ${idx}")
+            params.append(batch_id)
+            idx += 1
+        params.append(limit)
+
+        rows = await store.pg.fetch(
+            f"""
+            SELECT doc_id, file_path, extraction_result
+            FROM workspace_documents
+            WHERE {' AND '.join(conditions)}
+            ORDER BY updated_at DESC
+            LIMIT ${idx}
+            """,
+            *params,
+        )
+
+        new_entities: dict[str, dict[str, Any]] = {}
+        new_rels: dict[str, dict[str, Any]] = {}
+
+        for row in rows:
+            result = row["extraction_result"]
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            doc_ref = row.get("file_path", row.get("doc_id", ""))
+
+            for node in result.get("nodes", []):
+                label = node.get("label", "")
+                if not label or label in known_entities or label in system_labels:
+                    continue
+                props = list(node.get("properties", {}).keys())
+                if label not in new_entities:
+                    new_entities[label] = {"doc": doc_ref, "props": set(props), "count": 0}
+                new_entities[label]["count"] += 1
+                new_entities[label]["props"].update(props)
+
+            for rel in result.get("relationships", []):
+                rel_type = rel.get("type", "")
+                if not rel_type or rel_type in known_rels:
+                    continue
+                if rel_type not in new_rels:
+                    new_rels[rel_type] = {"doc": doc_ref, "count": 0}
+                new_rels[rel_type]["count"] += 1
+
+        saved_entities = 0
+        for name, info in new_entities.items():
+            r = await store.upsert_discovery(
+                agent_id, "entity", name,
+                first_seen_doc=info["doc"],
+                sample_properties=sorted(info["props"]),
+            )
+            if r["new"]:
+                saved_entities += 1
+
+        saved_rels = 0
+        for name, info in new_rels.items():
+            r = await store.upsert_discovery(
+                agent_id, "relationship", name,
+                first_seen_doc=info["doc"],
+            )
+            if r["new"]:
+                saved_rels += 1
+
+        total_new = saved_entities + saved_rels
+        if total_new == 0 and not new_entities and not new_rels:
+            return f"{len(rows)} belge analiz edildi. Ontolojide tanimsiz yeni tip bulunamadi."
+
+        lines = [f"{len(rows)} belge analiz edildi."]
+        if new_entities:
+            names = ", ".join(sorted(new_entities.keys()))
+            lines.append(f"Yeni entity tipleri ({len(new_entities)}): {names}")
+        if new_rels:
+            names = ", ".join(sorted(new_rels.keys()))
+            lines.append(f"Yeni relationship tipleri ({len(new_rels)}): {names}")
+        lines.append("Onay icin approve_discovery veya reject_discovery tool'larini kullan.")
+        return "\n".join(lines)
+
+    @tool
+    async def approve_discovery(name: str, discovery_type: str = "entity", description: str = "") -> str:
+        """Kesfedilen entity veya relationship tipini onayla ve ontolojiye ekle.
+
+        Args:
+            name: Onaylanacak tipin adi
+            discovery_type: 'entity' veya 'relationship'
+            description: Tip aciklamasi (opsiyonel)
+        """
+        updated = await store.update_discovery_status(agent_id, discovery_type, name, "approved")
+        if not updated:
+            return f"Discovery bulunamadi: {discovery_type}/{name}"
+
+        ontology = await store.load_ontology(agent_id)
+
+        if discovery_type == "entity":
+            discoveries = await store.list_discoveries(agent_id, discovery_type="entity")
+            disc = next((d for d in discoveries if d["name"] == name), None)
+            props = []
+            if disc and disc.get("sample_properties"):
+                sample_props = disc["sample_properties"]
+                if isinstance(sample_props, str):
+                    sample_props = json.loads(sample_props)
+                props = [Property(name=p, type="string", constraint="optional") for p in sample_props if isinstance(p, str)]
+
+            entity = EntityClass(name=name, description=description, properties=props)
+            ontology.upsert_entity(entity)
+        else:
+            rel = RelationshipPredicate(name=name, source="", target="", description=description)
+            ontology.upsert_relationship(rel)
+
+        await store.save_ontology(agent_id, ontology, source="auto_discovery")
+        return f"{discovery_type.capitalize()} '{name}' onaylandi ve ontolojiye eklendi."
+
+    @tool
+    async def reject_discovery(name: str, discovery_type: str = "entity") -> str:
+        """Kesfedilen entity veya relationship tipini reddet.
+
+        Args:
+            name: Reddedilecek tipin adi
+            discovery_type: 'entity' veya 'relationship'
+        """
+        updated = await store.update_discovery_status(agent_id, discovery_type, name, "rejected")
+        if not updated:
+            return f"Discovery bulunamadi: {discovery_type}/{name}"
+        return f"{discovery_type.capitalize()} '{name}' reddedildi. Gelecek extraction'larda dikkate alinmayacak."
+
+    @tool
+    async def list_pending_discoveries() -> str:
+        """Onay bekleyen kesfedilmis entity ve relationship tiplerini listele."""
+        discoveries = await store.list_discoveries(agent_id, status="pending")
+        if not discoveries:
+            return "Onay bekleyen kesif yok."
+
+        entities = [d for d in discoveries if d["discovery_type"] == "entity"]
+        rels = [d for d in discoveries if d["discovery_type"] == "relationship"]
+
+        lines = []
+        if entities:
+            lines.append(f"Entity tipleri ({len(entities)}):")
+            for d in entities:
+                props_info = ""
+                if d.get("sample_properties"):
+                    sp = d["sample_properties"]
+                    if isinstance(sp, str):
+                        sp = json.loads(sp)
+                    if sp:
+                        props_info = f" [props: {', '.join(sp[:5])}]"
+                lines.append(f"  - {d['name']} (x{d['sample_count']}){props_info}")
+        if rels:
+            lines.append(f"Relationship tipleri ({len(rels)}):")
+            for d in rels:
+                lines.append(f"  - {d['name']} (x{d['sample_count']})")
+        return "\n".join(lines)
+
+    @tool
+    async def create_dynamic_indexes(neo4j_uri: str = "", neo4j_user: str = "", neo4j_password: str = "") -> str:
+        """Onaylanan entity tipleri icin Neo4j'de RANGE ve FULLTEXT indexler olustur.
+
+        Ontolojideki entity class isimlerinden otomatik index olusturur.
+        Mevcut hardcoded index listelerinin yerini alir.
+
+        Args:
+            neo4j_uri: Neo4j baglanti adresi (bos ise env'den alinir)
+            neo4j_user: Neo4j kullanici adi
+            neo4j_password: Neo4j sifre
+        """
+        import os
+        uri = neo4j_uri or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+        user = neo4j_user or os.environ.get("NEO4J_USERNAME", "neo4j")
+        password = neo4j_password or os.environ.get("NEO4J_PASSWORD", "password")
+
+        ontology = await store.load_ontology(agent_id)
+        if ontology.is_empty:
+            return "Ontoloji bos, index olusturulamaz."
+
+        entity_names = [e.name for e in ontology.entity_classes]
+
+        try:
+            from neo4j import GraphDatabase
+            driver = GraphDatabase.driver(uri, auth=(user, password))
+
+            created = []
+            with driver.session() as session:
+                for label in entity_names:
+                    idx_id = f"idx_{label.lower()}_id"
+                    try:
+                        session.run(f"CREATE INDEX {idx_id} IF NOT EXISTS FOR (n:{label}) ON (n.id)")
+                        created.append(f"RANGE {label}.id")
+                    except Exception as e:
+                        if "EquivalentSchemaRuleAlreadyExists" not in str(e):
+                            logger.warning("Index %s failed: %s", idx_id, e)
+
+                    idx_name = f"idx_{label.lower()}_normalized_name"
+                    try:
+                        session.run(f"CREATE INDEX {idx_name} IF NOT EXISTS FOR (n:{label}) ON (n.normalized_name)")
+                        created.append(f"RANGE {label}.normalized_name")
+                    except Exception as e:
+                        if "EquivalentSchemaRuleAlreadyExists" not in str(e):
+                            pass
+
+                ft_labels = entity_names + ["__Entity__"]
+                ft_label_str = "|".join(f"`{l}`" for l in ft_labels)
+                try:
+                    session.run(
+                        f"CREATE FULLTEXT INDEX entity_names_dynamic IF NOT EXISTS "
+                        f"FOR (n:{ft_label_str}) ON EACH [n.name, n.normalized_name, n.id]"
+                    )
+                    created.append("FULLTEXT entity_names_dynamic")
+                except Exception as e:
+                    if "EquivalentSchemaRuleAlreadyExists" not in str(e):
+                        logger.warning("Fulltext index failed: %s", e)
+
+            driver.close()
+            return f"{len(created)} index olusturuldu/guncellendi: {', '.join(created)}"
+        except ImportError:
+            return "neo4j Python driver yuklu degil. pip install neo4j gerekli."
+        except Exception as exc:
+            return f"Neo4j baglanti hatasi: {exc}"
+
     return [
         add_entity_class,
         add_relationship_predicate,
@@ -232,4 +474,9 @@ def create_self_tools(
         save_as_skill,
         remove_entity_class,
         remove_relationship,
+        analyze_extraction_results,
+        approve_discovery,
+        reject_discovery,
+        list_pending_discoveries,
+        create_dynamic_indexes,
     ]

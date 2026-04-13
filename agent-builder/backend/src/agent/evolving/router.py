@@ -277,6 +277,63 @@ async def get_ontology_history(request: Request, agent_id: str):
 
 
 # ------------------------------------------------------------------
+# Ontology Discoveries
+# ------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/ontology/discoveries", summary="List ontology discoveries")
+async def list_discoveries(
+    request: Request,
+    agent_id: str,
+    status: str = Query(default="", description="Filter: pending | approved | rejected"),
+    discovery_type: str = Query(default="", description="Filter: entity | relationship"),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    registry = _get_registry(request)
+    from .knowledge_store import KnowledgeStore
+    store = KnowledgeStore(registry._pg)
+    items = await store.list_discoveries(agent_id, status=status, discovery_type=discovery_type, limit=limit)
+    return {"agent_id": agent_id, "count": len(items), "discoveries": items}
+
+
+@router.post("/agents/{agent_id}/ontology/discoveries/{name}/approve", summary="Approve a discovery")
+async def approve_discovery_endpoint(request: Request, agent_id: str, name: str, discovery_type: str = Query(default="entity")):
+    registry = _get_registry(request)
+    from .knowledge_store import KnowledgeStore
+    store = KnowledgeStore(registry._pg)
+
+    updated = await store.update_discovery_status(agent_id, discovery_type, name, "approved")
+    if not updated:
+        raise HTTPException(404, f"Discovery not found: {discovery_type}/{name}")
+
+    agent = await _get_agent(request, agent_id)
+    ontology = await agent.store.load_ontology(agent_id)
+
+    if discovery_type == "entity":
+        from .ontology_model import EntityClass
+        entity = EntityClass(name=name, description="")
+        ontology.upsert_entity(entity)
+    else:
+        from .ontology_model import RelationshipPredicate
+        rel = RelationshipPredicate(name=name, source="", target="", description="")
+        ontology.upsert_relationship(rel)
+
+    await agent.store.save_ontology(agent_id, ontology, source="auto_discovery")
+    return {"approved": True, "name": name, "type": discovery_type}
+
+
+@router.post("/agents/{agent_id}/ontology/discoveries/{name}/reject", summary="Reject a discovery")
+async def reject_discovery_endpoint(request: Request, agent_id: str, name: str, discovery_type: str = Query(default="entity")):
+    registry = _get_registry(request)
+    from .knowledge_store import KnowledgeStore
+    store = KnowledgeStore(registry._pg)
+
+    updated = await store.update_discovery_status(agent_id, discovery_type, name, "rejected")
+    if not updated:
+        raise HTTPException(404, f"Discovery not found: {discovery_type}/{name}")
+    return {"rejected": True, "name": name, "type": discovery_type}
+
+
+# ------------------------------------------------------------------
 # Skill Execution (AgenticOCR integration)
 # ------------------------------------------------------------------
 

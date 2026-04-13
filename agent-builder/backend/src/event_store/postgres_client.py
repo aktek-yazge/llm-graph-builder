@@ -1,8 +1,8 @@
 """
-PostgreSQL Event Store Client
-==============================
+PostgreSQL Client
+=================
 
-Async connection pool for the event store database.
+Async connection pool for the Agent Builder database.
 Singleton pattern - one pool per process.
 """
 
@@ -90,22 +90,21 @@ class PostgresClient:
         return await self._pool.fetchval(query, *args)
 
     async def initialize_schema(self) -> None:
-        """Run schema.sql to create tables and indexes."""
+        """Run schema.sql if it exists."""
         schema_path = Path(__file__).parent / "schema.sql"
         if not schema_path.exists():
-            logger.warning("schema.sql not found at %s", schema_path)
             return
 
         sql = schema_path.read_text(encoding="utf-8")
         await self.execute(sql)
-        logger.info("Event Store schema initialized")
+        logger.info("Database schema initialized")
 
     async def health_check(self) -> Dict[str, Any]:
         if self._pool is None:
             return {"status": "disconnected"}
         try:
-            count = await self.fetchval("SELECT COUNT(*) FROM graph_events")
-            return {"status": "healthy", "event_count": count}
+            result = await self.fetchval("SELECT 1")
+            return {"status": "healthy"}
         except Exception as e:
             return {"status": "unhealthy", "error": str(e)}
 

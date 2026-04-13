@@ -390,21 +390,51 @@ def create_chunk_fulltext_index(graph):
             logging.error(f"❌ Chunk fulltext index creation failed: {e}")
             raise
 
-# Entity fulltext index definitions for fuzzy search (domain-agnostic)
-ENTITY_FULLTEXT_INDEXES = [
-    {
-        "name": "entity_names",
-        "labels": ["Company", "Person", "__Entity__"],
-        "properties": ["name", "normalized_name", "id"],
-        "description": "Entity isimlerinde fuzzy search için",
-    },
-    {
-        "name": "entity_aliases",
-        "labels": ["Company", "Person", "__Entity__"],
-        "properties": ["aliases"],
-        "description": "Entity alias'larında arama için",
-    },
-]
+_FALLBACK_ENTITY_LABELS = ["Company", "Person", "__Entity__"]
+
+
+def _get_dynamic_fulltext_labels() -> list[str]:
+    """Fetch entity labels from Agent Builder ontology API, fallback to defaults."""
+    import os
+    api_url = os.environ.get("AGENT_BUILDER_API_URL", "")
+    agent_id = os.environ.get("ACTIVE_AGENT_ID", "")
+    if not api_url or not agent_id:
+        return _FALLBACK_ENTITY_LABELS
+    try:
+        import httpx
+        resp = httpx.get(f"{api_url}/api/v2/evolving/agents/{agent_id}/ontology", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            ontology = data.get("ontology", {})
+            labels = [e["name"] for e in ontology.get("entity_classes", []) if e.get("name")]
+            if labels:
+                if "__Entity__" not in labels:
+                    labels.append("__Entity__")
+                return labels
+    except Exception as e:
+        logging.debug(f"Ontology label fetch failed (using fallback): {e}")
+    return _FALLBACK_ENTITY_LABELS
+
+
+def _build_entity_fulltext_indexes() -> list[dict]:
+    labels = _get_dynamic_fulltext_labels()
+    return [
+        {
+            "name": "entity_names",
+            "labels": labels,
+            "properties": ["name", "normalized_name", "id"],
+            "description": "Entity isimlerinde fuzzy search",
+        },
+        {
+            "name": "entity_aliases",
+            "labels": labels,
+            "properties": ["aliases"],
+            "description": "Entity alias'larinda arama",
+        },
+    ]
+
+
+ENTITY_FULLTEXT_INDEXES = _build_entity_fulltext_indexes()
 
 
 def create_entity_fulltext_indexes(graph: Neo4jGraph):
