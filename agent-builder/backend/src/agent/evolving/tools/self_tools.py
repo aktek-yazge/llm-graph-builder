@@ -24,6 +24,7 @@ from ..ontology_model import (
 from ..knowledge_store import KnowledgeStore
 from ..agent_memory import AgentMemory
 from ..agent_skills import AgentSkillManager
+from ..wiki_store import WikiStore
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def create_self_tools(
     store: KnowledgeStore,
     memory: AgentMemory,
     skill_manager: AgentSkillManager,
+    wiki: WikiStore | None = None,
 ) -> list:
     """Agent'in kendini gelistirmek icin kullandigi tool'lari olustur."""
 
@@ -66,6 +68,20 @@ def create_self_tools(
         ontology.upsert_entity(entity)
 
         await store.save_ontology(agent_id, ontology, source="conversation")
+
+        if wiki:
+            related_rels = [
+                r.name for r in ontology.relationship_predicates
+                if r.source == name or r.target == name
+            ]
+            await wiki.sync_entity_page(
+                agent_id, name,
+                description=description,
+                properties=properties,
+                parent=parent,
+                related_relationships=related_rels,
+            )
+
         return f"Entity class '{name}' eklendi/guncellendi. Toplam entity: {len(ontology.entity_classes)}"
 
     @tool
@@ -96,6 +112,16 @@ def create_self_tools(
         ontology.upsert_relationship(rel)
 
         await store.save_ontology(agent_id, ontology, source="conversation")
+
+        if wiki:
+            await wiki.sync_relationship_page(
+                agent_id, name,
+                source_entity=source,
+                target_entity=target,
+                edge_properties=edge_properties,
+                description=description,
+            )
+
         return f"Relationship '{name}' ({source} -> {target}) eklendi. Toplam iliski: {len(ontology.relationship_predicates)}"
 
     @tool
@@ -154,11 +180,18 @@ def create_self_tools(
 
     @tool
     async def generate_extraction_prompt() -> str:
-        """Mevcut ontolojiden extraction prompt uret ve goster."""
+        """Mevcut ontolojiden extraction prompt uret ve goster.
+        Wiki sayfalari varsa ornekler ve pattern'ler de dahil edilir."""
         ontology = await store.load_ontology(agent_id)
         if ontology.is_empty:
             return "Ontoloji bos, once entity/relationship tanimlari ekleyin."
-        return memory.build_extraction_prompt(ontology)
+        wiki_context = ""
+        if wiki:
+            try:
+                wiki_context = await wiki.build_extraction_context(agent_id)
+            except Exception:
+                pass
+        return memory.build_extraction_prompt(ontology, wiki_context=wiki_context)
 
     @tool
     async def update_from_feedback(
@@ -171,10 +204,11 @@ def create_self_tools(
             feedback: Kullanici feedback metni
             affected_entities: Etkilenen entity isimleri (opsiyonel)
         """
+        fb_count = len(await store.get_all(agent_id, 'quality_feedback'))
         await store.upsert(
             agent_id,
             "quality_feedback",
-            f"fb_{len(await store.get_all(agent_id, 'quality_feedback'))}",
+            f"fb_{fb_count}",
             {
                 "feedback": feedback,
                 "affected_entities": affected_entities or [],
@@ -182,7 +216,18 @@ def create_self_tools(
             source="user_feedback",
             confidence=0.8,
         )
-        return f"Feedback kaydedildi. Ontoloji bir sonraki prompt'ta bu feedback'i dikkate alacak."
+
+        if wiki:
+            slug = feedback[:40].lower().replace(" ", "-").replace("/", "-")
+            await wiki.add_pattern_page(
+                agent_id,
+                pattern_name=f"feedback-{fb_count}-{slug}",
+                description=feedback,
+                related_entities=affected_entities or [],
+                source="user_feedback",
+            )
+
+        return f"Feedback kaydedildi. Wiki ve ontoloji bir sonraki prompt'ta bu feedback'i dikkate alacak."
 
     @tool
     async def save_as_skill() -> str:

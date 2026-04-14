@@ -31,9 +31,11 @@ from deepagents import create_deep_agent
 from langchain_core.messages import HumanMessage
 
 from .knowledge_store import KnowledgeStore
+from .wiki_store import WikiStore
 from .agent_memory import AgentMemory
 from .agent_skills import AgentSkillManager
 from .tools.self_tools import create_self_tools
+from .tools.wiki_tools import create_wiki_tools
 from .tools.ocr_tools import create_ocr_tools
 from .tools.batch_tools import create_batch_tools
 from .tools.quality_tools import create_quality_tools
@@ -87,8 +89,9 @@ class SelfEvolvingAgent:
         self.agent_id = agent_id
         self._pg = pg
         self.store = KnowledgeStore(pg)
+        self.wiki = WikiStore(self.store)
         self.memory = AgentMemory(self.store)
-        self.skill_manager = AgentSkillManager(self.store, self.memory)
+        self.skill_manager = AgentSkillManager(self.store, self.memory, wiki=self.wiki)
         self._celery_app = celery_app
         self._mcp_client = mcp_client
         self._notification_mgr = notification_mgr
@@ -98,6 +101,7 @@ class SelfEvolvingAgent:
     async def ensure_ready(self) -> None:
         """Tabloyu olustur, identity yoksa varsayilan kaydet."""
         await self.store.ensure_table()
+        await self.wiki.ensure_indexes()
         identity = await self.store.load_identity(self.agent_id)
         if not identity.get("purpose"):
             await self.store.save_identity(
@@ -115,7 +119,11 @@ class SelfEvolvingAgent:
     def _build_local_tools(self) -> list:
         """Assemble all locally-defined (non-MCP) tools."""
         tools: list = []
-        tools.extend(create_self_tools(self.agent_id, self.store, self.memory, self.skill_manager))
+        tools.extend(create_self_tools(
+            self.agent_id, self.store, self.memory, self.skill_manager,
+            wiki=self.wiki,
+        ))
+        tools.extend(create_wiki_tools(self.agent_id, self.wiki))
         tools.extend(create_ocr_tools(self.agent_id, self._celery_app))
         tools.extend(create_batch_tools(self.agent_id, pg=self._pg, celery_app=self._celery_app))
         return tools

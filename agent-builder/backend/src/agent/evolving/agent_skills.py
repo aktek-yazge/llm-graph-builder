@@ -15,6 +15,7 @@ from typing import Any
 from .ontology_model import AgentOntology
 from .agent_memory import AgentMemory
 from .knowledge_store import KnowledgeStore
+from .wiki_store import WikiStore
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,10 @@ logger = logging.getLogger(__name__)
 class AgentSkillManager:
     """Ontoloji -> SkillExecution donusumu ve API endpoint desteği."""
 
-    def __init__(self, store: KnowledgeStore, memory: AgentMemory):
+    def __init__(self, store: KnowledgeStore, memory: AgentMemory, wiki: WikiStore | None = None):
         self.store = store
         self.memory = memory
+        self.wiki = wiki
 
     async def ontology_to_skill_execution(self, agent_id: str) -> dict[str, Any]:
         """
@@ -42,7 +44,14 @@ class AgentSkillManager:
         if ontology.is_empty:
             return {}
 
-        prompt_template = self.memory.build_extraction_prompt(ontology)
+        wiki_context = ""
+        if self.wiki:
+            try:
+                wiki_context = await self.wiki.build_extraction_context(agent_id)
+            except Exception as exc:
+                logger.warning("Wiki context unavailable: %s", exc)
+
+        prompt_template = self.memory.build_extraction_prompt(ontology, wiki_context=wiki_context)
 
         entity_schemas = []
         for ec in ontology.entity_classes:

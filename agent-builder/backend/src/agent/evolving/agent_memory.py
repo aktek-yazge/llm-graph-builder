@@ -61,9 +61,19 @@ class AgentMemory:
 
         return "\n".join(sections)
 
-    def build_extraction_prompt(self, ontology: AgentOntology) -> str:
+    def build_extraction_prompt(
+        self,
+        ontology: AgentOntology,
+        wiki_context: str = "",
+    ) -> str:
         """
         Ontolojiden extraction prompt uret.
+
+        Args:
+            ontology: Yapisal ontoloji modeli.
+            wiki_context: Wiki sayfalarindan derlenmis zengin baglam.
+                         Ornekler, edge case'ler, ogrenilen pattern'ler icerir.
+
         KG Prompt Generator'in constructPrompt() mantigi.
         AgenticOCR'in system prompt'u olarak kullanilir.
         """
@@ -143,6 +153,17 @@ IMPORTANT:
 - If the same entity appears multiple times, use the same ID
 - Only extract entities and relationships defined in the schema above""")
 
+        if wiki_context:
+            parts.append(f"""
+
+## DOMAIN KNOWLEDGE (from wiki)
+
+The following section contains learned patterns, examples, edge cases and
+domain-specific notes accumulated during previous extraction sessions.
+Use this knowledge to improve extraction accuracy.
+
+{wiki_context}""")
+
         return "\n".join(parts)
 
     # ─── PRIVATE HELPERS ────────────────────────────────────────────
@@ -216,7 +237,23 @@ MinIO belge listeleme, okuma, ozetleme vb.
 - `generate_quality_report`: Kapsamli kalite raporu olustur
 
 ### Feedback
-- `update_from_feedback`: Kullanici geri bildirimine gore ontolojiyi guncelle
+- `update_from_feedback`: Kullanici geri bildirimine gore ontolojiyi guncelle (wiki'ye de pattern olarak kaydedilir)
+
+### Wiki Yonetimi (Obsidian-style Bilgi Tabani)
+Wiki, ontolojinin zenginlestirilmis halidir. Entity tanimlari, ornekler, edge case'ler,
+ogrenilen pattern'ler interlinked markdown sayfalari olarak saklanir.
+Celery worker extraction yaparken bu wiki'yi rehber olarak kullanir.
+
+- `create_wiki_page`: Wiki sayfasi olustur (path: 'entities/X', 'patterns/Y' vb.)
+- `update_wiki_page`: Mevcut wiki sayfasini guncelle
+- `get_wiki_page`: Wiki sayfasini oku
+- `search_wiki`: Wiki'de arama yap
+- `get_wiki_index`: Tum sayfalarin listesi
+- `add_learned_pattern`: Ogrenilen pattern'i wiki sayfasi olarak kaydet
+
+NOT: `add_entity_class` ve `add_relationship_predicate` cagirdiginda
+ilgili wiki sayfasi otomatik olusturulur/guncellenir. Manuel olusturmaya
+gerek yok ama ornekler, edge case'ler eklemek icin wiki tool'larini kullan
 
 ### Subagent'lar
 Karmasik analizleri subagent'lara delege edebilirsin:

@@ -2178,17 +2178,69 @@ class ReactAgent:
                 logging.warning(f"⚠️ Redis cache setup failed: {e}")
 
     def _get_schema_for_session(self, session_id: str) -> str:
-        """Session için şema bilgisini al (cache'li)"""
+        """Session için şema bilgisini al (cache'li).
+
+        Neo4j schema + Agent Builder ontoloji bilgisi birlestirilir.
+        """
         if session_id in self._schema_cache:
             return self._schema_cache[session_id]
 
+        schema = ""
         try:
             database_url = self._get_neo4j_url()
             schema = get_cached_schema(database_url, self.graph)
-            self._schema_cache[session_id] = schema
-            return schema
         except Exception as e:
             _log(f"⚠️ Schema fetch error: {e}", "warning")
+
+        ontology_context = self._fetch_ontology_context()
+        if ontology_context:
+            schema = schema + "\n\n" + ontology_context
+
+        self._schema_cache[session_id] = schema
+        return schema
+
+    def _fetch_ontology_context(self) -> str:
+        """Agent Builder'dan ontoloji bilgisini cek (varsa)."""
+        agent_builder_url = os.getenv("AGENT_BUILDER_URL", "")
+        agent_id = os.getenv("AGENT_ID", "")
+        if not agent_builder_url or not agent_id:
+            return ""
+
+        import httpx
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{agent_builder_url}/api/v2/evolving/agents/{agent_id}/ontology")
+                if resp.status_code != 200:
+                    return ""
+                data = resp.json()
+
+            parts = ["\n## DOMAIN ONTOLOGY (from Agent Builder)\n"]
+            if data.get("domain"):
+                parts.append(f"Domain: {data['domain']}")
+            if data.get("goal"):
+                parts.append(f"Goal: {data['goal']}")
+
+            entities = data.get("entity_classes", [])
+            if entities:
+                parts.append("\n### Entity Types")
+                for e in entities:
+                    props = e.get("properties", [])
+                    prop_str = ", ".join(
+                        f"{p['name']}[{p.get('type','string')}]" for p in props
+                    ) if props else ""
+                    parts.append(f"- **{e['name']}**: {e.get('description','')} ({prop_str})")
+
+            rels = data.get("relationship_predicates", [])
+            if rels:
+                parts.append("\n### Relationship Types")
+                for r in rels:
+                    parts.append(f"- {r.get('source','')} -[{r['name']}]-> {r.get('target','')}")
+
+            _log(f"📋 Ontology loaded: {len(entities)} entities, {len(rels)} relationships")
+            return "\n".join(parts)
+
+        except Exception as e:
+            _log(f"⚠️ Agent Builder ontology fetch skipped: {e}", "warning")
             return ""
 
     def _get_neo4j_url(self) -> str:
