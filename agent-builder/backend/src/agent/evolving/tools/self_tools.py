@@ -507,6 +507,72 @@ def create_self_tools(
         except Exception as exc:
             return f"Neo4j baglanti hatasi: {exc}"
 
+    # ─── PLAN TOOLS ─────────────────────────────────────────────
+
+    @tool
+    async def create_plan(steps: list[str], summary: str = "") -> str:
+        """Yapilandirilmis plan olustur. PLAN MODE'da kullanilir.
+        Plani kullaniciya markdown olarak sun ve onay iste.
+
+        Args:
+            steps: Plan adimlari listesi (orn: ["Belgeyi OCR ile oku", "Icerigini ozetle", ...])
+            summary: Plan ozeti/baslik (opsiyonel)
+        """
+        step_dicts = [{"id": i + 1, "content": s} for i, s in enumerate(steps)]
+        await store.save_plan(agent_id, step_dicts, summary)
+        plan = await store.load_plan(agent_id)
+        md = store.plan_to_markdown(plan) if plan else ""
+        return f"Plan olusturuldu ({len(steps)} adim).\n\n{md}"
+
+    @tool
+    async def update_plan_step(step_id: int, new_content: str) -> str:
+        """Plan adimini guncelle. PLAN MODE'da kullanilir.
+
+        Args:
+            step_id: Guncellenecek adim numarasi (1'den baslar)
+            new_content: Yeni adim icerigi
+        """
+        result = await store.update_plan_step(agent_id, step_id, new_content)
+        if not result:
+            return f"Adim {step_id} bulunamadi veya aktif plan yok."
+        md = store.plan_to_markdown(result)
+        return f"Adim {step_id} guncellendi.\n\n{md}"
+
+    @tool
+    async def add_plan_step(after_step_id: int, content: str) -> str:
+        """Plana yeni adim ekle. PLAN MODE'da kullanilir.
+
+        Args:
+            after_step_id: Bu adimdan sonra ekle (0 = en basa ekle)
+            content: Yeni adim icerigi
+        """
+        result = await store.add_plan_step(agent_id, after_step_id, content)
+        if not result:
+            return "Aktif plan bulunamadi."
+        md = store.plan_to_markdown(result)
+        return f"Yeni adim eklendi.\n\n{md}"
+
+    @tool
+    async def remove_plan_step(step_id: int) -> str:
+        """Plandan adim kaldir. PLAN MODE'da kullanilir.
+
+        Args:
+            step_id: Kaldirilacak adim numarasi
+        """
+        result = await store.remove_plan_step(agent_id, step_id)
+        if not result:
+            return f"Adim {step_id} bulunamadi veya aktif plan yok."
+        md = store.plan_to_markdown(result)
+        return f"Adim {step_id} kaldirildi.\n\n{md}"
+
+    @tool
+    async def get_current_plan() -> str:
+        """Aktif plani goster."""
+        plan = await store.load_plan(agent_id)
+        if not plan:
+            return "Aktif plan yok."
+        return store.plan_to_markdown(plan)
+
     return [
         add_entity_class,
         add_relationship_predicate,
@@ -524,4 +590,9 @@ def create_self_tools(
         reject_discovery,
         list_pending_discoveries,
         create_dynamic_indexes,
+        create_plan,
+        update_plan_step,
+        add_plan_step,
+        remove_plan_step,
+        get_current_plan,
     ]

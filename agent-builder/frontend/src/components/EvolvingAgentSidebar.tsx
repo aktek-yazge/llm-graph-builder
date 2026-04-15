@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box,
   Flex,
@@ -14,6 +15,7 @@ import { useAgentContext } from '../context/AgentContext';
 
 export default function EvolvingAgentSidebar() {
   const { agents, activeAgent, loadAgents, selectAgent, createAgent, removeAgent } = useAgentContext();
+  const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPurpose, setNewPurpose] = useState('');
@@ -24,12 +26,18 @@ export default function EvolvingAgentSidebar() {
     loadAgents();
   }, [loadAgents]);
 
+  const handleSelect = async (agentId: string) => {
+    await selectAgent(agentId);
+    navigate(`/evolving/${agentId}`, { replace: true });
+  };
+
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    await createAgent(newName.trim(), newPurpose.trim());
+    const agent = await createAgent(newName.trim(), newPurpose.trim());
     setNewName('');
     setNewPurpose('');
     setShowCreate(false);
+    navigate(`/evolving/${agent.agent_id}`, { replace: true });
   };
 
   const handleDelete = async (e: React.MouseEvent, agentId: string) => {
@@ -128,7 +136,7 @@ export default function EvolvingAgentSidebar() {
             }
             borderLeft={activeAgent?.agent_id === agent.agent_id ? '2px solid' : '2px solid transparent'}
             borderColor={activeAgent?.agent_id === agent.agent_id ? 'blue.500' : 'transparent'}
-            onClick={() => selectAgent(agent.agent_id)}
+            onClick={() => handleSelect(agent.agent_id)}
           >
             <Box minW={0} flex={1}>
               <Text fontSize="sm" fontWeight="medium" isTruncated>

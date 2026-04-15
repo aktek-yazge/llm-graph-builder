@@ -5,6 +5,8 @@ import {
   type Discovery,
   type ChatChunk,
   type BatchProgress,
+  type Plan,
+  type PlanStep,
   listAgents,
   createAgent as apiCreateAgent,
   deleteAgent as apiDeleteAgent,
@@ -14,6 +16,16 @@ import {
   rejectDiscovery as apiReject,
   streamChat,
   getBatchProgress as apiBatchProgress,
+  uploadFiles as apiUploadFiles,
+  listSessions,
+  getAgent as apiGetAgent,
+  resetChat as apiResetChat,
+  getMode as apiGetMode,
+  switchMode as apiSwitchMode,
+  getPlan as apiGetPlan,
+  updatePlanStep as apiUpdatePlanStep,
+  addPlanStep as apiAddPlanStep,
+  removePlanStep as apiRemovePlanStep,
 } from '../services/evolvingApi';
 import { useAgentSSE } from '../hooks/useAgentSSE';
 
@@ -24,6 +36,11 @@ export interface ChatMessage {
   toolName?: string;
   toolInput?: Record<string, unknown>;
   timestamp: number;
+}
+
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
 }
 
 interface AgentContextType {
@@ -37,12 +54,18 @@ interface AgentContextType {
   batchProgress: BatchProgress | null;
   notifications: ReturnType<typeof useAgentSSE>['notifications'];
   sseConnected: boolean;
+  mode: 'plan' | 'agent';
+  plan: Plan | null;
+  todos: TodoItem[];
+  uploadedFiles: Array<{ name: string; path: string }>;
 
   loadAgents: () => Promise<void>;
   selectAgent: (agentId: string) => Promise<void>;
   createAgent: (name: string, purpose: string) => Promise<AgentInfo>;
   removeAgent: (agentId: string) => Promise<void>;
   sendMessage: (text: string) => void;
+  editAndResend: (messageId: string) => string | null;
+  uploadFiles: (files: File[]) => Promise<void>;
   cancelStream: () => void;
   refreshOntology: () => Promise<void>;
   refreshDiscoveries: (status?: string) => Promise<void>;
@@ -50,6 +73,13 @@ interface AgentContextType {
   rejectDiscovery: (name: string, type: string) => Promise<void>;
   refreshBatch: (batchId?: string) => Promise<void>;
   clearMessages: () => void;
+  resetChat: () => Promise<void>;
+  switchMode: (mode: 'plan' | 'agent') => Promise<void>;
+  refreshPlan: () => Promise<void>;
+  updatePlanStep: (stepId: number, content: string) => Promise<void>;
+  addPlanStep: (afterStepId: number, content: string) => Promise<void>;
+  removePlanStep: (stepId: number) => Promise<void>;
+  clearUploadedFiles: () => void;
 }
 
 const AgentContext = createContext<AgentContextType | null>(null);
@@ -63,6 +93,10 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   const [sessionId, setSessionId] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [mode, setMode] = useState<'plan' | 'agent'>('plan');
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; path: string }>>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const { notifications, connected: sseConnected } = useAgentSSE(activeAgent?.agent_id ?? null);
@@ -101,14 +135,28 @@ export function AgentProvider({ children }: { children: ReactNode }) {
 
   const selectAgent = useCallback(
     async (agentId: string) => {
-      const found = agents.find((a) => a.agent_id === agentId);
-      if (!found) return;
+      let found = agents.find((a) => a.agent_id === agentId);
+      if (!found) {
+        try {
+          const resp = await apiGetAgent(agentId);
+          found = resp.data;
+          setAgents((prev) => {
+            if (prev.some((a) => a.agent_id === agentId)) return prev;
+            return [found!, ...prev];
+          });
+        } catch {
+          return;
+        }
+      }
       setActiveAgent(found);
       setMessages([]);
       setSessionId('');
       setOntology(null);
       setDiscoveries([]);
       setBatchProgress(null);
+      setPlan(null);
+      setTodos([]);
+
       try {
         const resp = await getOntology(agentId);
         setOntology(resp.data.ontology);
@@ -120,6 +168,23 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         setDiscoveries(resp.data.discoveries);
       } catch {
         /* ignore */
+      }
+
+      try {
+        const sessResp = await listSessions(agentId);
+        if (sessResp.data.length > 0) {
+          setSessionId(sessResp.data[sessResp.data.length - 1].session_id);
+        }
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        const modeResp = await apiGetMode(agentId);
+        setMode(modeResp.data.mode);
+        setPlan(modeResp.data.plan);
+      } catch {
+        setMode('plan');
       }
     },
     [agents]
@@ -175,7 +240,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         text,
         sessionId,
         (chunk: ChatChunk) => {
-          if (chunk.type === 'token' && chunk.content) {
+          if ((chunk.type === 'message_chunk' || chunk.type === 'token') && chunk.content) {
             assistantContent += chunk.content;
             setMessages((prev) => {
               const existing = prev.find((m) => m.id === assistantId);
@@ -193,9 +258,36 @@ export function AgentProvider({ children }: { children: ReactNode }) {
               {
                 id: `tool-${Date.now()}`,
                 role: 'tool' as const,
-                content: chunk.tool_output || '',
-                toolName: chunk.tool_name,
-                toolInput: chunk.tool_input,
+                content: '',
+                toolName: chunk.tool_name || (chunk as any).name,
+                toolInput: chunk.tool_input || (chunk as any).args,
+                timestamp: Date.now(),
+              },
+            ]);
+          } else if (chunk.type === 'tool_result') {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `toolres-${Date.now()}`,
+                role: 'tool' as const,
+                content: (chunk as any).result || chunk.tool_output || '',
+                toolName: chunk.tool_name || (chunk as any).name,
+                timestamp: Date.now(),
+              },
+            ]);
+          } else if (chunk.type === 'mode' && chunk.mode) {
+            setMode(chunk.mode as 'plan' | 'agent');
+          } else if (chunk.type === 'plan_update' && chunk.plan) {
+            setPlan(chunk.plan as Plan);
+          } else if (chunk.type === 'todo_update' && chunk.todos) {
+            setTodos(chunk.todos as TodoItem[]);
+          } else if (chunk.type === 'error' && chunk.content) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `err-${Date.now()}`,
+                role: 'assistant' as const,
+                content: `Bir hata olustu: ${chunk.content}`,
                 timestamp: Date.now(),
               },
             ]);
@@ -270,10 +362,135 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     [activeAgent]
   );
 
+  const uploadFilesFn = useCallback(
+    async (files: File[]) => {
+      if (!activeAgent || files.length === 0) return;
+      try {
+        const resp = await apiUploadFiles(activeAgent.agent_id, files);
+        const names = files.map((f) => f.name).join(', ');
+        const paths = resp.data.paths || [];
+
+        const newUploaded = paths.map((p: string, i: number) => ({
+          name: files[i]?.name || `file-${i}`,
+          path: p,
+        }));
+        setUploadedFiles((prev) => [...prev, ...newUploaded]);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `upload-${Date.now()}`,
+            role: 'tool' as const,
+            content: `${resp.data.file_count} dosya yuklendi: ${names}`,
+            toolName: 'upload',
+            timestamp: Date.now(),
+          },
+        ]);
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `err-${Date.now()}`,
+            role: 'assistant' as const,
+            content: `Dosya yukleme hatasi: ${err}`,
+            timestamp: Date.now(),
+          },
+        ]);
+      }
+    },
+    [activeAgent]
+  );
+
+  const editAndResend = useCallback(
+    (messageId: string): string | null => {
+      const idx = messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return null;
+      const msg = messages[idx];
+      if (msg.role !== 'user') return null;
+      setMessages(messages.slice(0, idx));
+      setSessionId('');
+      return msg.content;
+    },
+    [messages]
+  );
+
+  const resetChatFn = useCallback(async () => {
+    if (!activeAgent) return;
+    try {
+      await apiResetChat(activeAgent.agent_id);
+    } catch { /* ignore */ }
+    setMessages([]);
+    setSessionId('');
+  }, [activeAgent]);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     setSessionId('');
   }, []);
+
+  const switchModeFn = useCallback(
+    async (newMode: 'plan' | 'agent') => {
+      if (!activeAgent) return;
+      try {
+        await apiSwitchMode(activeAgent.agent_id, newMode);
+        setMode(newMode);
+        const planResp = await apiGetPlan(activeAgent.agent_id);
+        setPlan(planResp.data.plan);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
+
+  const refreshPlanFn = useCallback(async () => {
+    if (!activeAgent) return;
+    try {
+      const resp = await apiGetPlan(activeAgent.agent_id);
+      setPlan(resp.data.plan);
+    } catch {
+      /* ignore */
+    }
+  }, [activeAgent]);
+
+  const updatePlanStepFn = useCallback(
+    async (stepId: number, content: string) => {
+      if (!activeAgent) return;
+      try {
+        const resp = await apiUpdatePlanStep(activeAgent.agent_id, stepId, content);
+        setPlan(resp.data.plan);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
+
+  const addPlanStepFn = useCallback(
+    async (afterStepId: number, content: string) => {
+      if (!activeAgent) return;
+      try {
+        const resp = await apiAddPlanStep(activeAgent.agent_id, afterStepId, content);
+        setPlan(resp.data.plan);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
+
+  const removePlanStepFn = useCallback(
+    async (stepId: number) => {
+      if (!activeAgent) return;
+      try {
+        const resp = await apiRemovePlanStep(activeAgent.agent_id, stepId);
+        setPlan(resp.data.plan);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
 
   return (
     <AgentContext.Provider
@@ -288,11 +505,16 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         batchProgress,
         notifications,
         sseConnected,
+        mode,
+        plan,
+        todos,
         loadAgents,
         selectAgent,
         createAgent,
         removeAgent,
         sendMessage,
+        editAndResend,
+        uploadFiles: uploadFilesFn,
         cancelStream,
         refreshOntology,
         refreshDiscoveries,
@@ -300,6 +522,14 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         rejectDiscovery: rejectDiscoveryFn,
         refreshBatch,
         clearMessages,
+        resetChat: resetChatFn,
+        switchMode: switchModeFn,
+        refreshPlan: refreshPlanFn,
+        updatePlanStep: updatePlanStepFn,
+        addPlanStep: addPlanStepFn,
+        removePlanStep: removePlanStepFn,
+        uploadedFiles,
+        clearUploadedFiles: () => setUploadedFiles([]),
       }}
     >
       {children}

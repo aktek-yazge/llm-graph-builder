@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
+from pathlib import Path as FsPath
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Path, UploadFile, File, Request
@@ -74,6 +76,7 @@ class ResumeRequest(BaseModel):
 class UploadResponse(BaseModel):
     file_count: int
     message: str
+    paths: list[str] = []
 
 
 class BatchStartRequest(BaseModel):
@@ -94,6 +97,11 @@ class BatchProgressResponse(BaseModel):
     percent_complete: float
 
 
+class AddSourceRequest(BaseModel):
+    urls: list[str]
+    source_type: str = "url"
+
+
 class CallbackPayload(BaseModel):
     agent_id: str = ""
     doc_id: str = ""
@@ -102,6 +110,9 @@ class CallbackPayload(BaseModel):
     event_type: str = "document_complete"
     confidence_score: float = 0.0
     error_message: str = ""
+
+
+UPLOAD_DIR = FsPath(os.getenv("UPLOAD_DIR", "/tmp/evolving-uploads"))
 
 
 # ------------------------------------------------------------------
@@ -237,6 +248,134 @@ async def agent_chat_resume(request: Request, agent_id: str, body: ResumeRequest
 
 
 # ------------------------------------------------------------------
+# Chat History & Sessions
+# ------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/sessions", summary="List chat sessions for agent")
+async def list_sessions(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    sessions = await agent.list_sessions()
+    return {"agent_id": agent_id, "sessions": sessions}
+
+
+@router.get("/agents/{agent_id}/chat/history", summary="Get chat history for a session")
+async def get_chat_history(request: Request, agent_id: str, session_id: str = Query(default="")):
+    agent = await _get_agent(request, agent_id)
+    if not session_id:
+        sessions = await agent.list_sessions()
+        if sessions:
+            session_id = sessions[-1]["session_id"]
+        else:
+            return {"agent_id": agent_id, "session_id": "", "messages": []}
+    history = await agent.get_chat_history(session_id)
+    return {"agent_id": agent_id, "session_id": session_id, "messages": history}
+
+
+@router.post("/agents/{agent_id}/chat/reset", summary="Start a new chat session (clears conversation)")
+async def reset_chat(request: Request, agent_id: str):
+    """Mevcut konusmayi sifirla, yeni session baslat."""
+    agent = await _get_agent(request, agent_id)
+    if agent._checkpointer and hasattr(agent, "_checkpointer_conn"):
+        try:
+            import asyncpg
+            dsn = os.getenv(
+                "EVENT_STORE_DSN",
+                "postgresql://event_user:event_secret@localhost:5433/event_store",
+            )
+            conn = await asyncpg.connect(dsn)
+            try:
+                prefix = f"{agent_id}:%"
+                await conn.execute("DELETE FROM checkpoints WHERE thread_id LIKE $1", prefix)
+                await conn.execute("DELETE FROM checkpoint_writes WHERE thread_id LIKE $1", prefix)
+            finally:
+                await conn.close()
+        except Exception as exc:
+            logger.warning("Chat reset DB cleanup failed: %s", exc)
+    return {"agent_id": agent_id, "status": "reset", "message": "Konusma sifirlandi. Yeni session baslatilacak."}
+
+
+# ------------------------------------------------------------------
+# Mode & Plan
+# ------------------------------------------------------------------
+
+class ModeSwitchRequest(BaseModel):
+    mode: str  # "plan" | "agent"
+
+
+class PlanStepUpdate(BaseModel):
+    step_id: int
+    new_content: str
+
+
+class PlanStepAdd(BaseModel):
+    after_step_id: int = 0
+    content: str
+
+
+@router.get("/agents/{agent_id}/mode", summary="Get current agent mode")
+async def get_mode(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    mode = await agent.get_mode()
+    plan = await agent.store.load_plan(agent_id)
+    return {
+        "agent_id": agent_id,
+        "mode": mode,
+        "has_plan": plan is not None,
+        "plan": plan,
+    }
+
+
+@router.post("/agents/{agent_id}/mode", summary="Switch agent mode")
+async def switch_mode(request: Request, agent_id: str, body: ModeSwitchRequest):
+    agent = await _get_agent(request, agent_id)
+    if body.mode == "agent":
+        result = await agent.approve_plan()
+    else:
+        result = await agent.switch_to_plan()
+    return {"agent_id": agent_id, **result}
+
+
+@router.get("/agents/{agent_id}/plan", summary="Get current plan")
+async def get_plan(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    plan = await agent.store.load_plan(agent_id)
+    if not plan:
+        return {"agent_id": agent_id, "plan": None, "markdown": ""}
+    md = agent.store.plan_to_markdown(plan)
+    return {"agent_id": agent_id, "plan": plan, "markdown": md}
+
+
+@router.put("/agents/{agent_id}/plan/step", summary="Update a plan step")
+async def update_plan_step(request: Request, agent_id: str, body: PlanStepUpdate):
+    agent = await _get_agent(request, agent_id)
+    result = await agent.store.update_plan_step(agent_id, body.step_id, body.new_content)
+    if not result:
+        raise HTTPException(404, "Step not found or no active plan")
+    md = agent.store.plan_to_markdown(result)
+    return {"agent_id": agent_id, "plan": result, "markdown": md}
+
+
+@router.post("/agents/{agent_id}/plan/step", summary="Add a new plan step")
+async def add_plan_step(request: Request, agent_id: str, body: PlanStepAdd):
+    agent = await _get_agent(request, agent_id)
+    result = await agent.store.add_plan_step(agent_id, body.after_step_id, body.content)
+    if not result:
+        raise HTTPException(404, "No active plan")
+    md = agent.store.plan_to_markdown(result)
+    return {"agent_id": agent_id, "plan": result, "markdown": md}
+
+
+@router.delete("/agents/{agent_id}/plan/step/{step_id}", summary="Remove a plan step")
+async def remove_plan_step(request: Request, agent_id: str, step_id: int):
+    agent = await _get_agent(request, agent_id)
+    result = await agent.store.remove_plan_step(agent_id, step_id)
+    if not result:
+        raise HTTPException(404, "Step not found or no active plan")
+    md = agent.store.plan_to_markdown(result)
+    return {"agent_id": agent_id, "plan": result, "markdown": md}
+
+
+# ------------------------------------------------------------------
 # Ontology
 # ------------------------------------------------------------------
 
@@ -354,15 +493,57 @@ async def get_skill_execution(request: Request, agent_id: str):
 async def upload_samples(request: Request, agent_id: str, files: List[UploadFile] = File(...)):
     agent = await _get_agent(request, agent_id)
 
-    file_infos = [{"filename": f.filename, "content_type": f.content_type, "size": f.size} for f in files]
+    agent_dir = UPLOAD_DIR / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    file_infos: list[dict] = []
+    for f in files:
+        safe_name = f"{uuid.uuid4().hex[:8]}_{f.filename}"
+        dest = agent_dir / safe_name
+        content = await f.read()
+        dest.write_bytes(content)
+        saved_paths.append(str(dest))
+        file_infos.append({
+            "filename": f.filename,
+            "content_type": f.content_type,
+            "size": len(content),
+            "path": str(dest),
+        })
 
     await agent.store.upsert(
-        agent_id, "sample_files", f"batch_{len(files)}", {"files": file_infos}, source="user_upload",
+        agent_id, "sample_files", f"batch_{uuid.uuid4().hex[:8]}",
+        {"files": file_infos, "paths": saved_paths},
+        source="user_upload",
     )
+
+    logger.info("Agent %s: %d dosya yuklendi -> %s", agent_id, len(files), saved_paths)
 
     return UploadResponse(
         file_count=len(files),
         message=f"{len(files)} dosya yuklendi. Agent ile konusarak bu belgelerden entity/relationship kesfedebilirsiniz.",
+        paths=saved_paths,
+    )
+
+
+@router.post("/agents/{agent_id}/add-sources", response_model=UploadResponse)
+async def add_sources(request: Request, agent_id: str, body: AddSourceRequest):
+    """S3, MinIO veya HTTP URL'lerini kaynak olarak ekle."""
+    agent = await _get_agent(request, agent_id)
+
+    source_infos = [{"url": u, "type": body.source_type} for u in body.urls]
+
+    await agent.store.upsert(
+        agent_id, "source_urls", f"batch_{uuid.uuid4().hex[:8]}",
+        {"sources": source_infos, "urls": body.urls},
+        source="user_url",
+    )
+
+    logger.info("Agent %s: %d kaynak eklendi -> %s", agent_id, len(body.urls), body.urls)
+
+    return UploadResponse(
+        file_count=len(body.urls),
+        message=f"{len(body.urls)} kaynak eklendi.",
     )
 
 
@@ -398,7 +579,12 @@ async def batch_progress(request: Request, agent_id: str, batch_id: str = ""):
     tools = create_batch_tools(agent_id, pg=registry._pg)
     progress_tool = tools[1]
     result = await progress_tool.ainvoke({"batch_id": batch_id})
-    return json.loads(result) if isinstance(result, str) else result
+    if isinstance(result, str):
+        try:
+            return json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            return BatchProgressResponse(batch_id=batch_id or "", status="no_batch", total=0, processed=0, successful=0, failed=0, needs_review=0, percent_complete=0.0)
+    return result or BatchProgressResponse(batch_id=batch_id or "", status="no_batch", total=0, processed=0, successful=0, failed=0, needs_review=0, percent_complete=0.0)
 
 
 @router.get("/agents/{agent_id}/batch/problems", summary="List problem documents")

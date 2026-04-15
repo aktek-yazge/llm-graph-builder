@@ -8,6 +8,7 @@ import {
   PaginatedWorkspaces,
   AgentEvent,
 } from '../services/workspaceApi';
+import { listAgents as listEvolvingAgents, AgentInfo } from '../services/evolvingApi';
 import Breadcrumb from '../components/Breadcrumb';
 
 interface Agent extends ApiAgent {
@@ -64,6 +65,9 @@ export default function Dashboard() {
   const [tenantId] = useState('default-tenant');
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  const [evolvingAgents, setEvolvingAgents] = useState<AgentInfo[]>([]);
+  const [evolvingLoading, setEvolvingLoading] = useState(false);
+
   const [wsPage, setWsPage] = useState(1);
   const [wsPageSize, setWsPageSize] = useState(10);
   const [wsPaginated, setWsPaginated] = useState<PaginatedWorkspaces | null>(null);
@@ -81,9 +85,22 @@ export default function Dashboard() {
     }
   }, [tenantId]);
 
+  const loadEvolvingAgents = useCallback(async () => {
+    setEvolvingLoading(true);
+    try {
+      const res = await listEvolvingAgents(50);
+      setEvolvingAgents(res.data);
+    } catch (err) {
+      console.error('Failed to load evolving agents:', err);
+    } finally {
+      setEvolvingLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
     loadWorkspaces(1, wsPageSize);
+    loadEvolvingAgents();
     const es = dashboardApi.subscribeToEvents('', (event) => {
       setLiveEvents((prev) => [event, ...prev].slice(0, 30));
     });
@@ -158,7 +175,7 @@ export default function Dashboard() {
           variants={stagger}
           initial="hidden"
           animate="show"
-          className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6"
         >
           <QuickAction
             onClick={() => navigate('/workspaces')}
@@ -180,6 +197,13 @@ export default function Dashboard() {
             gradient="from-emerald-500 to-teal-600"
             title="Resource'lar"
             desc="Kaynaklari duzenleyin"
+          />
+          <QuickAction
+            onClick={() => navigate('/evolving')}
+            icon={<EvolvingIcon />}
+            gradient="from-amber-500 to-orange-600"
+            title="Self-Evolving Agent"
+            desc="Agent ile konusarak KG olustur"
           />
         </motion.div>
 
@@ -279,6 +303,100 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+
+        {/* Evolving Agents */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden mb-6">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-800">Self-Evolving Agent'lar</h2>
+              {evolvingAgents.length > 0 && (
+                <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                  {evolvingAgents.length}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => navigate('/evolving')}
+              className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 font-medium transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Yeni Agent
+            </button>
+          </div>
+
+          {evolvingLoading ? (
+            <div className="px-5 py-12 text-center">
+              <div className="inline-block animate-spin rounded-full h-5 w-5 border-2 border-amber-200 border-t-amber-600" />
+            </div>
+          ) : evolvingAgents.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2">
+              <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center">
+                <EvolvingIcon className="w-5 h-5 text-amber-500" />
+              </div>
+              <span className="text-sm text-slate-400">Henuz evolving agent yok</span>
+              <button
+                onClick={() => navigate('/evolving')}
+                className="text-xs text-amber-600 hover:text-amber-700 font-medium"
+              >
+                Ilk agent'inizi olusturun &rarr;
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50/70">
+                    <th className="text-left px-5 py-2.5 text-xs font-medium text-slate-500">Agent</th>
+                    <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Domain</th>
+                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Entity</th>
+                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Iliski</th>
+                    <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Durum</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {evolvingAgents.map((ag) => (
+                    <tr
+                      key={ag.agent_id}
+                      onClick={() => navigate('/evolving')}
+                      className="hover:bg-amber-50/40 cursor-pointer transition-colors group"
+                    >
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                            {ag.name?.[0]?.toUpperCase() || 'A'}
+                          </div>
+                          <div>
+                            <span className="font-medium text-slate-800 group-hover:text-amber-700 transition-colors">
+                              {ag.name || ag.agent_id.slice(0, 12)}
+                            </span>
+                            {ag.purpose && (
+                              <p className="text-[11px] text-slate-400 truncate max-w-[200px]">{ag.purpose}</p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 text-slate-600 text-xs">{ag.domain || '-'}</td>
+                      <td className="px-3 py-3 text-right text-slate-600 tabular-nums">{ag.entity_count}</td>
+                      <td className="px-3 py-3 text-right text-slate-600 tabular-nums">{ag.relationship_count}</td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium ${
+                          ag.is_empty
+                            ? 'bg-slate-100 text-slate-600'
+                            : 'bg-emerald-50 text-emerald-700'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${ag.is_empty ? 'bg-slate-400' : 'bg-emerald-500'}`} />
+                          {ag.is_empty ? 'Bos' : 'Aktif'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
 
         {/* Two-Column: Workspace Table + Activity */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -694,6 +812,14 @@ function ChartIcon() {
   return (
     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+    </svg>
+  );
+}
+
+function EvolvingIcon({ className = 'w-5 h-5' }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
     </svg>
   );
 }

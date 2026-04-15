@@ -42,24 +42,43 @@ from .tools.quality_tools import create_quality_tools
 
 logger = logging.getLogger(__name__)
 
-LLM_PROVIDER = os.getenv("EVOLVING_LLM_PROVIDER", "google")
-LLM_MODEL = os.getenv("EVOLVING_LLM_MODEL", "gemini-2.5-flash")
-LLM_TEMPERATURE = float(os.getenv("EVOLVING_LLM_TEMPERATURE", "0.3"))
+CHAT_PROVIDER = os.getenv("EVOLVING_CHAT_PROVIDER", "openai")
+CHAT_MODEL = os.getenv("EVOLVING_CHAT_MODEL", "gpt-5.4")
+CHAT_TEMPERATURE = float(os.getenv("EVOLVING_CHAT_TEMPERATURE", "0.3"))
+
+SUBAGENT_MODEL = os.getenv("EVOLVING_SUBAGENT_MODEL", "openai:gpt-5.4-mini")
+
+_PROVIDER_MAP = {
+    "google": "google_genai",
+    "gemini": "google_genai",
+    "openai": "openai",
+    "gpt": "openai",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+}
 
 
-def _model_string(provider: str = LLM_PROVIDER, model: str = LLM_MODEL) -> str:
+def _model_string(provider: str = CHAT_PROVIDER, model: str = CHAT_MODEL) -> str:
     """Build provider:model string for deepagents init_chat_model."""
-    provider = provider.lower()
-    provider_map = {
-        "google": "google_genai",
-        "gemini": "google_genai",
-        "openai": "openai",
-        "gpt": "openai",
-        "anthropic": "anthropic",
-        "claude": "anthropic",
-    }
-    prefix = provider_map.get(provider, provider)
+    prefix = _PROVIDER_MAP.get(provider.lower(), provider.lower())
     return f"{prefix}:{model}"
+
+
+def _extract_text(content: Any) -> str:
+    """Normalize msg.content which may be str, list[dict], or other."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(item.get("text", str(item)))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content) if content else ""
 
 
 class SelfEvolvingAgent:
@@ -83,8 +102,8 @@ class SelfEvolvingAgent:
         celery_app=None,
         mcp_client=None,
         notification_mgr=None,
-        llm_provider: str = LLM_PROVIDER,
-        llm_model: str = LLM_MODEL,
+        llm_provider: str = CHAT_PROVIDER,
+        llm_model: str = CHAT_MODEL,
     ):
         self.agent_id = agent_id
         self._pg = pg
@@ -124,7 +143,7 @@ class SelfEvolvingAgent:
             wiki=self.wiki,
         ))
         tools.extend(create_wiki_tools(self.agent_id, self.wiki))
-        tools.extend(create_ocr_tools(self.agent_id, self._celery_app))
+        tools.extend(create_ocr_tools(self.agent_id, self._celery_app, store=self.store, memory=self.memory))
         tools.extend(create_batch_tools(self.agent_id, pg=self._pg, celery_app=self._celery_app))
         return tools
 
@@ -136,7 +155,7 @@ class SelfEvolvingAgent:
     def _build_subagents(self) -> list[dict[str, Any]]:
         quality_tools = create_quality_tools(self.agent_id, pg=self._pg)
 
-        ocr_tools = create_ocr_tools(self.agent_id, self._celery_app)
+        ocr_tools = create_ocr_tools(self.agent_id, self._celery_app, store=self.store, memory=self.memory)
         test_tool = [t for t in ocr_tools if t.name == "test_extraction_on_sample"]
 
         return [
@@ -147,8 +166,13 @@ class SelfEvolvingAgent:
                     "Batch tamamlandiginda veya kullanici istediginde: "
                     "extraction sonuclarini ornekle, celiskileri bul, anomalileri tespit et, rapor uret."
                 ),
+                "system_prompt": (
+                    "Sen bir kalite analisti subagent'isin. "
+                    "Extraction sonuclarini analiz et, celiskileri bul, anomalileri tespit et ve rapor uret. "
+                    "Sonuclari yapilandirilmis ve okunakli sekilde sun."
+                ),
                 "tools": quality_tools,
-                "model": "google_genai:gemini-2.5-flash",
+                "model": SUBAGENT_MODEL,
             },
             {
                 "name": "ocr-strategy-advisor",
@@ -156,18 +180,60 @@ class SelfEvolvingAgent:
                     "Yeni belge tipi geldiginde veya OCR kalitesi dusuk oldugunda: "
                     "ornek sayfalari analiz et, en uygun OCR modunu oner."
                 ),
+                "system_prompt": (
+                    "Sen bir OCR strateji danismani subagent'isin. "
+                    "Belge tiplerini analiz et ve en uygun OCR modunu (native, gemini, hybrid) oner. "
+                    "Ornek sayfalari inceleyerek kalite degerlendirmesi yap."
+                ),
                 "tools": test_tool,
-                "model": "google_genai:gemini-2.5-flash",
+                "model": SUBAGENT_MODEL,
             },
         ]
+
+    # ------------------------------------------------------------------
+    # Mode management
+    # ------------------------------------------------------------------
+
+    PLAN_ONLY_TOOLS = frozenset({
+        "create_plan", "update_plan_step", "add_plan_step",
+        "remove_plan_step", "get_current_plan",
+        "get_current_ontology", "get_wiki_page", "search_wiki",
+        "get_wiki_index", "get_ocr_text", "get_batch_progress",
+        "list_pending_discoveries",
+    })
+
+    async def get_mode(self) -> str:
+        """Return current mode: 'plan' or 'agent'."""
+        plan = await self.store.load_plan(self.agent_id)
+        if plan and plan.get("status") in ("approved", "executing"):
+            return "agent"
+        return "plan"
+
+    async def approve_plan(self) -> dict[str, Any]:
+        """Approve current plan and switch to agent mode."""
+        plan = await self.store.load_plan(self.agent_id)
+        if not plan:
+            return {"error": "No active plan"}
+        await self.store.update_plan_status(self.agent_id, "approved")
+        return {"mode": "agent", "status": "approved", "steps": len(plan.get("steps", []))}
+
+    async def switch_to_plan(self) -> dict[str, Any]:
+        """Switch back to plan mode."""
+        plan = await self.store.load_plan(self.agent_id)
+        if plan:
+            await self.store.update_plan_status(self.agent_id, "draft")
+        return {"mode": "plan"}
 
     # ------------------------------------------------------------------
     # Agent construction
     # ------------------------------------------------------------------
 
-    async def _build_agent(self):
+    async def _build_agent(self, mode: str | None = None):
         """Create a compiled deep agent graph for this session."""
-        system_prompt = await self.memory.build_system_prompt(self.agent_id)
+        if mode is None:
+            mode = await self.get_mode()
+
+        system_prompt = await self.memory.build_system_prompt(self.agent_id, mode=mode)
         local_tools = self._build_local_tools()
 
         mcp_tools: list = []
@@ -178,7 +244,15 @@ class SelfEvolvingAgent:
                 logger.warning("MCP tools unavailable: %s", exc)
 
         all_tools = [*local_tools, *mcp_tools]
-        subagents = self._build_subagents()
+
+        if mode == "plan":
+            all_tools = [t for t in all_tools if t.name in self.PLAN_ONLY_TOOLS]
+            subagents = []
+        else:
+            all_tools = [t for t in all_tools if t.name not in {
+                "create_plan", "update_plan_step", "add_plan_step", "remove_plan_step",
+            }]
+            subagents = self._build_subagents()
 
         kwargs: dict[str, Any] = {
             "model": self._model_str,
@@ -216,23 +290,51 @@ class SelfEvolvingAgent:
         if not session_id:
             session_id = f"sess-{uuid.uuid4().hex[:12]}"
 
-        agent = await self._build_agent()
+        mode = await self.get_mode()
+        agent = await self._build_agent(mode=mode)
+
+        yield {"type": "mode", "mode": mode}
 
         config: dict[str, Any] = {"recursion_limit": 50}
         if self._checkpointer:
             config["configurable"] = {"thread_id": f"{self.agent_id}:{session_id}"}
 
         full_response = ""
+        _last_todos: list | None = None
         try:
+            from langgraph.types import Overwrite
+            from langchain_core.messages import AIMessage, ToolMessage
+
             async for event in agent.astream(
                 {"messages": [HumanMessage(content=message)]},
                 config=config,
             ):
                 for node_name, node_output in event.items():
-                    messages = node_output.get("messages", [])
-                    for msg in messages:
-                        from langchain_core.messages import AIMessage, ToolMessage
+                    if node_output is None:
+                        continue
 
+                    raw_todos = node_output.get("todos")
+                    if raw_todos is not None:
+                        if isinstance(raw_todos, Overwrite):
+                            raw_todos = raw_todos.value
+                        if isinstance(raw_todos, list) and raw_todos != _last_todos:
+                            _last_todos = raw_todos
+                            yield {
+                                "type": "todo_update",
+                                "todos": [
+                                    {"content": t.get("content", ""), "status": t.get("status", "pending")}
+                                    for t in raw_todos if isinstance(t, dict)
+                                ],
+                            }
+
+                    raw_messages = node_output.get("messages", [])
+
+                    if isinstance(raw_messages, Overwrite):
+                        raw_messages = raw_messages.value
+                    if not isinstance(raw_messages, list):
+                        raw_messages = [raw_messages] if raw_messages else []
+
+                    for msg in raw_messages:
                         if isinstance(msg, AIMessage):
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
@@ -241,14 +343,20 @@ class SelfEvolvingAgent:
                                         "name": tc["name"],
                                         "args": tc["args"],
                                     }
+                                    if tc["name"] in ("create_plan", "update_plan_step", "add_plan_step", "remove_plan_step"):
+                                        plan = await self.store.load_plan(self.agent_id)
+                                        if plan:
+                                            yield {"type": "plan_update", "plan": plan}
                             elif msg.content:
-                                full_response += msg.content
-                                yield {
-                                    "type": "message_chunk",
-                                    "content": msg.content,
-                                }
+                                text = _extract_text(msg.content)
+                                if text:
+                                    full_response += text
+                                    yield {
+                                        "type": "message_chunk",
+                                        "content": text,
+                                    }
                         elif isinstance(msg, ToolMessage):
-                            result_preview = str(msg.content)[:500]
+                            result_preview = _extract_text(msg.content)[:500]
                             yield {
                                 "type": "tool_result",
                                 "name": msg.name,
@@ -285,25 +393,32 @@ class SelfEvolvingAgent:
 
         full_response = ""
         try:
-            from langgraph.types import Command
+            from langgraph.types import Command, Overwrite
+            from langchain_core.messages import AIMessage, ToolMessage
+
             async for event in agent.astream(
                 Command(resume=resume_value),
                 config={"configurable": {"thread_id": thread_id}},
             ):
                 for node_name, node_output in event.items():
-                    messages = node_output.get("messages", [])
-                    for msg in messages:
-                        from langchain_core.messages import AIMessage, ToolMessage
+                    raw_messages = node_output.get("messages", [])
+                    if isinstance(raw_messages, Overwrite):
+                        raw_messages = raw_messages.value
+                    if not isinstance(raw_messages, list):
+                        raw_messages = [raw_messages] if raw_messages else []
 
+                    for msg in raw_messages:
                         if isinstance(msg, AIMessage):
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
                                     yield {"type": "tool_call", "name": tc["name"], "args": tc["args"]}
                             elif msg.content:
-                                full_response += msg.content
-                                yield {"type": "message_chunk", "content": msg.content}
+                                text = _extract_text(msg.content)
+                                if text:
+                                    full_response += text
+                                    yield {"type": "message_chunk", "content": text}
                         elif isinstance(msg, ToolMessage):
-                            yield {"type": "tool_result", "name": msg.name, "result": str(msg.content)[:500]}
+                            yield {"type": "tool_result", "name": msg.name, "result": _extract_text(msg.content)[:500]}
         except Exception as e:
             logger.error("Agent resume error: %s", e, exc_info=True)
             yield {"type": "error", "content": str(e)}
@@ -343,6 +458,70 @@ class SelfEvolvingAgent:
         """AgenticOCR uyumlu SkillExecution formatini dondur."""
         return await self.skill_manager.get_skill_for_api(self.agent_id)
 
+    async def get_chat_history(self, session_id: str) -> list[dict[str, Any]]:
+        """Checkpointer'dan konusma gecmisini yukle."""
+        if not self._checkpointer:
+            return []
+        try:
+            from langchain_core.messages import HumanMessage as HM, AIMessage, ToolMessage
+
+            thread_id = f"{self.agent_id}:{session_id}"
+            config = {"configurable": {"thread_id": thread_id}}
+            checkpoint = await self._checkpointer.aget(config)
+            if not checkpoint or "channel_values" not in checkpoint:
+                return []
+            raw_messages = checkpoint["channel_values"].get("messages", [])
+            result: list[dict[str, Any]] = []
+            for msg in raw_messages:
+                if isinstance(msg, HM):
+                    result.append({"role": "user", "content": _extract_text(msg.content)})
+                elif isinstance(msg, AIMessage):
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            result.append({"role": "tool_call", "tool_name": tc["name"], "content": str(tc.get("args", {}))})
+                    elif msg.content:
+                        result.append({"role": "assistant", "content": _extract_text(msg.content)})
+                elif isinstance(msg, ToolMessage):
+                    result.append({"role": "tool", "tool_name": msg.name, "content": _extract_text(msg.content)[:500]})
+            return result
+        except Exception as exc:
+            logger.warning("Chat history load error: %s", exc)
+            return []
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """Checkpointer'daki tum session'lari listele."""
+        if not self._checkpointer:
+            return []
+        try:
+            prefix = f"{self.agent_id}:"
+            sessions: list[dict[str, Any]] = []
+            dsn = os.getenv(
+                "EVENT_STORE_DSN",
+                "postgresql://event_user:event_secret@localhost:5433/event_store",
+            )
+            import asyncpg
+            conn = await asyncpg.connect(dsn)
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT thread_id
+                    FROM checkpoints
+                    WHERE thread_id LIKE $1
+                    ORDER BY thread_id
+                    """,
+                    f"{prefix}%",
+                )
+                for row in rows:
+                    tid = row["thread_id"]
+                    sid = tid[len(prefix):]
+                    sessions.append({"session_id": sid, "thread_id": tid})
+            finally:
+                await conn.close()
+            return sessions
+        except Exception as exc:
+            logger.warning("Session list error: %s", exc)
+            return []
+
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
@@ -351,13 +530,16 @@ class SelfEvolvingAgent:
         """Create an async PostgreSQL checkpointer for conversation persistence."""
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            import psycopg
 
             dsn = os.getenv(
                 "EVENT_STORE_DSN",
                 "postgresql://event_user:event_secret@localhost:5433/event_store",
             )
-            saver = AsyncPostgresSaver.from_conn_string(dsn)
+            conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+            saver = AsyncPostgresSaver(conn)
             await saver.setup()
+            self._checkpointer_conn = conn
             return saver
         except Exception as exc:
             logger.warning("AsyncPostgresSaver not available: %s (conversations will not persist)", exc)

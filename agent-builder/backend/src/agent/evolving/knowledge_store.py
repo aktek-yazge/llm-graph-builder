@@ -190,6 +190,112 @@ class KnowledgeStore:
         )
         return [dict(r) for r in rows]
 
+    # ─── PLAN ─────────────────────────────────────────────────────
+
+    async def save_plan(
+        self,
+        agent_id: str,
+        steps: list[dict[str, str]],
+        summary: str = "",
+    ) -> dict[str, Any]:
+        """Yeni plan olustur veya mevcut plani degistir.
+
+        Args:
+            steps: [{"id": 1, "content": "..."}, ...]
+            summary: Plan ozeti
+        """
+        numbered = []
+        for i, s in enumerate(steps):
+            numbered.append({
+                "id": s.get("id", i + 1),
+                "content": s.get("content", s) if isinstance(s, dict) else str(s),
+            })
+        value = {"steps": numbered, "summary": summary, "status": "draft"}
+        return await self.upsert(agent_id, "active_plan", "current", value, source="plan_mode")
+
+    async def load_plan(self, agent_id: str) -> dict[str, Any] | None:
+        """Aktif plani yukle."""
+        row = await self.get(agent_id, "active_plan", "current")
+        if not row:
+            return None
+        val = row["value"]
+        if isinstance(val, str):
+            val = json.loads(val)
+        return val
+
+    async def update_plan_status(self, agent_id: str, status: str) -> None:
+        """Plan durumunu guncelle: draft | approved | executing | completed."""
+        plan = await self.load_plan(agent_id)
+        if not plan:
+            return
+        plan["status"] = status
+        await self.upsert(agent_id, "active_plan", "current", plan, source="plan_mode")
+
+    async def update_plan_step(
+        self, agent_id: str, step_id: int, new_content: str
+    ) -> dict[str, Any] | None:
+        """Tek bir plan adimini guncelle."""
+        plan = await self.load_plan(agent_id)
+        if not plan:
+            return None
+        for step in plan.get("steps", []):
+            if step.get("id") == step_id:
+                step["content"] = new_content
+                break
+        else:
+            return None
+        await self.upsert(agent_id, "active_plan", "current", plan, source="plan_mode")
+        return plan
+
+    async def add_plan_step(
+        self, agent_id: str, after_step_id: int, content: str
+    ) -> dict[str, Any] | None:
+        """Belirli bir adimdan sonra yeni adim ekle."""
+        plan = await self.load_plan(agent_id)
+        if not plan:
+            return None
+        steps = plan.get("steps", [])
+        insert_idx = len(steps)
+        for i, step in enumerate(steps):
+            if step.get("id") == after_step_id:
+                insert_idx = i + 1
+                break
+        max_id = max((s.get("id", 0) for s in steps), default=0)
+        steps.insert(insert_idx, {"id": max_id + 1, "content": content})
+        for i, step in enumerate(steps):
+            step["id"] = i + 1
+        plan["steps"] = steps
+        await self.upsert(agent_id, "active_plan", "current", plan, source="plan_mode")
+        return plan
+
+    async def remove_plan_step(
+        self, agent_id: str, step_id: int
+    ) -> dict[str, Any] | None:
+        """Plan adimini kaldir."""
+        plan = await self.load_plan(agent_id)
+        if not plan:
+            return None
+        steps = plan.get("steps", [])
+        plan["steps"] = [s for s in steps if s.get("id") != step_id]
+        for i, step in enumerate(plan["steps"]):
+            step["id"] = i + 1
+        await self.upsert(agent_id, "active_plan", "current", plan, source="plan_mode")
+        return plan
+
+    def plan_to_markdown(self, plan: dict[str, Any]) -> str:
+        """Plan dict'inden markdown olustur."""
+        lines = []
+        if plan.get("summary"):
+            lines.append(f"## Plan: {plan['summary']}")
+        else:
+            lines.append("## Plan")
+        lines.append("")
+        for step in plan.get("steps", []):
+            lines.append(f"{step['id']}. {step['content']}")
+        status = plan.get("status", "draft")
+        lines.append(f"\n*Durum: {status}*")
+        return "\n".join(lines)
+
     # ─── ONTOLOGY DISCOVERIES ─────────────────────────────────────
 
     async def upsert_discovery(

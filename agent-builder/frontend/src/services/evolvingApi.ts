@@ -5,8 +5,7 @@ const agentBuilderUrl = (): string => {
     const u = import.meta.env.VITE_AGENT_BUILDER_URL as string;
     return u.endsWith('/') ? u.slice(0, -1) : u;
   }
-  const loc = window.location;
-  return `${loc.protocol}//${loc.hostname}:8002`;
+  return '';
 };
 
 const agentApi = axios.create({ baseURL: agentBuilderUrl() });
@@ -38,6 +37,31 @@ export const getAgent = (agentId: string) =>
 export const deleteAgent = (agentId: string) =>
   agentApi.delete(`${PREFIX}/agents/${agentId}`);
 
+// ── Sessions & History ──────────────────────────────────────────
+
+export interface SessionInfo {
+  session_id: string;
+  thread_id: string;
+}
+
+export interface HistoryMessage {
+  role: 'user' | 'assistant' | 'tool' | 'tool_call';
+  content: string;
+  tool_name?: string;
+}
+
+export const listSessions = (agentId: string) =>
+  agentApi.get<{ sessions: SessionInfo[] }>(`${PREFIX}/agents/${agentId}/sessions`);
+
+export const getChatHistory = (agentId: string, sessionId = '') =>
+  agentApi.get<{ session_id: string; messages: HistoryMessage[] }>(
+    `${PREFIX}/agents/${agentId}/chat/history`,
+    { params: { session_id: sessionId } }
+  );
+
+export const resetChat = (agentId: string) =>
+  agentApi.post(`${PREFIX}/agents/${agentId}/chat/reset`);
+
 // ── Chat ────────────────────────────────────────────────────────
 
 export interface ChatChunk {
@@ -47,6 +71,9 @@ export interface ChatChunk {
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_output?: string;
+  mode?: 'plan' | 'agent';
+  plan?: Plan;
+  todos?: Array<{ content: string; status: string }>;
   [key: string]: unknown;
 }
 
@@ -99,6 +126,56 @@ export function streamChat(
 
   return controller;
 }
+
+// ── Mode & Plan ─────────────────────────────────────────────────
+
+export interface PlanStep {
+  id: number;
+  content: string;
+}
+
+export interface Plan {
+  steps: PlanStep[];
+  summary: string;
+  status: 'draft' | 'approved' | 'executing' | 'completed';
+}
+
+export interface ModeInfo {
+  agent_id: string;
+  mode: 'plan' | 'agent';
+  has_plan: boolean;
+  plan: Plan | null;
+}
+
+export interface PlanResponse {
+  agent_id: string;
+  plan: Plan | null;
+  markdown: string;
+}
+
+export const getMode = (agentId: string) =>
+  agentApi.get<ModeInfo>(`${PREFIX}/agents/${agentId}/mode`);
+
+export const switchMode = (agentId: string, mode: 'plan' | 'agent') =>
+  agentApi.post(`${PREFIX}/agents/${agentId}/mode`, { mode });
+
+export const getPlan = (agentId: string) =>
+  agentApi.get<PlanResponse>(`${PREFIX}/agents/${agentId}/plan`);
+
+export const updatePlanStep = (agentId: string, stepId: number, newContent: string) =>
+  agentApi.put<PlanResponse>(`${PREFIX}/agents/${agentId}/plan/step`, {
+    step_id: stepId,
+    new_content: newContent,
+  });
+
+export const addPlanStep = (agentId: string, afterStepId: number, content: string) =>
+  agentApi.post<PlanResponse>(`${PREFIX}/agents/${agentId}/plan/step`, {
+    after_step_id: afterStepId,
+    content,
+  });
+
+export const removePlanStep = (agentId: string, stepId: number) =>
+  agentApi.delete<PlanResponse>(`${PREFIX}/agents/${agentId}/plan/step/${stepId}`);
 
 // ── Ontology ────────────────────────────────────────────────────
 
@@ -190,6 +267,27 @@ export const getNotifications = (agentId: string, limit = 50) =>
   agentApi.get<{ notifications: AgentNotification[] }>(`${PREFIX}/agents/${agentId}/notifications`, {
     params: { limit },
   });
+
+// ── Upload ──────────────────────────────────────────────────────
+
+export interface UploadResult {
+  file_count: number;
+  message: string;
+  paths?: string[];
+}
+
+export const uploadFiles = (agentId: string, files: File[]) => {
+  const form = new FormData();
+  files.forEach((f) => form.append('files', f));
+  return agentApi.post<UploadResult>(`${PREFIX}/agents/${agentId}/upload-samples`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+// ── Sources (URL/S3/MinIO) ───────────────────────────────────────
+
+export const addSources = (agentId: string, urls: string[], sourceType = 'url') =>
+  agentApi.post<UploadResult>(`${PREFIX}/agents/${agentId}/add-sources`, { urls, source_type: sourceType });
 
 // ── Utilities ───────────────────────────────────────────────────
 

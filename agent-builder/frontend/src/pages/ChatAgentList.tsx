@@ -3,11 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   ChatAgentSummary,
   ChatAgentStatus,
-  createChatAgent,
   listChatAgents,
-  sendCreatorChat,
 } from '../services/chatAgentApi';
-import { workspaceApi } from '../services/workspaceApi';
+import { listAgents as listEvolvingAgents, AgentInfo } from '../services/evolvingApi';
 import Breadcrumb from '../components/Breadcrumb';
 
 const TENANT_ID = 'default-tenant';
@@ -34,36 +32,11 @@ const agentTypeLabels: Record<string, string> = {
   assistant: 'Asistan',
 };
 
-interface WizardState {
-  step: 1 | 2 | 3;
-  name: string;
-  description: string;
-  agentType: string;
-  selectedWorkspaces: string[];
-  connectedAgents: string[];
-  creatorSessionId: string;
-  creatorMessages: Array<{ role: 'user' | 'assistant' | 'status'; content: string }>;
-  createdAgentId?: string;
-}
-
 export default function ChatAgentList() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<ChatAgentSummary[]>([]);
+  const [evolvingAgents, setEvolvingAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showWizard, setShowWizard] = useState(false);
-  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string; status: string }>>([]);
-  const [wizard, setWizard] = useState<WizardState>({
-    step: 1,
-    name: '',
-    description: '',
-    agentType: 'expert',
-    selectedWorkspaces: [],
-    connectedAgents: [],
-    creatorSessionId: '',
-    creatorMessages: [],
-  });
-  const [chatInput, setChatInput] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
 
   useEffect(() => {
     load();
@@ -71,134 +44,17 @@ export default function ChatAgentList() {
 
   async function load() {
     try {
-      const [agentData, wsData] = await Promise.all([
+      const [agentData, evolvingData] = await Promise.allSettled([
         listChatAgents(TENANT_ID),
-        workspaceApi.listWorkspaces(TENANT_ID).then((ws) => ({ workspaces: ws })).catch(() => ({ workspaces: [] })),
+        listEvolvingAgents(50),
       ]);
-      setAgents(agentData.agents);
-      setWorkspaces(
-        (wsData as any).workspaces?.map((w: any) => ({
-          id: w.id,
-          name: w.name,
-          status: w.status,
-        })) || [],
-      );
+      if (agentData.status === 'fulfilled') setAgents(agentData.value.agents);
+      if (evolvingData.status === 'fulfilled') setEvolvingAgents(evolvingData.value.data);
     } catch (err) {
       console.error('Failed to load agents:', err);
     } finally {
       setLoading(false);
     }
-  }
-
-  function resetWizard() {
-    setWizard({
-      step: 1,
-      name: '',
-      description: '',
-      agentType: 'expert',
-      selectedWorkspaces: [],
-      connectedAgents: [],
-      creatorSessionId: '',
-      creatorMessages: [],
-    });
-    setChatInput('');
-    setShowWizard(false);
-  }
-
-  async function goToStep2() {
-    if (!wizard.name.trim() || wizard.selectedWorkspaces.length === 0) return;
-    const sessionId = `creator-${Date.now()}`;
-    setWizard((w) => ({
-      ...w,
-      step: 2,
-      creatorSessionId: sessionId,
-      creatorMessages: [{ role: 'status', content: 'Workspace analizi baslatiliyor...' }],
-    }));
-
-    setChatLoading(true);
-    try {
-      await sendCreatorChat(
-        {
-          message: `Agent adi: ${wizard.name}. Aciklama: ${wizard.description || 'Yok'}. Agent tipi: ${wizard.agentType}.`,
-          session_id: sessionId,
-          workspace_ids: wizard.selectedWorkspaces,
-          agent_name: wizard.name,
-          agent_type: wizard.agentType,
-        },
-        (data) => {
-          try {
-            const parsed = JSON.parse(data);
-            setWizard((w) => ({
-              ...w,
-              creatorMessages: [
-                ...w.creatorMessages,
-                {
-                  role: parsed.type === 'status' ? 'status' : 'assistant',
-                  content: parsed.content || parsed.message || '',
-                },
-              ],
-              createdAgentId: parsed.agent_id || w.createdAgentId,
-            }));
-          } catch {
-            /* ignore parse errors */
-          }
-        },
-        () => setChatLoading(false),
-        (err) => {
-          console.error(err);
-          setChatLoading(false);
-        },
-      );
-    } catch {
-      setChatLoading(false);
-    }
-  }
-
-  async function sendCreatorMessage() {
-    if (!chatInput.trim() || chatLoading) return;
-    const msg = chatInput.trim();
-    setChatInput('');
-    setWizard((w) => ({
-      ...w,
-      creatorMessages: [...w.creatorMessages, { role: 'user', content: msg }],
-    }));
-    setChatLoading(true);
-
-    await sendCreatorChat(
-      { message: msg, session_id: wizard.creatorSessionId },
-      (data) => {
-        try {
-          const parsed = JSON.parse(data);
-          setWizard((w) => ({
-            ...w,
-            creatorMessages: [
-              ...w.creatorMessages,
-              {
-                role: parsed.type === 'status' ? 'status' : 'assistant',
-                content: parsed.content || parsed.message || '',
-              },
-            ],
-            createdAgentId: parsed.agent_id || w.createdAgentId,
-          }));
-          if (parsed.type === 'agent_created') {
-            setWizard((w) => ({ ...w, step: 3 }));
-          }
-        } catch {
-          /* ignore */
-        }
-      },
-      () => setChatLoading(false),
-      () => setChatLoading(false),
-    );
-  }
-
-  function toggleWorkspace(wsId: string) {
-    setWizard((w) => ({
-      ...w,
-      selectedWorkspaces: w.selectedWorkspaces.includes(wsId)
-        ? w.selectedWorkspaces.filter((id) => id !== wsId)
-        : [...w.selectedWorkspaces, wsId],
-    }));
   }
 
   return (
@@ -211,278 +67,157 @@ export default function ChatAgentList() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Agent Yonetimi</h1>
           <p className="text-sm text-gray-500">
-            Uzman agentlar olusturun, workspace KB'lerine baglayın ve ContextForge'a deploy edin.
+            Agent ile konusarak Knowledge Graph olusturun ve yonetin.
           </p>
         </div>
         <button
-          onClick={() => setShowWizard(true)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+          onClick={() => navigate('/evolving')}
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 text-white
+                     rounded-xl hover:from-amber-600 hover:to-orange-700 transition-all text-sm font-medium
+                     shadow-sm hover:shadow-md active:scale-[0.97]"
         >
-          + Yeni Agent Yarat
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+          Yeni Agent Yarat
         </button>
       </div>
 
-      {/* Hybrid Wizard */}
-      {showWizard && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-          {/* Step Indicator */}
-          <div className="flex items-center gap-4 mb-6">
-            {[1, 2, 3].map((s) => (
-              <div key={s} className="flex items-center gap-2">
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                    wizard.step === s
-                      ? 'bg-blue-600 text-white'
-                      : wizard.step > s
-                        ? 'bg-green-500 text-white'
-                        : 'bg-gray-200 text-gray-500'
-                  }`}
-                >
-                  {wizard.step > s ? '\u2713' : s}
-                </div>
-                <span className="text-sm text-gray-600">
-                  {s === 1 ? 'Temel Bilgiler' : s === 2 ? 'KB Analiz & Yapilandirma' : 'Tamamlandi'}
-                </span>
-                {s < 3 && <div className="w-8 h-px bg-gray-300" />}
-              </div>
-            ))}
-          </div>
-
-          {/* Step 1: Form */}
-          {wizard.step === 1 && (
-            <div className="space-y-4">
-              <h3 className="text-lg font-semibold">Agent Bilgileri</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Agent Adi *</label>
-                  <input
-                    type="text"
-                    value={wizard.name}
-                    onChange={(e) => setWizard((w) => ({ ...w, name: e.target.value }))}
-                    placeholder="orn: Finans Analisti"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Agent Tipi</label>
-                  <select
-                    value={wizard.agentType}
-                    onChange={(e) => setWizard((w) => ({ ...w, agentType: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                  >
-                    <option value="expert">Uzman (Expert)</option>
-                    <option value="analyst">Analist (Analyst)</option>
-                    <option value="assistant">Asistan (Assistant)</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Aciklama</label>
-                <textarea
-                  value={wizard.description}
-                  onChange={(e) => setWizard((w) => ({ ...w, description: e.target.value }))}
-                  rows={2}
-                  placeholder="Agent'in gorev tanimi..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Workspace Secimi * (KB kaynaklari)
-                </label>
-                {workspaces.length === 0 ? (
-                  <p className="text-sm text-gray-400">Henuz workspace olusturulmamis.</p>
-                ) : (
-                  <div className="grid grid-cols-3 gap-2">
-                    {workspaces.map((ws) => (
-                      <button
-                        key={ws.id}
-                        onClick={() => toggleWorkspace(ws.id)}
-                        className={`p-3 rounded-lg border text-left text-sm transition-all ${
-                          wizard.selectedWorkspaces.includes(ws.id)
-                            ? 'border-blue-500 bg-blue-50 text-blue-700'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="font-medium">{ws.name}</div>
-                        <div className="text-xs text-gray-400">{ws.status}</div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex gap-2 pt-2">
-                <button
-                  onClick={goToStep2}
-                  disabled={!wizard.name.trim() || wizard.selectedWorkspaces.length === 0}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
-                >
-                  Devam - KB Analiz
-                </button>
-                <button
-                  onClick={resetWizard}
-                  className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm"
-                >
-                  Iptal
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Chat with Creator Assistant */}
-          {wizard.step === 2 && (
-            <div className="space-y-4">
-              <h3 className="text-lg font-semibold">KB Analiz & Agent Yapilandirma</h3>
-              <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto space-y-3">
-                {wizard.creatorMessages.map((msg, i) => (
-                  <div
-                    key={i}
-                    className={`${
-                      msg.role === 'user'
-                        ? 'text-right'
-                        : msg.role === 'status'
-                          ? 'text-center'
-                          : 'text-left'
-                    }`}
-                  >
-                    {msg.role === 'status' ? (
-                      <span className="text-xs text-gray-400 italic">{msg.content}</span>
-                    ) : (
-                      <div
-                        className={`inline-block max-w-[80%] px-4 py-2 rounded-lg text-sm whitespace-pre-wrap ${
-                          msg.role === 'user'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-white border border-gray-200 text-gray-800'
-                        }`}
-                      >
-                        {msg.content}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {chatLoading && (
-                  <div className="text-center">
-                    <span className="text-xs text-gray-400">Dusunuyor...</span>
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && sendCreatorMessage()}
-                  placeholder="Mesajinizi yazin..."
-                  disabled={chatLoading}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none disabled:opacity-50"
-                />
-                <button
-                  onClick={sendCreatorMessage}
-                  disabled={chatLoading || !chatInput.trim()}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
-                >
-                  Gonder
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Step 3: Done */}
-          {wizard.step === 3 && (
-            <div className="text-center py-8">
-              <div className="text-4xl mb-3">&#10003;</div>
-              <h3 className="text-xl font-semibold text-green-700 mb-2">Agent Basariyla Olusturuldu!</h3>
-              <p className="text-gray-500 mb-6">
-                Agent'iniz deploy edildi ve kullanima hazir.
-              </p>
-              <div className="flex justify-center gap-3">
-                <button
-                  onClick={() => {
-                    if (wizard.createdAgentId) {
-                      navigate(`/admin/agents/${wizard.createdAgentId}`);
-                    }
-                    resetWizard();
-                  }}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
-                >
-                  Agent Detayina Git
-                </button>
-                <button
-                  onClick={() => {
-                    resetWizard();
-                    load();
-                  }}
-                  className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm"
-                >
-                  Kapat
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Agent List */}
       {loading ? (
-        <div className="text-center py-12 text-gray-500">Yukleniyor...</div>
-      ) : agents.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-gray-200">
-          <div className="text-4xl mb-3">&#129302;</div>
-          <p className="text-gray-500 mb-4">Henuz Agent olusturulmamis.</p>
+        <div className="flex items-center justify-center py-16">
+          <div className="animate-spin rounded-full h-8 w-8 border-2 border-amber-200 border-t-amber-600" />
+        </div>
+      ) : evolvingAgents.length === 0 && agents.length === 0 ? (
+        <div className="text-center py-20 bg-white rounded-2xl border border-gray-200">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-100 to-orange-100 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+          </div>
+          <p className="text-gray-500 mb-1">Henuz Agent olusturulmamis.</p>
+          <p className="text-sm text-gray-400 mb-6">
+            Agent ile konusarak domain, entity ve relationship tanimlayabilirsiniz.
+          </p>
           <button
-            onClick={() => setShowWizard(true)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+            onClick={() => navigate('/evolving')}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 text-white
+                       rounded-xl hover:from-amber-600 hover:to-orange-700 text-sm font-medium shadow-sm"
           >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
             Ilk Agent'i Olustur
           </button>
         </div>
       ) : (
-        <div className="grid gap-4">
-          {agents.map((agent) => (
-            <Link
-              key={agent.id}
-              to={`/admin/agents/${agent.id}`}
-              className="block bg-white rounded-xl border border-gray-200 p-5 hover:border-blue-300 hover:shadow-sm transition-all"
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-1">
-                    <h3 className="font-semibold text-gray-900 truncate">{agent.name}</h3>
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[agent.status]}`}
-                    >
-                      {statusLabels[agent.status]}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                      {agentTypeLabels[agent.agent_type] || agent.agent_type}
-                    </span>
-                    {agent.a2a_agent_id && (
-                      <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
-                        A2A
-                      </span>
-                    )}
-                  </div>
-                  {agent.description && (
-                    <p className="text-sm text-gray-500 truncate">{agent.description}</p>
-                  )}
-                  {agent.workspace_ids.length > 0 && (
-                    <p className="text-xs text-gray-400 mt-1">
-                      {agent.workspace_ids.length} workspace bagli
-                    </p>
-                  )}
-                </div>
-                <div className="flex items-center gap-4 text-xs text-gray-400 ml-4 shrink-0">
-                  <span title="Tools">{agent.tool_count} tool</span>
-                  <span title="Prompts">{agent.prompt_count} prompt</span>
-                  {agent.connected_agent_count > 0 && (
-                    <span title="Connected Agents">{agent.connected_agent_count} bagli agent</span>
-                  )}
+        <div className="space-y-6">
+          {/* Evolving Agents */}
+          {evolvingAgents.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-slate-800">Self-Evolving Agent'lar</h2>
+                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                    {evolvingAgents.length}
+                  </span>
                 </div>
               </div>
-            </Link>
-          ))}
+              <div className="divide-y divide-slate-50">
+                {evolvingAgents.map((agent) => (
+                  <div
+                    key={agent.agent_id}
+                    onClick={() => navigate('/evolving')}
+                    className="flex items-center justify-between px-5 py-4 hover:bg-amber-50/40 cursor-pointer transition-colors group"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white text-sm font-bold shrink-0">
+                        {agent.name?.[0]?.toUpperCase() || 'A'}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-slate-800 group-hover:text-amber-700 transition-colors truncate">
+                            {agent.name || agent.agent_id.slice(0, 12)}
+                          </span>
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium ${
+                            agent.is_empty ? 'bg-slate-100 text-slate-600' : 'bg-emerald-50 text-emerald-700'
+                          }`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${agent.is_empty ? 'bg-slate-400' : 'bg-emerald-500'}`} />
+                            {agent.is_empty ? 'Bos' : 'Aktif'}
+                          </span>
+                        </div>
+                        {agent.purpose && (
+                          <p className="text-xs text-slate-400 truncate max-w-xs">{agent.purpose}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4 text-xs text-slate-400 shrink-0 ml-4">
+                      {agent.domain && <span className="text-slate-500">{agent.domain}</span>}
+                      <span className="tabular-nums">{agent.entity_count} entity</span>
+                      <span className="tabular-nums">{agent.relationship_count} rel</span>
+                      <svg className="w-4 h-4 text-slate-300 group-hover:text-amber-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Legacy Chat Agents */}
+          {agents.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-slate-800">Diger Agent'lar</h2>
+                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                    {agents.length}
+                  </span>
+                </div>
+              </div>
+              <div className="divide-y divide-slate-50">
+                {agents.map((agent) => (
+                  <Link
+                    key={agent.id}
+                    to={`/admin/agents/${agent.id}`}
+                    className="flex items-center justify-between px-5 py-4 hover:bg-blue-50/40 transition-colors group"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-400 to-purple-500 flex items-center justify-center text-white text-sm font-bold shrink-0">
+                        {agent.name?.[0]?.toUpperCase() || 'A'}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-slate-800 group-hover:text-blue-700 transition-colors truncate">
+                            {agent.name}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-md text-xs font-medium ${statusColors[agent.status]}`}>
+                            {statusLabels[agent.status]}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-purple-50 text-purple-700">
+                            {agentTypeLabels[agent.agent_type] || agent.agent_type}
+                          </span>
+                        </div>
+                        {agent.description && (
+                          <p className="text-xs text-slate-400 truncate max-w-xs">{agent.description}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4 text-xs text-slate-400 shrink-0 ml-4">
+                      <span>{agent.tool_count} tool</span>
+                      <span>{agent.prompt_count} prompt</span>
+                      {agent.workspace_ids.length > 0 && (
+                        <span>{agent.workspace_ids.length} ws</span>
+                      )}
+                      <svg className="w-4 h-4 text-slate-300 group-hover:text-blue-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -35,27 +35,70 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _run_migrations(pg) -> None:
+    """
+    Run all schema migrations step-by-step.
+
+    Each statement runs in its own implicit transaction so a single
+    failure doesn't block the rest.  ``IF NOT EXISTS`` / ``IF EXISTS``
+    keeps everything idempotent.
+    """
+    from src.agent.evolving.knowledge_store import KnowledgeStore
+    from src.agent.evolving.wiki_store import WIKI_MIGRATION_SQL
+
+    # 1. Run schema.sql — each statement separately
+    schema_path = os.path.join(os.path.dirname(__file__), "src", "event_store", "schema.sql")
+    if os.path.exists(schema_path):
+        with open(schema_path, encoding="utf-8") as f:
+            raw_sql = f.read()
+
+        statements = [s.strip() for s in raw_sql.split(";") if s.strip() and not s.strip().startswith("--")]
+        for stmt in statements:
+            try:
+                await pg.execute(stmt)
+            except Exception as exc:
+                logger.warning("Migration statement skipped: %.80s... -> %s", stmt, exc)
+
+    # 2. Ensure agent_knowledge (KnowledgeStore's own migration)
+    try:
+        ks = KnowledgeStore(pg)
+        await ks.ensure_table()
+        logger.info("Migration: agent_knowledge table ensured")
+    except Exception as exc:
+        logger.warning("Migration: agent_knowledge skipped: %s", exc)
+
+    # 3. Wiki full-text search & log indexes
+    for stmt in [s.strip() for s in WIKI_MIGRATION_SQL.split(";") if s.strip()]:
+        try:
+            await pg.execute(stmt)
+        except Exception as exc:
+            logger.warning("Migration: wiki index skipped: %.60s... -> %s", stmt, exc)
+    logger.info("Migration: wiki indexes ensured")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Agent Builder starting...")
 
     pg = None
 
-    # 1. PostgreSQL -- primary metadata store
+    # 1. PostgreSQL connection
     try:
         pg = await get_postgres_client()
-        await pg.initialize_schema()
         es_health = await pg.health_check()
         logger.info("PostgreSQL connected: %s", es_health.get("status", "ok"))
-
-        from src.agent.evolving.knowledge_store import KnowledgeStore
-        ks = KnowledgeStore(pg)
-        await ks.ensure_table()
-        logger.info("agent_knowledge table ensured")
     except Exception as e:
-        logger.error("PostgreSQL not available: %s -- service cannot start properly", e)
+        logger.error("PostgreSQL unavailable: %s — service will start degraded", e)
 
-    # 2. AgentRegistry -- manages SelfEvolvingAgent instances
+    # 2. Migrations (idempotent, per-statement)
+    if pg is not None:
+        try:
+            await _run_migrations(pg)
+            logger.info("All migrations completed")
+        except Exception as e:
+            logger.error("Migration error: %s", e)
+
+    # 3. AgentRegistry
     registry = None
     if pg is not None:
         try:
