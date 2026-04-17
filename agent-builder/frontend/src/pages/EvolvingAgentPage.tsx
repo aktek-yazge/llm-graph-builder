@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import {
   Box,
   Flex,
   IconButton,
+  Button,
   Tabs,
   TabList,
   Tab,
@@ -11,17 +12,19 @@ import {
   TabPanel,
   useColorMode,
 } from '@chakra-ui/react';
-import { ChevronRightIcon, ChevronLeftIcon } from '@chakra-ui/icons';
+import { ChevronRightIcon, ChevronLeftIcon, ViewIcon, StarIcon } from '@chakra-ui/icons';
 import { AgentProvider, useAgentContext } from '../context/AgentContext';
 import EvolvingAgentSidebar from '../components/EvolvingAgentSidebar';
-import EvolvingAgentChat from '../components/EvolvingAgentChat';
+import AssistantChat from '../components/AssistantChat';
 import OntologyPanel from '../components/OntologyPanel';
 import BatchMonitor from '../components/BatchMonitor';
 import NotificationBar from '../components/NotificationBar';
 import PlanPanel from '../components/PlanPanel';
+import ResourcesPanel from '../components/resources/ResourcesPanel';
 
 function AgentPageInner() {
   const { agentId } = useParams<{ agentId?: string }>();
+  const navigate = useNavigate();
   const { activeAgent, selectAgent, loadAgents } = useAgentContext();
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const { colorMode } = useColorMode();
@@ -51,6 +54,30 @@ function AgentPageInner() {
           <span style={{ color: isDark ? '#e2e8f0' : '#1e293b', fontWeight: 500 }}>
             Self-Evolving Agent
           </span>
+          <Box flex={1} />
+          {activeAgent && (
+            <>
+              <Button
+                size="xs"
+                leftIcon={<StarIcon />}
+                colorScheme="purple"
+                variant="outline"
+                onClick={() => navigate(`/evolving/${activeAgent.agent_id}/wiki`)}
+                mr={2}
+              >
+                Wiki (Sahne)
+              </Button>
+              <Button
+                size="xs"
+                leftIcon={<ViewIcon />}
+                colorScheme="blue"
+                variant="outline"
+                onClick={() => navigate(`/evolving/${activeAgent.agent_id}/ecosystem`)}
+              >
+                Ecosystem
+              </Button>
+            </>
+          )}
         </Flex>
       </Box>
       <NotificationBar />
@@ -58,7 +85,7 @@ function AgentPageInner() {
         <EvolvingAgentSidebar />
 
         <Flex flex={1} overflow="hidden">
-          <EvolvingAgentChat />
+          <AssistantChat />
 
           <Box position="relative" flexShrink={0}>
             <IconButton
@@ -79,7 +106,7 @@ function AgentPageInner() {
 
           {rightPanelOpen && (
             <Flex
-              w="96"
+              w={{ base: '420px', lg: '480px', xl: '560px', '2xl': '640px' }}
               direction="column"
               borderLeft="1px"
               borderColor={isDark ? 'gray.700' : 'gray.200'}
@@ -89,6 +116,7 @@ function AgentPageInner() {
                 <TabList flexShrink={0}>
                   <Tab fontSize="xs">Plan</Tab>
                   <Tab fontSize="xs">Ontoloji</Tab>
+                  <Tab fontSize="xs">Kaynaklar</Tab>
                   <Tab fontSize="xs">Batch</Tab>
                 </TabList>
                 <TabPanels flex={1} overflow="hidden">
@@ -97,6 +125,9 @@ function AgentPageInner() {
                   </TabPanel>
                   <TabPanel p={0} h="100%" overflowY="auto">
                     <OntologyPanel />
+                  </TabPanel>
+                  <TabPanel p={0} h="100%">
+                    <ResourcesPanel />
                   </TabPanel>
                   <TabPanel p={0} h="100%">
                     <BatchMonitor />

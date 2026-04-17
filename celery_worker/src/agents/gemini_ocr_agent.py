@@ -23,14 +23,25 @@ import os
 import time
 import logging
 import asyncio
+import hashlib
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+
+try:
+    from PIL import Image as _PILImage  # for diagnostic dimensions
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    _PILImage = None
 
 logger = logging.getLogger(__name__)
 
 # Environment variables
 GEMINI_OCR_MODEL = os.getenv("GEMINI_OCR_MODEL", "gemini-2.5-flash")
 GEMINI_MAX_CONCURRENT = int(os.getenv("GEMINI_MAX_CONCURRENT", "5"))
+# Per-page Gemini call timeout in seconds. Long pages with dense text usually
+# return in ~5-15s; we allow generous headroom but still cap to avoid hangs.
+GEMINI_OCR_TIMEOUT = float(os.getenv("GEMINI_OCR_TIMEOUT", "90"))
 
 # Google GenAI import
 try:
@@ -282,6 +293,24 @@ class GeminiOCRAgent:
 
         mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
 
+        # ── DIAGNOSTIC: image metadata (failure analizini kolaylastirir) ──
+        img_size_bytes = len(image_data)
+        img_md5 = hashlib.md5(image_data).hexdigest()[:12]
+        img_dims = "unknown"
+        img_mode = "unknown"
+        if _PIL_AVAILABLE and _PILImage:
+            try:
+                with _PILImage.open(image_path) as _im:
+                    img_dims = f"{_im.size[0]}x{_im.size[1]}"
+                    img_mode = _im.mode
+            except Exception as _exc:
+                img_dims = f"PIL_ERROR:{_exc}"
+        logger.info(
+            "📷 OCR page=%s file=%s size=%.1fKB dims=%s mode=%s md5=%s mime=%s",
+            page_num, os.path.basename(image_path),
+            img_size_bytes / 1024.0, img_dims, img_mode, img_md5, mime_type,
+        )
+
         # OCR prompt - adım adım kolon okuma
         ocr_prompt = """Türkiye Ticaret Sicil Gazetesi - 5 kolonlu sayfa.
 
@@ -298,25 +327,63 @@ KRİTİK HATA (YAPMA):
 
 ÇIKTI: Sadece OCR metni. Yorum, açıklama, analiz EKLEME."""
 
-        # Gemini API çağrısı
-        response = await asyncio.to_thread(
-            self._gemini_client.models.generate_content,
-            model=GEMINI_OCR_MODEL,
-            contents=[
-                genai_types.Content(
-                    role="user",
-                    parts=[
-                        genai_types.Part.from_bytes(
-                            data=image_data, mime_type=mime_type
-                        ),
-                        genai_types.Part.from_text(text=ocr_prompt),
-                    ],
-                ),
-            ],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-            ),
+        # Gemini API çağrısı (timeout ile - takılmaları önler)
+        request_start = time.time()
+        logger.info(
+            "🚀 Gemini request START page=%s model=%s prompt_len=%d image_md5=%s timeout=%ds",
+            page_num, GEMINI_OCR_MODEL, len(ocr_prompt), img_md5, int(GEMINI_OCR_TIMEOUT),
         )
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._gemini_client.models.generate_content,
+                    model=GEMINI_OCR_MODEL,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_bytes(
+                                    data=image_data, mime_type=mime_type
+                                ),
+                                genai_types.Part.from_text(text=ocr_prompt),
+                            ],
+                        ),
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.0,
+                    ),
+                ),
+                timeout=GEMINI_OCR_TIMEOUT,
+            )
+            request_dt = time.time() - request_start
+            logger.info(
+                "🟢 Gemini request DONE page=%s in %.1fs (image_md5=%s)",
+                page_num, request_dt, img_md5,
+            )
+        except asyncio.TimeoutError as exc:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(
+                "⏱️  Gemini OCR timeout page=%s after %dms (limit=%.0fs) "
+                "image=%s size=%.1fKB dims=%s md5=%s — server-side hang VEYA "
+                "kompleks prompt; gorseli manuel test icin: open '%s'",
+                page_num, duration_ms, GEMINI_OCR_TIMEOUT,
+                os.path.basename(image_path), img_size_bytes / 1024.0,
+                img_dims, img_md5, image_path,
+            )
+            raise TimeoutError(
+                f"Gemini OCR sayfası {page_num} {GEMINI_OCR_TIMEOUT:.0f} saniyede yanıt vermedi "
+                f"(image={os.path.basename(image_path)}, size={img_size_bytes/1024:.0f}KB, "
+                f"dims={img_dims}, md5={img_md5})"
+            ) from exc
+        except Exception as exc:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(
+                "❌ Gemini OCR error page=%s after %dms type=%s msg=%s "
+                "image=%s size=%.1fKB md5=%s",
+                page_num, duration_ms, type(exc).__name__, str(exc),
+                os.path.basename(image_path), img_size_bytes / 1024.0, img_md5,
+            )
+            raise
 
         ocr_text = response.text.strip() if response and response.text else ""
         duration_ms = int((time.time() - start_time) * 1000)
@@ -446,23 +513,38 @@ Sayfa bilgilerini koru: [[PAGE:X]]
 
 **HATIRLATMA: Dosya adından ({file_name}) hangi şirket olduğunu tespit et ve sadece o şirketin içeriğini çıkar.**"""
         
-        response = await asyncio.to_thread(
-            self._gemini_client.models.generate_content,
-            model=GEMINI_OCR_MODEL,
-            contents=[
-                genai_types.Content(
-                    role="user",
-                    parts=[
-                        genai_types.Part.from_text(text=user_prompt),
+        # Extraction çağrısı için OCR çağrısından daha uzun timeout (3x)
+        extraction_timeout = GEMINI_OCR_TIMEOUT * 3
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._gemini_client.models.generate_content,
+                    model=GEMINI_OCR_MODEL,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_text(text=user_prompt),
+                            ],
+                        ),
                     ],
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.0,
+                        max_output_tokens=32000,
+                    ),
                 ),
-            ],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=32000,
-            ),
-        )
-        
+                timeout=extraction_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(
+                "⏱️  Gemini extraction timeout (%dms, limit=%.0fs)",
+                duration_ms, extraction_timeout,
+            )
+            raise TimeoutError(
+                f"Gemini extraction {extraction_timeout:.0f} saniyede yanıt vermedi"
+            ) from exc
+
         extracted_text = response.text.strip() if response and response.text else ""
         duration_ms = int((time.time() - start_time) * 1000)
         

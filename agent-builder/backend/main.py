@@ -113,6 +113,11 @@ async def lifespan(app: FastAPI):
             from src.agent.evolving.agent_registry import AgentRegistry
             registry = AgentRegistry(pg=pg, celery_app=celery_app)
             await registry.reload_all()
+
+            safety_interval = int(os.getenv("RESUME_SAFETY_INTERVAL_SEC", "300"))
+            if safety_interval > 0:
+                registry.start_safety_net(interval_sec=safety_interval)
+
             app.state.agent_registry = registry
             logger.info("AgentRegistry initialized")
         except Exception as e:

@@ -44,14 +44,23 @@ class AgentRegistry:
         self._agents: dict[str, Any] = {}
         self._mcp_clients: dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        self._safety_task: Optional[asyncio.Task] = None
 
         from .notification_manager import NotificationManager
-        self.notifications = NotificationManager()
+        self.notifications = NotificationManager(pg=pg)
 
     async def get_or_create(self, agent_id: str) -> Any:
-        """Return a cached agent or create a new one."""
+        """Return a cached agent or create a new one. Refuses soft-deleted agents."""
         if agent_id in self._agents:
             return self._agents[agent_id]
+
+        # Block access to soft-deleted agents (restore them first).
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        if await ks.is_deleted(agent_id):
+            raise PermissionError(
+                f"Agent '{agent_id}' silinmis. Once restore edilmeli."
+            )
 
         async with self._lock:
             if agent_id in self._agents:
@@ -60,13 +69,14 @@ class AgentRegistry:
             mcp_client = await self._create_mcp_client(agent_id)
             agent = await self._create_agent(agent_id, mcp_client)
             self._agents[agent_id] = agent
+            await ks.ensure_lifecycle_row(agent_id)
             logger.info("Agent loaded: %s", agent_id)
             return agent
 
     async def delete(self, agent_id: str) -> None:
-        """Remove an agent and clean up its MCP client."""
+        """Soft-delete: mark deleted, evict from cache, close MCP. Data preserved."""
         async with self._lock:
-            agent = self._agents.pop(agent_id, None)
+            self._agents.pop(agent_id, None)
             mcp_client = self._mcp_clients.pop(agent_id, None)
 
         if mcp_client is not None:
@@ -77,32 +87,105 @@ class AgentRegistry:
 
         await self.notifications.close_agent(agent_id)
 
-        await self._pg.execute(
-            "DELETE FROM agent_knowledge WHERE agent_id = $1", agent_id
-        )
-        logger.info("Agent deleted: %s", agent_id)
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        await ks.soft_delete_agent(agent_id)
+        logger.info("Agent soft-deleted: %s", agent_id)
+
+    async def restore(self, agent_id: str) -> None:
+        """Undo soft delete; agent becomes visible & usable again."""
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        await ks.restore_agent(agent_id)
+        logger.info("Agent restored: %s", agent_id)
+
+    async def purge(self, agent_id: str) -> None:
+        """Hard delete: irreversibly remove every row for this agent."""
+        async with self._lock:
+            self._agents.pop(agent_id, None)
+            mcp_client = self._mcp_clients.pop(agent_id, None)
+
+        if mcp_client is not None:
+            try:
+                await mcp_client.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.warning("MCP client cleanup failed for %s: %s", agent_id, exc)
+
+        await self.notifications.close_agent(agent_id)
+
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        await ks.purge_agent(agent_id)
+        logger.warning("Agent permanently purged: %s", agent_id)
 
     async def list_agent_ids(self, limit: int = 100) -> list[str]:
-        """Return all known agent IDs from PostgreSQL."""
-        rows = await self._pg.fetch(
-            """
-            SELECT DISTINCT agent_id
-            FROM agent_knowledge
-            WHERE knowledge_type = 'identity'
-            ORDER BY agent_id
-            LIMIT $1
-            """,
-            limit,
-        )
-        return [r["agent_id"] for r in rows]
+        """Return active (non-deleted) agent IDs from PostgreSQL."""
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        return await ks.list_active_agent_ids(limit)
+
+    async def list_deleted(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Return soft-deleted agents with metadata (name, deleted_at)."""
+        from .knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(self._pg)
+        return await ks.list_deleted_agents(limit)
 
     async def reload_all(self) -> None:
         """Pre-warm the registry from PostgreSQL (lazy: just records IDs)."""
         ids = await self.list_agent_ids()
         logger.info("Registry discovered %d agents in PostgreSQL", len(ids))
 
+    def start_safety_net(self, interval_sec: int = 300) -> None:
+        """Start a background sweep that recovers ``pending_resumes`` rows whose
+        Celery completion callback was lost (e.g. backend was down when the
+        webhook fired).
+
+        Idempotent: safe to call multiple times; only the first call spawns the
+        task. The task is cancelled in ``shutdown()``.
+        """
+        if self._safety_task is not None and not self._safety_task.done():
+            return
+        if self._pg is None:
+            logger.info("Safety net not started: PG unavailable")
+            return
+
+        self._safety_task = asyncio.create_task(
+            self._safety_net_loop(interval_sec), name="resume-safety-net",
+        )
+        logger.info("Resume safety net started (interval=%ds)", interval_sec)
+
+    async def _safety_net_loop(self, interval_sec: int) -> None:
+        # Lazy import to avoid circular dependency (router -> registry -> router).
+        from .router import _resume_safety_sweep
+
+        # Brief warm-up delay so we don't fight the lifespan startup race.
+        try:
+            await asyncio.sleep(min(30, interval_sec))
+        except asyncio.CancelledError:
+            return
+
+        while True:
+            try:
+                await _resume_safety_sweep(self)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("safety net iteration failed: %s", exc)
+            try:
+                await asyncio.sleep(interval_sec)
+            except asyncio.CancelledError:
+                return
+
     async def shutdown(self) -> None:
         """Gracefully close all MCP clients."""
+        if self._safety_task is not None:
+            self._safety_task.cancel()
+            try:
+                await self._safety_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._safety_task = None
+
         async with self._lock:
             for aid, client in list(self._mcp_clients.items()):
                 try:

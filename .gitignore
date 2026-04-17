@@ -224,5 +224,8 @@ llm_graph_builder_backup.sql
 infisical/.env
 *.infisical-token
 
+# MegaMemory knowledge graph
+.megamemory/
+
 # Agent Builder frontend
 agent-builder/frontend/node_modules/

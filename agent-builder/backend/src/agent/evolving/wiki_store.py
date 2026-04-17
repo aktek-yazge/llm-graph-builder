@@ -415,12 +415,22 @@ class WikiStore:
 
     # ─── EXTRACTION CONTEXT ─────────────────────────────────────────
 
-    async def build_extraction_context(self, agent_id: str) -> str:
+    async def build_extraction_context(
+        self,
+        agent_id: str,
+        categories: list[str] | None = None,
+    ) -> str:
         """
-        Assemble all wiki pages into a single markdown string suitable
+        Assemble wiki pages into a single markdown string suitable
         for injection into an LLM extraction prompt.
 
         Ordering: entities -> relationships -> patterns -> analysis -> rest.
+
+        Args:
+            agent_id: Agent identifier.
+            categories: Optional filter. If provided, only pages whose
+                ``category`` is in this list are included. System pages
+                (path prefix ``_``) are always excluded.
         """
         pages = await self.list_pages(agent_id)
         if not pages:
@@ -436,6 +446,8 @@ class WikiStore:
         }
         pages.sort(key=lambda p: (category_order.get(p.get("category", "general"), 99), p["path"]))
 
+        allowed = set(categories) if categories else None
+
         sections: list[str] = []
         current_cat = ""
         for page in pages:
@@ -443,6 +455,8 @@ class WikiStore:
             if path.startswith("_"):
                 continue
             cat = page.get("category", "general")
+            if allowed is not None and cat not in allowed:
+                continue
             if cat != current_cat:
                 current_cat = cat
                 sections.append(f"\n## {cat.upper()}\n")

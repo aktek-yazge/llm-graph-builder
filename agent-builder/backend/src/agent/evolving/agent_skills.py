@@ -28,7 +28,11 @@ class AgentSkillManager:
         self.memory = memory
         self.wiki = wiki
 
-    async def ontology_to_skill_execution(self, agent_id: str) -> dict[str, Any]:
+    async def ontology_to_skill_execution(
+        self,
+        agent_id: str,
+        categories: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Agent'in ontolojisini AgenticOCR SkillExecution formatina donustur.
 
@@ -37,6 +41,12 @@ class AgentSkillManager:
             input_schema, output_schema,
             entity_schemas, relationship_schemas,
             version, effectiveness_score
+
+        Args:
+            agent_id: Agent identifier.
+            categories: Optional wiki kategorileri filtresi. None ise tum
+                kategoriler prompt'a dahil edilir. 20K production'da token
+                butcesini kontrol etmek icin kullanilir.
         """
         ontology = await self.store.load_ontology(agent_id)
         identity = await self.store.load_identity(agent_id)
@@ -47,7 +57,9 @@ class AgentSkillManager:
         wiki_context = ""
         if self.wiki:
             try:
-                wiki_context = await self.wiki.build_extraction_context(agent_id)
+                wiki_context = await self.wiki.build_extraction_context(
+                    agent_id, categories=categories,
+                )
             except Exception as exc:
                 logger.warning("Wiki context unavailable: %s", exc)
 
@@ -83,6 +95,30 @@ class AgentSkillManager:
         version_row = await self.store.get(agent_id, "ontology", "full")
         version = version_row["version"] if version_row else 1
 
+        page_count = 0
+        token_estimate = len(prompt_template) // 4
+        if self.wiki:
+            try:
+                all_pages = await self.wiki.list_pages(agent_id)
+                if categories:
+                    allowed = set(categories)
+                    page_count = sum(
+                        1 for p in all_pages
+                        if not p["path"].startswith("_") and p.get("category") in allowed
+                    )
+                else:
+                    page_count = sum(1 for p in all_pages if not p["path"].startswith("_"))
+            except Exception:
+                pass
+
+        from datetime import datetime as _dt
+        scene_metadata = {
+            "categories": categories or [],
+            "page_count": page_count,
+            "token_estimate": token_estimate,
+            "frozen_at": _dt.utcnow().isoformat(),
+        }
+
         return {
             "skill_id": f"agent-{agent_id}-extraction",
             "name": f"{identity.get('name', 'Agent')} - {ontology.domain} Extraction",
@@ -106,11 +142,22 @@ class AgentSkillManager:
             "relationship_schemas": relationship_schemas,
             "version": version,
             "effectiveness_score": 0.5,
+            "scene_metadata": scene_metadata,
         }
 
-    async def save_skill(self, agent_id: str) -> dict[str, Any]:
-        """Ontolojiyi skill olarak kaydet ve geri don."""
-        skill_data = await self.ontology_to_skill_execution(agent_id)
+    async def save_skill(
+        self,
+        agent_id: str,
+        categories: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Ontolojiyi skill olarak kaydet ve geri don.
+
+        Args:
+            agent_id: Agent identifier.
+            categories: Optional wiki kategori filtresi. Snapshot'a hangi
+                wiki kategorilerinin dahil edilecegini belirler.
+        """
+        skill_data = await self.ontology_to_skill_execution(agent_id, categories=categories)
         if not skill_data:
             return {"error": "Ontoloji bos, once entity'ler ekleyin."}
 

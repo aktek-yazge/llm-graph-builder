@@ -38,6 +38,31 @@ def create_self_tools(
 ) -> list:
     """Agent'in kendini gelistirmek icin kullandigi tool'lari olustur."""
 
+    async def _wiki_first_guard(kind: str, name: str) -> str | None:
+        """
+        Wiki-first ihlalini runtime'da yakala.
+        Wiki sayfasi yoksa hata mesaji dondurur (agent tool sonucu olarak gorur ve
+        wiki yazmaya geri doner). Wiki sayfasi varsa None doner (yani serbest).
+        kind: 'entities' veya 'relationships'
+        """
+        if wiki is None:
+            return None
+        page_path = f"{kind}/{name}"
+        page = await wiki.get_page(agent_id, page_path)
+        if page:
+            return None
+        kind_label = "entity sinifi" if kind == "entities" else "iliski tipi"
+        return (
+            f"WIKI-FIRST IHLALI: '{name}' {kind_label} icin wiki sayfasi yok. "
+            f"Once `create_wiki_page('{page_path}', '...')` cagir; sayfada bu "
+            f"adayin tanimini, ornek instance'larini, aday property'lerini ve "
+            f"diger wiki sayfalarina backlink'leri yaz. Kullaniciya gosterip "
+            f"onayini al ('formalize edelim mi?'). Onaydan SONRA bu tool'u tekrar cagir.\n\n"
+            f"Eger kullanici acikca 'wiki yazmadan dogrudan ekle' demisse, "
+            f"yine de once kisa bir wiki sayfasi yaz (1-2 cumle yeterli) — sahnenin "
+            f"yayindan sonra okunabilir olmasi icin gerekli."
+        )
+
     @tool
     async def add_entity_class(
         name: str,
@@ -47,12 +72,21 @@ def create_self_tools(
     ) -> str:
         """Ontolojiye yeni entity sinifi ekle veya mevcut olani guncelle.
 
+        ⚠️ WIKI-FIRST KURALI (RUNTIME ENFORCED): Bu tool, wiki-first akisinin
+        6. ADIMIDIR. Cagirmadan once `entities/<name>` wiki sayfasi yazilmis
+        OLMALI. Aksi halde tool reddeder ve sana wiki yazmani soyler.
+
         Args:
-            name: Entity sinifi adi (orn: 'Policy', 'Customer')
+            name: Entity sinifi adi (orn: 'Policy', 'Customer'). Wiki sayfa
+                  adiyla birebir ayni olmalidir (`entities/<name>`).
             description: Kisa aciklama
             properties: Property listesi [{"name": "...", "type": "string|number|date|boolean", "constraint": "required|optional"}]
             parent: Ust sinif adi (opsiyonel)
         """
+        violation = await _wiki_first_guard("entities", name)
+        if violation:
+            return violation
+
         ontology = await store.load_ontology(agent_id)
 
         props = [
@@ -94,13 +128,22 @@ def create_self_tools(
     ) -> str:
         """Ontolojiye yeni iliski tipi ekle.
 
+        ⚠️ WIKI-FIRST KURALI (RUNTIME ENFORCED): Bu tool, wiki-first akisinin
+        6. ADIMIDIR. Cagirmadan once `relationships/<name>` wiki sayfasi yazilmis
+        OLMALI. Aksi halde tool reddeder.
+
         Args:
-            name: Iliski adi (orn: 'HAS_POLICY', 'COVERS')
+            name: Iliski adi (orn: 'HAS_POLICY', 'COVERS'). Wiki sayfa adiyla
+                  birebir ayni olmalidir (`relationships/<name>`).
             source: Kaynak entity sinifi
             target: Hedef entity sinifi
             edge_properties: Edge property isimleri (opsiyonel)
             description: Aciklama
         """
+        violation = await _wiki_first_guard("relationships", name)
+        if violation:
+            return violation
+
         ontology = await store.load_ontology(agent_id)
         rel = RelationshipPredicate(
             name=name,
@@ -160,10 +203,28 @@ def create_self_tools(
     async def set_domain_info(domain: str, goal: str) -> str:
         """Agent'in domain ve hedef bilgisini ayarla.
 
+        ⚠️ WIKI-FIRST: Domain'i ayarlamadan once wiki'de en az bir analiz veya
+        kaynak sayfa bulunmalidir (kullanici metni ve domain'i gorerek onaylamali).
+        Aksi halde tool reddeder.
+
         Args:
             domain: Calisma alani (orn: 'Sigorta Polce Yonetimi')
             goal: Extraction hedefi (orn: 'Police belgelerinden musteri, teminat ve prim bilgilerini cikar')
         """
+        if wiki is not None:
+            try:
+                index = await wiki.get_index(agent_id)
+            except Exception:
+                index = ""
+            if not index or "Henuz wiki sayfasi yok" in str(index) or len(str(index).strip()) < 20:
+                return (
+                    "WIKI-FIRST IHLALI: Domain'i set etmeden once wiki'de en az "
+                    "bir analiz/kaynak sayfa olmali. Once `create_wiki_page("
+                    "'analysis/domain-overview', '...')` veya `create_wiki_page("
+                    "'sources/<doc_slug>', '...')` cagir; kullanicinin gordugu "
+                    "ve onayladigi domain anlayisini dokumante et. Sonra bu tool'u tekrar cagir."
+                )
+
         ontology = await store.load_ontology(agent_id)
         ontology.domain = domain
         ontology.goal = goal
@@ -177,6 +238,265 @@ def create_self_tools(
         if ontology.is_empty:
             return "Ontoloji henuz bos. Once domain, entity ve relationship ekleyin."
         return json.dumps(ontology.to_dict(), ensure_ascii=False, indent=2)
+
+    @tool
+    async def delete_resource(filename: str = "", url: str = "") -> str:
+        """Yuklenmis bir dosyayi veya URL kaynagini sil.
+
+        Args:
+            filename: Silinecek dosyanin adi (filename ile path ayni anda verilmemeli)
+            url: Silinecek URL kaynagi
+
+        Not: `filename` verildiyse ayni isimde olan TUM dosyalar silinir (mukerrerleri siler).
+        """
+        import os as _os
+
+        if not filename and not url:
+            return "Hata: Silmek icin filename veya url parametrelerinden birini belirtin."
+
+        deleted_files: list[str] = []
+        deleted_urls: list[str] = []
+
+        if filename:
+            sample_entries = await store.get_all(agent_id, "sample_files")
+            for entry in sample_entries:
+                key = entry.get("key", "")
+                val = entry.get("value", {})
+                if isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+                files = val.get("files", [])
+                remaining: list[dict] = []
+                for f in files:
+                    if f.get("filename") == filename:
+                        fpath = f.get("path", "")
+                        if fpath and _os.path.exists(fpath):
+                            try:
+                                _os.remove(fpath)
+                            except OSError:
+                                pass
+                        deleted_files.append(f.get("filename", fpath))
+                    else:
+                        remaining.append(f)
+
+                if len(remaining) != len(files):
+                    if remaining:
+                        paths = [r.get("path", "") for r in remaining]
+                        await store.upsert(
+                            agent_id, "sample_files", key,
+                            {"files": remaining, "paths": paths},
+                            source="user_delete",
+                        )
+                    else:
+                        await store.delete(agent_id, "sample_files", key)
+
+        if url:
+            source_entries = await store.get_all(agent_id, "source_urls")
+            for entry in source_entries:
+                key = entry.get("key", "")
+                val = entry.get("value", {})
+                if isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+                urls = val.get("urls", [])
+                sources = val.get("sources", [])
+                if url in urls:
+                    new_urls = [u for u in urls if u != url]
+                    new_sources = [s for s in sources if s.get("url") != url]
+                    deleted_urls.append(url)
+                    if new_urls:
+                        await store.upsert(
+                            agent_id, "source_urls", key,
+                            {"sources": new_sources, "urls": new_urls},
+                            source="user_delete",
+                        )
+                    else:
+                        await store.delete(agent_id, "source_urls", key)
+
+        if not deleted_files and not deleted_urls:
+            return f"Eslesen kayit bulunamadi. (filename='{filename}', url='{url}')"
+
+        parts: list[str] = []
+        if deleted_files:
+            parts.append(f"{len(deleted_files)} dosya silindi: {', '.join(deleted_files)}")
+        if deleted_urls:
+            parts.append(f"{len(deleted_urls)} URL silindi: {', '.join(deleted_urls)}")
+        return ". ".join(parts)
+
+    @tool
+    async def delete_all_resources(confirm: bool = False) -> str:
+        """TUM yuklenmis dosyalari ve URL'leri sil.
+
+        Args:
+            confirm: Onaylamak icin True gonderin. Geri alinamaz.
+        """
+        import os as _os
+
+        if not confirm:
+            return "Hata: Tum kaynaklari silmek icin `confirm=True` gonderin."
+
+        sample_entries = await store.get_all(agent_id, "sample_files")
+        source_entries = await store.get_all(agent_id, "source_urls")
+
+        file_count = 0
+        for entry in sample_entries:
+            val = entry.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            for f in val.get("files", []):
+                fpath = f.get("path", "")
+                if fpath and _os.path.exists(fpath):
+                    try:
+                        _os.remove(fpath)
+                    except OSError:
+                        pass
+                file_count += 1
+            await store.delete(agent_id, "sample_files", entry.get("key", ""))
+
+        url_count = 0
+        for entry in source_entries:
+            val = entry.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            url_count += len(val.get("urls", []))
+            await store.delete(agent_id, "source_urls", entry.get("key", ""))
+
+        return f"Temizlik tamamlandi: {file_count} dosya, {url_count} URL silindi."
+
+    @tool
+    async def list_resources() -> str:
+        """Yuklenmis dosyalari ve URL kaynaklarini listele.
+
+        JSON formatinda doner: {"files": [...], "urls": [...], "summary": "...",
+        "pending_ocr_count": int, "warning": str|None}.
+
+        Her dosya: name, filename, size, type, path, resource_id, **ocr_status**
+        ('completed' veya 'pending'), **doc_key** (OCR'lanmissa), page_count, total_chars.
+
+        ⚠️ KRITIK: ocr_status='pending' ise dosya icerigi HENUZ OKUNMADI. Asla
+        dosya adindan icerik UYDURMA. Once `ocr_and_analyze(file_path)` cagir,
+        sonra `read_ocr_pages(doc_key, ...)` ile gercek metni oku.
+
+        Kullanici 'kac dosya var', 'hangi dosyalar yuklendi' veya bir belge
+        hakkinda is istediginde once bunu cagir."""
+        sample_files = await store.get_all(agent_id, "sample_files")
+        source_urls = await store.get_all(agent_id, "source_urls")
+
+        ocr_entries = await store.get_all(agent_id, "ocr_result")
+        ocr_by_rid: dict[str, dict] = {}
+        ocr_by_path: dict[str, dict] = {}
+        ocr_by_name: dict[str, dict] = {}
+        for entry in ocr_entries:
+            val = entry.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            info = {
+                "doc_key": entry.get("key", ""),
+                "page_count": val.get("page_count", 0),
+                "total_chars": val.get("total_chars", 0),
+            }
+            rid = val.get("resource_id", "") or ""
+            fpath = val.get("file_path", "") or ""
+            fname = val.get("file_name", "") or ""
+            if rid:
+                ocr_by_rid[rid] = info
+            if fpath:
+                ocr_by_path[fpath] = info
+            if fname:
+                ocr_by_name[fname] = info
+
+        files: list[dict] = []
+        pending_count = 0
+        for sf in sample_files:
+            val = sf.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            for f in val.get("files", []):
+                fname = f.get("filename", "")
+                fpath = f.get("path", "") or ""
+                rid = f.get("resource_id", "") or ""
+
+                ocr_info = None
+                if rid and rid in ocr_by_rid:
+                    ocr_info = ocr_by_rid[rid]
+                elif fpath and fpath in ocr_by_path:
+                    ocr_info = ocr_by_path[fpath]
+                elif fname and fname in ocr_by_name:
+                    ocr_info = ocr_by_name[fname]
+                else:
+                    for op, info in ocr_by_path.items():
+                        if op.endswith(fname) or (fname and fname in op):
+                            ocr_info = info
+                            break
+
+                ocr_status = "completed" if ocr_info else "pending"
+                if ocr_status == "pending":
+                    pending_count += 1
+
+                files.append({
+                    "name": fname,
+                    "filename": fname,
+                    "size": f.get("size", 0),
+                    "type": f.get("content_type", ""),
+                    "path": fpath,
+                    "resource_id": rid,
+                    "ocr_status": ocr_status,
+                    "doc_key": ocr_info["doc_key"] if ocr_info else None,
+                    "page_count": ocr_info["page_count"] if ocr_info else None,
+                    "total_chars": ocr_info["total_chars"] if ocr_info else None,
+                })
+
+        urls: list[dict] = []
+        for su in source_urls:
+            val = su.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            for u in val.get("urls", []):
+                urls.append({"url": u, "name": u})
+
+        summary = f"{len(files)} dosya ({pending_count} OCR bekliyor), {len(urls)} URL"
+        if not files and not urls:
+            summary = "Henuz dosya veya URL yuklenmemis."
+
+        warning = None
+        if pending_count > 0:
+            warning = (
+                f"⚠️ {pending_count} dosyada OCR yok. Bu dosyalar hakkinda is yapmadan ONCE "
+                "her biri icin `ocr_and_analyze(file_path)` cagir. Dosya icerigini ASLA "
+                "isim/path'ten tahmin etme — gercek metin OCR'dan gelmeli."
+            )
+
+        return json.dumps(
+            {
+                "files": files,
+                "urls": urls,
+                "summary": summary,
+                "pending_ocr_count": pending_count,
+                "warning": warning,
+            },
+            ensure_ascii=False,
+        )
 
     @tool
     async def generate_extraction_prompt() -> str:
@@ -573,6 +893,40 @@ def create_self_tools(
             return "Aktif plan yok."
         return store.plan_to_markdown(plan)
 
+    @tool
+    async def request_plan_mode(reason: str, topic: str = "") -> str:
+        """Karmasik veya uzun bir gorev icin kullanicidan PLAN MODU izni iste.
+
+        Bu tool aciklamasini iyi oku:
+        - Sen su anda AGENT (uygulama) modundasin. Default mod budur.
+        - Cogu istek dogrudan agent modunda yapilir; plan modu istemeden once dusun.
+        - Sadece su durumlarda cagir:
+            * Cok adimli, uzun surecek bir is (orn. 50+ dosyalik batch, yeni ontoloji
+              tasarimi, sahne yayinlama)
+            * Birden fazla yol var ve kullaniciyla once tartisilmasi gereken bir karar
+            * Buyuk bir refactor / mimari karar
+            * Kullanici acikca "plan yapalim" / "tartisalim" / "once konusalim" demis
+
+        Bu tool cagrildiginda kullaniciya bir onay karti gosterilir. Sen tool
+        cagrisindan SONRA tek bir kisa cumle ile niye plan modu istedigini soyle
+        ("Bu is uzun surecek, plan modunda tartisalim mi?") ve DUR — daha tool
+        cagirma. Kullanicinin onay vermesini bekle.
+
+        Kullanici onaylarsa sistem otomatik olarak plan moduna gecer ve sen
+        sonraki turunda create_plan / update_plan_step gibi plan tool'larina
+        erisirsin. Reddederse mevcut bilgilerle gorevi agent modunda yap.
+
+        Args:
+            reason: Plan modunun NEDEN gerekli oldugu (1-2 cumle, sade Turkce).
+            topic: Plan modunda tartisilacak konu basligi (opsiyonel).
+        """
+        payload = {
+            "status": "awaiting_user_approval",
+            "reason": reason,
+            "topic": topic or reason[:60],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
     return [
         add_entity_class,
         add_relationship_predicate,
@@ -580,6 +934,9 @@ def create_self_tools(
         add_constraint,
         set_domain_info,
         get_current_ontology,
+        list_resources,
+        delete_resource,
+        delete_all_resources,
         generate_extraction_prompt,
         update_from_feedback,
         save_as_skill,
@@ -595,4 +952,5 @@ def create_self_tools(
         add_plan_step,
         remove_plan_step,
         get_current_plan,
+        request_plan_mode,
     ]

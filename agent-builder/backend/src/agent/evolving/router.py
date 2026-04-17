@@ -15,6 +15,8 @@ Endpoint gruplari:
 - /agents/{id}/batch: Batch isleme yonetimi
 - /agents/{id}/quality: Kalite kontrol
 - /agents/{id}/notifications: Proaktif bildirimler (SSE + polling)
+- /agents/{id}/wiki: Wiki sayfalari (sahne)
+- /agents/{id}/scene: Sahne yayinlama ve onizleme
 - /callback: Celery task callback (bildirim yonlendirme)
 """
 
@@ -110,6 +112,12 @@ class CallbackPayload(BaseModel):
     event_type: str = "document_complete"
     confidence_score: float = 0.0
     error_message: str = ""
+    extraction_result: Optional[dict] = None
+
+
+class BatchCompletePayload(BaseModel):
+    batch_id: str
+    agent_id: str = ""
 
 
 UPLOAD_DIR = FsPath(os.getenv("UPLOAD_DIR", "/tmp/evolving-uploads"))
@@ -128,9 +136,12 @@ def _get_registry(request: Request):
 
 
 async def _get_agent(request: Request, agent_id: str):
-    """Get or create agent via the registry."""
+    """Get or create agent via the registry. Refuses soft-deleted agents."""
     registry = _get_registry(request)
-    return await registry.get_or_create(agent_id)
+    try:
+        return await registry.get_or_create(agent_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=410, detail=str(exc))
 
 
 # ------------------------------------------------------------------
@@ -146,11 +157,12 @@ async def create_agent(request: Request, body: CreateAgentRequest):
     store = KnowledgeStore(registry._pg)
     await store.ensure_table()
     await store.save_identity(agent_id, name=body.name, purpose=body.purpose)
+    await store.ensure_lifecycle_row(agent_id)
 
     return AgentInfo(agent_id=agent_id, name=body.name, purpose=body.purpose)
 
 
-@router.get("/agents", response_model=List[AgentInfo], summary="List evolving agents")
+@router.get("/agents", response_model=List[AgentInfo], summary="List active evolving agents")
 async def list_agents(
     request: Request,
     tenant_id: str = Query(default="default"),
@@ -159,21 +171,12 @@ async def list_agents(
     registry = _get_registry(request)
     from .knowledge_store import KnowledgeStore
     store = KnowledgeStore(registry._pg)
+    await store.ensure_table()
 
-    rows = await registry._pg.fetch(
-        """
-        SELECT DISTINCT agent_id
-        FROM agent_knowledge
-        WHERE knowledge_type = 'identity'
-        ORDER BY agent_id
-        LIMIT $1
-        """,
-        limit,
-    )
+    active_ids = await store.list_active_agent_ids(limit)
 
     agents = []
-    for row in rows:
-        aid = row["agent_id"]
+    for aid in active_ids:
         identity = await store.load_identity(aid)
         ontology = await store.load_ontology(aid)
         agents.append(AgentInfo(
@@ -189,6 +192,17 @@ async def list_agents(
     return agents
 
 
+@router.get("/agents/deleted", summary="List soft-deleted (trash) evolving agents")
+async def list_deleted_agents(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+):
+    """Return agents currently in the trash, newest deletions first."""
+    registry = _get_registry(request)
+    deleted = await registry.list_deleted(limit)
+    return {"deleted": deleted, "total": len(deleted)}
+
+
 @router.get("/agents/{agent_id}", response_model=AgentInfo, summary="Get evolving agent")
 async def get_agent(request: Request, agent_id: str = Path(...)):
     agent = await _get_agent(request, agent_id)
@@ -196,11 +210,30 @@ async def get_agent(request: Request, agent_id: str = Path(...)):
     return AgentInfo(**summary)
 
 
-@router.delete("/agents/{agent_id}", summary="Delete evolving agent")
-async def delete_agent(request: Request, agent_id: str = Path(...)):
+@router.delete("/agents/{agent_id}", summary="Soft-delete an evolving agent (recoverable)")
+async def delete_agent(
+    request: Request,
+    agent_id: str = Path(...),
+    purge: bool = Query(default=False, description="If true, hard delete (irrecoverable)"),
+):
+    """
+    Default: soft delete - agent moves to trash; data preserved; restore possible.
+    Pass ?purge=true to permanently destroy all data for this agent.
+    """
     registry = _get_registry(request)
+    if purge:
+        await registry.purge(agent_id)
+        return {"purged": True, "agent_id": agent_id}
     await registry.delete(agent_id)
-    return {"deleted": True, "agent_id": agent_id}
+    return {"deleted": True, "agent_id": agent_id, "soft": True}
+
+
+@router.post("/agents/{agent_id}/restore", summary="Restore a soft-deleted evolving agent")
+async def restore_agent(request: Request, agent_id: str = Path(...)):
+    """Bring a soft-deleted agent back from the trash."""
+    registry = _get_registry(request)
+    await registry.restore(agent_id)
+    return {"restored": True, "agent_id": agent_id}
 
 
 # ------------------------------------------------------------------
@@ -214,8 +247,10 @@ async def agent_chat(request: Request, agent_id: str, body: ChatRequest):
     full_response = ""
     session_id = body.session_id
     async for chunk in agent.chat(body.message, body.session_id):
-        if chunk["type"] == "final_response":
-            full_response = chunk["content"]
+        ctype = chunk.get("type")
+        if ctype == "message_chunk":
+            full_response += chunk.get("content") or ""
+        elif ctype == "final_response":
             session_id = chunk.get("session_id", session_id)
 
     return ChatResponse(response=full_response, session_id=session_id, agent_id=agent_id)
@@ -229,9 +264,11 @@ async def agent_chat_stream(request: Request, agent_id: str, body: ChatRequest):
 
     async def event_generator():
         async for chunk in agent.chat(body.message, body.session_id):
+            if await request.is_disconnected():
+                break
             yield {"data": json.dumps(chunk, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 @router.post("/agents/{agent_id}/chat/resume", summary="Resume after human-in-the-loop interrupt")
@@ -242,9 +279,11 @@ async def agent_chat_resume(request: Request, agent_id: str, body: ResumeRequest
 
     async def event_generator():
         async for chunk in agent.resume_after_interrupt(body.session_id, body.decision):
+            if await request.is_disconnected():
+                break
             yield {"data": json.dumps(chunk, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 # ------------------------------------------------------------------
@@ -294,6 +333,39 @@ async def reset_chat(request: Request, agent_id: str):
     return {"agent_id": agent_id, "status": "reset", "message": "Konusma sifirlandi. Yeni session baslatilacak."}
 
 
+class RewindRequest(BaseModel):
+    session_id: str
+    user_message_index: int
+
+
+@router.post(
+    "/agents/{agent_id}/chat/rewind",
+    summary="Rewind chat to before a specific user message; undo side effects",
+)
+async def rewind_chat(request: Request, agent_id: str, body: RewindRequest):
+    """N'inci kullanici mesajinin oncesine geri don, agent'in o noktadan sonra
+    yaptigi yan etkileri (extracted_records .md dosyalari + DB kayitlari, ontoloji
+    versiyonlari) sil. Konusma o noktada kesilir; frontend ayni mesaji yeniden
+    gonderebilir."""
+    agent = await _get_agent(request, agent_id)
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id zorunlu")
+    if body.user_message_index < 0:
+        raise HTTPException(status_code=400, detail="user_message_index >= 0 olmali")
+
+    result = await agent.rewind_to_user_message(
+        session_id=body.session_id,
+        user_message_index=body.user_message_index,
+    )
+    if result.get("status") == "no_checkpointer":
+        raise HTTPException(status_code=400, detail="Konusma kalici degil (checkpointer yok)")
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("message", "Geri alinacak nokta bulunamadi"))
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", result.get("error", "Rewind hatasi")))
+    return {"agent_id": agent_id, **result}
+
+
 # ------------------------------------------------------------------
 # Mode & Plan
 # ------------------------------------------------------------------
@@ -335,6 +407,28 @@ async def switch_mode(request: Request, agent_id: str, body: ModeSwitchRequest):
     return {"agent_id": agent_id, **result}
 
 
+class PlanModeRequest(BaseModel):
+    decision: str  # "approve" | "reject"
+    reason: str = ""
+    topic: str = ""
+
+
+@router.post("/agents/{agent_id}/mode/plan-request", summary="Approve/reject agent's plan-mode request")
+async def respond_plan_mode_request(request: Request, agent_id: str, body: PlanModeRequest):
+    """User responds to the agent's `request_plan_mode` tool call.
+
+    On approve: a fresh draft plan is created with the given reason as summary,
+    flipping the agent into plan mode for the next chat turn.
+    On reject: nothing changes; agent stays in agent mode.
+    """
+    agent = await _get_agent(request, agent_id)
+    if body.decision == "approve":
+        summary = (body.topic or body.reason or "Plan tartismasi").strip()
+        result = await agent.start_plan_discussion(summary)
+        return {"agent_id": agent_id, "decision": "approved", **result}
+    return {"agent_id": agent_id, "decision": "rejected", "mode": "agent"}
+
+
 @router.get("/agents/{agent_id}/plan", summary="Get current plan")
 async def get_plan(request: Request, agent_id: str):
     agent = await _get_agent(request, agent_id)
@@ -373,6 +467,14 @@ async def remove_plan_step(request: Request, agent_id: str, step_id: int):
         raise HTTPException(404, "Step not found or no active plan")
     md = agent.store.plan_to_markdown(result)
     return {"agent_id": agent_id, "plan": result, "markdown": md}
+
+
+@router.delete("/agents/{agent_id}/plan", summary="Clear active plan")
+async def clear_plan(request: Request, agent_id: str):
+    """Aktif plani tamamen sil. Tamamlanan/vazgecilen planlari panelden temizler."""
+    agent = await _get_agent(request, agent_id)
+    await agent.store.delete(agent_id, "active_plan", "current")
+    return {"agent_id": agent_id, "plan": None, "mode": "agent", "status": "cleared"}
 
 
 # ------------------------------------------------------------------
@@ -505,6 +607,7 @@ async def upload_samples(request: Request, agent_id: str, files: List[UploadFile
         dest.write_bytes(content)
         saved_paths.append(str(dest))
         file_infos.append({
+            "resource_id": f"res_{uuid.uuid4().hex[:8]}",
             "filename": f.filename,
             "content_type": f.content_type,
             "size": len(content),
@@ -650,11 +753,42 @@ async def detect_anomalies_endpoint(request: Request, agent_id: str, batch_id: s
 # Notifications (SSE push + polling)
 # ------------------------------------------------------------------
 
-@router.get("/agents/{agent_id}/notifications", summary="Get recent notifications (polling)")
-async def get_notifications(request: Request, agent_id: str, limit: int = Query(default=50, ge=1, le=200)):
+@router.get("/agents/{agent_id}/notifications", summary="Get notifications (durable history)")
+async def get_notifications(
+    request: Request,
+    agent_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    since_id: int | None = Query(default=None, ge=0),
+    unread_only: bool = Query(default=False),
+    mode: str = Query(default="history", regex="^(history|recent)$"),
+):
+    """Notifications endpoint.
+
+    - ``mode=history`` (default): persistent PG-backed history with optional
+      ``since_id`` cursor (>= ``since_id``) and ``unread_only`` filter.
+    - ``mode=recent``: legacy in-memory deque (only the live process buffer).
+    """
     registry = _get_registry(request)
-    items = registry.notifications.get_recent(agent_id, limit=limit)
+    if mode == "recent":
+        items = registry.notifications.get_recent(agent_id, limit=limit)
+    else:
+        items = await registry.notifications.get_history(
+            agent_id, limit=limit, since_id=since_id, unread_only=unread_only,
+        )
     return {"agent_id": agent_id, "count": len(items), "notifications": items}
+
+
+class MarkReadPayload(BaseModel):
+    notification_ids: list[int] | None = None
+
+
+@router.post("/agents/{agent_id}/notifications/mark-read", summary="Mark notifications read")
+async def mark_notifications_read(request: Request, agent_id: str, payload: MarkReadPayload | None = None):
+    """Mark specific notification ids (or all unread) as read for this agent."""
+    registry = _get_registry(request)
+    ids = payload.notification_ids if payload else None
+    updated = await registry.notifications.mark_read(agent_id, notification_ids=ids)
+    return {"agent_id": agent_id, "marked": updated}
 
 
 @router.get("/agents/{agent_id}/notifications/stream", summary="Stream notifications (SSE)")
@@ -665,9 +799,18 @@ async def stream_notifications(request: Request, agent_id: str):
 
     async def event_generator():
         async for notif in registry.notifications.subscribe(agent_id):
-            yield {"data": json.dumps(notif, ensure_ascii=False)}
+            if await request.is_disconnected():
+                break
+            yield {
+                "event": notif.get("event_type", "message"),
+                "data": json.dumps(notif, ensure_ascii=False),
+            }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        ping=10,
+        ping_message_factory=lambda: json.dumps({"event_type": "heartbeat"}),
+    )
 
 
 # ------------------------------------------------------------------
@@ -708,3 +851,778 @@ async def celery_callback(request: Request, payload: CallbackPayload):
     )
 
     return {"received": True, "routed": True, "agent_id": agent_id}
+
+
+async def _process_batch_completion(
+    registry,
+    batch_id: str,
+    fallback_agent_id: str = "",
+) -> dict[str, Any]:
+    """Resolve a finished batch: compute summary, notify, and inject a
+    system event into the originating chat thread (idempotent).
+
+    Returns a dict suitable for the webhook response. Used by both the
+    HTTP webhook and the periodic safety-net task.
+    """
+    import asyncio
+    from .tools.batch_tools import compute_batch_summary
+
+    pg = registry._pg
+
+    summary = await compute_batch_summary(pg, batch_id)
+    if not summary.get("agent_id") and not fallback_agent_id:
+        return {"received": True, "routed": False, "reason": "batch not found", "batch_id": batch_id}
+
+    agent_id_for_batch = summary.get("agent_id") or fallback_agent_id
+
+    pending = None
+    try:
+        pending = await pg.fetchrow(
+            """
+            SELECT agent_id, session_id, thread_id, status, event_text_template
+            FROM pending_resumes WHERE batch_id=$1
+            """,
+            batch_id,
+        )
+    except Exception as exc:
+        logger.warning("pending_resumes lookup failed: %s", exc)
+
+    await registry.notifications.notify(
+        agent_id=agent_id_for_batch,
+        event_type="batch_complete",
+        data={"batch_id": batch_id, "summary": summary},
+    )
+
+    routed = False
+    if pending and pending["status"] == "waiting":
+        agent_id_target = pending["agent_id"]
+        session_id_target = pending["session_id"]
+        template = pending["event_text_template"] or ""
+
+        try:
+            updated = await pg.execute(
+                """
+                UPDATE pending_resumes
+                SET status='resumed', resumed_at=NOW()
+                WHERE batch_id=$1 AND status='waiting'
+                """,
+                batch_id,
+            )
+            try:
+                affected = int(updated.split()[-1])
+            except (ValueError, IndexError):
+                affected = 0
+        except Exception as exc:
+            logger.warning("pending_resumes update failed: %s", exc)
+            affected = 0
+
+        if affected:
+            event_text = (
+                f"Batch '{template}' tamamlandi. "
+                if template else f"Batch {batch_id} tamamlandi. "
+            )
+            event_text += (
+                f"Toplam {summary['total']} belge: "
+                f"{summary['completed']} basarili, "
+                f"{summary['failed']} basarisiz, "
+                f"{summary['needs_review']} inceleme bekliyor "
+                f"(ortalama guven {summary['avg_confidence']})."
+            )
+
+            try:
+                agent = await registry.get_or_create(agent_id_target)
+                asyncio.create_task(
+                    agent.inject_system_event(
+                        session_id=session_id_target,
+                        event_text=event_text,
+                        event_data={"batch_id": batch_id, "summary": summary},
+                    )
+                )
+                routed = True
+            except Exception as exc:
+                logger.warning("agent inject_system_event scheduling failed: %s", exc)
+
+    return {
+        "received": True,
+        "routed": routed,
+        "batch_id": batch_id,
+        "agent_id": agent_id_for_batch,
+        "summary": summary,
+    }
+
+
+async def _resume_safety_sweep(registry) -> int:
+    """Find batches whose Celery completion callback was lost and resume them.
+
+    Strategy: every ``pending_resumes`` row with status='waiting' whose
+    underlying ``batch_jobs`` row has ``status IN ('completed','failed')`` is
+    re-driven through ``_process_batch_completion``. Idempotent — the inner
+    UPDATE flips ``status='resumed'`` so subsequent sweeps no-op.
+
+    Returns the number of pending rows recovered.
+    """
+    pg = registry._pg
+    if pg is None:
+        return 0
+
+    try:
+        rows = await pg.fetch(
+            """
+            SELECT pr.batch_id
+            FROM pending_resumes pr
+            JOIN batch_jobs bj ON bj.batch_id = pr.batch_id
+            WHERE pr.status='waiting' AND bj.status IN ('completed','failed')
+            ORDER BY pr.created_at ASC
+            LIMIT 50
+            """,
+        )
+    except Exception as exc:
+        logger.warning("safety sweep query failed: %s", exc)
+        return 0
+
+    if not rows:
+        return 0
+
+    recovered = 0
+    for row in rows:
+        try:
+            await _process_batch_completion(registry, row["batch_id"])
+            recovered += 1
+        except Exception as exc:
+            logger.warning("safety sweep resume failed for %s: %s", row["batch_id"], exc)
+
+    if recovered:
+        logger.info("Resume safety net recovered %d pending batch(es)", recovered)
+    return recovered
+
+
+@router.post("/callback/batch-complete", summary="Async batch completion webhook")
+async def batch_complete_callback(request: Request, payload: BatchCompletePayload):
+    """
+    Celery worker batch tamamlandiginda buraya POST yapar. Webhook idempotenttir:
+    ayni batch icin ``pending_resumes.status='resumed'`` isaretlenir, ikinci
+    POST tetikleme yapmaz.
+
+    Akis ``_process_batch_completion`` icinde toplanmistir; ayni helper safety
+    task tarafindan da kullanilir.
+    """
+    registry = _get_registry(request)
+    return await _process_batch_completion(
+        registry, payload.batch_id, fallback_agent_id=payload.agent_id,
+    )
+
+
+# ------------------------------------------------------------------
+# Ecosystem (aggregated view for graph visualization)
+# ------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/ecosystem", summary="Aggregated ecosystem data for graph visualization")
+async def get_ecosystem(request: Request, agent_id: str):
+    registry = _get_registry(request)
+    agent = await _get_agent(request, agent_id)
+
+    from .knowledge_store import KnowledgeStore
+    store = KnowledgeStore(registry._pg)
+
+    identity = await store.load_identity(agent_id)
+    ontology = await store.load_ontology(agent_id)
+
+    mode = "agent"
+    try:
+        mode = await agent.get_mode()
+    except Exception:
+        pass
+
+    model = os.getenv("EVOLVING_CHAT_MODEL", "gpt-5.4")
+
+    pending = approved = rejected = 0
+    try:
+        all_disc = await store.list_discoveries(agent_id, limit=1000)
+        for d in all_disc:
+            s = d.get("status", "pending")
+            if s == "pending":
+                pending += 1
+            elif s == "approved":
+                approved += 1
+            elif s == "rejected":
+                rejected += 1
+    except Exception:
+        pass
+
+    mcp_info = {"connected": False, "tool_count": 0, "tool_names": []}
+    mcp_client = registry._mcp_clients.get(agent_id)
+    if mcp_client is not None:
+        mcp_info["connected"] = True
+        try:
+            mcp_tools = mcp_client.get_tools()
+            mcp_info["tool_count"] = len(mcp_tools)
+            mcp_info["tool_names"] = [t.name for t in mcp_tools[:20]]
+        except Exception:
+            pass
+
+    celery_available = registry._celery_app is not None
+
+    neo4j_uri = os.getenv("NEO4J_URI", "")
+    neo4j_configured = bool(neo4j_uri)
+    if neo4j_uri:
+        parts = neo4j_uri.split("@")
+        neo4j_uri = f"***@{parts[-1]}" if len(parts) > 1 else neo4j_uri[:20] + "..."
+
+    subagents = [
+        {"name": "quality-analyst", "description": "Extraction kalitesini analiz eder, celiskileri ve anomalileri bulur", "tool_count": 4},
+        {"name": "ocr-strategy-advisor", "description": "Belge orneklerini analiz eder, OCR stratejisi onerir", "tool_count": 1},
+    ]
+
+    batch_info: dict[str, Any] = {"active_count": 0, "latest": None}
+    try:
+        rows = await registry._pg.fetch(
+            "SELECT batch_id, status, total_docs, processed_docs FROM batch_jobs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 5",
+            agent_id,
+        )
+        active = [r for r in rows if r["status"] in ("pending", "processing", "running")]
+        batch_info["active_count"] = len(active)
+        if rows:
+            r = rows[0]
+            total = r["total_docs"] or 0
+            processed = r["processed_docs"] or 0
+            batch_info["latest"] = {
+                "batch_id": r["batch_id"],
+                "status": r["status"],
+                "total": total,
+                "processed": processed,
+                "percent_complete": round((processed / total * 100) if total > 0 else 0, 1),
+            }
+    except Exception:
+        pass
+
+    sample_count = 0
+    source_count = 0
+    try:
+        sf = await registry._pg.fetch(
+            "SELECT value FROM agent_knowledge WHERE agent_id = $1 AND knowledge_type = 'sample_files'",
+            agent_id,
+        )
+        for row in sf:
+            val = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
+            sample_count += len(val.get("files", []))
+    except Exception:
+        pass
+    try:
+        su = await registry._pg.fetch(
+            "SELECT value FROM agent_knowledge WHERE agent_id = $1 AND knowledge_type = 'source_urls'",
+            agent_id,
+        )
+        for row in su:
+            val = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
+            source_count += len(val.get("urls", []))
+    except Exception:
+        pass
+
+    notif_count = len(registry.notifications.get_recent(agent_id, limit=50))
+
+    return {
+        "agent": {
+            "agent_id": agent_id,
+            "name": identity.get("name", "Agent"),
+            "purpose": identity.get("purpose", ""),
+            "domain": ontology.domain,
+            "mode": mode,
+            "model": model,
+        },
+        "ontology": {
+            "entity_count": len(ontology.entity_classes),
+            "relationship_count": len(ontology.relationship_predicates),
+            "rule_count": len(ontology.inference_rules),
+            "constraint_count": len(ontology.constraints),
+            "domain": ontology.domain,
+            "goal": ontology.goal,
+        },
+        "discoveries": {"pending": pending, "approved": approved, "rejected": rejected},
+        "mcp": mcp_info,
+        "celery": {"available": celery_available},
+        "neo4j": {"configured": neo4j_configured, "uri": neo4j_uri},
+        "subagents": subagents,
+        "batch": batch_info,
+        "resources": {"sample_files": sample_count, "source_urls": source_count},
+        "notifications": {"recent_count": notif_count},
+    }
+
+
+# ------------------------------------------------------------------
+# Wiki (sahne)
+# ------------------------------------------------------------------
+
+class WikiPageBody(BaseModel):
+    content: str
+
+
+class SceneFreezeRequest(BaseModel):
+    categories: list[str] = []  # bos = tum kategoriler
+
+
+def _page_summary(page: dict[str, Any]) -> str:
+    """First non-heading, non-empty line (max 120 chars)."""
+    for line in (page.get("content") or "").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped[:120]
+    return ""
+
+
+@router.get("/agents/{agent_id}/wiki/pages", summary="List wiki pages")
+async def wiki_list_pages(
+    request: Request,
+    agent_id: str,
+    category: str = Query(default=""),
+    include_system: bool = Query(default=False),
+):
+    agent = await _get_agent(request, agent_id)
+    pages = await agent.wiki.list_pages(agent_id, category=category)
+    out: list[dict[str, Any]] = []
+    for p in pages:
+        if not include_system and p["path"].startswith("_"):
+            continue
+        out.append({
+            "path": p["path"],
+            "category": p.get("category", "general"),
+            "summary": _page_summary(p),
+            "version": p.get("version", 1),
+            "links": p.get("links", []),
+            "created_at": p.get("created_at"),
+        })
+    return {"agent_id": agent_id, "count": len(out), "pages": out}
+
+
+@router.get("/agents/{agent_id}/wiki/search", summary="Search wiki pages")
+async def wiki_search(request: Request, agent_id: str, q: str = Query(...)):
+    agent = await _get_agent(request, agent_id)
+    results = await agent.wiki.search(agent_id, q)
+    return {
+        "agent_id": agent_id,
+        "query": q,
+        "count": len(results),
+        "results": [
+            {
+                "path": r["path"],
+                "category": r.get("category", "general"),
+                "summary": _page_summary(r),
+                "version": r.get("version", 1),
+            }
+            for r in results
+        ],
+    }
+
+
+@router.get("/agents/{agent_id}/wiki/index", summary="Get wiki index (markdown)")
+async def wiki_index(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    md = await agent.wiki.get_index(agent_id)
+    return {"agent_id": agent_id, "markdown": md}
+
+
+@router.post("/agents/{agent_id}/wiki/lint", summary="Run wiki health check")
+async def wiki_lint(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    report = await agent.wiki.lint(agent_id)
+    return {"agent_id": agent_id, **report}
+
+
+@router.get("/agents/{agent_id}/wiki/traverse", summary="Traverse wikilinks")
+async def wiki_traverse(
+    request: Request,
+    agent_id: str,
+    start: str = Query(...),
+    depth: int = Query(default=2, ge=1, le=4),
+):
+    agent = await _get_agent(request, agent_id)
+    reachable = await agent.wiki.traverse(agent_id, start, depth=depth)
+    return {
+        "agent_id": agent_id,
+        "start": start,
+        "depth": depth,
+        "count": len(reachable),
+        "pages": [
+            {
+                "path": path,
+                "category": page.get("category", "general"),
+                "summary": _page_summary(page),
+                "links": page.get("links", []),
+            }
+            for path, page in reachable.items()
+        ],
+    }
+
+
+@router.get("/agents/{agent_id}/wiki/log", summary="Get wiki mutation log")
+async def wiki_log(request: Request, agent_id: str, limit: int = Query(default=50, ge=1, le=500)):
+    agent = await _get_agent(request, agent_id)
+    entries = await agent.wiki.get_log(agent_id, limit=limit)
+    return {"agent_id": agent_id, "count": len(entries), "entries": entries}
+
+
+@router.get("/agents/{agent_id}/wiki/graph", summary="Wiki graph: nodes + edges")
+async def wiki_graph(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    pages = await agent.wiki.list_pages(agent_id)
+    visible = [p for p in pages if not p["path"].startswith("_")]
+
+    name_index, path_index = agent.wiki._build_page_index(visible)
+
+    inbound: dict[str, int] = {p["path"]: 0 for p in visible}
+    edges: list[dict[str, str]] = []
+    for p in visible:
+        src = p["path"]
+        for link in p.get("links", []):
+            resolved = agent.wiki._resolve_path(link, name_index, path_index)
+            if resolved and resolved in inbound:
+                inbound[resolved] += 1
+                edges.append({"source": src, "target": resolved})
+
+    nodes = [
+        {
+            "id": p["path"],
+            "path": p["path"],
+            "category": p.get("category", "general"),
+            "summary": _page_summary(p),
+            "backlinks": inbound.get(p["path"], 0),
+            "outbound": len(p.get("links", [])),
+        }
+        for p in visible
+    ]
+    return {"agent_id": agent_id, "node_count": len(nodes), "edge_count": len(edges), "nodes": nodes, "edges": edges}
+
+
+@router.get("/agents/{agent_id}/wiki/pages/{page_path:path}", summary="Get wiki page")
+async def wiki_get_page(request: Request, agent_id: str, page_path: str):
+    agent = await _get_agent(request, agent_id)
+    page = await agent.wiki.get_page(agent_id, page_path)
+    if not page:
+        raise HTTPException(404, f"Sayfa bulunamadi: {page_path}")
+    backlinks = await agent.wiki.get_backlinks(agent_id, page_path)
+    unresolved = await agent.wiki.resolve_links(agent_id, page["content"])
+    broken = [target for target, resolved in unresolved.items() if resolved is None]
+    return {
+        "agent_id": agent_id,
+        "path": page["path"],
+        "category": page.get("category", "general"),
+        "content": page.get("content", ""),
+        "links": page.get("links", []),
+        "version": page.get("version", 1),
+        "created_at": page.get("created_at"),
+        "backlinks": backlinks,
+        "broken_links": broken,
+    }
+
+
+@router.put("/agents/{agent_id}/wiki/pages/{page_path:path}", summary="Create or update wiki page")
+async def wiki_put_page(request: Request, agent_id: str, page_path: str, body: WikiPageBody):
+    agent = await _get_agent(request, agent_id)
+    existing = await agent.wiki.get_page(agent_id, page_path)
+    if existing:
+        result = await agent.wiki.update_page(agent_id, page_path, body.content, source="ui_edit")
+    else:
+        result = await agent.wiki.create_page(agent_id, page_path, body.content, source="ui_edit")
+    return {"agent_id": agent_id, "path": page_path, "version": result.get("version", 1)}
+
+
+@router.delete("/agents/{agent_id}/wiki/pages/{page_path:path}", summary="Delete wiki page")
+async def wiki_delete_page(request: Request, agent_id: str, page_path: str):
+    agent = await _get_agent(request, agent_id)
+    deleted = await agent.wiki.delete_page(agent_id, page_path)
+    if not deleted:
+        raise HTTPException(404, f"Sayfa bulunamadi: {page_path}")
+    return {"agent_id": agent_id, "path": page_path, "deleted": True}
+
+
+@router.get("/agents/{agent_id}/wiki/history/{page_path:path}", summary="Page version history")
+async def wiki_page_history(request: Request, agent_id: str, page_path: str):
+    agent = await _get_agent(request, agent_id)
+    versions = await agent.wiki.get_page_history(agent_id, page_path)
+    return {
+        "agent_id": agent_id,
+        "path": page_path,
+        "version_count": len(versions),
+        "versions": [
+            {
+                "version": v.get("version", 1),
+                "source": v.get("source", ""),
+                "created_at": str(v["created_at"]) if v.get("created_at") else None,
+            }
+            for v in versions
+        ],
+    }
+
+
+# ------------------------------------------------------------------
+# Scene (publishing = save_skill + wiki snapshot)
+# ------------------------------------------------------------------
+
+async def _categories_from_request(categories: list[str]) -> list[str] | None:
+    """Normalize categories arg: empty list -> None (all)."""
+    return [c for c in categories if c] or None
+
+
+@router.get("/agents/{agent_id}/scene/stats", summary="Scene stats (page count + token estimate)")
+async def scene_stats(
+    request: Request,
+    agent_id: str,
+    categories: str = Query(default="", description="Virgulle ayrilmis kategori filtresi"),
+):
+    agent = await _get_agent(request, agent_id)
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+
+    pages = await agent.wiki.list_pages(agent_id)
+    visible = [p for p in pages if not p["path"].startswith("_")]
+
+    by_cat: dict[str, int] = {}
+    for p in visible:
+        c = p.get("category", "general")
+        by_cat[c] = by_cat.get(c, 0) + 1
+
+    ontology = await agent.store.load_ontology(agent_id)
+    context = await agent.wiki.build_extraction_context(agent_id, categories=cat_list)
+    prompt = "" if ontology.is_empty else agent.memory.build_extraction_prompt(ontology, wiki_context=context)
+
+    return {
+        "agent_id": agent_id,
+        "filter_categories": cat_list or [],
+        "page_count_total": len(visible),
+        "page_count_by_category": by_cat,
+        "char_count": len(prompt),
+        "token_estimate": len(prompt) // 4,
+        "ontology_empty": ontology.is_empty,
+    }
+
+
+@router.get("/agents/{agent_id}/scene/preview", summary="Preview the extraction prompt Celery would see")
+async def scene_preview(
+    request: Request,
+    agent_id: str,
+    categories: str = Query(default=""),
+):
+    agent = await _get_agent(request, agent_id)
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+
+    ontology = await agent.store.load_ontology(agent_id)
+    if ontology.is_empty:
+        return {
+            "agent_id": agent_id,
+            "prompt": "",
+            "char_count": 0,
+            "token_estimate": 0,
+            "ontology_empty": True,
+            "filter_categories": cat_list or [],
+        }
+    context = await agent.wiki.build_extraction_context(agent_id, categories=cat_list)
+    prompt = agent.memory.build_extraction_prompt(ontology, wiki_context=context)
+    return {
+        "agent_id": agent_id,
+        "filter_categories": cat_list or [],
+        "prompt": prompt,
+        "char_count": len(prompt),
+        "token_estimate": len(prompt) // 4,
+        "ontology_empty": False,
+    }
+
+
+@router.get("/agents/{agent_id}/scene/published", summary="Get the currently published scene (frozen snapshot)")
+async def scene_published(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    row = await agent.store.get(agent_id, "skill_execution", "latest")
+    if not row:
+        return {"agent_id": agent_id, "published": False, "prompt": "", "metadata": None}
+
+    value = row["value"]
+    if isinstance(value, str):
+        value = json.loads(value)
+
+    prompt = value.get("prompt_template", "") if value else ""
+    meta = value.get("scene_metadata") if value else None
+
+    return {
+        "agent_id": agent_id,
+        "published": True,
+        "prompt": prompt,
+        "char_count": len(prompt),
+        "token_estimate": len(prompt) // 4,
+        "skill_id": value.get("skill_id") if value else None,
+        "version": value.get("version") if value else None,
+        "metadata": meta,
+        "created_at": str(row["created_at"]) if row.get("created_at") else None,
+    }
+
+
+@router.post("/agents/{agent_id}/scene/publish", summary="Publish scene (freeze wiki + ontology into skill)")
+async def scene_publish(request: Request, agent_id: str, body: SceneFreezeRequest):
+    agent = await _get_agent(request, agent_id)
+    cat_list = [c for c in body.categories if c] or None
+    result = await agent.skill_manager.save_skill(agent_id, categories=cat_list)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return {
+        "agent_id": agent_id,
+        "published": True,
+        "skill_id": result.get("skill_id"),
+        "version": result.get("version"),
+        "metadata": result.get("scene_metadata"),
+    }
+
+
+# ------------------------------------------------------------------
+# OCR Document Preview (frontend)
+# ------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/ocr/documents", summary="List OCR'd documents for this agent")
+async def list_ocr_documents(request: Request, agent_id: str):
+    registry = _get_registry(request)
+    from .knowledge_store import KnowledgeStore
+    ks = KnowledgeStore(registry._pg)
+    entries = await ks.get_all(agent_id, "ocr_result")
+    docs = []
+    for entry in entries:
+        val = entry.get("value", {})
+        if isinstance(val, str):
+            import json as _json
+            try:
+                val = _json.loads(val)
+            except Exception:
+                continue
+        docs.append({
+            "doc_key": entry.get("key", ""),
+            "file_name": val.get("file_name", ""),
+            "page_count": val.get("page_count", 0),
+            "total_chars": val.get("total_chars", 0),
+            "duration_ms": val.get("duration_ms", 0),
+            "token_usage": val.get("token_usage"),
+        })
+    return {"agent_id": agent_id, "count": len(docs), "documents": docs}
+
+
+@router.get("/agents/{agent_id}/ocr/{doc_key}/pages", summary="Paginated OCR text reader")
+async def read_ocr_pages(
+    request: Request,
+    agent_id: str,
+    doc_key: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=5, ge=1, le=50),
+):
+    import re as _re
+    registry = _get_registry(request)
+    from .knowledge_store import KnowledgeStore
+    ks = KnowledgeStore(registry._pg)
+    entries = await ks.get_all(agent_id, "ocr_result")
+    val = None
+    for entry in entries:
+        if entry.get("key") == doc_key:
+            val = entry.get("value", {})
+            if isinstance(val, str):
+                import json as _json
+                val = _json.loads(val)
+            break
+    if val is None:
+        raise HTTPException(404, f"OCR document '{doc_key}' not found")
+
+    merged_text = val.get("ocr_text", "")
+    parts = _re.split(r"\[\[PAGE:\d+\]\]", merged_text)
+    pages = [p.strip() for p in parts if p.strip()]
+    if not pages and merged_text:
+        chunk_size = 4000
+        pages = [merged_text[i:i + chunk_size] for i in range(0, len(merged_text), chunk_size)]
+
+    total_pages = len(pages)
+    selected = pages[offset:offset + limit]
+    has_more = (offset + limit) < total_pages
+
+    return {
+        "doc_key": doc_key,
+        "file_name": val.get("file_name", ""),
+        "total_pages": total_pages,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(selected),
+        "has_more": has_more,
+        "pages": selected,
+    }
+
+
+# ------------------------------------------------------------------
+# Unified Resources (sample_files + ocr_result joined by resource_id)
+# ------------------------------------------------------------------
+
+@router.get("/agents/{agent_id}/resources", summary="Merged resource list with OCR status")
+async def list_agent_resources(request: Request, agent_id: str):
+    agent = await _get_agent(request, agent_id)
+    ks = agent.store
+
+    sf_entries = await ks.get_all(agent_id, "sample_files")
+    files: list[dict] = []
+    for entry in sf_entries:
+        val = entry.get("value", {})
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        for f in val.get("files", []):
+            files.append(f)
+
+    ocr_entries = await ks.get_all(agent_id, "ocr_result")
+    # Birden fazla index: birinci tercih resource_id; yoksa (eski kayitlar icin)
+    # file_path veya file_name uzerinden geri donusu fallback olarak kullan.
+    ocr_by_rid: dict[str, dict] = {}
+    ocr_by_path: dict[str, dict] = {}
+    ocr_by_name: dict[str, dict] = {}
+    for entry in ocr_entries:
+        val = entry.get("value", {})
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        info = {
+            "doc_key": entry.get("key", ""),
+            "page_count": val.get("page_count", 0),
+            "total_chars": val.get("total_chars", 0),
+        }
+        rid = val.get("resource_id", "") or ""
+        fpath = val.get("file_path", "") or ""
+        fname = val.get("file_name", "") or ""
+        if rid:
+            ocr_by_rid[rid] = info
+        if fpath:
+            ocr_by_path[fpath] = info
+        if fname:
+            ocr_by_name[fname] = info
+
+    result = []
+    for f in files:
+        rid = f.get("resource_id", "") or ""
+        fpath = f.get("path", "") or ""
+        fname = f.get("filename", "") or ""
+
+        ocr_info = None
+        if rid and rid in ocr_by_rid:
+            ocr_info = ocr_by_rid[rid]
+        elif fpath and fpath in ocr_by_path:
+            ocr_info = ocr_by_path[fpath]
+        elif fname and fname in ocr_by_name:
+            ocr_info = ocr_by_name[fname]
+        else:
+            # Son care: OCR file_path icindeki safe-name dosya adiyla eslesiyor mu?
+            for op, info in ocr_by_path.items():
+                if op.endswith(fname) or (fname and fname in op):
+                    ocr_info = info
+                    break
+
+        result.append({
+            "resource_id": rid,
+            "filename": fname,
+            "content_type": f.get("content_type", ""),
+            "size": f.get("size", 0),
+            "ocr_status": "completed" if ocr_info else "pending",
+            "doc_key": ocr_info["doc_key"] if ocr_info else None,
+            "page_count": ocr_info["page_count"] if ocr_info else None,
+            "total_chars": ocr_info["total_chars"] if ocr_info else None,
+        })
+
+    return {"resources": result, "total": len(result)}

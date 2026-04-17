@@ -31,13 +31,24 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
     agent_id VARCHAR(128) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     total_documents INT NOT NULL DEFAULT 0,
+    celery_task_count INT NOT NULL DEFAULT 0,
     skill_id VARCHAR(256),
     ocr_mode VARCHAR(32) DEFAULT 'hybrid',
+    description TEXT,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_batch_agent ON batch_jobs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_batch_status ON batch_jobs(status);
+
+-- Idempotent column adds for legacy installations.
+ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS celery_task_count INT NOT NULL DEFAULT 0;
+ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;
 
 -- =============================================================================
 -- WORKSPACE DOCUMENTS - individual document processing status
@@ -47,6 +58,8 @@ CREATE TABLE IF NOT EXISTS workspace_documents (
     batch_id VARCHAR(128) REFERENCES batch_jobs(batch_id),
     agent_id VARCHAR(128) NOT NULL,
     file_path TEXT NOT NULL,
+    file_name VARCHAR(512),
+    sequence INT,
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     confidence_score FLOAT DEFAULT 0.0,
     extraction_result JSONB,
@@ -59,6 +72,43 @@ CREATE TABLE IF NOT EXISTS workspace_documents (
 CREATE INDEX IF NOT EXISTS idx_wdoc_batch ON workspace_documents(batch_id);
 CREATE INDEX IF NOT EXISTS idx_wdoc_agent ON workspace_documents(agent_id);
 CREATE INDEX IF NOT EXISTS idx_wdoc_status ON workspace_documents(status);
+
+-- Idempotent column adds for legacy installations.
+ALTER TABLE workspace_documents ADD COLUMN IF NOT EXISTS file_name VARCHAR(512);
+ALTER TABLE workspace_documents ADD COLUMN IF NOT EXISTS sequence INT;
+
+-- =============================================================================
+-- PENDING RESUMES - async batch durability: which thread waits which batch
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS pending_resumes (
+    batch_id VARCHAR(128) PRIMARY KEY REFERENCES batch_jobs(batch_id) ON DELETE CASCADE,
+    agent_id VARCHAR(128) NOT NULL,
+    session_id VARCHAR(128) NOT NULL,
+    thread_id VARCHAR(256) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'waiting',
+    event_text_template TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    resumed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_resumes_thread ON pending_resumes(thread_id);
+CREATE INDEX IF NOT EXISTS idx_pending_resumes_status ON pending_resumes(status);
+CREATE INDEX IF NOT EXISTS idx_pending_resumes_agent ON pending_resumes(agent_id);
+
+-- =============================================================================
+-- NOTIFICATIONS - durable in-app notification history
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGSERIAL PRIMARY KEY,
+    agent_id VARCHAR(128) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    data JSONB NOT NULL DEFAULT '{}',
+    read_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_agent_unread ON notifications(agent_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);
 
 -- =============================================================================
 -- ONTOLOGY DISCOVERIES - auto-discovered entity/relationship types from documents

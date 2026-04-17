@@ -34,8 +34,27 @@ export const listAgents = (limit = 50) =>
 export const getAgent = (agentId: string) =>
   agentApi.get<AgentInfo>(`${PREFIX}/agents/${agentId}`);
 
-export const deleteAgent = (agentId: string) =>
-  agentApi.delete(`${PREFIX}/agents/${agentId}`);
+export const deleteAgent = (agentId: string, purge = false) =>
+  agentApi.delete(`${PREFIX}/agents/${agentId}`, { params: { purge } });
+
+export const restoreAgent = (agentId: string) =>
+  agentApi.post(`${PREFIX}/agents/${agentId}/restore`);
+
+export const purgeAgent = (agentId: string) =>
+  agentApi.delete(`${PREFIX}/agents/${agentId}`, { params: { purge: true } });
+
+export interface DeletedAgentInfo {
+  agent_id: string;
+  name: string;
+  purpose: string;
+  deleted_at: string | null;
+}
+
+export const listDeletedAgents = (limit = 200) =>
+  agentApi.get<{ deleted: DeletedAgentInfo[]; total: number }>(
+    `${PREFIX}/agents/deleted`,
+    { params: { limit } }
+  );
 
 // ── Sessions & History ──────────────────────────────────────────
 
@@ -61,6 +80,28 @@ export const getChatHistory = (agentId: string, sessionId = '') =>
 
 export const resetChat = (agentId: string) =>
   agentApi.post(`${PREFIX}/agents/${agentId}/chat/reset`);
+
+export interface RewindResponse {
+  agent_id: string;
+  status: string;
+  session_id?: string;
+  kept_user_messages?: number;
+  cutoff_ts?: string | null;
+  deleted_records?: number;
+  deleted_files?: number;
+  deleted_md_paths?: string[];
+  ontology_versions_deleted?: number;
+}
+
+export const rewindChat = (
+  agentId: string,
+  sessionId: string,
+  userMessageIndex: number,
+) =>
+  agentApi.post<RewindResponse>(
+    `${PREFIX}/agents/${agentId}/chat/rewind`,
+    { session_id: sessionId, user_message_index: userMessageIndex },
+  );
 
 // ── Chat ────────────────────────────────────────────────────────
 
@@ -159,6 +200,26 @@ export const getMode = (agentId: string) =>
 export const switchMode = (agentId: string, mode: 'plan' | 'agent') =>
   agentApi.post(`${PREFIX}/agents/${agentId}/mode`, { mode });
 
+export interface PlanRequestResponse {
+  agent_id: string;
+  decision: 'approved' | 'rejected';
+  mode: 'plan' | 'agent';
+  status?: string;
+  summary?: string;
+}
+
+export const respondPlanModeRequest = (
+  agentId: string,
+  decision: 'approve' | 'reject',
+  reason = '',
+  topic = ''
+) =>
+  agentApi.post<PlanRequestResponse>(`${PREFIX}/agents/${agentId}/mode/plan-request`, {
+    decision,
+    reason,
+    topic,
+  });
+
 export const getPlan = (agentId: string) =>
   agentApi.get<PlanResponse>(`${PREFIX}/agents/${agentId}/plan`);
 
@@ -176,6 +237,11 @@ export const addPlanStep = (agentId: string, afterStepId: number, content: strin
 
 export const removePlanStep = (agentId: string, stepId: number) =>
   agentApi.delete<PlanResponse>(`${PREFIX}/agents/${agentId}/plan/step/${stepId}`);
+
+export const clearPlan = (agentId: string) =>
+  agentApi.delete<{ agent_id: string; plan: null; mode: 'plan'; status: string }>(
+    `${PREFIX}/agents/${agentId}/plan`
+  );
 
 // ── Ontology ────────────────────────────────────────────────────
 
@@ -261,11 +327,29 @@ export interface AgentNotification {
   event_type: string;
   data: Record<string, unknown>;
   timestamp: number;
+  id?: number;
+  read_at?: string | null;
 }
 
-export const getNotifications = (agentId: string, limit = 50) =>
-  agentApi.get<{ notifications: AgentNotification[] }>(`${PREFIX}/agents/${agentId}/notifications`, {
-    params: { limit },
+export const getNotifications = (
+  agentId: string,
+  opts: { limit?: number; sinceId?: number; unreadOnly?: boolean; mode?: 'history' | 'recent' } = {},
+) =>
+  agentApi.get<{ notifications: AgentNotification[]; count: number }>(
+    `${PREFIX}/agents/${agentId}/notifications`,
+    {
+      params: {
+        limit: opts.limit ?? 50,
+        ...(opts.sinceId != null ? { since_id: opts.sinceId } : {}),
+        ...(opts.unreadOnly ? { unread_only: true } : {}),
+        mode: opts.mode ?? 'history',
+      },
+    },
+  );
+
+export const markNotificationsRead = (agentId: string, notificationIds?: number[]) =>
+  agentApi.post<{ marked: number }>(`${PREFIX}/agents/${agentId}/notifications/mark-read`, {
+    notification_ids: notificationIds ?? null,
   });
 
 // ── Upload ──────────────────────────────────────────────────────
@@ -288,6 +372,365 @@ export const uploadFiles = (agentId: string, files: File[]) => {
 
 export const addSources = (agentId: string, urls: string[], sourceType = 'url') =>
   agentApi.post<UploadResult>(`${PREFIX}/agents/${agentId}/add-sources`, { urls, source_type: sourceType });
+
+// ── Ecosystem (aggregated graph view) ───────────────────────────
+
+export interface EcosystemAgent {
+  agent_id: string;
+  name: string;
+  purpose: string;
+  domain: string;
+  mode: string;
+  model: string;
+}
+
+export interface EcosystemOntology {
+  entity_count: number;
+  relationship_count: number;
+  rule_count: number;
+  constraint_count: number;
+  domain: string;
+  goal: string;
+}
+
+export interface EcosystemDiscoveries {
+  pending: number;
+  approved: number;
+  rejected: number;
+}
+
+export interface EcosystemMcp {
+  connected: boolean;
+  tool_count: number;
+  tool_names: string[];
+}
+
+export interface EcosystemSubagent {
+  name: string;
+  description: string;
+  tool_count: number;
+}
+
+export interface EcosystemBatchLatest {
+  batch_id: string;
+  status: string;
+  total: number;
+  processed: number;
+  percent_complete: number;
+}
+
+export interface EcosystemBatch {
+  active_count: number;
+  latest: EcosystemBatchLatest | null;
+}
+
+export interface EcosystemData {
+  agent: EcosystemAgent;
+  ontology: EcosystemOntology;
+  discoveries: EcosystemDiscoveries;
+  mcp: EcosystemMcp;
+  celery: { available: boolean };
+  neo4j: { configured: boolean; uri: string };
+  subagents: EcosystemSubagent[];
+  batch: EcosystemBatch;
+  resources: { sample_files: number; source_urls: number };
+  notifications: { recent_count: number };
+}
+
+export const getEcosystem = (agentId: string) =>
+  agentApi.get<EcosystemData>(`${PREFIX}/agents/${agentId}/ecosystem`);
+
+// ── Wiki (Sahne) ────────────────────────────────────────────────
+
+export type WikiCategory =
+  | 'entities'
+  | 'relationships'
+  | 'patterns'
+  | 'analysis'
+  | 'sources'
+  | 'general';
+
+export const WIKI_CATEGORY_ORDER: WikiCategory[] = [
+  'entities',
+  'relationships',
+  'patterns',
+  'analysis',
+  'sources',
+  'general',
+];
+
+export interface WikiPageSummary {
+  path: string;
+  category: WikiCategory;
+  summary: string;
+  version: number;
+  links: string[];
+  created_at: string | null;
+}
+
+export interface WikiPageDetail {
+  agent_id: string;
+  path: string;
+  category: WikiCategory;
+  content: string;
+  links: string[];
+  version: number;
+  created_at: string | null;
+  backlinks: string[];
+  broken_links: string[];
+}
+
+export interface WikiListResponse {
+  agent_id: string;
+  count: number;
+  pages: WikiPageSummary[];
+}
+
+export interface WikiSearchResponse {
+  agent_id: string;
+  query: string;
+  count: number;
+  results: Array<{
+    path: string;
+    category: WikiCategory;
+    summary: string;
+    version: number;
+  }>;
+}
+
+export interface WikiLintReport {
+  agent_id: string;
+  total_pages: number;
+  total_links: number;
+  orphan_pages: string[];
+  broken_links: Array<{ source: string; target: string }>;
+  unresolved_targets: string[];
+  issues_count: number;
+}
+
+export interface WikiGraphNode {
+  id: string;
+  path: string;
+  category: WikiCategory;
+  summary: string;
+  backlinks: number;
+  outbound: number;
+}
+
+export interface WikiGraphEdge {
+  source: string;
+  target: string;
+}
+
+export interface WikiGraphResponse {
+  agent_id: string;
+  node_count: number;
+  edge_count: number;
+  nodes: WikiGraphNode[];
+  edges: WikiGraphEdge[];
+}
+
+export interface WikiLogEntry {
+  action: string;
+  path: string;
+  timestamp: string;
+}
+
+export interface WikiHistoryResponse {
+  agent_id: string;
+  path: string;
+  version_count: number;
+  versions: Array<{ version: number; source: string; created_at: string | null }>;
+}
+
+export const wikiListPages = (agentId: string, category = '') =>
+  agentApi.get<WikiListResponse>(`${PREFIX}/agents/${agentId}/wiki/pages`, {
+    params: category ? { category } : undefined,
+  });
+
+export const wikiGetPage = (agentId: string, path: string) =>
+  agentApi.get<WikiPageDetail>(
+    `${PREFIX}/agents/${agentId}/wiki/pages/${encodeURI(path)}`
+  );
+
+export const wikiSavePage = (agentId: string, path: string, content: string) =>
+  agentApi.put<{ path: string; version: number }>(
+    `${PREFIX}/agents/${agentId}/wiki/pages/${encodeURI(path)}`,
+    { content }
+  );
+
+export const wikiDeletePage = (agentId: string, path: string) =>
+  agentApi.delete<{ path: string; deleted: boolean }>(
+    `${PREFIX}/agents/${agentId}/wiki/pages/${encodeURI(path)}`
+  );
+
+export const wikiSearch = (agentId: string, query: string) =>
+  agentApi.get<WikiSearchResponse>(`${PREFIX}/agents/${agentId}/wiki/search`, {
+    params: { q: query },
+  });
+
+export const wikiIndex = (agentId: string) =>
+  agentApi.get<{ agent_id: string; markdown: string }>(
+    `${PREFIX}/agents/${agentId}/wiki/index`
+  );
+
+export const wikiLint = (agentId: string) =>
+  agentApi.post<WikiLintReport>(`${PREFIX}/agents/${agentId}/wiki/lint`);
+
+export const wikiTraverse = (agentId: string, start: string, depth = 2) =>
+  agentApi.get<{
+    agent_id: string;
+    start: string;
+    depth: number;
+    count: number;
+    pages: Array<{ path: string; category: WikiCategory; summary: string; links: string[] }>;
+  }>(`${PREFIX}/agents/${agentId}/wiki/traverse`, {
+    params: { start, depth },
+  });
+
+export const wikiLog = (agentId: string, limit = 50) =>
+  agentApi.get<{ agent_id: string; count: number; entries: WikiLogEntry[] }>(
+    `${PREFIX}/agents/${agentId}/wiki/log`,
+    { params: { limit } }
+  );
+
+export const wikiGraph = (agentId: string) =>
+  agentApi.get<WikiGraphResponse>(`${PREFIX}/agents/${agentId}/wiki/graph`);
+
+export const wikiPageHistory = (agentId: string, path: string) =>
+  agentApi.get<WikiHistoryResponse>(
+    `${PREFIX}/agents/${agentId}/wiki/history/${encodeURI(path)}`
+  );
+
+// ── Scene (publishing frozen snapshot) ──────────────────────────
+
+export interface SceneStats {
+  agent_id: string;
+  filter_categories: string[];
+  page_count_total: number;
+  page_count_by_category: Record<string, number>;
+  char_count: number;
+  token_estimate: number;
+  ontology_empty: boolean;
+}
+
+export interface ScenePreview {
+  agent_id: string;
+  filter_categories: string[];
+  prompt: string;
+  char_count: number;
+  token_estimate: number;
+  ontology_empty: boolean;
+}
+
+export interface SceneMetadata {
+  categories: string[];
+  page_count: number;
+  token_estimate: number;
+  frozen_at: string;
+}
+
+export interface ScenePublished {
+  agent_id: string;
+  published: boolean;
+  prompt: string;
+  char_count?: number;
+  token_estimate?: number;
+  skill_id?: string | null;
+  version?: number | null;
+  metadata?: SceneMetadata | null;
+  created_at?: string | null;
+}
+
+export interface ScenePublishResult {
+  agent_id: string;
+  published: boolean;
+  skill_id?: string | null;
+  version?: number | null;
+  metadata?: SceneMetadata | null;
+}
+
+const joinCategories = (cats?: string[]) => (cats && cats.length ? cats.join(',') : undefined);
+
+export const getSceneStats = (agentId: string, categories?: string[]) =>
+  agentApi.get<SceneStats>(`${PREFIX}/agents/${agentId}/scene/stats`, {
+    params: { categories: joinCategories(categories) },
+  });
+
+export const getScenePreview = (agentId: string, categories?: string[]) =>
+  agentApi.get<ScenePreview>(`${PREFIX}/agents/${agentId}/scene/preview`, {
+    params: { categories: joinCategories(categories) },
+  });
+
+export const getScenePublished = (agentId: string) =>
+  agentApi.get<ScenePublished>(`${PREFIX}/agents/${agentId}/scene/published`);
+
+export const publishScene = (agentId: string, categories: string[] = []) =>
+  agentApi.post<ScenePublishResult>(`${PREFIX}/agents/${agentId}/scene/publish`, {
+    categories,
+  });
+
+// ── OCR Document Preview ────────────────────────────────────────
+
+export interface OcrDocumentMeta {
+  doc_key: string;
+  file_name: string;
+  page_count: number;
+  total_chars: number;
+  duration_ms?: number;
+  token_usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    cost_usd?: number;
+  } | null;
+}
+
+export interface OcrDocumentsResponse {
+  agent_id: string;
+  count: number;
+  documents: OcrDocumentMeta[];
+}
+
+export interface OcrPagesResponse {
+  doc_key: string;
+  file_name: string;
+  total_pages: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  pages: string[];
+}
+
+export const getOcrDocuments = (agentId: string) =>
+  agentApi.get<OcrDocumentsResponse>(`${PREFIX}/agents/${agentId}/ocr/documents`);
+
+export const getOcrPages = (agentId: string, docKey: string, offset = 0, limit = 5) =>
+  agentApi.get<OcrPagesResponse>(`${PREFIX}/agents/${agentId}/ocr/${docKey}/pages`, {
+    params: { offset, limit },
+  });
+
+// ── Unified Resources ───────────────────────────────────────────
+
+export interface ResourceFile {
+  resource_id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  ocr_status: 'pending' | 'completed';
+  doc_key: string | null;
+  page_count: number | null;
+  total_chars: number | null;
+}
+
+export interface ResourcesResponse {
+  resources: ResourceFile[];
+  total: number;
+}
+
+export const getResources = (agentId: string) =>
+  agentApi.get<ResourcesResponse>(`${PREFIX}/agents/${agentId}/resources`);
 
 // ── Utilities ───────────────────────────────────────────────────
 

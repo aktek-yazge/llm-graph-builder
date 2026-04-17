@@ -1,8 +1,12 @@
+import auiPlugin from '@assistant-ui/react-ui/tailwindcss';
+import animatePlugin from 'tailwindcss-animate';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
+    "./node_modules/@assistant-ui/react-ui/dist/**/*.{js,mjs}",
   ],
   theme: {
     extend: {
@@ -22,5 +26,5 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [animatePlugin, auiPlugin({ components: ['thread', 'markdown'] })],
 };

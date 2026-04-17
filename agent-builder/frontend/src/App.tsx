@@ -9,6 +9,8 @@ import ChatAgentList from './pages/ChatAgentList';
 import ChatAgentDetailPage from './pages/ChatAgentDetail';
 import OrchestratorChat from './pages/OrchestratorChat';
 import EvolvingAgentPage from './pages/EvolvingAgentPage';
+import EcosystemPage from './pages/EcosystemPage';
+import WikiPage from './pages/WikiPage';
 import NavBar from './components/NavBar';
 
 function App() {
@@ -25,6 +27,9 @@ function App() {
             {/* Evolving Agent */}
             <Route path="/evolving" element={<EvolvingAgentPage />} />
             <Route path="/evolving/:agentId" element={<EvolvingAgentPage />} />
+            <Route path="/evolving/:agentId/ecosystem" element={<EcosystemPage />} />
+            <Route path="/evolving/:agentId/wiki" element={<WikiPage />} />
+            <Route path="/evolving/:agentId/wiki/*" element={<WikiPage />} />
 
             {/* Admin / Yonetim */}
             <Route path="/dashboard" element={<Dashboard />} />

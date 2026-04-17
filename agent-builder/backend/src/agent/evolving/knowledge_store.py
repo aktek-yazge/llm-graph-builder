@@ -9,6 +9,7 @@ versiyonlanmis olarak saklar.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -52,6 +53,17 @@ CREATE TABLE IF NOT EXISTS ontology_discoveries (
 
 CREATE INDEX IF NOT EXISTS idx_disc_agent ON ontology_discoveries(agent_id);
 CREATE INDEX IF NOT EXISTS idx_disc_status ON ontology_discoveries(agent_id, status);
+
+-- Agent lifecycle: tracks soft-delete state per agent.
+-- A row exists for every known agent. deleted_at IS NULL = active; NOT NULL = soft-deleted.
+-- Hard delete (purge) removes the row from this table AND every related row in agent_knowledge.
+CREATE TABLE IF NOT EXISTS agent_lifecycle (
+    agent_id VARCHAR(128) PRIMARY KEY,
+    deleted_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_deleted ON agent_lifecycle(deleted_at);
 """
 
 
@@ -64,6 +76,120 @@ class KnowledgeStore:
 
     async def ensure_table(self) -> None:
         await self.pg.execute(MIGRATION_SQL)
+
+    # ─── LIFECYCLE (soft delete / restore / purge) ──────────────────
+
+    async def ensure_lifecycle_row(self, agent_id: str) -> None:
+        """Insert an active lifecycle row if one doesn't already exist."""
+        await self.pg.execute(
+            """
+            INSERT INTO agent_lifecycle (agent_id, deleted_at)
+            VALUES ($1, NULL)
+            ON CONFLICT (agent_id) DO NOTHING
+            """,
+            agent_id,
+        )
+
+    async def is_deleted(self, agent_id: str) -> bool:
+        """True if the agent is soft-deleted."""
+        row = await self.pg.fetchrow(
+            "SELECT deleted_at FROM agent_lifecycle WHERE agent_id = $1",
+            agent_id,
+        )
+        if not row:
+            return False
+        return row["deleted_at"] is not None
+
+    async def soft_delete_agent(self, agent_id: str) -> None:
+        """Mark the agent as soft-deleted; data is preserved and can be restored."""
+        await self.pg.execute(
+            """
+            INSERT INTO agent_lifecycle (agent_id, deleted_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (agent_id) DO UPDATE SET deleted_at = NOW()
+            """,
+            agent_id,
+        )
+
+    async def restore_agent(self, agent_id: str) -> None:
+        """Clear the soft-delete flag, bringing the agent back."""
+        await self.pg.execute(
+            """
+            INSERT INTO agent_lifecycle (agent_id, deleted_at)
+            VALUES ($1, NULL)
+            ON CONFLICT (agent_id) DO UPDATE SET deleted_at = NULL
+            """,
+            agent_id,
+        )
+
+    async def purge_agent(self, agent_id: str) -> None:
+        """Hard delete: remove every trace of the agent from all related tables."""
+        await self.pg.execute(
+            "DELETE FROM agent_knowledge WHERE agent_id = $1", agent_id
+        )
+        await self.pg.execute(
+            "DELETE FROM ontology_discoveries WHERE agent_id = $1", agent_id
+        )
+        await self.pg.execute(
+            "DELETE FROM agent_lifecycle WHERE agent_id = $1", agent_id
+        )
+
+    async def list_active_agent_ids(self, limit: int = 200) -> list[str]:
+        """Return agent IDs that are not soft-deleted (joined with identity)."""
+        rows = await self.pg.fetch(
+            """
+            SELECT DISTINCT ak.agent_id
+            FROM agent_knowledge ak
+            LEFT JOIN agent_lifecycle al ON al.agent_id = ak.agent_id
+            WHERE ak.knowledge_type = 'identity'
+              AND al.deleted_at IS NULL
+            ORDER BY ak.agent_id
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [r["agent_id"] for r in rows]
+
+    async def list_deleted_agents(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Return soft-deleted agents with their last-known identity & deletion time."""
+        rows = await self.pg.fetch(
+            """
+            SELECT al.agent_id,
+                   al.deleted_at,
+                   ak.value AS identity_value
+            FROM agent_lifecycle al
+            LEFT JOIN LATERAL (
+                SELECT value
+                FROM agent_knowledge
+                WHERE agent_id = al.agent_id
+                  AND knowledge_type = 'identity'
+                  AND key = 'main'
+                ORDER BY version DESC
+                LIMIT 1
+            ) ak ON TRUE
+            WHERE al.deleted_at IS NOT NULL
+            ORDER BY al.deleted_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            value = r["identity_value"]
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    value = {}
+            value = value or {}
+            out.append({
+                "agent_id": r["agent_id"],
+                "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None,
+                "name": value.get("name", "Agent"),
+                "purpose": value.get("purpose", ""),
+            })
+        return out
 
     # ─── GENERIC OPS ────────────────────────────────────────────────
 
@@ -121,21 +247,61 @@ class KnowledgeStore:
         source: str = "conversation",
         confidence: float = 0.5,
     ) -> dict[str, Any]:
-        """Yeni versiyon olarak kaydet (append-only)."""
-        existing = await self.get(agent_id, knowledge_type, key)
-        new_version = (existing["version"] + 1) if existing else 1
-        value_json = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+        """Yeni versiyon olarak kaydet (append-only).
 
-        row_id = str(uuid.uuid4())
-        await self.pg.execute(
-            """
-            INSERT INTO agent_knowledge (id, agent_id, knowledge_type, key, value, version, confidence, source)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
-            """,
-            row_id, agent_id, knowledge_type, key, value_json, new_version, confidence, source,
-        )
-        logger.info("Knowledge upsert: agent=%s type=%s key=%s v%d", agent_id, knowledge_type, key, new_version)
-        return {"id": row_id, "version": new_version}
+        Paralel tool cagrilari ayni (agent_id, knowledge_type, key) uzerinde
+        cakisirsa SELECT max+1 read-modify-write race olusur. Cozum: version'i
+        SQL icinde COALESCE(MAX(version),0)+1 ile atomic hesapla ve unique
+        constraint ihlalinde 5 kere kadar retry yap.
+        """
+        import asyncpg
+
+        value_json = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+        last_exc: Exception | None = None
+
+        for attempt in range(5):
+            row_id = str(uuid.uuid4())
+            try:
+                row = await self.pg.fetchrow(
+                    """
+                    INSERT INTO agent_knowledge
+                        (id, agent_id, knowledge_type, key, value, version, confidence, source)
+                    SELECT
+                        $1::uuid,
+                        $2::varchar,
+                        $3::varchar,
+                        $4::varchar,
+                        $5::jsonb,
+                        COALESCE(
+                            (SELECT MAX(version) FROM agent_knowledge
+                             WHERE agent_id = $2::varchar
+                               AND knowledge_type = $3::varchar
+                               AND key = $4::varchar),
+                            0
+                        ) + 1,
+                        $6::float8,
+                        $7::varchar
+                    RETURNING version
+                    """,
+                    row_id, agent_id, knowledge_type, key, value_json, confidence, source,
+                )
+                new_version = int(row["version"]) if row else 1
+                logger.info(
+                    "Knowledge upsert: agent=%s type=%s key=%s v%d",
+                    agent_id, knowledge_type, key, new_version,
+                )
+                return {"id": row_id, "version": new_version}
+            except asyncpg.exceptions.UniqueViolationError as exc:
+                last_exc = exc
+                logger.warning(
+                    "Knowledge upsert race (attempt %d/5) agent=%s type=%s key=%s: %s",
+                    attempt + 1, agent_id, knowledge_type, key, exc,
+                )
+                await asyncio.sleep(0.05 * (attempt + 1))
+                continue
+
+        assert last_exc is not None
+        raise last_exc
 
     async def delete(self, agent_id: str, knowledge_type: str, key: str) -> int:
         """Tum versiyonlari sil."""

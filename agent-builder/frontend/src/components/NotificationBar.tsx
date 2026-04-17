@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Flex,
@@ -10,16 +10,44 @@ import { CloseIcon } from '@chakra-ui/icons';
 import { useAgentContext } from '../context/AgentContext';
 
 export default function NotificationBar() {
-  const { notifications, sseConnected } = useAgentContext();
+  const { notifications, sseConnected, activeAgent } = useAgentContext();
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [showDisconnect, setShowDisconnect] = useState(false);
+  const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { colorMode } = useColorMode();
   const isDark = colorMode === 'dark';
 
+  useEffect(() => {
+    if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
+    if (sseConnected) {
+      setShowDisconnect(false);
+    } else {
+      disconnectTimer.current = setTimeout(() => setShowDisconnect(true), 3000);
+    }
+    return () => {
+      if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
+    };
+  }, [sseConnected, activeAgent?.agent_id]);
+
+  // chat_message_* event'leri AgentContext tarafindan dogrudan chat'e
+  // enjekte edildigi icin notification bar'da gosterme; batch_complete ise
+  // hem chat'e (inject_system_event) hem buraya gelir, kullaniciya hizli
+  // bir banner ozeti versin.
+  const HIDDEN_EVENTS = new Set([
+    'heartbeat',
+    'chat_message_chunk',
+    'chat_message_injected',
+    'chat_message_injected_start',
+    'chat_message_injected_error',
+    'tool_call',
+    'tool_result',
+  ]);
+
   const visible = notifications
-    .filter((n) => !dismissed.has(n.timestamp) && n.event_type !== 'heartbeat')
+    .filter((n) => !dismissed.has(n.timestamp) && !HIDDEN_EVENTS.has(n.event_type))
     .slice(0, 3);
 
-  if (visible.length === 0 && sseConnected) return null;
+  if (visible.length === 0 && !showDisconnect) return null;
 
   const dismiss = (ts: number) => {
     setDismissed((prev) => new Set([...prev, ts]));
@@ -65,7 +93,7 @@ export default function NotificationBar() {
       borderBottom="1px"
       borderColor={isDark ? 'gray.700' : 'gray.200'}
     >
-      {!sseConnected && (
+      {showDisconnect && (
         <Flex align="center" gap={1} fontSize="xs" color="gray.400" mb={visible.length > 0 ? 1 : 0}>
           <Box w="1.5" h="1.5" bg="gray.400" borderRadius="full" />
           <Text>SSE baglantisi kesildi, yeniden deneniyor...</Text>
@@ -96,6 +124,18 @@ export default function NotificationBar() {
                   {String(n.data.doc_id)}
                 </Text>
               )}
+              {n.event_type === 'batch_complete' && (() => {
+                const summary = (n.data?.summary as Record<string, unknown>) || {};
+                const total = Number(summary.total || 0);
+                const done = Number(summary.completed || 0);
+                const failed = Number(summary.failed || 0);
+                if (!total) return null;
+                return (
+                  <Text color="gray.500" isTruncated>
+                    {done}/{total} basarili{failed ? ` · ${failed} hatali` : ''}
+                  </Text>
+                );
+              })()}
               {n.data.error_message && (
                 <Text color="red.500" isTruncated>
                   {String(n.data.error_message)}

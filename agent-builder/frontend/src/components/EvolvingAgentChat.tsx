@@ -11,22 +11,58 @@ import {
   useColorMode,
 } from '@chakra-ui/react';
 import { ArrowForwardIcon, CloseIcon, EditIcon, AttachmentIcon, RepeatIcon } from '@chakra-ui/icons';
+import { useToast } from '@chakra-ui/react';
 import ReactMarkdown from 'react-markdown';
 import { useAgentContext, type ChatMessage } from '../context/AgentContext';
+import PlanCard, { parsePlan } from './chat/PlanCard';
+
+const PLAN_TOOLS = new Set([
+  'create_plan',
+  'update_plan_step',
+  'add_plan_step',
+  'remove_plan_step',
+  'get_current_plan',
+]);
+
+// Bu tool'lar sag paneldeki Gorevler bolumunde zaten gorunuyor;
+// chat icinde ayrica gosterilmesine gerek yok.
+const HIDDEN_TOOLS = new Set([
+  'write_todos',
+  'read_todos',
+]);
 
 function MessageBubble({
   msg,
   onEdit,
+  onRewind,
   isStreaming,
 }: {
   msg: ChatMessage;
   onEdit?: (id: string) => void;
+  onRewind?: (id: string) => void;
   isStreaming: boolean;
 }) {
   const { colorMode } = useColorMode();
   const isDark = colorMode === 'dark';
 
   if (msg.role === 'tool') {
+    if (msg.toolName && HIDDEN_TOOLS.has(msg.toolName)) {
+      return null;
+    }
+    const isPlanTool = msg.toolName && PLAN_TOOLS.has(msg.toolName);
+    const plan = isPlanTool && msg.content ? parsePlan(msg.content) : null;
+
+    if (plan) {
+      return (
+        <Box mx={4} my={2}>
+          <Text fontSize="2xs" fontWeight="bold" color="blue.500" mb={1} textTransform="uppercase" letterSpacing="wider">
+            {msg.toolName}
+          </Text>
+          <PlanCard plan={plan} />
+        </Box>
+      );
+    }
+
     return (
       <Box
         mx={4}
@@ -60,6 +96,7 @@ function MessageBubble({
   }
 
   const isUser = msg.role === 'user';
+  const assistantPlan = !isUser && msg.content ? parsePlan(msg.content) : null;
 
   return (
     <Flex justify={isUser ? 'flex-end' : 'flex-start'} px={4} py={1} role="group">
@@ -73,28 +110,61 @@ function MessageBubble({
         >
           {isUser ? (
             <Text>{msg.content}</Text>
+          ) : assistantPlan ? (
+            <Box>
+              {assistantPlan.header && (
+                <Box className="prose prose-sm dark:prose-invert" sx={{ maxWidth: 'none' }} mb={1}>
+                  <ReactMarkdown>{assistantPlan.header}</ReactMarkdown>
+                </Box>
+              )}
+              <PlanCard plan={assistantPlan} />
+            </Box>
           ) : (
             <Box className="prose prose-sm dark:prose-invert" sx={{ maxWidth: 'none' }}>
               <ReactMarkdown>{msg.content || '...'}</ReactMarkdown>
             </Box>
           )}
         </Box>
-        {isUser && onEdit && !isStreaming && (
-          <Tooltip label="Duzenle ve tekrar gonder" placement="left" fontSize="xs">
-            <IconButton
-              aria-label="Duzenle"
-              icon={<EditIcon />}
-              size="xs"
-              variant="ghost"
-              color="gray.400"
-              _hover={{ color: 'blue.500' }}
-              mt={0.5}
-              opacity={0}
-              _groupHover={{ opacity: 1 }}
-              transition="opacity 0.15s"
-              onClick={() => onEdit(msg.id)}
-            />
-          </Tooltip>
+        {isUser && !isStreaming && (
+          <HStack
+            spacing={0}
+            mt={0.5}
+            opacity={0}
+            _groupHover={{ opacity: 1 }}
+            transition="opacity 0.15s"
+          >
+            {onRewind && (
+              <Tooltip
+                label="Tekrar sor — bu mesajdan sonraki tum cevaplar ve agent'in yaptigi yan etkiler (cikartilmis kayitlar, ontoloji degisiklikleri) silinir, ayni soru yeniden gonderilir."
+                placement="left"
+                fontSize="xs"
+                hasArrow
+              >
+                <IconButton
+                  aria-label="Tekrar sor"
+                  icon={<RepeatIcon />}
+                  size="xs"
+                  variant="ghost"
+                  color="gray.400"
+                  _hover={{ color: 'orange.500' }}
+                  onClick={() => onRewind(msg.id)}
+                />
+              </Tooltip>
+            )}
+            {onEdit && (
+              <Tooltip label="Duzenle ve tekrar gonder" placement="left" fontSize="xs">
+                <IconButton
+                  aria-label="Duzenle"
+                  icon={<EditIcon />}
+                  size="xs"
+                  variant="ghost"
+                  color="gray.400"
+                  _hover={{ color: 'blue.500' }}
+                  onClick={() => onEdit(msg.id)}
+                />
+              </Tooltip>
+            )}
+          </HStack>
         )}
       </Flex>
     </Flex>
@@ -102,7 +172,8 @@ function MessageBubble({
 }
 
 export default function EvolvingAgentChat() {
-  const { activeAgent, messages, isStreaming, sendMessage, editAndResend, uploadFiles, cancelStream, resetChat, mode, uploadedFiles, clearUploadedFiles } = useAgentContext();
+  const { activeAgent, messages, isStreaming, sendMessage, editAndResend, rewindAndResend, uploadFiles, cancelStream, resetChat, mode, uploadedFiles, clearUploadedFiles } = useAgentContext();
+  const toast = useToast();
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -135,6 +206,40 @@ export default function EvolvingAgentChat() {
     if (text !== null) {
       setInput(text);
       setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  };
+
+  const handleRewind = async (messageId: string) => {
+    const ok = window.confirm(
+      'Bu mesajdan sonraki tum konusma silinecek ve agent\'in bu noktadan sonra yaptigi:\n' +
+      '  - Cikartilmis kayitlar (.md dosyalari + DB)\n' +
+      '  - Ontoloji versiyon degisiklikleri\n' +
+      'geri alinacak. Sonra ayni soru yeniden gonderilecek.\n\nDevam edilsin mi?'
+    );
+    if (!ok) return;
+    try {
+      const summary = await rewindAndResend(messageId);
+      if (summary) {
+        const bits: string[] = [];
+        if (summary.deleted_records) bits.push(`${summary.deleted_records} kayit`);
+        if (summary.deleted_files) bits.push(`${summary.deleted_files} .md dosyasi`);
+        if (summary.ontology_versions_deleted) bits.push(`${summary.ontology_versions_deleted} ontoloji versiyonu`);
+        toast({
+          title: 'Konusma geri alindi',
+          description: bits.length ? `Silindi: ${bits.join(', ')}.` : 'Yan etki yoktu, sadece konusma sifirlandi.',
+          status: 'info',
+          duration: 4000,
+          isClosable: true,
+        });
+      }
+    } catch (err) {
+      toast({
+        title: 'Geri alma hatasi',
+        description: String(err),
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
     }
   };
 
@@ -302,7 +407,13 @@ export default function EvolvingAgentChat() {
           </Flex>
         )}
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} onEdit={handleEdit} isStreaming={isStreaming} />
+          <MessageBubble
+            key={msg.id}
+            msg={msg}
+            onEdit={handleEdit}
+            onRewind={handleRewind}
+            isStreaming={isStreaming}
+          />
         ))}
       </Box>
 

@@ -29,7 +29,15 @@ logger = logging.getLogger(__name__)
 
 CALLBACK_URL = os.getenv(
     "AGENT_BUILDER_CALLBACK_URL",
-    "http://localhost:8001/api/v2/workspaces/callback/document-status",
+    "http://localhost:8001/api/v2/evolving/callback/document-status",
+)
+BATCH_COMPLETE_CALLBACK_URL = os.getenv(
+    "AGENT_BUILDER_BATCH_COMPLETE_URL",
+    "http://localhost:8001/api/v2/evolving/callback/batch-complete",
+)
+EVENT_STORE_DSN = os.getenv(
+    "EVENT_STORE_DSN",
+    "postgresql://event_user:event_secret@localhost:5433/event_store",
 )
 
 IMAGE_RESOLUTION_SCALE = 2.0
@@ -45,30 +53,169 @@ def _report_status(
     confidence_score: float = 0.0,
     extraction_result: Optional[str] = None,
     error_message: Optional[str] = None,
+    agent_id: str = "",
+    batch_id: str = "",
+    event_type: str = "document_status",
 ):
-    """Agent Builder callback endpoint'ine durum bildir."""
+    """Agent Builder callback endpoint'ine durum bildir.
+
+    Tum alanlari unified JSON body olarak gonderir; backend ``CallbackPayload``
+    ile birebir eslesir. ``extraction_result`` zaten JSON string olabilir;
+    parse etmeyi deneriz, basarisiz olursak raw text alan olarak yollarız.
+    """
+    payload: Dict[str, Any] = {
+        "doc_id": doc_id,
+        "status": status,
+        "agent_id": agent_id,
+        "batch_id": batch_id,
+        "event_type": event_type,
+        "confidence_score": float(confidence_score or 0.0),
+        "error_message": error_message or "",
+    }
+    if extraction_result:
+        try:
+            payload["extraction_result"] = json.loads(extraction_result)
+        except (json.JSONDecodeError, TypeError):
+            payload["extraction_result"] = {"raw": str(extraction_result)[:5000]}
+
     try:
         import httpx
-
-        params: Dict[str, Any] = {"doc_id": doc_id, "status": status}
-        if confidence_score > 0:
-            params["confidence_score"] = confidence_score
-        if error_message:
-            params["error_message"] = error_message
-
-        body = extraction_result if extraction_result else None
 
         with httpx.Client(timeout=10) as client:
             resp = client.post(
                 CALLBACK_URL,
-                params=params,
-                content=body,
-                headers={"Content-Type": "application/json"} if body else {},
+                json=payload,
+                headers={"Content-Type": "application/json"},
             )
             resp.raise_for_status()
-
     except Exception as e:
         logger.warning("Callback failed for %s (status=%s): %s", doc_id, status, e)
+
+
+def _terminal_status(status: str) -> bool:
+    """True if a workspace_documents.status row should be considered done."""
+    return status in {
+        "completed",
+        "entities_extracted",
+        "failed",
+        "low_confidence",
+        "needs_review",
+    }
+
+
+def _update_workspace_document(
+    doc_id: str,
+    status: str,
+    confidence_score: float = 0.0,
+    extraction_result: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+    celery_task_id: Optional[str] = None,
+) -> None:
+    """Synchronously update workspace_documents row in PostgreSQL.
+
+    Worker'in PG'ye dogrudan yazmasi sayesinde ``get_batch_progress`` HTTP
+    callback geç gelse bile dogru veriyi gosterir.
+    """
+    try:
+        import psycopg
+    except ImportError:
+        logger.debug("psycopg not installed in worker; skip PG update for %s", doc_id)
+        return
+
+    extraction_json = None
+    if extraction_result is not None:
+        try:
+            extraction_json = json.dumps(extraction_result, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            extraction_json = None
+
+    sql = """
+        UPDATE workspace_documents
+        SET status=%s,
+            confidence_score=%s,
+            extraction_result=COALESCE(%s::jsonb, extraction_result),
+            error_message=COALESCE(NULLIF(%s, ''), error_message),
+            celery_task_id=COALESCE(NULLIF(%s, ''), celery_task_id),
+            updated_at=NOW()
+        WHERE doc_id=%s
+    """
+    try:
+        with psycopg.connect(EVENT_STORE_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (
+                        status,
+                        float(confidence_score or 0.0),
+                        extraction_json,
+                        error_message or "",
+                        celery_task_id or "",
+                        doc_id,
+                    ),
+                )
+    except Exception as exc:
+        logger.warning("workspace_documents update failed for %s: %s", doc_id, exc)
+
+
+def _maybe_finalize_batch(batch_id: str) -> None:
+    """If all docs in batch reached terminal status, transition batch_jobs.status='completed'
+    exactly once and POST to /callback/batch-complete."""
+    if not batch_id:
+        return
+    try:
+        import psycopg
+    except ImportError:
+        return
+
+    try:
+        with psycopg.connect(EVENT_STORE_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM workspace_documents
+                    WHERE batch_id=%s
+                      AND status NOT IN ('completed', 'entities_extracted',
+                                          'failed', 'low_confidence', 'needs_review')
+                    """,
+                    (batch_id,),
+                )
+                row = cur.fetchone()
+                remaining = int(row[0]) if row else 0
+                if remaining > 0:
+                    return
+
+                cur.execute(
+                    """
+                    UPDATE batch_jobs
+                    SET status='completed', completed_at=NOW(), updated_at=NOW()
+                    WHERE batch_id=%s AND status<>'completed'
+                    """,
+                    (batch_id,),
+                )
+                if cur.rowcount == 0:
+                    return
+
+                cur.execute(
+                    "SELECT agent_id FROM batch_jobs WHERE batch_id=%s", (batch_id,),
+                )
+                ag = cur.fetchone()
+                agent_id_for_batch = ag[0] if ag else ""
+    except Exception as exc:
+        logger.warning("_maybe_finalize_batch %s failed: %s", batch_id, exc)
+        return
+
+    try:
+        import httpx
+
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                BATCH_COMPLETE_CALLBACK_URL,
+                json={"batch_id": batch_id, "agent_id": agent_id_for_batch},
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("/callback/batch-complete POST failed for %s: %s", batch_id, exc)
 
 
 def _extract_pdf_images(file_path: str, output_dir: Optional[str] = None) -> List[str]:
@@ -113,7 +260,14 @@ def _extract_pdf_images(file_path: str, output_dir: Optional[str] = None) -> Lis
 # ============================================================================
 
 @app.task(bind=True, name="workspace.extract_images", max_retries=2)
-def extract_images_task(self, workspace_doc_id: str, file_path: str, output_dir: str = ""):
+def extract_images_task(
+    self,
+    workspace_doc_id: str,
+    file_path: str,
+    output_dir: str = "",
+    agent_id: str = "",
+    batch_id: str = "",
+):
     """
     PDF dosyasini PNG sayfa goruntulerine donusturur.
 
@@ -121,7 +275,8 @@ def extract_images_task(self, workspace_doc_id: str, file_path: str, output_dir:
         {"doc_id": ..., "images": [...], "page_count": N}
     """
     logger.info("workspace.extract_images: %s (%s)", workspace_doc_id, file_path)
-    _report_status(workspace_doc_id, "extracting_images")
+    _update_workspace_document(workspace_doc_id, "extracting_images", celery_task_id=self.request.id)
+    _report_status(workspace_doc_id, "extracting_images", agent_id=agent_id, batch_id=batch_id)
 
     try:
         p = Path(file_path)
@@ -131,21 +286,28 @@ def extract_images_task(self, workspace_doc_id: str, file_path: str, output_dir:
             target_dir = output_dir or tempfile.mkdtemp(prefix=f"ws_{workspace_doc_id}_")
             images = _extract_pdf_images(file_path, target_dir)
             if not images:
-                _report_status(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed")
+                _update_workspace_document(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed")
+                _report_status(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed", agent_id=agent_id, batch_id=batch_id)
+                _maybe_finalize_batch(batch_id)
                 return {"doc_id": workspace_doc_id, "images": [], "error": "PDF->PNG failed"}
 
         elif suffix in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
             images = [file_path]
         else:
-            _report_status(workspace_doc_id, "failed", error_message=f"Unsupported file type: {suffix}")
+            _update_workspace_document(workspace_doc_id, "failed", error_message=f"Unsupported file type: {suffix}")
+            _report_status(workspace_doc_id, "failed", error_message=f"Unsupported file type: {suffix}", agent_id=agent_id, batch_id=batch_id)
+            _maybe_finalize_batch(batch_id)
             return {"doc_id": workspace_doc_id, "images": [], "error": f"Unsupported: {suffix}"}
 
-        _report_status(workspace_doc_id, "images_extracted")
+        _update_workspace_document(workspace_doc_id, "images_extracted")
+        _report_status(workspace_doc_id, "images_extracted", agent_id=agent_id, batch_id=batch_id)
         return {"doc_id": workspace_doc_id, "images": images, "page_count": len(images)}
 
     except Exception as e:
         logger.error("extract_images failed for %s: %s", workspace_doc_id, e)
-        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _update_workspace_document(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
+        _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=30, max_retries=2)
 
 
@@ -154,7 +316,14 @@ def extract_images_task(self, workspace_doc_id: str, file_path: str, output_dir:
 # ============================================================================
 
 @app.task(bind=True, name="workspace.ocr_pages", max_retries=3)
-def ocr_pages_task(self, workspace_doc_id: str, image_paths: List[str], file_name: str = ""):
+def ocr_pages_task(
+    self,
+    workspace_doc_id: str,
+    image_paths: List[str],
+    file_name: str = "",
+    agent_id: str = "",
+    batch_id: str = "",
+):
     """
     Sayfa goruntuleri uzerinde GeminiOCR ile metin cikarir.
 
@@ -162,7 +331,8 @@ def ocr_pages_task(self, workspace_doc_id: str, image_paths: List[str], file_nam
         {"doc_id": ..., "merged_text": "...", "page_count": N}
     """
     logger.info("workspace.ocr_pages: %s (%d images)", workspace_doc_id, len(image_paths))
-    _report_status(workspace_doc_id, "ocr_processing")
+    _update_workspace_document(workspace_doc_id, "ocr_processing", celery_task_id=self.request.id)
+    _report_status(workspace_doc_id, "ocr_processing", agent_id=agent_id, batch_id=batch_id)
 
     try:
         from src.agents import process_gemini_ocr
@@ -180,10 +350,13 @@ def ocr_pages_task(self, workspace_doc_id: str, image_paths: List[str], file_nam
             merged = "\n\n".join(t for t in ocr_texts if t)
 
         if not merged:
-            _report_status(workspace_doc_id, "failed", error_message="OCR returned empty text")
+            _update_workspace_document(workspace_doc_id, "failed", error_message="OCR returned empty text")
+            _report_status(workspace_doc_id, "failed", error_message="OCR returned empty text", agent_id=agent_id, batch_id=batch_id)
+            _maybe_finalize_batch(batch_id)
             return {"doc_id": workspace_doc_id, "merged_text": "", "error": "Empty OCR result"}
 
-        _report_status(workspace_doc_id, "ocr_completed")
+        _update_workspace_document(workspace_doc_id, "ocr_completed")
+        _report_status(workspace_doc_id, "ocr_completed", agent_id=agent_id, batch_id=batch_id)
         return {
             "doc_id": workspace_doc_id,
             "merged_text": merged,
@@ -193,7 +366,9 @@ def ocr_pages_task(self, workspace_doc_id: str, image_paths: List[str], file_nam
 
     except Exception as e:
         logger.error("ocr_pages failed for %s: %s", workspace_doc_id, e)
-        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _update_workspace_document(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
+        _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=60, max_retries=3)
 
 
@@ -211,6 +386,8 @@ def extract_entities_task(
     relationship_schemas: Optional[List[Dict]] = None,
     skill_id: str = "",
     domain: str = "",
+    agent_id: str = "",
+    batch_id: str = "",
 ):
     """
     OCR metinden schema-driven entity/relationship cikarir.
@@ -221,7 +398,8 @@ def extract_entities_task(
         {"doc_id": ..., "nodes": [...], "relationships": [...], "confidence_score": float}
     """
     logger.info("workspace.extract_entities: %s (%d chars)", workspace_doc_id, len(text))
-    _report_status(workspace_doc_id, "extracting_entities")
+    _update_workspace_document(workspace_doc_id, "extracting_entities", celery_task_id=self.request.id)
+    _report_status(workspace_doc_id, "extracting_entities", agent_id=agent_id, batch_id=batch_id)
 
     try:
         from src.agentic_ocr import process_agentic_ocr_text_mode
@@ -242,15 +420,19 @@ def extract_entities_task(
         elif len(nodes) < 3:
             confidence = 0.5
 
+        result_payload = {"nodes": nodes[:50], "relationships": relationships[:50]}
+        _update_workspace_document(
+            workspace_doc_id, "entities_extracted",
+            confidence_score=confidence, extraction_result=result_payload,
+        )
         _report_status(
             workspace_doc_id,
             "entities_extracted",
             confidence_score=confidence,
-            extraction_result=json.dumps(
-                {"nodes": nodes[:50], "relationships": relationships[:50]},
-                ensure_ascii=False, default=str,
-            ),
+            extraction_result=json.dumps(result_payload, ensure_ascii=False, default=str),
+            agent_id=agent_id, batch_id=batch_id,
         )
+        _maybe_finalize_batch(batch_id)
 
         return {
             "doc_id": workspace_doc_id,
@@ -261,7 +443,9 @@ def extract_entities_task(
 
     except Exception as e:
         logger.error("extract_entities failed for %s: %s", workspace_doc_id, e)
-        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _update_workspace_document(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
+        _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=60, max_retries=3)
 
 
@@ -279,22 +463,35 @@ def process_document_task(
     relationship_schemas: Optional[List[Dict]] = None,
     skill_id: str = "",
     domain: str = "",
+    agent_id: str = "",
+    batch_id: str = "",
+    ocr_mode: str = "hybrid",
+    # Legacy kwargs accepted for backwards compatibility:
     workspace_id: str = "",
     batch_job_id: str = "",
-    ocr_mode: str = "hybrid",
 ):
     """
     Tek belge icin tam hybrid pipeline:
     PDF -> PyMuPDF -> PNG -> GeminiOCR -> text -> AgenticOCR text mode -> entities
 
-    Her adimda callback gondererek Event Store'a kaydeder.
+    Her adimda hem PostgreSQL ``workspace_documents`` rownu UPDATE eder
+    hem de HTTP callback gondererek NotificationManager'a iletir.
+    Tum belgeler bittiginde ``_maybe_finalize_batch`` ile batch_jobs.status
+    'completed'a geciser ve ``/callback/batch-complete`` tetiklenir (sadece
+    ilk transition).
     """
+    if not agent_id and workspace_id and workspace_id.startswith("ws-"):
+        agent_id = workspace_id[len("ws-"):]
+    if not batch_id and batch_job_id:
+        batch_id = batch_job_id
+
     start = time.time()
     logger.info(
-        "workspace.process_document: %s (%s) [ws=%s, batch=%s]",
-        workspace_doc_id, file_name or file_path, workspace_id, batch_job_id,
+        "workspace.process_document: %s (%s) [agent=%s, batch=%s]",
+        workspace_doc_id, file_name or file_path, agent_id, batch_id,
     )
-    _report_status(workspace_doc_id, "processing")
+    _update_workspace_document(workspace_doc_id, "processing", celery_task_id=self.request.id)
+    _report_status(workspace_doc_id, "processing", agent_id=agent_id, batch_id=batch_id)
 
     try:
         # Step 1: Image extraction
@@ -305,15 +502,20 @@ def process_document_task(
             output_dir = tempfile.mkdtemp(prefix=f"ws_{workspace_doc_id}_")
             images = _extract_pdf_images(file_path, output_dir)
             if not images:
-                _report_status(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed")
+                _update_workspace_document(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed")
+                _report_status(workspace_doc_id, "failed", error_message="PDF->PNG conversion failed", agent_id=agent_id, batch_id=batch_id)
+                _maybe_finalize_batch(batch_id)
                 return {"doc_id": workspace_doc_id, "status": "failed", "error": "PDF->PNG failed"}
         elif suffix in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
             images = [file_path]
         else:
-            _report_status(workspace_doc_id, "failed", error_message=f"Unsupported: {suffix}")
+            _update_workspace_document(workspace_doc_id, "failed", error_message=f"Unsupported: {suffix}")
+            _report_status(workspace_doc_id, "failed", error_message=f"Unsupported: {suffix}", agent_id=agent_id, batch_id=batch_id)
+            _maybe_finalize_batch(batch_id)
             return {"doc_id": workspace_doc_id, "status": "failed", "error": f"Unsupported: {suffix}"}
 
-        _report_status(workspace_doc_id, "images_extracted")
+        _update_workspace_document(workspace_doc_id, "images_extracted")
+        _report_status(workspace_doc_id, "images_extracted", agent_id=agent_id, batch_id=batch_id)
         logger.info("Step 1 done: %d images for %s", len(images), workspace_doc_id)
 
         # Step 2: GeminiOCR
@@ -332,10 +534,13 @@ def process_document_task(
             merged_text = "\n\n".join(t for t in ocr_texts if t)
 
         if not merged_text:
-            _report_status(workspace_doc_id, "failed", error_message="OCR returned empty text")
+            _update_workspace_document(workspace_doc_id, "failed", error_message="OCR returned empty text")
+            _report_status(workspace_doc_id, "failed", error_message="OCR returned empty text", agent_id=agent_id, batch_id=batch_id)
+            _maybe_finalize_batch(batch_id)
             return {"doc_id": workspace_doc_id, "status": "failed", "error": "Empty OCR"}
 
-        _report_status(workspace_doc_id, "ocr_completed")
+        _update_workspace_document(workspace_doc_id, "ocr_completed")
+        _report_status(workspace_doc_id, "ocr_completed", agent_id=agent_id, batch_id=batch_id)
         logger.info("Step 2 done: %d chars OCR text for %s", len(merged_text), workspace_doc_id)
 
         # Step 3: AgenticOCR text mode (entity extraction)
@@ -358,16 +563,20 @@ def process_document_task(
             confidence = 0.5
 
         final_status = "completed" if confidence >= 0.5 else "low_confidence"
+        result_payload = {"nodes": nodes, "relationships": relationships}
 
+        _update_workspace_document(
+            workspace_doc_id, final_status,
+            confidence_score=confidence, extraction_result=result_payload,
+        )
         _report_status(
             workspace_doc_id,
             final_status,
             confidence_score=confidence,
-            extraction_result=json.dumps(
-                {"nodes": nodes, "relationships": relationships},
-                ensure_ascii=False, default=str,
-            ),
+            extraction_result=json.dumps(result_payload, ensure_ascii=False, default=str),
+            agent_id=agent_id, batch_id=batch_id,
         )
+        _maybe_finalize_batch(batch_id)
 
         elapsed = time.time() - start
         logger.info(
@@ -390,7 +599,9 @@ def process_document_task(
         logger.error("process_document failed for %s: %s", workspace_doc_id, e)
         import traceback
         logger.error("Traceback: %s", traceback.format_exc())
-        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _update_workspace_document(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
+        _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=60, max_retries=2)
 
 
@@ -503,9 +714,12 @@ def process_document_mcp_task(
     minio_key: str = "",
     file_name: str = "",
     schema_json: str = "",
+    agent_id: str = "",
+    batch_id: str = "",
+    auto_accept: bool = True,
+    # Legacy kwargs for backwards compatibility
     workspace_id: str = "",
     batch_job_id: str = "",
-    auto_accept: bool = True,
 ):
     """
     MCP pipeline ile belge isleme:
@@ -526,12 +740,18 @@ def process_document_mcp_task(
         batch_job_id: Batch job ID
         auto_accept: True ise yuksek guvenli sonuclari otomatik kabul et
     """
+    if not agent_id and workspace_id and workspace_id.startswith("ws-"):
+        agent_id = workspace_id[len("ws-"):]
+    if not batch_id and batch_job_id:
+        batch_id = batch_job_id
+
     start = time.time()
     logger.info(
-        "workspace.process_document_mcp: %s (bucket=%s, key=%s) [ws=%s, batch=%s]",
-        workspace_doc_id, minio_bucket, minio_key, workspace_id, batch_job_id,
+        "workspace.process_document_mcp: %s (bucket=%s, key=%s) [agent=%s, batch=%s]",
+        workspace_doc_id, minio_bucket, minio_key, agent_id, batch_id,
     )
-    _report_status(workspace_doc_id, "processing")
+    _update_workspace_document(workspace_doc_id, "processing", celery_task_id=self.request.id)
+    _report_status(workspace_doc_id, "processing", agent_id=agent_id, batch_id=batch_id)
 
     try:
         # Step 1: Extract entities via MCP (uses Sampling internally)
@@ -576,25 +796,29 @@ def process_document_mcp_task(
         if final_status in ("needs_review", "low_confidence"):
             _create_elicitation_request(
                 doc_id=workspace_doc_id,
-                workspace_id=workspace_id,
-                batch_job_id=batch_job_id,
+                workspace_id=workspace_id or f"ws-{agent_id}",
+                batch_job_id=batch_id or batch_job_id,
                 extraction_result={"nodes": nodes, "relationships": relationships},
                 confidence_score=confidence,
                 file_name=file_name,
             )
 
         # Step 4: Report status
-        extraction_json = json.dumps(
-            {"nodes": nodes[:50], "relationships": relationships[:50]},
-            ensure_ascii=False, default=str,
-        )
+        result_payload = {"nodes": nodes[:50], "relationships": relationships[:50]}
+        extraction_json = json.dumps(result_payload, ensure_ascii=False, default=str)
 
+        _update_workspace_document(
+            workspace_doc_id, final_status,
+            confidence_score=confidence, extraction_result=result_payload,
+        )
         _report_status(
             workspace_doc_id,
             final_status,
             confidence_score=confidence,
             extraction_result=extraction_json,
+            agent_id=agent_id, batch_id=batch_id,
         )
+        _maybe_finalize_batch(batch_id)
 
         elapsed = time.time() - start
         logger.info(
@@ -616,5 +840,7 @@ def process_document_mcp_task(
         logger.error("process_document_mcp failed for %s: %s", workspace_doc_id, e)
         import traceback
         logger.error("Traceback: %s", traceback.format_exc())
-        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _update_workspace_document(workspace_doc_id, "failed", error_message=str(e)[:500])
+        _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
+        _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=60, max_retries=2)

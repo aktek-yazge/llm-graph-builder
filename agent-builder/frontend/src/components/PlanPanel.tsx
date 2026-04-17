@@ -51,6 +51,7 @@ export default function PlanPanel() {
     updatePlanStep,
     addPlanStep,
     removePlanStep,
+    clearPlan,
     activeAgent,
     isStreaming,
   } = useAgentContext();
@@ -95,22 +96,41 @@ export default function PlanPanel() {
             {mode === 'plan' ? 'Readonly' : 'Uygulama'}
           </Badge>
         </HStack>
-        {mode === 'plan' && plan && planStatus === 'draft' && (
-          <Button
-            size="xs"
-            colorScheme="green"
-            leftIcon={<CheckCircleIcon />}
-            onClick={handleApply}
-            isDisabled={isStreaming || steps.length === 0}
-          >
-            Uygula
-          </Button>
-        )}
-        {mode === 'agent' && (
-          <Button size="xs" variant="outline" onClick={handleBackToPlan} isDisabled={isStreaming}>
-            Plana Don
-          </Button>
-        )}
+        <HStack spacing={1}>
+          {mode === 'plan' && plan && planStatus === 'draft' && (
+            <Button
+              size="xs"
+              colorScheme="green"
+              leftIcon={<CheckCircleIcon />}
+              onClick={handleApply}
+              isDisabled={isStreaming || steps.length === 0}
+            >
+              Uygula
+            </Button>
+          )}
+          {mode === 'agent' && (
+            <Button size="xs" variant="outline" onClick={handleBackToPlan} isDisabled={isStreaming}>
+              Plana Don
+            </Button>
+          )}
+          {plan && (
+            <Tooltip label="Plani temizle">
+              <IconButton
+                aria-label="Clear plan"
+                icon={<DeleteIcon />}
+                size="xs"
+                variant="ghost"
+                colorScheme="red"
+                onClick={() => {
+                  if (window.confirm('Aktif plan silinecek. Emin misiniz?')) {
+                    clearPlan();
+                  }
+                }}
+                isDisabled={isStreaming}
+              />
+            </Tooltip>
+          )}
+        </HStack>
       </HStack>
 
       {/* Plan Steps */}

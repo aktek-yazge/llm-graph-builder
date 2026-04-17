@@ -13,6 +13,7 @@
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 WORKSPACE_DIR="$( cd "$SCRIPT_DIR/../.." && pwd )"
+FRONTEND_DIR="$( cd "$SCRIPT_DIR/../frontend" && pwd )"
 
 # ============================================================================
 # LOGGING
@@ -33,6 +34,7 @@ log() {
 # ============================================================================
 PORT="${1:-${AGENT_BUILDER_PORT:-8001}}"
 HOST="${AGENT_BUILDER_HOST:-0.0.0.0}"
+FRONTEND_PORT="${FRONTEND_PORT:-3001}"
 
 export PYTHONPATH="$SCRIPT_DIR:$WORKSPACE_DIR"
 export ENV="${ENV:-development}"
@@ -76,6 +78,42 @@ log "Server PID: $SERVER_PID"
 log ""
 log "API:  http://localhost:${PORT}"
 log "Docs: http://localhost:${PORT}/docs"
+
+# ============================================================================
+# START FRONTEND (skip if already running)
+# ============================================================================
+FRONTEND_PID=""
+FRONTEND_STARTED=0
+
+is_port_in_use() {
+    local p="$1"
+    if command -v lsof &> /dev/null; then
+        lsof -iTCP:"$p" -sTCP:LISTEN -nP 2>/dev/null | grep -q LISTEN
+    else
+        (echo > /dev/tcp/127.0.0.1/"$p") >/dev/null 2>&1
+    fi
+}
+
+log ""
+if is_port_in_use "$FRONTEND_PORT"; then
+    log "Frontend already running on port ${FRONTEND_PORT} (skipped)"
+else
+    if [ -d "$FRONTEND_DIR" ]; then
+        log "Starting frontend (vite) on port ${FRONTEND_PORT}..."
+        if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+            log "node_modules missing, running npm install..."
+            (cd "$FRONTEND_DIR" && npm install 2>&1 | tee -a "$LOG_FILE")
+        fi
+        (cd "$FRONTEND_DIR" && npm run dev -- --port "$FRONTEND_PORT" 2>&1 | tee -a "$LOG_FILE") &
+        FRONTEND_PID=$!
+        FRONTEND_STARTED=1
+        log "Frontend PID: $FRONTEND_PID"
+        log "UI:   http://localhost:${FRONTEND_PORT}"
+    else
+        log "WARNING: Frontend dir not found at $FRONTEND_DIR (skipped)"
+    fi
+fi
+
 log ""
 log "Press Ctrl+C to stop..."
 
@@ -89,6 +127,15 @@ cleanup() {
     pkill -P $SERVER_PID 2>/dev/null
     sleep 0.5
     pkill -9 -f "uvicorn main:app.*${PORT}" 2>/dev/null
+
+    if [ "$FRONTEND_STARTED" = "1" ] && [ -n "$FRONTEND_PID" ]; then
+        log "Stopping frontend..."
+        kill $FRONTEND_PID 2>/dev/null
+        pkill -P $FRONTEND_PID 2>/dev/null
+        sleep 0.5
+        pkill -9 -f "vite.*--port ${FRONTEND_PORT}" 2>/dev/null
+    fi
+
     log "Stopped."
     exit 0
 }
