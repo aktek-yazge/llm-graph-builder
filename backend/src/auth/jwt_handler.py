@@ -5,14 +5,13 @@ JWT Token Handler for Authentication
 import os
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from typing import Optional
 
 import jwt
 from fastapi import HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
 
-from .models import User, TokenData
+from .models import TokenData
 
 # Configuration
 JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-super-secret-key-change-in-production")

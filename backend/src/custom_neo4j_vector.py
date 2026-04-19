@@ -1,7 +1,5 @@
 
 
-import logging
-import re
 from typing import Any, Dict, List, Optional, Tuple, Type
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings

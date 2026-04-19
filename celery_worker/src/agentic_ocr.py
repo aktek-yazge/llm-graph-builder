@@ -1030,7 +1030,6 @@ class AgenticOCR:
             model_id = response_metadata.get("model", self._model_name)
             stop_reason = response_metadata.get("stop_reason", "unknown")
             message_id = response_metadata.get("id", "")
-            raw_usage = response_metadata.get("usage", {}) or {}
             
             # Token loglama (detaylı)
             logger.info(
@@ -1472,8 +1471,8 @@ Yeni entity'ler için aşağıdaki ID pattern'lerini kullan:
         if not self._llm_model:
             raise RuntimeError("LLM model not initialized. Call initialize() first.")
         
-        from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
-        from src.ocr_tools import get_grid_tools, set_current_image_path
+        from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+        from src.ocr_tools import get_grid_tools
         
         # Mevcut sayfa görüntüsünü ayarla (grid tool'ları için)
         # page_path parametresi _process_page'den geliyor, burada image_data var

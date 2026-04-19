@@ -6,7 +6,6 @@ Minimal Test - Tek soru ile token tracking test
 from src.intelligent_agent import IntelligentAgent
 from langchain_neo4j import Neo4jGraph
 import os
-import json
 
 def main():
     print("🚀 Token Tracking Test Başlatılıyor...")

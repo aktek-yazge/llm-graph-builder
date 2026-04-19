@@ -6,7 +6,6 @@ Bu server intelligent_agent'ın 2 tool'unu MCP protokolü üzerinden sunar.
 
 import os
 import sys
-import json
 from typing import Dict, Any
 
 from mcp.server.fastmcp import FastMCP

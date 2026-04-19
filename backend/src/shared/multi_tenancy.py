@@ -34,10 +34,10 @@ import os
 import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from contextvars import ContextVar
 
-from fastapi import Request, HTTPException
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)

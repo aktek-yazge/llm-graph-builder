@@ -14,7 +14,7 @@ Features:
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from sqlalchemy.exc import OperationalError, IntegrityError
 
 from src.celery_app import app

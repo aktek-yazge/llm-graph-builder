@@ -19,7 +19,6 @@ from .graph_dsl import (
     AggregateSpec,
     AggregateFunction,
     OrderBySpec,
-    SemanticSearchSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -594,7 +593,6 @@ RETURN value"""
                 # Tamamen yeni bir başlangıç noktası
                 main_patterns.append(f"({from_alias}:{step.from_node}){rel_pattern}({to_alias}:{step.to_node})")
                 last_to_node = step.to_node
-                last_to_alias = to_alias
         
         return ",\n      ".join(main_patterns)
     

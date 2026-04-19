@@ -11,10 +11,19 @@ import {
   useColorMode,
   useDisclosure,
   Icon,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  ModalCloseButton,
+  Textarea,
+  useToast,
 } from '@chakra-ui/react';
-import { ViewIcon, AttachmentIcon, RepeatIcon } from '@chakra-ui/icons';
+import { ViewIcon, AttachmentIcon, RepeatIcon, AddIcon, LinkIcon } from '@chakra-ui/icons';
 import { useAgentContext } from '../../context/AgentContext';
-import { getResources, type ResourceFile } from '../../services/evolvingApi';
+import { getResources, uploadFiles as apiUploadFiles, addSources, type ResourceFile } from '../../services/evolvingApi';
 import OcrPreviewModal from './OcrPreviewModal';
 
 // Bekleyen OCR varsa hizli polling, yoksa cok daha yavas (yeni dosya geldiginde
@@ -40,18 +49,24 @@ export default function ResourcesPanel() {
   const { activeAgent, notifications } = useAgentContext();
   const { colorMode } = useColorMode();
   const isDark = colorMode === 'dark';
+  const toast = useToast();
 
   const [resources, setResources] = useState<ResourceFile[]>([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
 
   const previewModal = useDisclosure();
+  const sourceModal = useDisclosure();
   const [previewDoc, setPreviewDoc] = useState<{
     docKey: string;
     fileName: string;
     totalPages: number;
   } | null>(null);
+  const [sourceUrls, setSourceUrls] = useState('');
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const agentId = activeAgent?.agent_id;
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastNotifTsRef = useRef<number>(0);
@@ -126,6 +141,65 @@ export default function ResourcesPanel() {
     previewModal.onOpen();
   };
 
+  const handleFileUpload = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0 || !agentId) return;
+    setUploading(true);
+    try {
+      await apiUploadFiles(agentId, Array.from(files));
+      toast({
+        title: `${files.length} dosya yuklendi`,
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+      fetchResources();
+    } catch (err) {
+      toast({
+        title: 'Yukleme hatasi',
+        description: String(err),
+        status: 'error',
+        duration: 4000,
+      });
+    } finally {
+      setUploading(false);
+    }
+  }, [agentId, toast, fetchResources]);
+
+  const handleAddSources = useCallback(async () => {
+    if (!agentId || !sourceUrls.trim()) return;
+    const urls = sourceUrls
+      .split('\n')
+      .map((u) => u.trim())
+      .filter(Boolean);
+    if (urls.length === 0) return;
+
+    const isS3 = urls.some((u) => u.startsWith('s3://') || u.startsWith('minio://'));
+    const sourceType = isS3 ? 's3' : 'url';
+
+    setUploading(true);
+    try {
+      await addSources(agentId, urls, sourceType);
+      toast({
+        title: `${urls.length} kaynak eklendi`,
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+      setSourceUrls('');
+      sourceModal.onClose();
+      fetchResources();
+    } catch (err) {
+      toast({
+        title: 'Kaynak ekleme hatasi',
+        description: String(err),
+        status: 'error',
+        duration: 4000,
+      });
+    } finally {
+      setUploading(false);
+    }
+  }, [agentId, sourceUrls, toast, fetchResources, sourceModal]);
+
   if (!agentId) {
     return (
       <Flex justify="center" align="center" h="100%" p={4}>
@@ -143,16 +217,62 @@ export default function ResourcesPanel() {
           </Text>
           <Badge colorScheme="gray" fontSize="2xs">{resources.length}</Badge>
         </HStack>
-        <Button
-          size="xs"
-          variant="ghost"
-          leftIcon={<RepeatIcon />}
-          onClick={() => { setLoading(true); fetchResources().finally(() => setLoading(false)); }}
-          isLoading={loading}
-        >
-          Yenile
-        </Button>
+        <HStack spacing={1}>
+          <Button
+            size="xs"
+            colorScheme="blue"
+            leftIcon={<AddIcon />}
+            onClick={() => fileInputRef.current?.click()}
+            isLoading={uploading}
+          >
+            Dosya
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            colorScheme="blue"
+            onClick={() => folderInputRef.current?.click()}
+            isLoading={uploading}
+          >
+            Klasor
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            colorScheme="purple"
+            leftIcon={<LinkIcon />}
+            onClick={sourceModal.onOpen}
+          >
+            URL/S3
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            leftIcon={<RepeatIcon />}
+            onClick={() => { setLoading(true); fetchResources().finally(() => setLoading(false)); }}
+            isLoading={loading}
+          >
+            Yenile
+          </Button>
+        </HStack>
       </Flex>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept=".pdf,.png,.jpg,.jpeg,.tiff,.docx,.xlsx,.csv,.txt"
+        style={{ display: 'none' }}
+        onChange={(e) => handleFileUpload(e.target.files)}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+        style={{ display: 'none' }}
+        onChange={(e) => handleFileUpload(e.target.files)}
+      />
 
       {error && (
         <Text color="red.400" fontSize="xs" mb={2}>{error}</Text>
@@ -231,6 +351,42 @@ export default function ResourcesPanel() {
           totalPages={previewDoc.totalPages}
         />
       )}
+
+      <Modal isOpen={sourceModal.isOpen} onClose={sourceModal.onClose} size="md">
+        <ModalOverlay />
+        <ModalContent bg={isDark ? 'gray.800' : 'white'}>
+          <ModalHeader fontSize="sm">Kaynak Ekle (URL / S3 / MinIO / Azure)</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Text fontSize="xs" color="gray.500" mb={2}>
+              Her satira bir URL girin. S3 yollari icin s3://bucket/path, MinIO icin
+              minio://bucket/path, Azure icin https://account.blob.core.windows.net/...
+              formatini kullanin.
+            </Text>
+            <Textarea
+              value={sourceUrls}
+              onChange={(e) => setSourceUrls(e.target.value)}
+              placeholder={'s3://my-bucket/documents/\nhttps://storage.blob.core.windows.net/...\nminio://ocr-bucket/reports/'}
+              rows={5}
+              fontSize="sm"
+            />
+          </ModalBody>
+          <ModalFooter>
+            <Button size="sm" variant="ghost" mr={2} onClick={sourceModal.onClose}>
+              Iptal
+            </Button>
+            <Button
+              size="sm"
+              colorScheme="purple"
+              onClick={handleAddSources}
+              isLoading={uploading}
+              isDisabled={!sourceUrls.trim()}
+            >
+              Ekle
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
     </Box>
   );
 }

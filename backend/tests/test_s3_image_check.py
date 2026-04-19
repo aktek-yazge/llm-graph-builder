@@ -3,10 +3,8 @@
 Test script for S3 image existence check functionality
 """
 
-import logging
 import sys
 import os
-from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables

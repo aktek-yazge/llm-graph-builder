@@ -10,7 +10,6 @@ from langchain_aws import ChatBedrock
 from langchain_community.chat_models import ChatOllama
 import boto3
 import google.auth
-import re
 import json
 
 def get_llm(model: str):

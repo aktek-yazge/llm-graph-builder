@@ -11,9 +11,6 @@ Bu script:
 
 import os
 import re
-import json
-from datetime import datetime
-from pathlib import Path
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 

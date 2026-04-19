@@ -17,7 +17,7 @@ NOT: Domain tanımlamaları src/config/domains.py dosyasında merkezi olarak yö
      Yeni domain eklemek için önce oraya ekleme yapın.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict
 from importlib import import_module
 
 # Merkezi domain registry'den domain bilgilerini al

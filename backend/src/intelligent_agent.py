@@ -7,7 +7,6 @@ Cypher sorguları oluşturur ve veritabanını sorgular.
 
 import logging
 import json
-import re
 import os
 import sys
 import time
@@ -16,7 +15,6 @@ import concurrent.futures
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from langchain_classic.schema import HumanMessage, SystemMessage
-from langchain_core.messages import ToolMessage
 from langchain_neo4j import Neo4jGraph
 import neo4j.time
 # from mem0 import Memory  # Mem0 özelliği devre dışı bırakıldı
@@ -36,7 +34,6 @@ try:
     from sklearn.metrics.pairwise import cosine_similarity
 except (ImportError, ModuleNotFoundError):
     cosine_similarity = None  # Similarity calculations are in celery_worker
-import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -1820,7 +1817,6 @@ Bu deneyimleri dikkate alarak strateji belirle."""
         logger.info("🧹 Resource Manager temizlendi")
 
         # 🧠 MEM0: Önceki deneyimleri ara (background thread'de) - DEVRE DIŞI
-        memory_context_future = None
         # try:
         #     # Shared thread pool executor ile background'da memory aramayı başlat
         #     memory_context_future = self._memory_executor.submit(

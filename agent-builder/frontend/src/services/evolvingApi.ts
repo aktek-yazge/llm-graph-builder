@@ -10,6 +10,42 @@ const agentBuilderUrl = (): string => {
 
 const agentApi = axios.create({ baseURL: agentBuilderUrl() });
 
+agentApi.interceptors.request.use((config) => {
+  const token = localStorage.getItem('access_token');
+  if (token && config.headers) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+agentApi.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    const orig = error.config;
+    if (error.response?.status === 401 && !orig._retry) {
+      orig._retry = true;
+      const rt = localStorage.getItem('refresh_token');
+      if (rt) {
+        try {
+          const { data } = await axios.post(
+            `${agentBuilderUrl()}/api/v2/auth/refresh`,
+            { refresh_token: rt },
+          );
+          localStorage.setItem('access_token', data.access_token);
+          localStorage.setItem('refresh_token', data.refresh_token);
+          orig.headers.Authorization = `Bearer ${data.access_token}`;
+          return agentApi(orig);
+        } catch {
+          localStorage.removeItem('access_token');
+          localStorage.removeItem('refresh_token');
+          window.location.href = '/login';
+        }
+      }
+    }
+    return Promise.reject(error);
+  },
+);
+
 const PREFIX = '/api/v2/evolving';
 
 // ── Agent CRUD ──────────────────────────────────────────────────
@@ -23,10 +59,22 @@ export interface AgentInfo {
   entity_count: number;
   relationship_count: number;
   is_empty: boolean;
+  llm_provider?: string | null;
+  llm_model?: string | null;
 }
 
-export const createAgent = (name: string, purpose: string) =>
-  agentApi.post<AgentInfo>(`${PREFIX}/agents`, { name, purpose });
+export const createAgent = (
+  name: string,
+  purpose: string,
+  llmProvider?: string,
+  llmModel?: string,
+) =>
+  agentApi.post<AgentInfo>(`${PREFIX}/agents`, {
+    name,
+    purpose,
+    ...(llmProvider ? { llm_provider: llmProvider } : {}),
+    ...(llmModel ? { llm_model: llmModel } : {}),
+  });
 
 export const listAgents = (limit = 50) =>
   agentApi.get<AgentInfo[]>(`${PREFIX}/agents`, { params: { limit } });
@@ -42,6 +90,16 @@ export const restoreAgent = (agentId: string) =>
 
 export const purgeAgent = (agentId: string) =>
   agentApi.delete(`${PREFIX}/agents/${agentId}`, { params: { purge: true } });
+
+export const updateAgentModel = (
+  agentId: string,
+  llmProvider: string,
+  llmModel: string,
+) =>
+  agentApi.patch<AgentInfo>(`${PREFIX}/agents/${agentId}/model`, {
+    llm_provider: llmProvider,
+    llm_model: llmModel,
+  });
 
 export interface DeletedAgentInfo {
   agent_id: string;
@@ -749,3 +807,248 @@ export function hashColor(str: string): string {
 }
 
 export { agentBuilderUrl, PREFIX };
+
+// ── Workflow ─────────────────────────────────────────────────────
+
+export interface WorkflowNodeType {
+  type_id: string;
+  label: string;
+  description: string;
+  category: string;
+  icon: string;
+  color: string;
+  params_schema: Record<string, unknown>;
+  input_ports: Array<{ name: string; direction: string; data_type: string; required: boolean }>;
+  output_ports: Array<{ name: string; direction: string; data_type: string; required: boolean }>;
+}
+
+export interface WorkflowDSL {
+  nodes: Array<{
+    id: string;
+    type: string;
+    label: string;
+    params: Record<string, unknown>;
+    position: { x: number; y: number };
+  }>;
+  edges: Array<{
+    from_node: string;
+    from_port: string;
+    to_node: string;
+    to_port: string;
+    condition?: string;
+  }>;
+}
+
+export interface WorkflowData {
+  workflow_id: string;
+  agent_id: string;
+  name: string;
+  description: string;
+  version: number;
+  status: string;
+  node_count: number;
+  is_template: boolean;
+  source_template_id?: string;
+  dsl: WorkflowDSL;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface WorkflowListItem {
+  workflow_id: string;
+  name: string;
+  description: string;
+  version: number;
+  status: string;
+  node_count: number;
+  is_template: boolean;
+  source_template_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface WorkflowTemplate {
+  workflow_id: string;
+  agent_id: string;
+  agent_name: string;
+  name: string;
+  description: string;
+  node_count: number;
+  version: number;
+  status: string;
+}
+
+export interface WorkflowRunSummary {
+  run_id: string;
+  status: string;
+  elapsed_sec?: number;
+  node_count?: number;
+  errors?: string[];
+}
+
+// ── Node types ────────────────────────────────────────────────
+
+export const getWorkflowNodeTypes = () =>
+  agentApi.get<{ node_types: WorkflowNodeType[] }>(`${PREFIX}/workflow/node-types`);
+
+// ── Multi-workflow CRUD ───────────────────────────────────────
+
+export const listWorkflows = (agentId: string) =>
+  agentApi.get<{ workflows: WorkflowListItem[]; active_workflow_id: string | null }>(
+    `${PREFIX}/agents/${agentId}/workflows`,
+  );
+
+export const createWorkflowApi = (agentId: string, name: string, description = '') =>
+  agentApi.post<WorkflowData>(`${PREFIX}/agents/${agentId}/workflows`, { name, description });
+
+export const getWorkflowById = (agentId: string, workflowId: string) =>
+  agentApi.get<WorkflowData>(`${PREFIX}/agents/${agentId}/workflows/${workflowId}`);
+
+export const updateWorkflowById = (agentId: string, workflowId: string, dsl: WorkflowDSL) =>
+  agentApi.put<{ workflow_id: string; status: string; node_count: number }>(
+    `${PREFIX}/agents/${agentId}/workflows/${workflowId}`,
+    { dsl },
+  );
+
+export const renameWorkflowApi = (agentId: string, workflowId: string, name: string) =>
+  agentApi.patch<{ workflow_id: string; name: string }>(
+    `${PREFIX}/agents/${agentId}/workflows/${workflowId}`,
+    { name },
+  );
+
+export const deleteWorkflowApi = (agentId: string, workflowId: string) =>
+  agentApi.delete(`${PREFIX}/agents/${agentId}/workflows/${workflowId}`);
+
+export const setActiveWorkflow = (agentId: string, workflowId: string) =>
+  agentApi.put<{ active_workflow_id: string }>(
+    `${PREFIX}/agents/${agentId}/active-workflow`,
+    { workflow_id: workflowId },
+  );
+
+// ── Workflow runs (addressed by workflow_id) ──────────────────
+
+export const startWorkflowRunById = (agentId: string, workflowId: string, mode: string, inputs?: Record<string, unknown>) =>
+  agentApi.post<WorkflowRunSummary>(`${PREFIX}/agents/${agentId}/workflows/${workflowId}/runs`, { mode, inputs });
+
+export const publishWorkflowById = (agentId: string, workflowId: string) =>
+  agentApi.post<{ workflow_id: string; version: number; status: string }>(
+    `${PREFIX}/agents/${agentId}/workflows/${workflowId}/publish`,
+  );
+
+// ── Global workflows list ─────────────────────────────────────
+
+export interface GlobalWorkflowItem {
+  workflow_id: string;
+  agent_id: string | null;
+  agent_name: string;
+  name: string;
+  description: string;
+  version: number;
+  status: string;
+  node_count: number;
+  is_template: boolean;
+  source_template_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export const listAllWorkflows = (params?: { search?: string; status?: string; limit?: number; offset?: number }) =>
+  agentApi.get<{ workflows: GlobalWorkflowItem[]; total: number }>(
+    `${PREFIX}/workflows`,
+    { params },
+  );
+
+export const createGlobalWorkflow = (name: string, description = '', agentId?: string) =>
+  agentApi.post<WorkflowData>(`${PREFIX}/workflows`, {
+    name,
+    description,
+    agent_id: agentId || null,
+  });
+
+export const deleteGlobalWorkflow = (workflowId: string) =>
+  agentApi.delete(`${PREFIX}/workflows/${workflowId}`);
+
+// ── Template sharing ─────────────────────────────────────────
+
+export const listWorkflowTemplates = (excludeAgentId?: string) =>
+  agentApi.get<{ templates: WorkflowTemplate[] }>(
+    `${PREFIX}/workflow-templates`,
+    { params: excludeAgentId ? { exclude_agent_id: excludeAgentId } : {} },
+  );
+
+export const shareWorkflowAsTemplate = (agentId: string, workflowId: string, description = '') =>
+  agentApi.post<{ workflow_id: string; is_template: boolean }>(
+    `${PREFIX}/agents/${agentId}/workflows/${workflowId}/share`,
+    { description },
+  );
+
+export const importWorkflowTemplate = (agentId: string, templateWorkflowId: string, name?: string) =>
+  agentApi.post<WorkflowData>(
+    `${PREFIX}/agents/${agentId}/import-template`,
+    { template_workflow_id: templateWorkflowId, name },
+  );
+
+// ── Compat: old singular endpoints (still used by Canvas for backward compat) ──
+
+export const getWorkflow = (agentId: string) =>
+  agentApi.get<WorkflowData>(`${PREFIX}/agents/${agentId}/workflow`);
+
+export const updateWorkflow = (agentId: string, dsl: WorkflowDSL) =>
+  agentApi.put<{ workflow_id: string; status: string; node_count: number }>(
+    `${PREFIX}/agents/${agentId}/workflow`,
+    { dsl },
+  );
+
+export const startWorkflowRun = (agentId: string, mode: string, inputs?: Record<string, unknown>) =>
+  agentApi.post<WorkflowRunSummary>(`${PREFIX}/agents/${agentId}/workflow/runs`, { mode, inputs });
+
+export const listWorkflowRuns = (agentId: string, limit = 20, offset = 0) =>
+  agentApi.get<{ runs: WorkflowRunSummary[]; total: number }>(
+    `${PREFIX}/agents/${agentId}/workflow/runs`,
+    { params: { limit, offset } },
+  );
+
+export const getWorkflowRun = (runId: string) =>
+  agentApi.get<{ run: WorkflowRunSummary; steps: unknown[] }>(`${PREFIX}/workflow/runs/${runId}`);
+
+export const publishWorkflow = (agentId: string) =>
+  agentApi.post<{ workflow_id: string; version: number; status: string }>(
+    `${PREFIX}/agents/${agentId}/workflow/publish`,
+  );
+
+// ── Global Resources ─────────────────────────────────────────────
+
+export interface GlobalResourceItem {
+  resource_id: string;
+  agent_id: string;
+  agent_name: string;
+  type: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  path: string;
+  created_at?: string;
+}
+
+export const listGlobalResources = () =>
+  agentApi.get<{ resources: GlobalResourceItem[]; total: number }>(
+    `${PREFIX}/resources`,
+  );
+
+export const uploadGlobalResource = (agentId: string, files: File[]) => {
+  const form = new FormData();
+  files.forEach((f) => form.append('files', f));
+  return agentApi.post<{ file_count: number; message: string; paths: string[] }>(
+    `${PREFIX}/resources/upload`,
+    form,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { agent_id: agentId },
+    },
+  );
+};
+
+export const deleteGlobalResource = (resourceId: string) =>
+  agentApi.delete<{ status: string; resource_id: string }>(
+    `${PREFIX}/resources/${resourceId}`,
+  );

@@ -4,7 +4,6 @@ import os
 from typing import Optional
 
 from minio import Minio
-from minio.error import S3Error
 
 logger = logging.getLogger("mcp_services.minio")
 

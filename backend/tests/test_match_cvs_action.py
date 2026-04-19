@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.intelligent_agent import IntelligentAgent
-from neo4j import GraphDatabase
 import logging
 
 # Logging yapılandırması

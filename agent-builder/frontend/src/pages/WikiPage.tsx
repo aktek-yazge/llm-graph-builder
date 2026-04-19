@@ -118,7 +118,7 @@ export default function WikiPage() {
   const gotoPath = useCallback(
     (path: string) => {
       if (!agentId) return;
-      navigate(`/evolving/${agentId}/wiki/${encodeURI(path)}`);
+      navigate(`/agents/${agentId}/wiki/${encodeURI(path)}`);
     },
     [agentId, navigate]
   );
@@ -163,7 +163,7 @@ export default function WikiPage() {
       await wikiDeletePage(agentId, currentPage.path);
       toast({ title: 'Sayfa silindi', status: 'success', duration: 2000 });
       await loadPages();
-      navigate(`/evolving/${agentId}/wiki`);
+      navigate(`/agents/${agentId}/wiki`);
       setCurrentPage(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Bilinmeyen hata';
@@ -223,7 +223,7 @@ export default function WikiPage() {
           onSave={handleSave}
           onCancel={() => {
             setMode('view');
-            if (!currentPage) navigate(`/evolving/${agentId}/wiki`);
+            if (!currentPage) navigate(`/agents/${agentId}/wiki`);
           }}
         />
       );
@@ -286,7 +286,7 @@ export default function WikiPage() {
           icon={<ArrowBackIcon />}
           size="sm"
           variant="ghost"
-          onClick={() => navigate(`/evolving/${agentId}`)}
+          onClick={() => navigate(`/agents/${agentId}`)}
         />
         <Text fontSize="md" fontWeight="bold">Wiki</Text>
         <Text fontSize="sm" color="gray.500">Sahne hazirligi (Pre-KG)</Text>

@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
 import {
-  Box, VStack, Text, HStack, Badge, Input, InputGroup, InputLeftElement,
+  Box, VStack, Text, HStack, Input, InputGroup, InputLeftElement,
   Accordion, AccordionItem, AccordionButton, AccordionPanel, AccordionIcon,
   Button, Tooltip,
 } from '@chakra-ui/react';
-import { SearchIcon, AddIcon } from '@chakra-ui/icons';
+import { Search, Plus } from 'lucide-react';
 import type { WikiCategory, WikiPageSummary } from '../../services/evolvingApi';
 import {
   CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_COLORS, pageName,
@@ -52,31 +52,42 @@ export default function WikiSidebar({
   return (
     <VStack
       align="stretch"
-      w="300px"
+      w="280px"
       h="100%"
       bg="white"
       borderRight="1px solid"
-      borderColor="gray.200"
+      borderColor="#f1f3f5"
       spacing={0}
       flexShrink={0}
       overflow="hidden"
     >
-      <Box p={3} borderBottom="1px solid" borderColor="gray.100">
+      <Box p={3} borderBottom="1px solid" borderColor="#f1f3f5">
         <HStack>
           <InputGroup size="sm">
             <InputLeftElement pointerEvents="none">
-              <SearchIcon color="gray.400" boxSize={3} />
+              <Search size={13} color="#adb5bd" />
             </InputLeftElement>
             <Input
               value={query}
               onChange={(e) => onQueryChange(e.target.value)}
               placeholder="Sayfalarda ara..."
-              borderRadius="md"
+              variant="filled"
+              bg="#f8f9fa"
+              border="none"
+              borderRadius="8px"
+              fontSize="13px"
+              _hover={{ bg: '#f1f3f5' }}
+              _focus={{ bg: '#f8f9fa', border: '1px solid', borderColor: '#dee2e6' }}
             />
           </InputGroup>
           <Tooltip label="Yeni sayfa">
-            <Button size="sm" leftIcon={<AddIcon boxSize={2.5} />} onClick={onCreatePage}>
-              Yeni
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onCreatePage}
+              px={2}
+            >
+              <Plus size={15} strokeWidth={1.75} />
             </Button>
           </Tooltip>
         </HStack>
@@ -84,41 +95,47 @@ export default function WikiSidebar({
           size="xs"
           mt={2}
           w="100%"
-          variant={showingGraph ? 'solid' : 'outline'}
-          colorScheme="purple"
+          variant={showingGraph ? 'solid' : 'ghost'}
+          bg={showingGraph ? '#f1f3f5' : 'transparent'}
+          color={showingGraph ? '#212529' : '#868e96'}
+          _hover={{ bg: '#f1f3f5' }}
+          fontWeight="500"
+          fontSize="12px"
           onClick={onShowGraph}
         >
           {showingGraph ? 'Sayfaya don' : 'Graph goruntusu'}
         </Button>
       </Box>
 
-      <Box flex={1} overflowY="auto">
+      <Box flex={1} overflowY="auto" sx={{ '&::-webkit-scrollbar': { display: 'none' } }}>
         <Accordion defaultIndex={defaultIndex} allowMultiple reduceMotion>
           {CATEGORY_ORDER.map((cat) => {
             const items = grouped.get(cat)!;
             if (items.length === 0) return null;
+            const catColors = CATEGORY_COLORS[cat];
             return (
               <AccordionItem key={cat} border="none">
                 <AccordionButton
                   py={2}
-                  _hover={{ bg: 'gray.50' }}
-                  _expanded={{ bg: 'gray.50' }}
+                  px={3}
+                  _hover={{ bg: '#f8f9fa' }}
                 >
                   <HStack flex={1} spacing={2}>
                     <Box
-                      w="8px"
-                      h="8px"
-                      bg={CATEGORY_COLORS[cat]}
+                      w="6px"
+                      h="6px"
+                      bg={catColors.dot}
                       borderRadius="full"
+                      flexShrink={0}
                     />
-                    <Text fontSize="sm" fontWeight="semibold">
+                    <Text fontSize="13px" fontWeight="600" color="#495057">
                       {CATEGORY_LABELS[cat]}
                     </Text>
-                    <Badge fontSize="2xs" colorScheme="gray">
+                    <Text fontSize="11px" color="#adb5bd" fontWeight="500">
                       {items.length}
-                    </Badge>
+                    </Text>
                   </HStack>
-                  <AccordionIcon />
+                  <AccordionIcon color="#adb5bd" />
                 </AccordionButton>
                 <AccordionPanel p={0}>
                   <VStack align="stretch" spacing={0}>
@@ -127,25 +144,39 @@ export default function WikiSidebar({
                       return (
                         <Box
                           key={item.path}
-                          px={4}
+                          px={3}
                           py={2}
+                          ml={1}
                           cursor="pointer"
-                          bg={isActive ? 'indigo.50' : 'transparent'}
-                          borderLeft="3px solid"
-                          borderLeftColor={isActive ? 'indigo.500' : 'transparent'}
-                          _hover={{ bg: isActive ? 'indigo.50' : 'gray.50' }}
+                          borderRadius="6px"
+                          mx={1.5}
+                          bg={isActive ? '#f1f3f5' : 'transparent'}
+                          _hover={{ bg: isActive ? '#f1f3f5' : '#f8f9fa' }}
+                          transition="background 0.1s"
                           onClick={() => onSelectPage(item.path)}
+                          position="relative"
                         >
+                          {isActive && (
+                            <Box
+                              position="absolute"
+                              left="0"
+                              top="6px"
+                              bottom="6px"
+                              w="2px"
+                              borderRadius="full"
+                              bg="#4c6ef5"
+                            />
+                          )}
                           <Text
-                            fontSize="sm"
-                            fontWeight={isActive ? 'semibold' : 'normal'}
-                            color={isActive ? 'indigo.700' : 'gray.800'}
+                            fontSize="13px"
+                            fontWeight={isActive ? '600' : '400'}
+                            color={isActive ? '#212529' : '#495057'}
                             noOfLines={1}
                           >
                             {pageName(item.path)}
                           </Text>
                           {item.summary && (
-                            <Text fontSize="xs" color="gray.500" noOfLines={1}>
+                            <Text fontSize="11px" color="#adb5bd" noOfLines={1}>
                               {item.summary}
                             </Text>
                           )}
@@ -160,8 +191,8 @@ export default function WikiSidebar({
         </Accordion>
         {pages.length === 0 && (
           <Box p={6} textAlign="center">
-            <Text fontSize="sm" color="gray.500">Henuz wiki sayfasi yok.</Text>
-            <Text fontSize="xs" color="gray.400" mt={1}>
+            <Text fontSize="13px" color="#868e96">Henuz wiki sayfasi yok.</Text>
+            <Text fontSize="12px" color="#adb5bd" mt={1}>
               Agent ile konusarak entity/relationship ekleyin; sayfalar otomatik
               olusacak.
             </Text>

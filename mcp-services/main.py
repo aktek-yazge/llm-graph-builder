@@ -12,7 +12,6 @@ Usage:
 import asyncio
 import logging
 import os
-import sys
 
 from dotenv import load_dotenv
 from fastmcp.server import FastMCP

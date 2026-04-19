@@ -7,15 +7,17 @@ import {
 } from '@assistant-ui/react';
 import { useAgentContext, type ChatMessage } from '../context/AgentContext';
 
-// Tool'lar sag paneldeki Gorevler bolumunde zaten gosteriliyor;
-// Assistant-UI chat thread'inde goruntulenmez.
-// get_current_plan: sag plan panelinde zaten canli olarak goruluyor.
-// Sohbete her turn'de yeniden basilmasi gereksiz.
 const HIDDEN_TOOLS = new Set(['write_todos', 'read_todos', 'get_current_plan']);
 
-// ThreadMessageLike.tool-call.args bekliyor: ReadonlyJSONObject. Assistant-UI
-// tool-call part'ini olusturmak icin herhangi bir JSON-serializable obje yeterli.
 type JsonArgs = Record<string, unknown>;
+
+export interface ToolStepInfo {
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: string;
+  status: 'running' | 'done';
+  id: string;
+}
 
 function parseMaybeJSON(text: string | undefined): JsonArgs | undefined {
   if (!text) return undefined;
@@ -32,54 +34,93 @@ function parseMaybeJSON(text: string | undefined): JsonArgs | undefined {
   return undefined;
 }
 
-function convertMessage(m: ChatMessage): ThreadMessageLike {
-  if (m.role === 'user') {
-    return {
-      id: m.id,
-      role: 'user',
-      content: [{ type: 'text', text: m.content || '' }],
-      createdAt: new Date(m.timestamp),
-    };
+function buildMergedMessages(messages: ChatMessage[]): ThreadMessageLike[] {
+  const filtered = messages.filter(
+    (m) => !(m.role === 'tool' && m.toolName && HIDDEN_TOOLS.has(m.toolName))
+  );
+
+  const result: ThreadMessageLike[] = [];
+
+  for (let i = 0; i < filtered.length; ) {
+    const head = filtered[i];
+
+    if (head.role === 'user') {
+      result.push({
+        id: head.id,
+        role: 'user',
+        content: [{ type: 'text', text: head.content || '' }],
+        createdAt: new Date(head.timestamp),
+      });
+      i++;
+      continue;
+    }
+
+    const group: ChatMessage[] = [];
+    while (i < filtered.length && filtered[i].role !== 'user') {
+      group.push(filtered[i]);
+      i++;
+    }
+
+    const tools = group.filter((g) => g.role === 'tool');
+    const texts = group.filter((g) => g.role !== 'tool');
+
+    const content: Array<
+      | { type: 'text'; text: string }
+      | { type: 'tool-call'; toolCallId: string; toolName: string; args: Record<string, never>; result?: string | undefined }
+    > = [];
+
+    if (tools.length >= 2) {
+      const steps: ToolStepInfo[] = tools.map((t) => ({
+        id: t.id,
+        toolName: t.toolName || 'tool',
+        args: t.toolInput ?? parseMaybeJSON(t.content) ?? {},
+        result: t.content || undefined,
+        status: t.content ? 'done' as const : 'running' as const,
+      }));
+      const allDone = steps.every((s) => s.status === 'done');
+      content.push({
+        type: 'tool-call' as const,
+        toolCallId: `grp-${tools[0].id}`,
+        toolName: '_tool_steps',
+        args: { steps } as unknown as Record<string, never>,
+        result: allDone ? JSON.stringify({ allDone: true }) : undefined,
+      });
+    } else if (tools.length === 1) {
+      const t = tools[0];
+      const toolName = t.toolName || 'tool';
+      const args = t.toolInput ?? parseMaybeJSON(t.content) ?? {};
+      content.push({
+        type: 'tool-call' as const,
+        toolCallId: t.id,
+        toolName,
+        args: args as unknown as Record<string, never>,
+        result: t.content || undefined,
+      });
+    }
+
+    for (const t of texts) {
+      if (t.content) {
+        content.push({ type: 'text' as const, text: t.content });
+      }
+    }
+
+    if (content.length > 0) {
+      const anchor = tools[0] || texts[0] || group[0];
+      result.push({
+        id: anchor.id,
+        role: 'assistant',
+        createdAt: new Date(anchor.timestamp),
+        content,
+      });
+    }
   }
 
-  if (m.role === 'tool') {
-    const toolName = m.toolName || 'tool';
-    const args = m.toolInput ?? parseMaybeJSON(m.content) ?? {};
-    const result = m.content ? m.content : undefined;
-    return {
-      id: m.id,
-      role: 'assistant',
-      createdAt: new Date(m.timestamp),
-      content: [
-        {
-          type: 'tool-call',
-          toolCallId: m.id,
-          toolName,
-          // ThreadMessageLike.args tipi ReadonlyJSONObject ama ChatMessage.toolInput
-          // runtime tarafinda opak bir JSON olarak saklandigi icin narrow tipe
-          // kasitli olarak cast ediyoruz.
-          args: args as unknown as Record<string, never>,
-          result,
-        },
-      ],
-    };
-  }
-
-  return {
-    id: m.id,
-    role: 'assistant',
-    content: [{ type: 'text', text: m.content || '' }],
-    createdAt: new Date(m.timestamp),
-  };
+  return result;
 }
 
 export function AgentRuntimeProvider({ children }: { children: ReactNode }) {
   const { messages, sendMessage, isStreaming, cancelStream } = useAgentContext();
 
-  // sendMessage / cancelStream context'ten geliyor; her re-render'da yeni
-  // referans donebiliyor. Assistant-UI runtime adapter degistiginde icteki
-  // converter'lari yeniden import ediyor — bu da gereksiz repaint'e yol
-  // aciyor. Ref ile stabil callback'lere sariyoruz.
   const sendRef = useRef(sendMessage);
   sendRef.current = sendMessage;
   const cancelRef = useRef(cancelStream);
@@ -95,36 +136,14 @@ export function AgentRuntimeProvider({ children }: { children: ReactNode }) {
     cancelRef.current();
   }, []);
 
-  const visibleMessages = useMemo(() => {
-    const filtered = messages.filter(
-      (m) => !(m.role === 'tool' && m.toolName && HIDDEN_TOOLS.has(m.toolName))
-    );
-    // Ayni assistant turn'unde tool call'larini metin cevabindan ONCE goster.
-    // LLM bazen once metin uretip sonra tool cagirdigi icin chronological sira
-    // gorsel olarak "cevabin altinda loose tool call" hissi veriyor.
-    const reordered: ChatMessage[] = [];
-    for (let i = 0; i < filtered.length; ) {
-      const head = filtered[i];
-      if (head.role === 'user') {
-        reordered.push(head);
-        i++;
-        continue;
-      }
-      const group: ChatMessage[] = [];
-      while (i < filtered.length && filtered[i].role !== 'user') {
-        group.push(filtered[i]);
-        i++;
-      }
-      const tools = group.filter((g) => g.role === 'tool');
-      const texts = group.filter((g) => g.role !== 'tool');
-      reordered.push(...tools, ...texts);
-    }
-    return reordered;
-  }, [messages]);
+  const mergedMessages = useMemo(
+    () => buildMergedMessages(messages),
+    [messages]
+  );
 
-  const runtime = useExternalStoreRuntime<ChatMessage>({
-    messages: visibleMessages,
-    convertMessage,
+  const runtime = useExternalStoreRuntime<ThreadMessageLike>({
+    messages: mergedMessages,
+    convertMessage: (m: ThreadMessageLike) => m,
     isRunning: isStreaming,
     onNew,
     onCancel,

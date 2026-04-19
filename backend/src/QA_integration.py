@@ -4,15 +4,10 @@ import time
 import logging
 import asyncio
 import threading
-import tempfile
-import base64
-import requests
 import re
 from datetime import datetime
 from typing import Any
 from dotenv import load_dotenv
-import requests
-import tempfile
 import os
 
 from langchain_neo4j import Neo4jVector
@@ -21,12 +16,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, Huma
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableBranch
 from langchain_classic.retrievers import ContextualCompressionRetriever
-from langchain_community.document_transformers import EmbeddingsRedundantFilter
 from langchain_classic.retrievers.document_compressors import EmbeddingsFilter, DocumentCompressorPipeline
 from langchain_text_splitters import TokenTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_community.chat_message_histories import ChatMessageHistory 
-from langchain_core.callbacks import StdOutCallbackHandler, BaseCallbackHandler
+from langchain_core.callbacks import BaseCallbackHandler
 
 # LangChain chat models
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
@@ -204,7 +197,6 @@ def generate_reference_links(chunkdetails, sources):
     return reference_text
 
 from typing import Dict, List
-import base64
 
 # Neo4j ve langchain loglama seviyelerini ayarla
 # DEBUG seviyesi çok ayrıntılı log üretir, gerekirse açabilirsiniz
@@ -1889,7 +1881,6 @@ async def convert_files_to_markdown(files: Dict[str, List[Dict[str, str]]], mode
         from langchain_docling.loader import ExportType
         from docling_core.types.doc import DocItemLabel
         from docling_core.types.doc.document import DEFAULT_EXPORT_LABELS
-        from urllib.parse import urlparse
         from pdf2image import convert_from_path
 
         all_documents_content = []

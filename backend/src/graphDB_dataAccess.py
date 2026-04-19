@@ -1,9 +1,5 @@
 import logging
 import os
-import time
-import re
-import difflib
-from neo4j.exceptions import TransientError
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import (
     create_gcs_bucket_folder_name_hashed,
@@ -18,8 +14,8 @@ from src.shared.constants import (
 )
 from src.entities.source_node import sourceNode
 from src.communities import MAX_COMMUNITY_LEVELS
-from src.utf8_utils import normalize_unicode_text, normalize_file_name
-from src.utils.log_helpers import log_delete, log_processing
+from src.utf8_utils import normalize_file_name
+from src.utils.log_helpers import log_delete
 # Entity resolution pre-processing KALDIRILDI - post-processing LLM ile yapılıyor
 # from src.entity_resolver import resolve_entity_before_creation
 import json

@@ -26,6 +26,8 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.agent.evolving.router import router as evolving_router
+from src.agent.auth.router import router as auth_router
+from src.agent.platform_router import router as platform_router
 from src.event_store import get_postgres_client
 
 logging.basicConfig(
@@ -52,7 +54,9 @@ async def _run_migrations(pg) -> None:
         with open(schema_path, encoding="utf-8") as f:
             raw_sql = f.read()
 
-        statements = [s.strip() for s in raw_sql.split(";") if s.strip() and not s.strip().startswith("--")]
+        lines = [l for l in raw_sql.splitlines() if not l.strip().startswith("--")]
+        cleaned = "\n".join(lines)
+        statements = [s.strip() for s in cleaned.split(";") if s.strip()]
         for stmt in statements:
             try:
                 await pg.execute(stmt)
@@ -97,6 +101,8 @@ async def lifespan(app: FastAPI):
             logger.info("All migrations completed")
         except Exception as e:
             logger.error("Migration error: %s", e)
+
+    app.state.pg = pg
 
     # 3. AgentRegistry
     registry = None
@@ -158,6 +164,8 @@ app.add_middleware(
 )
 
 app.include_router(evolving_router, prefix="/api/v2/evolving")
+app.include_router(auth_router, prefix="/api/v2/auth")
+app.include_router(platform_router, prefix="/api/v2/platform")
 
 
 @app.get("/")

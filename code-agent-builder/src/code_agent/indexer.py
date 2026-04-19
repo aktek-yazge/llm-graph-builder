@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-from pathlib import Path
 from typing import Any
 
 from code_agent.graph.kuzu_client import KuzuClient
-from code_agent.graph.schema import Edge
 from code_agent.parser.base import ExtractionResult
 from code_agent.parser.tree_sitter_parser import discover_files, parse_file
 from code_agent.temporal.diff_engine import compute_diff, has_changed

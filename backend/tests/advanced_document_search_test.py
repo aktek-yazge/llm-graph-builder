@@ -6,7 +6,6 @@ Document fileName'leri için embedding tabanlı arama testi
 import os
 import openai
 from neo4j import GraphDatabase
-import numpy as np
 from dotenv import load_dotenv
 
 # Load environment variables

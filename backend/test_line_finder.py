@@ -5,7 +5,6 @@ Soru verildiğinde ilgili satır aralığını döndürür.
 
 import json
 import re
-import os
 from dotenv import load_dotenv
 
 # .env dosyasını yükle

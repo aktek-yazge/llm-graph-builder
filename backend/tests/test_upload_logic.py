@@ -3,7 +3,6 @@
 Test the improved upload_file function with S3 image existence check
 """
 
-import logging
 import sys
 import os
 from pathlib import Path

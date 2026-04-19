@@ -9,7 +9,6 @@ from tests.test_setup import *
 
 from src.intelligent_agent import IntelligentAgent
 from langchain_neo4j import Neo4jGraph
-import json
 
 def main():
     print("🚀 Enhanced Intelligent Agent Test Başlatılıyor...")

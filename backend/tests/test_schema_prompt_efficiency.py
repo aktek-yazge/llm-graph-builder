@@ -4,7 +4,6 @@ Schema prompt token efficiency testi
 """
 
 import sys
-import os
 sys.path.append('/workspace/backend/src')
 
 try:

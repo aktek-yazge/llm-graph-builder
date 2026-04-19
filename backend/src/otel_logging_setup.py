@@ -11,7 +11,6 @@ import logging
 import sys
 import json
 from datetime import datetime, timezone
-from io import StringIO
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 
@@ -446,7 +445,6 @@ def setup_uvicorn_logging():
     try:
         # Uvicorn access logger'ını al
         uvicorn_access_logger = logging.getLogger("uvicorn.access")
-        uvicorn_logger = logging.getLogger("uvicorn")
         
         # Custom formatter for HTTP requests
         class HTTPRequestFormatter(logging.Formatter):

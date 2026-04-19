@@ -12,7 +12,7 @@ import {
 import { AttachmentIcon, CloseIcon, RepeatIcon } from '@chakra-ui/icons';
 import { Thread } from '@assistant-ui/react-ui';
 import '@assistant-ui/react-ui/styles/index.css';
-import '@assistant-ui/react-ui/styles/markdown.css';
+import '@assistant-ui/react-ui/styles/tailwindcss/markdown.css';
 import { useAgentContext } from '../context/AgentContext';
 import { AgentRuntimeProvider } from '../runtime/AgentRuntimeProvider';
 import PlanAwareText from './chat/PlanAwareText';
@@ -36,13 +36,13 @@ import {
   RunOcrToolUI,
   OcrAndAnalyzeToolUI,
   RequestPlanModeToolUI,
+  ToolStepsUI,
 } from './chat/tools';
 
 function ChatShell() {
   const {
     activeAgent,
     isStreaming,
-    mode,
     uploadFiles,
     resetChat,
     uploadedFiles,
@@ -106,6 +106,8 @@ function ChatShell() {
     <Flex
       flex={1}
       direction="column"
+      h="100%"
+      minH={0}
       bg={isDark ? 'gray.900' : 'white'}
       position="relative"
       onDragOver={handleDragOver}
@@ -136,36 +138,20 @@ function ChatShell() {
         </Flex>
       )}
 
-      {/* Header */}
+      {/* Compact toolbar */}
       <Flex
         align="center"
-        justify="space-between"
-        px={4}
-        py={3}
+        justify="flex-end"
+        px={3}
+        py={1.5}
         borderBottom="1px"
-        borderColor={isDark ? 'gray.700' : 'gray.200'}
+        borderColor={isDark ? 'gray.700' : 'gray.100'}
         flexShrink={0}
+        minH="36px"
       >
-        <HStack spacing={3}>
-          <Box>
-            <Text fontWeight="semibold">{activeAgent.name}</Text>
-            <Text fontSize="sm" color="gray.500">
-              {activeAgent.domain || activeAgent.purpose || activeAgent.agent_id}
-            </Text>
-          </Box>
-          <Badge
-            colorScheme={mode === 'plan' ? 'yellow' : 'green'}
-            fontSize="2xs"
-            px={2}
-            py={0.5}
-            borderRadius="full"
-          >
-            {mode === 'plan' ? 'Plan' : 'Agent'}
-          </Badge>
-        </HStack>
         <HStack spacing={2}>
           {isStreaming && (
-            <HStack spacing={1} color="blue.400" fontSize="xs">
+            <HStack spacing={1} color="blue.400" fontSize="xs" mr={2}>
               <Box w={2} h={2} bg="blue.400" borderRadius="full" className="animate-pulse" />
               <Text>Yanitliyor...</Text>
             </HStack>
@@ -224,6 +210,7 @@ function ChatShell() {
             },
           }}
           tools={[
+            ToolStepsUI,
             CreatePlanToolUI,
             UpdatePlanStepToolUI,
             AddPlanStepToolUI,

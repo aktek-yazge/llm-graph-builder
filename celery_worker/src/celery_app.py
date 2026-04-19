@@ -1,7 +1,6 @@
 import os
 import logging
 import signal
-import sys
 from celery import Celery
 from celery.signals import worker_init, worker_shutdown, worker_process_init, task_failure, celeryd_after_setup
 from kombu import Queue, Exchange

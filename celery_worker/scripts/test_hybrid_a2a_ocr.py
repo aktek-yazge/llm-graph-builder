@@ -22,7 +22,6 @@ Usage:
 import os
 import sys
 import asyncio
-import json
 import logging
 from glob import glob
 

@@ -12,7 +12,6 @@ import json
 import logging
 from typing import Any
 
-from .ontology_model import AgentOntology
 from .agent_memory import AgentMemory
 from .knowledge_store import KnowledgeStore
 from .wiki_store import WikiStore

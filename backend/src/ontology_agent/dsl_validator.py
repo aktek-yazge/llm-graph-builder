@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 
 from .graph_dsl import (
     GraphDSL,
-    QueryIntent,
     TraversalStep,
     Filter,
     ReturnSpec,

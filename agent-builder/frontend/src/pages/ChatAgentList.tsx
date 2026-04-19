@@ -71,7 +71,7 @@ export default function ChatAgentList() {
           </p>
         </div>
         <button
-          onClick={() => navigate('/evolving')}
+          onClick={() => navigate('/agents')}
           className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 text-white
                      rounded-xl hover:from-amber-600 hover:to-orange-700 transition-all text-sm font-medium
                      shadow-sm hover:shadow-md active:scale-[0.97]"
@@ -99,7 +99,7 @@ export default function ChatAgentList() {
             Agent ile konusarak domain, entity ve relationship tanimlayabilirsiniz.
           </p>
           <button
-            onClick={() => navigate('/evolving')}
+            onClick={() => navigate('/agents')}
             className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 text-white
                        rounded-xl hover:from-amber-600 hover:to-orange-700 text-sm font-medium shadow-sm"
           >
@@ -126,7 +126,7 @@ export default function ChatAgentList() {
                 {evolvingAgents.map((agent) => (
                   <div
                     key={agent.agent_id}
-                    onClick={() => navigate('/evolving')}
+                    onClick={() => navigate('/agents')}
                     className="flex items-center justify-between px-5 py-4 hover:bg-amber-50/40 cursor-pointer transition-colors group"
                   >
                     <div className="flex items-center gap-3 min-w-0">

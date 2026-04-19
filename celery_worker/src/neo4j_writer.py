@@ -15,7 +15,7 @@ Features:
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 
 from src.celery_app import app

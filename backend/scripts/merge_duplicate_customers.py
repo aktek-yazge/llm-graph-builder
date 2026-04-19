@@ -21,7 +21,6 @@ import os
 import sys
 import argparse
 from datetime import datetime
-from typing import Optional, List, Dict
 
 # .env dosyasını yükle
 from dotenv import load_dotenv

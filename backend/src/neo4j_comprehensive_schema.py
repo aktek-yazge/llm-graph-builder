@@ -7,10 +7,9 @@ Sistemdeki tüm node'ları ve ilişkileri benzersiz şema halinde çıkarır.
 import os
 import sys
 import json
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List
 from langchain_neo4j import Neo4jGraph
 from dotenv import load_dotenv
-from datetime import datetime
 
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))

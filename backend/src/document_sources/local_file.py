@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-from langchain_community.document_loaders import PyMuPDFLoader
 # Docling is only needed for document processing, which is done in celery_worker
 try:
     from langchain_docling import DoclingLoader
@@ -38,7 +37,6 @@ except (ImportError, ModuleNotFoundError):
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
 import csv
 import io
-import os
 import time
 from pathlib import Path
 # BeautifulSoup and markdown are only needed for document processing, which is done in celery_worker

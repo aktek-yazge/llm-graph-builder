@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import urllib.parse
-from typing import AsyncGenerator, Dict, Any, Optional, List, Set
+from typing import AsyncGenerator, Dict, Any, Set
 from datetime import datetime
 
 # Global Schema Cache import

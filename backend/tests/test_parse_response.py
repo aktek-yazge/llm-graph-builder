@@ -3,7 +3,6 @@
 Parse agent response test
 """
 
-import os
 import sys
 from pathlib import Path
 

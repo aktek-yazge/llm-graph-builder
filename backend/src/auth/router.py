@@ -3,16 +3,13 @@
 Auth Router - Login, Register, Profile endpoints
 """
 import logging
-from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.responses import JSONResponse
 
 from .models import UserCreate, UserLogin, TokenResponse, User
 from .jwt_handler import (
     create_access_token,
     get_current_user,
-    get_current_user_optional,
     TokenData,
     JWT_EXPIRATION_HOURS,
 )

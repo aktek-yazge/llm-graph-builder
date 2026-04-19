@@ -6,7 +6,6 @@ Basic keyword arama + embedding testi (APOC olmadan)
 import os
 import openai
 from neo4j import GraphDatabase
-import numpy as np
 from dotenv import load_dotenv
 
 # Load environment variables

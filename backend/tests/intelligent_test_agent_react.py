@@ -24,8 +24,6 @@ import json
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
-import neo4j
-from neo4j import GraphDatabase
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from langchain.schema import HumanMessage, SystemMessage
@@ -39,7 +37,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.llm import get_llm
 from src.shared.common_fn import load_embedding_model
 from src.utf8_utils import normalize_unicode_text
-from src.graph_query import get_graphDB_driver
 
 # Setup logging
 logging.basicConfig(
@@ -525,7 +522,6 @@ class IntelligentTestAgentReAct:
             
             # Similarity hesapla
             from sklearn.metrics.pairwise import cosine_similarity
-            import numpy as np
             
             for chunk in chunks:
                 if chunk.chunk_id in embedding_map:

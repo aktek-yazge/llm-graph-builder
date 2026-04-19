@@ -13,7 +13,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Index,
-    event,
     text,
 )
 from sqlalchemy.ext.declarative import declarative_base
@@ -22,8 +21,6 @@ from sqlalchemy.pool import StaticPool
 from datetime import datetime
 import hashlib
 import os
-import subprocess
-import platform
 import logging
 from pathlib import Path
 from typing import Optional, List

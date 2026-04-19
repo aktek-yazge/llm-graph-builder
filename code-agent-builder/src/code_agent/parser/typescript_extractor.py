@@ -7,7 +7,6 @@ from tree_sitter import Node
 
 from code_agent.graph.schema import (
     ClassNode,
-    DecoratorNode,
     Edge,
     FunctionNode,
     ParameterNode,

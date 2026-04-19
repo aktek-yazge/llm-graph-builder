@@ -1,9 +1,7 @@
 import logging
 from pathlib import Path
-from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_docling import DoclingLoader
 from langchain_docling.loader import ExportType
-from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption

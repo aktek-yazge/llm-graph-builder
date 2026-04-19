@@ -5,10 +5,16 @@ import { AgentBuilderAPI, Agent as ApiAgent } from '../services/agentBuilderApi'
 import {
   dashboardApi,
   DashboardOverview,
-  PaginatedWorkspaces,
   AgentEvent,
 } from '../services/workspaceApi';
-import { listAgents as listEvolvingAgents, AgentInfo } from '../services/evolvingApi';
+import {
+  listAgents as listEvolvingAgents,
+  AgentInfo,
+  listAllWorkflows,
+  GlobalWorkflowItem,
+  setActiveWorkflow,
+  createAgent,
+} from '../services/evolvingApi';
 import Breadcrumb from '../components/Breadcrumb';
 
 interface Agent extends ApiAgent {
@@ -44,7 +50,11 @@ const EVENT_LABELS: Record<string, { label: string; icon: string; color: string 
   'blackboard.updated': { label: 'Blackboard', icon: '■', color: 'text-slate-500' },
 };
 
-const PAGE_SIZE_OPTIONS = [5, 10, 20, 50];
+const WF_STATUS_LABELS: Record<string, { label: string; color: string; dot: string }> = {
+  draft: { label: 'Taslak', color: 'bg-slate-100 text-slate-700', dot: 'bg-slate-400' },
+  published: { label: 'Yayinda', color: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+  archived: { label: 'Arsiv', color: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500' },
+};
 
 const stagger = {
   hidden: {},
@@ -55,6 +65,15 @@ const fadeUp = {
   hidden: { opacity: 0, y: 12 },
   show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' } },
 };
+
+const AVAILABLE_MODELS = [
+  { provider: 'openai', model: 'gpt-5.4', label: 'GPT-5.4' },
+  { provider: 'openai', model: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+  { provider: 'anthropic', model: 'claude-sonnet-4-6-20250414', label: 'Claude Sonnet 4.6' },
+  { provider: 'anthropic', model: 'claude-opus-4-7-20250414', label: 'Claude Opus 4.7' },
+  { provider: 'google', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+  { provider: 'google', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+];
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -68,22 +87,28 @@ export default function Dashboard() {
   const [evolvingAgents, setEvolvingAgents] = useState<AgentInfo[]>([]);
   const [evolvingLoading, setEvolvingLoading] = useState(false);
 
-  const [wsPage, setWsPage] = useState(1);
-  const [wsPageSize, setWsPageSize] = useState(10);
-  const [wsPaginated, setWsPaginated] = useState<PaginatedWorkspaces | null>(null);
-  const [wsLoading, setWsLoading] = useState(false);
+  const [recentWorkflows, setRecentWorkflows] = useState<GlobalWorkflowItem[]>([]);
+  const [wfTotal, setWfTotal] = useState(0);
+  const [wfLoading, setWfLoading] = useState(false);
 
-  const loadWorkspaces = useCallback(async (page: number, pageSize: number) => {
-    setWsLoading(true);
+  const [showNewAgent, setShowNewAgent] = useState(false);
+  const [newAgentName, setNewAgentName] = useState('');
+  const [newAgentPurpose, setNewAgentPurpose] = useState('');
+  const [newAgentModel, setNewAgentModel] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const loadRecentWorkflows = useCallback(async () => {
+    setWfLoading(true);
     try {
-      const data = await dashboardApi.getWorkspacesPaginated(tenantId, page, pageSize);
-      setWsPaginated(data);
+      const { data } = await listAllWorkflows({ limit: 8 });
+      setRecentWorkflows(data.workflows);
+      setWfTotal(data.total);
     } catch (error) {
-      console.error('Failed to load workspaces:', error);
+      console.error('Failed to load workflows:', error);
     } finally {
-      setWsLoading(false);
+      setWfLoading(false);
     }
-  }, [tenantId]);
+  }, []);
 
   const loadEvolvingAgents = useCallback(async () => {
     setEvolvingLoading(true);
@@ -99,18 +124,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadData();
-    loadWorkspaces(1, wsPageSize);
     loadEvolvingAgents();
+    loadRecentWorkflows();
     const es = dashboardApi.subscribeToEvents('', (event) => {
       setLiveEvents((prev) => [event, ...prev].slice(0, 30));
     });
     eventSourceRef.current = es;
     return () => { es.close(); };
   }, []);
-
-  useEffect(() => {
-    loadWorkspaces(wsPage, wsPageSize);
-  }, [wsPage, wsPageSize, loadWorkspaces]);
 
   const loadData = async () => {
     try {
@@ -125,6 +146,31 @@ export default function Dashboard() {
       console.error('Failed to load data:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreateAgent = async () => {
+    if (!newAgentName.trim()) return;
+    setCreating(true);
+    try {
+      const selected = AVAILABLE_MODELS.find(
+        (m) => `${m.provider}/${m.model}` === newAgentModel,
+      );
+      const { data } = await createAgent(
+        newAgentName.trim(),
+        newAgentPurpose.trim(),
+        selected?.provider,
+        selected?.model,
+      );
+      setShowNewAgent(false);
+      setNewAgentName('');
+      setNewAgentPurpose('');
+      setNewAgentModel('');
+      navigate(`/agents/${data.agent_id}`);
+    } catch (e) {
+      console.error('Agent creation failed', e);
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -151,14 +197,14 @@ export default function Dashboard() {
         <div className="flex justify-between items-start mb-6">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              Knowledge Base Builder
+              Agent Builder
             </h1>
             <p className="mt-0.5 text-sm text-slate-500">
-              Belgelerinizden bilgi grafigi olusturun
+              Akilli agentlar olusturun ve yonetin
             </p>
           </div>
           <button
-            onClick={() => navigate('/workspaces')}
+            onClick={() => setShowNewAgent(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-blue-600 text-white rounded-xl
                        hover:bg-blue-700 text-sm font-medium transition-all shadow-sm hover:shadow-md
                        active:scale-[0.97]"
@@ -166,7 +212,7 @@ export default function Dashboard() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
-            Yeni Workspace
+            Yeni Agent
           </button>
         </div>
 
@@ -178,37 +224,34 @@ export default function Dashboard() {
           className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6"
         >
           <QuickAction
-            onClick={() => navigate('/workspaces')}
-            icon={<WorkspaceIcon />}
-            gradient="from-blue-500 to-blue-600"
-            title="Workspace'ler"
-            desc="Belge koleksiyonlarini yonetin"
-          />
-          <QuickAction
-            onClick={() => navigate('/admin/agents')}
+            onClick={() => navigate('/agents')}
             icon={<AgentIcon />}
-            gradient="from-violet-500 to-purple-600"
-            title="Agent Yonetimi"
-            desc="Uzman agentlar olusturun ve yonetin"
+            gradient="from-blue-500 to-blue-600"
+            title="Agents"
+            desc="Agent'lari olusturun ve yonetin"
           />
           <QuickAction
-            onClick={() => navigate('/resources')}
+            onClick={() => navigate('/workflows')}
+            icon={<WorkflowIcon />}
+            gradient="from-violet-500 to-purple-600"
+            title="Workflows"
+            desc="Tum workflow'lari inceleyin"
+          />
+          <QuickAction
+            onClick={() => navigate('/knowledges')}
             icon={<ResourceIcon />}
             gradient="from-emerald-500 to-teal-600"
-            title="Resource'lar"
-            desc="Kaynaklari duzenleyin"
+            title="Knowledges"
+            desc="Belgeler ve knowledge graph'ler"
           />
           <QuickAction
-            onClick={() => navigate('/evolving')}
+            onClick={() => navigate('/models')}
             icon={<EvolvingIcon />}
             gradient="from-amber-500 to-orange-600"
-            title="Self-Evolving Agent"
-            desc="Agent ile konusarak KG olustur"
+            title="Models"
+            desc="LLM modelleri ve maliyet yonetimi"
           />
         </motion.div>
-
-        {/* Chat CTA */}
-        <ChatCTA />
 
         {/* Stat Cards */}
         {s && (
@@ -220,9 +263,9 @@ export default function Dashboard() {
           >
             <StatCard
               icon={<FolderIcon />}
-              label="Workspace"
-              value={s.workspace_count}
-              sub={`${s.active_workspaces} aktif`}
+              label="Workflow"
+              value={wfTotal}
+              sub={`${recentWorkflows.filter(w => w.status === 'published').length} yayinda`}
               accent="blue"
             />
             <StatCard
@@ -279,12 +322,11 @@ export default function Dashboard() {
             <div className="space-y-3">
               {overview.active_batches.map((batch) => (
                 <div key={batch.batch_job_id} className="flex items-center gap-4">
-                  <Link
-                    to={`/workspaces/${batch.workspace_id}`}
-                    className="text-sm font-medium text-blue-600 hover:text-blue-700 min-w-[120px] truncate"
+                  <span
+                    className="text-sm font-medium text-slate-700 min-w-[120px] truncate"
                   >
                     {batch.workspace_id.slice(0, 15)}
-                  </Link>
+                  </span>
                   <div className="flex-1">
                     <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
                       <motion.div
@@ -308,7 +350,7 @@ export default function Dashboard() {
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden mb-6">
           <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-slate-800">Self-Evolving Agent'lar</h2>
+              <h2 className="text-sm font-semibold text-slate-800">Agent'lar</h2>
               {evolvingAgents.length > 0 && (
                 <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
                   {evolvingAgents.length}
@@ -316,7 +358,7 @@ export default function Dashboard() {
               )}
             </div>
             <button
-              onClick={() => navigate('/evolving')}
+              onClick={() => setShowNewAgent(true)}
               className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 font-medium transition-colors"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -335,9 +377,9 @@ export default function Dashboard() {
               <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center">
                 <EvolvingIcon className="w-5 h-5 text-amber-500" />
               </div>
-              <span className="text-sm text-slate-400">Henuz evolving agent yok</span>
+              <span className="text-sm text-slate-400">Henuz agent yok</span>
               <button
-                onClick={() => navigate('/evolving')}
+                onClick={() => setShowNewAgent(true)}
                 className="text-xs text-amber-600 hover:text-amber-700 font-medium"
               >
                 Ilk agent'inizi olusturun &rarr;
@@ -359,7 +401,7 @@ export default function Dashboard() {
                   {evolvingAgents.map((ag) => (
                     <tr
                       key={ag.agent_id}
-                      onClick={() => navigate('/evolving')}
+                      onClick={() => navigate(`/agents/${ag.agent_id}`)}
                       className="hover:bg-amber-50/40 cursor-pointer transition-colors group"
                     >
                       <td className="px-5 py-3">
@@ -398,21 +440,21 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Two-Column: Workspace Table + Activity */}
+        {/* Two-Column: Workflows Table + Activity */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Workspace Table */}
+          {/* Workflows Table */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold text-slate-800">Workspace'ler</h2>
-                {wsPaginated && (
+                <h2 className="text-sm font-semibold text-slate-800">Workflow'lar</h2>
+                {wfTotal > 0 && (
                   <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
-                    {wsPaginated.total}
+                    {wfTotal}
                   </span>
                 )}
               </div>
               <Link
-                to="/workspaces"
+                to="/workflows"
                 className="text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
               >
                 Tumunu gor &rarr;
@@ -423,81 +465,73 @@ export default function Dashboard() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-slate-50/70">
-                    <th className="text-left px-5 py-2.5 text-xs font-medium text-slate-500">Ad</th>
+                    <th className="text-left px-5 py-2.5 text-xs font-medium text-slate-500">Workflow</th>
+                    <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Agent</th>
+                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Versiyon</th>
                     <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Durum</th>
-                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Belge</th>
-                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500 hidden sm:table-cell">Islenen</th>
-                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500 hidden md:table-cell">Basarili</th>
-                    <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500 hidden md:table-cell">Hatali</th>
-                    <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Basari</th>
                     <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500 hidden lg:table-cell">Tarih</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
-                  {wsLoading && !wsPaginated ? (
+                  {wfLoading ? (
                     <tr>
-                      <td colSpan={8} className="px-5 py-16 text-center">
+                      <td colSpan={5} className="px-5 py-16 text-center">
                         <div className="inline-block animate-spin rounded-full h-5 w-5 border-2 border-blue-200 border-t-blue-600" />
                       </td>
                     </tr>
-                  ) : !wsPaginated || wsPaginated.items.length === 0 ? (
+                  ) : recentWorkflows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-5 py-16 text-center">
+                      <td colSpan={5} className="px-5 py-16 text-center">
                         <div className="flex flex-col items-center gap-2">
                           <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center">
                             <FolderIcon className="w-5 h-5 text-slate-400" />
                           </div>
-                          <span className="text-sm text-slate-400">Henuz workspace yok</span>
+                          <span className="text-sm text-slate-400">Henuz workflow yok</span>
                           <button
-                            onClick={() => navigate('/workspaces')}
+                            onClick={() => navigate('/agents')}
                             className="text-xs text-blue-600 hover:text-blue-700 font-medium"
                           >
-                            Ilk workspace'inizi olusturun &rarr;
+                            Agent olusturarak baslayin &rarr;
                           </button>
                         </div>
                       </td>
                     </tr>
                   ) : (
-                    wsPaginated.items.map((ws) => {
-                      const st = STATUS_LABELS[ws.status] || { label: ws.status, color: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' };
+                    recentWorkflows.map((wf) => {
+                      const st = WF_STATUS_LABELS[wf.status] || { label: wf.status, color: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' };
                       return (
                         <tr
-                          key={ws.id}
-                          onClick={() => navigate(`/workspaces/${ws.id}`)}
-                          className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
+                          key={wf.workflow_id}
+                          onClick={async () => {
+                            if (!wf.agent_id) return;
+                            try { await setActiveWorkflow(wf.agent_id, wf.workflow_id); } catch {}
+                            navigate(`/agents/${wf.agent_id}/workflow`);
+                          }}
+                          className={`${wf.agent_id ? 'hover:bg-blue-50/40 cursor-pointer' : ''} transition-colors group`}
                         >
                           <td className="px-5 py-3">
-                            <span className="font-medium text-slate-800 group-hover:text-blue-700 transition-colors">
-                              {ws.name}
-                            </span>
+                            <div>
+                              <span className="font-medium text-slate-800 group-hover:text-blue-700 transition-colors">
+                                {wf.name}
+                              </span>
+                              {wf.is_template && (
+                                <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-600 font-medium">T</span>
+                              )}
+                            </div>
+                            {wf.description && (
+                              <p className="text-xs text-slate-400 truncate max-w-[200px]">{wf.description}</p>
+                            )}
                           </td>
+                          <td className="px-3 py-3 text-xs text-slate-500 truncate max-w-[120px]">{wf.agent_name}</td>
+                          <td className="px-3 py-3 text-right text-slate-600 tabular-nums">v{wf.version}</td>
                           <td className="px-3 py-3">
                             <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium ${st.color}`}>
                               <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
                               {st.label}
                             </span>
                           </td>
-                          <td className="px-3 py-3 text-right text-slate-600 tabular-nums">{ws.document_count}</td>
-                          <td className="px-3 py-3 text-right text-slate-600 tabular-nums hidden sm:table-cell">{ws.processed}</td>
-                          <td className="px-3 py-3 text-right text-emerald-600 tabular-nums hidden md:table-cell">{ws.successful}</td>
-                          <td className="px-3 py-3 text-right text-red-500 tabular-nums hidden md:table-cell">{ws.failed}</td>
-                          <td className="px-3 py-3">
-                            {ws.document_count > 0 ? (
-                              <div className="flex items-center gap-2">
-                                <div className="w-14 bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                                  <div
-                                    className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
-                                    style={{ width: `${Math.min(ws.success_rate, 100)}%` }}
-                                  />
-                                </div>
-                                <span className="text-xs text-slate-500 tabular-nums">%{ws.success_rate}</span>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-slate-300">&mdash;</span>
-                            )}
-                          </td>
                           <td className="px-3 py-3 text-xs text-slate-400 whitespace-nowrap hidden lg:table-cell">
-                            {ws.created_at ? new Date(ws.created_at).toLocaleDateString('tr-TR') : '-'}
+                            {wf.updated_at ? new Date(wf.updated_at).toLocaleDateString('tr-TR') : '-'}
                           </td>
                         </tr>
                       );
@@ -506,53 +540,6 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
-
-            {/* Pagination */}
-            {wsPaginated && wsPaginated.total > 0 && (
-              <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <select
-                    value={wsPageSize}
-                    onChange={(e) => { setWsPageSize(Number(e.target.value)); setWsPage(1); }}
-                    className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white
-                               focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                  >
-                    {PAGE_SIZE_OPTIONS.map((sz) => (
-                      <option key={sz} value={sz}>{sz}</option>
-                    ))}
-                  </select>
-                  <span className="text-slate-400">
-                    {((wsPage - 1) * wsPageSize) + 1}&ndash;{Math.min(wsPage * wsPageSize, wsPaginated.total)} / {wsPaginated.total}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <PagBtn onClick={() => setWsPage(1)} disabled={wsPage <= 1}>&laquo;</PagBtn>
-                  <PagBtn onClick={() => setWsPage((p) => Math.max(1, p - 1))} disabled={wsPage <= 1}>&lsaquo;</PagBtn>
-                  {Array.from({ length: wsPaginated.total_pages }, (_, i) => i + 1)
-                    .filter((p) => p === 1 || p === wsPaginated.total_pages || Math.abs(p - wsPage) <= 1)
-                    .reduce<(number | 'ellipsis')[]>((acc, p, i, arr) => {
-                      if (i > 0 && p - (arr[i - 1]) > 1) acc.push('ellipsis');
-                      acc.push(p);
-                      return acc;
-                    }, [])
-                    .map((p, i) =>
-                      p === 'ellipsis' ? (
-                        <span key={`e${i}`} className="px-1 text-xs text-slate-300">&hellip;</span>
-                      ) : (
-                        <PagBtn
-                          key={p}
-                          onClick={() => setWsPage(p)}
-                          active={p === wsPage}
-                        >
-                          {p}
-                        </PagBtn>
-                      ),
-                    )}
-                  <PagBtn onClick={() => setWsPage((p) => Math.min(wsPaginated.total_pages, p + 1))} disabled={wsPage >= wsPaginated.total_pages}>&rsaquo;</PagBtn>
-                  <PagBtn onClick={() => setWsPage(wsPaginated.total_pages)} disabled={wsPage >= wsPaginated.total_pages}>&raquo;</PagBtn>
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Activity Feed */}
@@ -613,71 +600,114 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* New Agent Modal */}
+      <AnimatePresence>
+        {showNewAgent && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            onClick={() => !creating && setShowNewAgent(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-6 py-5 border-b border-slate-100">
+                <h2 className="text-lg font-semibold text-slate-900">Yeni Agent Olustur</h2>
+                <p className="text-sm text-slate-500 mt-0.5">Agent bilgilerini girin</p>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Agent Adi <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newAgentName}
+                    onChange={(e) => setNewAgentName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCreateAgent()}
+                    placeholder="orn. Ticaret Sicil Gazeteleri"
+                    autoFocus
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400
+                               placeholder:text-slate-400 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Amac / Aciklama
+                  </label>
+                  <textarea
+                    value={newAgentPurpose}
+                    onChange={(e) => setNewAgentPurpose(e.target.value)}
+                    placeholder="Agent'in ne yapacagini kisa bir sekilde aciklayiniz..."
+                    rows={3}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-sm resize-none
+                               focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400
+                               placeholder:text-slate-400 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    LLM Model
+                  </label>
+                  <select
+                    value={newAgentModel}
+                    onChange={(e) => setNewAgentModel(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400
+                               bg-white transition-all"
+                  >
+                    <option value="">Sistem Varsayilani</option>
+                    {AVAILABLE_MODELS.map((m) => (
+                      <option key={`${m.provider}/${m.model}`} value={`${m.provider}/${m.model}`}>
+                        {m.label} ({m.provider})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-slate-400 mt-1">Bos birakilirsa sistem varsayilani kullanilir</p>
+                </div>
+              </div>
+
+              <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2.5">
+                <button
+                  onClick={() => { setShowNewAgent(false); setNewAgentName(''); setNewAgentPurpose(''); setNewAgentModel(''); }}
+                  disabled={creating}
+                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800
+                             hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+                >
+                  Iptal
+                </button>
+                <button
+                  onClick={handleCreateAgent}
+                  disabled={!newAgentName.trim() || creating}
+                  className="inline-flex items-center gap-1.5 px-5 py-2 bg-blue-600 text-white rounded-xl
+                             text-sm font-medium hover:bg-blue-700 transition-all shadow-sm
+                             disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97]"
+                >
+                  {creating && (
+                    <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-white/30 border-t-white" />
+                  )}
+                  Olustur
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 /* ─── Sub-components ─── */
-
-function ChatCTA() {
-  const navigate = useNavigate();
-  const [expertCount, setExpertCount] = useState(0);
-  const [expertNames, setExpertNames] = useState<string[]>([]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { getOrchestratorStatus } = await import('../services/chatAgentApi');
-        const s = await getOrchestratorStatus();
-        setExpertCount(s.experts.total);
-        setExpertNames(s.experts.names);
-      } catch { /* ignore */ }
-    })();
-  }, []);
-
-  return (
-    <motion.div
-      variants={fadeUp}
-      initial="hidden"
-      animate="show"
-      className="mb-6"
-    >
-      <button
-        onClick={() => navigate('/chat')}
-        className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-5 text-white
-                   hover:from-indigo-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg
-                   active:scale-[0.99] group"
-      >
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center text-2xl font-bold shrink-0">
-            ?
-          </div>
-          <div className="text-left flex-1">
-            <div className="text-lg font-semibold">Soru Sor</div>
-            <div className="text-sm text-white/70 mt-0.5">
-              {expertCount > 0
-                ? `${expertCount} uzman agent otomatik olarak sorgulanir`
-                : 'Uzman agentlara sorunuzu iletin'}
-            </div>
-          </div>
-          <svg className="w-6 h-6 text-white/60 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </div>
-        {expertNames.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-3">
-            {expertNames.map((name) => (
-              <span key={name} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-white/15 text-white/90">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                {name}
-              </span>
-            ))}
-          </div>
-        )}
-      </button>
-    </motion.div>
-  );
-}
 
 function StatCard({ icon, label, value, sub, accent }: {
   icon: React.ReactNode;
@@ -737,30 +767,9 @@ function QuickAction({ onClick, icon, gradient, title, desc }: {
   );
 }
 
-function PagBtn({ onClick, disabled, active, children }: {
-  onClick?: () => void;
-  disabled?: boolean;
-  active?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${
-        active
-          ? 'bg-blue-600 text-white border-blue-600'
-          : 'border-slate-200 hover:bg-slate-50 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
 /* ─── Icons ─── */
 
-function WorkspaceIcon() {
+function WorkflowIcon() {
   return (
     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />

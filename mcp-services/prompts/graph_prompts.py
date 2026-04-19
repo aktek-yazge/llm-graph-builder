@@ -5,7 +5,6 @@ Registers domain-specific prompts (sigorta, akkok_sicil) and
 shared Cypher query guides as MCP prompts on the given server.
 """
 
-import os
 from pathlib import Path
 from fastmcp.server import FastMCP
 

@@ -864,9 +864,15 @@ def create_ocr_tools(agent_id: str, celery_app=None, store=None, memory=None) ->
     async def _run_ocr_direct(image_paths: list[str], file_name: str) -> str:
         try:
             _ensure_celery_worker_importable()
-            from agents.gemini_ocr_agent import GeminiOCRAgent
+            provider = os.getenv("OCR_PROVIDER", "gemini").lower()
 
-            agent = GeminiOCRAgent()
+            if provider == "chandra":
+                from agents.chandra_ocr_agent import ChandraOCRAgent
+                agent = ChandraOCRAgent()
+            else:
+                from agents.gemini_ocr_agent import GeminiOCRAgent
+                agent = GeminiOCRAgent()
+
             await agent.initialize()
 
             output_dir = tempfile.mkdtemp(prefix="evolving_ocr_out_")
@@ -882,6 +888,7 @@ def create_ocr_tools(agent_id: str, celery_app=None, store=None, memory=None) ->
 
             return json.dumps({
                 "mode": "direct",
+                "provider": provider,
                 "page_count": page_count,
                 "total_chars": result.get("total_chars", 0),
                 "ocr_texts_count": len(ocr_texts),

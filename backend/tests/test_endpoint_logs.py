@@ -3,7 +3,6 @@
 Test endpoint logları üretmek için basit script
 """
 import json
-import os
 from datetime import datetime, timezone
 
 def generate_test_logs():

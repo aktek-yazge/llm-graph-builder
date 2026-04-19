@@ -5,7 +5,7 @@ Runtime'da veritabanından subtype'ları ve relation type'ları çıkarır
 """
 
 import logging
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 

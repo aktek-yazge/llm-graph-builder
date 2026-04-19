@@ -4,7 +4,6 @@ Embedding sisteminin çalışıp çalışmadığını test eden script
 """
 
 import os
-import sys
 from neo4j import GraphDatabase
 
 # Neo4j bağlantı bilgileri

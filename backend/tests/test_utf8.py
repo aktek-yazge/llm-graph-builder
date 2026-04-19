@@ -9,9 +9,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.utf8_utils import *
 from src.shared.common_fn import create_graph_database_connection
-from src.graphDB_dataAccess import graphDBdataAccess
 from dotenv import load_dotenv
-import logging
 import requests
 import json
 

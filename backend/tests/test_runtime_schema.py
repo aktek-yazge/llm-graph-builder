@@ -5,7 +5,6 @@ Tamamen runtime'da schema bilgilerini çıkarıp kontrol eder
 """
 
 import sys
-import os
 sys.path.append('/workspace/backend')
 
 try:

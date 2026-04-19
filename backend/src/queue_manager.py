@@ -8,14 +8,11 @@ import os
 import logging
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
-import hashlib
-import shutil
 from datetime import datetime
 
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.shared.common_fn import create_graph_database_connection
-from src.utf8_utils import normalize_file_name
 
 
 class QueueManager:

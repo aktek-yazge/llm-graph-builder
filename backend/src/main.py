@@ -2,7 +2,6 @@ from langchain_neo4j import Neo4jGraph
 from src.shared.constants import (
     BUCKET_UPLOAD,
     BUCKET_FAILED_FILE,
-    PROJECT_ID,
     QUERY_TO_GET_CHUNKS,
     QUERY_TO_DELETE_EXISTING_ENTITIES,
     QUERY_TO_GET_LAST_PROCESSED_CHUNK_POSITION,
@@ -29,10 +28,8 @@ import asyncio
 #     logging.info("🔧 OpenTelemetry logging aktif - tüm loglar Loki'ye gönderiliyor")
 # except Exception as otel_error:
 #     logging.warning(f"⚠️ OpenTelemetry başlatılamadı: {otel_error} - Normal logging devam ediyor")
-from src.create_chunks import CreateChunksofDocument
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.document_sources.local_file import (
-    get_documents_from_file_by_path,
     generate_page_images_with_pymupdf,
 )
 from src.entities.source_node import sourceNode
@@ -47,9 +44,7 @@ from src.shared.common_fn import *
 from src.document_sources.web_pages import *
 from src.graph_query import get_graphDB_driver
 from src.utf8_utils import (
-    normalize_unicode_text,
     normalize_file_name,
-    ensure_utf8_encoding,
 )
 import re
 from langchain_community.document_loaders import WikipediaLoader, WebBaseLoader
@@ -61,10 +56,7 @@ import urllib.parse
 # Logger helper fonksiyonlarını utils'den import et
 from src.utils.log_helpers import (
     log_upload,
-    log_delete,
-    log_chunking,
     log_extraction,
-    log_processing,
 )
 import json
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
@@ -74,7 +66,6 @@ try:
     import markdown_to_json
 except (ImportError, ModuleNotFoundError):
     markdown_to_json = None  # Document processing is in celery_worker
-from src.models.file_queue_models import get_file_queue_db, UploadedFile, FileStatus
 
 # from src.tasks import process_file_pipeline  # Moved to celery_worker
 
@@ -84,7 +75,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     pd = None  # Data processing is in celery_worker
 import re
-from io import StringIO
 import time
 
 warnings.filterwarnings("ignore")
@@ -1938,7 +1928,7 @@ def merge_chunks_local(file_name, total_chunks, chunk_dir, merged_dir):
                 logging.info(f"📦 Chunk {i} size: {chunk_size} bytes")
 
                 with open(chunk_file_path, "rb") as chunk_file:
-                    bytes_copied = shutil.copyfileobj(chunk_file, write_stream)
+                    shutil.copyfileobj(chunk_file, write_stream)
                     total_bytes_written += chunk_size
                     logging.info(f"✅ Chunk {i} merged successfully")
 
@@ -1987,7 +1977,6 @@ def upload_file(
     generate_embedding: str = None,
 ):
     # Dosya adını normalize et (Unicode consistency için)
-    import unicodedata
     from src.utf8_utils import normalize_file_name
 
     # Model parametresi kontrolü - varsayılan değer ataması

@@ -6,7 +6,6 @@
 import os
 import sys
 import logging
-import importlib.util
 
 # OpenTelemetry configuration - Alloy/Tempo için
 # Local: localhost:4317 (gRPC), Docker: alloy:4317 (gRPC)
@@ -34,7 +33,6 @@ from fastapi import (
     BackgroundTasks,
     Depends,
 )
-from fastapi.staticfiles import StaticFiles
 from fastapi_health import health
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -55,7 +53,7 @@ from src.main import (
     set_status_retry,
     upload_file,
 )
-from src.QA_integration import QA_RAG, QA_RAG_stream, clear_chat_history
+from src.QA_integration import QA_RAG, QA_RAG_stream
 from src.intelligent_agent import IntelligentAgent
 from src.workflow.fast_agent_integration_simple import stream_fast_agent_response
 from src.langchain_deepagents import (
@@ -65,11 +63,10 @@ from src.langchain_deepagents import (
     stream_react_agent_response,
     REACT_LANGCHAIN_AVAILABLE,
 )
-from src.llm import detect_document_domain
 from src.shared.common_fn import *
 from src.shared.constants import QUERY_TO_GET_CHUNKS
 from src.shared.llm_graph_builder_exception import LLMGraphBuilderException
-from src.shared.context import set_request_context, clear_request_context
+from src.shared.context import set_request_context
 from src.shared.multi_tenancy import (
     TenantMiddleware,
     get_current_tenant,
@@ -81,7 +78,6 @@ import asyncio
 import base64
 
 # from langserve import add_routes
-from langchain_google_vertexai import ChatVertexAI
 from src.api_response import create_api_response
 from src.graphDB_dataAccess import graphDBdataAccess
 from src.graph_query import get_graph_results, get_chunktext_results, visualize_schema
@@ -106,7 +102,6 @@ from src.logger import CustomLogger
 from src.celery_client import (
     celery_app,
     revoke_celery_task,
-    revoke_celery_tasks,
     purge_all_queues,
     get_queue_stats,
 )
@@ -114,11 +109,9 @@ from src.models.file_queue_models import get_file_queue_db
 from src.otel_tracing_setup import (
     initialize_tracing,
     instrument_fastapi,
-    get_tracer,
-    add_span_attribute,
 )
 from src.otel_logging_setup import initialize_otel_logging
-from src.auth import auth_router, get_current_user, get_current_user_optional, TokenData
+from src.auth import auth_router, get_current_user, TokenData
 from src.shared.langfuse_client import (
     create_dataset,
     get_dataset,
@@ -137,7 +130,6 @@ except ImportError:
     genai_sdk = None  # type: ignore
     GEMINI_AVAILABLE = False
 from src.device_utils import (
-    get_optimal_device,
     print_device_info,
     optimize_for_apple_silicon,
 )
@@ -1270,7 +1262,6 @@ async def serve_document_file(file_name: str, inline: bool = False):
         # URL decode işlemi
         import urllib.parse
         import boto3
-        from fastapi.responses import StreamingResponse
 
         decoded_file_name = urllib.parse.unquote(file_name, encoding="utf-8")
 
@@ -4755,7 +4746,6 @@ async def create_entity_embeddings(
                 error=result["error"],
             )
 
-        total_types = result.get("total_node_types", 0)
         total_embeddings = result.get("total_embeddings_created", 0)
         embedding_model = result.get("embedding_model", "Unknown")
         available_types = result.get("available_types", [])
@@ -5191,7 +5181,7 @@ async def delete_similar_relationships(
             RETURN count(r) as deleted_count
         """
 
-        delete_result = graph.query(delete_query, session_params={"database": database})
+        graph.query(delete_query, session_params={"database": database})
         deleted_count = (
             similar_count  # Neo4j DELETE count döndürmez, önceki sayımı kullan
         )
@@ -5220,7 +5210,7 @@ async def delete_similar_relationships(
 
 from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
 from src.utf8_utils import normalize_file_name
-from typing import List, Dict, Any
+from typing import List, Dict
 from pydantic import BaseModel
 import shutil
 from pathlib import Path
@@ -5276,9 +5266,7 @@ async def upload_file_to_queue(
 
     🔒 Requires JWT authentication
     """
-    from concurrent.futures import ThreadPoolExecutor
     import json
-    import shutil
 
     try:
         start = time.time()
@@ -6514,7 +6502,6 @@ async def start_graph_creation(
                     )
                     if os.path.exists(abs_path):
                         markdown_exists = True
-                        actual_markdown_path = abs_path
                         logging.info(f"📂 Found markdown (absolute path): {abs_path}")
 
         if not markdown_exists:

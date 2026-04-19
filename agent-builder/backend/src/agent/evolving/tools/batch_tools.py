@@ -20,17 +20,18 @@ Iki batch tool'u vardir:
    ``/callback/batch-complete`` webhook'u tetiklenir ve agent yeni bir turn'de
    sonucla bilgilendirilir. Chat kapansa bile is devam eder.
 
-Kolon isimleri ``schema.sql`` ile bire-bir uyumludur:
-- ``batch_jobs.batch_id`` (PK), ``agent_id``, ``status``, ``total_documents``,
-  ``celery_task_count``, ``description``, ``started_at``, ``completed_at``
-- ``workspace_documents.doc_id`` (PK), ``batch_id``, ``agent_id``,
+Kolon isimleri veritabanindaki gercek yapiyla uyumludur:
+- ``batch_jobs.id`` (PK), ``workspace_id``, ``status``, ``total_documents``,
+  ``processed_documents``, ``successful_documents``, ``failed_documents``,
+  ``low_confidence_documents``, ``celery_task_count``, ``description``,
+  ``started_at``, ``completed_at``
+- ``workspace_documents.id`` (PK), ``batch_job_id``, ``workspace_id``,
   ``file_path``, ``file_name``, ``sequence``, ``status``, ``confidence_score``,
-  ``extraction_result``, ``error_message``, ``celery_task_id``
+  ``extraction_result``, ``error_message``
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -56,14 +57,12 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
         await pg.execute(
             """
             INSERT INTO batch_jobs
-                (batch_id, agent_id, status, total_documents, skill_id, ocr_mode, description)
-            VALUES ($1, $2, 'created', $3, $4, $5, $6)
+                (id, workspace_id, status, total_documents, description)
+            VALUES ($1, $2, 'created', $3, $4)
             """,
             batch_id,
             agent_id,
             len(file_paths),
-            skill_id or None,
-            ocr_mode,
             description or None,
         )
 
@@ -79,7 +78,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
             await pg.execute(
                 """
                 INSERT INTO workspace_documents
-                    (doc_id, batch_id, agent_id, file_path, file_name, sequence, status)
+                    (id, batch_job_id, workspace_id, file_path, file_name, sequence, status)
                 VALUES ($1, $2, $3, $4, $5, $6, 'queued')
                 """,
                 doc_id,
@@ -91,14 +90,14 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
             )
 
         await pg.execute(
-            "UPDATE batch_jobs SET status='processing', started_at=NOW(), updated_at=NOW() "
-            "WHERE batch_id=$1",
+            "UPDATE batch_jobs SET status='processing', started_at=NOW() "
+            "WHERE id=$1",
             batch_id,
         )
 
         queued_docs = await pg.fetch(
-            "SELECT doc_id, file_path, file_name FROM workspace_documents "
-            "WHERE batch_id=$1 ORDER BY sequence",
+            "SELECT id, file_path, file_name FROM workspace_documents "
+            "WHERE batch_job_id=$1 ORDER BY sequence",
             batch_id,
         )
 
@@ -107,7 +106,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
         for doc in queued_docs:
             celery_app.send_task(
                 "workspace.process_document",
-                args=[doc["doc_id"], doc["file_path"], doc["file_name"]],
+                args=[doc["id"], doc["file_path"], doc["file_name"]],
                 kwargs={
                     "skill_id": actual_skill_id,
                     "agent_id": agent_id,
@@ -119,7 +118,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
             task_count += 1
 
         await pg.execute(
-            "UPDATE batch_jobs SET celery_task_count=$1, updated_at=NOW() WHERE batch_id=$2",
+            "UPDATE batch_jobs SET celery_task_count=$1 WHERE id=$2",
             task_count,
             batch_id,
         )
@@ -224,9 +223,9 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
                     await pg.execute(
                         """
                         INSERT INTO pending_resumes
-                            (batch_id, agent_id, session_id, thread_id, status, event_text_template)
+                            (batch_job_id, workspace_id, session_id, thread_id, status, event_text_template)
                         VALUES ($1, $2, $3, $4, 'waiting', $5)
-                        ON CONFLICT (batch_id) DO UPDATE
+                        ON CONFLICT (batch_job_id) DO UPDATE
                           SET thread_id = EXCLUDED.thread_id,
                               session_id = EXCLUDED.session_id,
                               status = 'waiting'
@@ -282,18 +281,18 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
             if not batch_id:
                 row = await pg.fetchrow(
                     """
-                    SELECT batch_id FROM batch_jobs
-                    WHERE agent_id = $1
+                    SELECT id FROM batch_jobs
+                    WHERE workspace_id = $1
                     ORDER BY created_at DESC LIMIT 1
                     """,
                     agent_id,
                 )
                 if not row:
                     return "Henuz batch isleme baslatilmamis."
-                batch_id = row["batch_id"]
+                batch_id = row["id"]
 
             job = await pg.fetchrow(
-                "SELECT * FROM batch_jobs WHERE batch_id = $1", batch_id,
+                "SELECT * FROM batch_jobs WHERE id = $1", batch_id,
             )
             if not job:
                 return f"Batch bulunamadi: {batch_id}"
@@ -309,7 +308,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
                     COUNT(*) FILTER (WHERE status IN ('processing', 'extracting_images', 'images_extracted', 'ocr_processing', 'ocr_completed', 'extracting_entities')) as in_progress,
                     AVG(confidence_score) FILTER (WHERE confidence_score > 0) as avg_confidence
                 FROM workspace_documents
-                WHERE batch_id = $1
+                WHERE batch_job_id = $1
                 """,
                 batch_id,
             )
@@ -351,19 +350,19 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
         try:
             if not batch_id:
                 row = await pg.fetchrow(
-                    "SELECT batch_id FROM batch_jobs WHERE agent_id=$1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT id FROM batch_jobs WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT 1",
                     agent_id,
                 )
                 if not row:
                     return "Henuz batch isleme baslatilmamis."
-                batch_id = row["batch_id"]
+                batch_id = row["id"]
 
             docs = await pg.fetch(
                 """
-                SELECT doc_id, file_name, status, confidence_score, error_message,
+                SELECT id, file_name, status, confidence_score, error_message,
                        extraction_result::text as result_preview
                 FROM workspace_documents
-                WHERE batch_id = $1 AND status IN ('failed', 'low_confidence', 'needs_review')
+                WHERE batch_job_id = $1 AND status IN ('failed', 'low_confidence', 'needs_review')
                 ORDER BY confidence_score ASC NULLS FIRST
                 LIMIT $2
                 """,
@@ -373,7 +372,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
             problems = []
             for d in docs:
                 entry: dict[str, Any] = {
-                    "doc_id": d["doc_id"],
+                    "doc_id": d["id"],
                     "file_name": d["file_name"],
                     "status": d["status"],
                     "confidence": float(d["confidence_score"]) if d["confidence_score"] else 0,
@@ -407,18 +406,18 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
         try:
             if not batch_id:
                 row = await pg.fetchrow(
-                    "SELECT batch_id FROM batch_jobs WHERE agent_id=$1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT id FROM batch_jobs WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT 1",
                     agent_id,
                 )
                 if not row:
                     return "Henuz batch isleme baslatilmamis."
-                batch_id = row["batch_id"]
+                batch_id = row["id"]
 
             docs = await pg.fetch(
                 """
-                SELECT doc_id, file_name, confidence_score, extraction_result
+                SELECT id, file_name, confidence_score, extraction_result
                 FROM workspace_documents
-                WHERE batch_id = $1 AND status IN ('low_confidence', 'needs_review')
+                WHERE batch_job_id = $1 AND status IN ('low_confidence', 'needs_review')
                 ORDER BY confidence_score ASC
                 LIMIT $2
                 """,
@@ -442,7 +441,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
                     rel_count = len(data.get("relationships", data.get("edges", [])))
 
                 items.append({
-                    "doc_id": d["doc_id"],
+                    "doc_id": d["id"],
                     "file_name": d["file_name"],
                     "confidence": float(d["confidence_score"]) if d["confidence_score"] else 0,
                     "node_count": node_count,
@@ -471,7 +470,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
 
         try:
             await pg.execute(
-                "UPDATE workspace_documents SET status='completed', updated_at=NOW() WHERE doc_id=$1",
+                "UPDATE workspace_documents SET status='completed', updated_at=NOW() WHERE id=$1",
                 doc_id,
             )
             if notes:
@@ -499,7 +498,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
         try:
             await pg.execute(
                 "UPDATE workspace_documents SET status='failed', error_message=$2, updated_at=NOW() "
-                "WHERE doc_id=$1",
+                "WHERE id=$1",
                 doc_id, reason or "Kullanici tarafindan reddedildi",
             )
             if reason:
@@ -531,7 +530,7 @@ def create_batch_tools(agent_id: str, pg=None, celery_app=None) -> list:
 async def compute_batch_summary(pg, batch_id: str) -> dict[str, Any]:
     """Compute completion summary for a batch (callable from anywhere)."""
     job = await pg.fetchrow(
-        "SELECT * FROM batch_jobs WHERE batch_id=$1", batch_id,
+        "SELECT * FROM batch_jobs WHERE id=$1", batch_id,
     )
     if not job:
         return {"batch_id": batch_id, "found": False}
@@ -545,14 +544,14 @@ async def compute_batch_summary(pg, batch_id: str) -> dict[str, Any]:
             COUNT(*) FILTER (WHERE status IN ('low_confidence', 'needs_review')) as needs_review,
             AVG(confidence_score) FILTER (WHERE confidence_score > 0) as avg_confidence
         FROM workspace_documents
-        WHERE batch_id=$1
+        WHERE batch_job_id=$1
         """,
         batch_id,
     )
 
     return {
         "batch_id": batch_id,
-        "agent_id": job["agent_id"],
+        "agent_id": job["workspace_id"],
         "status": job["status"],
         "description": job.get("description") or "",
         "total": int(stats["total"] or 0),
@@ -576,7 +575,7 @@ async def maybe_finalize_batch(pg, batch_id: str) -> Optional[dict[str, Any]]:
     pending = await pg.fetchrow(
         """
         SELECT COUNT(*) as remaining FROM workspace_documents
-        WHERE batch_id=$1
+        WHERE batch_job_id=$1
           AND status NOT IN ('completed', 'entities_extracted', 'failed', 'low_confidence', 'needs_review')
         """,
         batch_id,
@@ -584,12 +583,11 @@ async def maybe_finalize_batch(pg, batch_id: str) -> Optional[dict[str, Any]]:
     if pending and int(pending["remaining"]) > 0:
         return None
 
-    # Use a guarded UPDATE so the transition fires exactly once.
     updated = await pg.execute(
         """
         UPDATE batch_jobs
-        SET status='completed', completed_at=NOW(), updated_at=NOW()
-        WHERE batch_id=$1 AND status<>'completed'
+        SET status='completed', completed_at=NOW()
+        WHERE id=$1 AND status<>'completed'
         """,
         batch_id,
     )

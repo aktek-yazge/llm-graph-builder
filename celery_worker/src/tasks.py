@@ -1,10 +1,9 @@
 import logging
 import asyncio
-from datetime import datetime, timezone
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 from src.celery_app import app
-from src.models.file_queue_models import get_file_queue_db, FileStatus, UploadedFile
+from src.models.file_queue_models import get_file_queue_db, UploadedFile
 from src.processing_utils import GeminiOCRException, GeminiRateLimitException
 
 # Langfuse LLM Observability
@@ -15,7 +14,6 @@ from src.shared.schema_version import increment_schema_version
 
 # Import DB Write Queue helpers - async writes to PostgreSQL
 from src.db_writer import (
-    enqueue_db_write,
     enqueue_chunking_update,
     enqueue_graph_update,
     enqueue_embedding_update,
@@ -777,7 +775,6 @@ def delete_files_task(self, file_ids: list):
                         orphan_result = use_connection.query(cleanup_orphans_query, session_params=session_params)
                         deleted_orphans = orphan_result[0]["deletedOrphans"] if orphan_result else 0
                         
-                        total_neo4j_deleted = deleted_chunks + deleted_entities + deleted_orphans + 1  # +1 for document
                         logging.info(f"🗑️ Neo4j cleanup for {original_name}: {deleted_chunks} chunks, {deleted_entities} entities, {deleted_orphans} orphans, 1 document")
                         
                         # Özel bağlantı kullanıldıysa kapat

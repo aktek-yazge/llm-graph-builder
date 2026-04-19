@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 from datetime import datetime, timezone
 # google.cloud.logging is optional - only needed if GCP logging is configured
 try:

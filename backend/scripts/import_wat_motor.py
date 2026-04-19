@@ -32,7 +32,7 @@ import logging
 import os
 import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # .env dosyasını yükle
 from dotenv import load_dotenv
@@ -44,7 +44,7 @@ from neo4j import GraphDatabase
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.excel_parser import MaintenanceTask, ParseResult, parse_maintenance_excel, print_parse_summary
+from src.excel_parser import MaintenanceTask, parse_maintenance_excel, print_parse_summary
 
 # Logging setup
 logging.basicConfig(

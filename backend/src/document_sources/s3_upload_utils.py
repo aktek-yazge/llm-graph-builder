@@ -585,7 +585,6 @@ def check_document_images_exist_in_s3(
 
         if existing_images:
             # Sadece filename'leri döndür (backward compatibility için)
-            image_filenames = [img["filename"] if isinstance(img, dict) else img for img in existing_images]
             logging.info(
                 f"🔍 Found {len(existing_images)} existing page images in S3 for document: {document_name}"
             )

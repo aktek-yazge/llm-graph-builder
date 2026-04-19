@@ -15,7 +15,6 @@ from typing import Any
 from langchain_core.tools import tool
 
 from ..ontology_model import (
-    AgentOntology,
     EntityClass,
     Property,
     RelationshipPredicate,
@@ -41,27 +40,17 @@ def create_self_tools(
     async def _wiki_first_guard(kind: str, name: str) -> str | None:
         """
         Wiki-first ihlalini runtime'da yakala.
-        Wiki sayfasi yoksa hata mesaji dondurur (agent tool sonucu olarak gorur ve
-        wiki yazmaya geri doner). Wiki sayfasi varsa None doner (yani serbest).
-        kind: 'entities' veya 'relationships'
+
+        DEPRECATED: Workflow engine aktif oldugunda bu guard devre disi kalir
+        (workflow yapisi akisi zaten garantiler). Gecis sureci icin korunuyor;
+        sadece warning loglar, bloklama yapmaz.
         """
-        if wiki is None:
-            return None
-        page_path = f"{kind}/{name}"
-        page = await wiki.get_page(agent_id, page_path)
-        if page:
-            return None
-        kind_label = "entity sinifi" if kind == "entities" else "iliski tipi"
-        return (
-            f"WIKI-FIRST IHLALI: '{name}' {kind_label} icin wiki sayfasi yok. "
-            f"Once `create_wiki_page('{page_path}', '...')` cagir; sayfada bu "
-            f"adayin tanimini, ornek instance'larini, aday property'lerini ve "
-            f"diger wiki sayfalarina backlink'leri yaz. Kullaniciya gosterip "
-            f"onayini al ('formalize edelim mi?'). Onaydan SONRA bu tool'u tekrar cagir.\n\n"
-            f"Eger kullanici acikca 'wiki yazmadan dogrudan ekle' demisse, "
-            f"yine de once kisa bir wiki sayfasi yaz (1-2 cumle yeterli) — sahnenin "
-            f"yayindan sonra okunabilir olmasi icin gerekli."
+        import logging as _lg
+        _lg.getLogger(__name__).debug(
+            "wiki_first_guard check (deprecated — workflow engine handles ordering): %s/%s",
+            kind, name,
         )
+        return None
 
     @tool
     async def add_entity_class(

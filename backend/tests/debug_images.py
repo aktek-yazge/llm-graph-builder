@@ -3,7 +3,6 @@
 Debug script for page image generation
 """
 
-import logging
 import sys
 from pathlib import Path
 
@@ -11,7 +10,6 @@ from pathlib import Path
 sys.path.append("src")
 
 from src.document_sources.local_file import generate_page_images_from_converter
-from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption

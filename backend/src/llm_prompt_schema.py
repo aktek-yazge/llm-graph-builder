@@ -6,7 +6,6 @@ Extracts only node types, relationships, and properties without counts
 
 import os
 import json
-from datetime import datetime
 from langchain_neo4j import Neo4jGraph
 from dotenv import load_dotenv
 

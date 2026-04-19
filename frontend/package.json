@@ -17,7 +17,6 @@
     "@auth0/auth0-react": "^2.2.4",
     "@emotion/styled": "^11.14.0",
     "@mui/material": "^5.15.10",
-    "@mui/styled-engine": "^7.1.0",
     "@neo4j-devtools/word-color": "^0.0.8",
     "@neo4j-ndl/base": "^3.2.9",
     "@neo4j-ndl/react": "^3.2.18",
@@ -41,7 +40,6 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^28.0.6",
     "@tailwindcss/postcss": "^4.0.12",
     "@types/node": "^22.13.10",
     "@types/react": "^18.2.15",

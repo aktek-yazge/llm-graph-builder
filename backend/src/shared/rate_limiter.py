@@ -38,7 +38,7 @@ from typing import Callable, Optional
 from functools import wraps
 from datetime import datetime
 
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)

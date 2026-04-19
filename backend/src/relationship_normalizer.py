@@ -11,7 +11,7 @@ Akış:
 
 import json
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

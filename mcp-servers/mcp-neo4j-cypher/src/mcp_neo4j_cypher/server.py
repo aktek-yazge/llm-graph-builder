@@ -10,10 +10,9 @@ from typing import Any, Dict, Literal, LiteralString, Optional, Tuple, cast
 from dotenv import load_dotenv
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import ToolAnnotations, TextContent
-from neo4j import AsyncDriver, AsyncGraphDatabase, Query, RoutingControl
-from neo4j.exceptions import ClientError, Neo4jError
+from mcp.types import ToolAnnotations
+from neo4j import AsyncGraphDatabase, Query, RoutingControl
+from neo4j.exceptions import Neo4jError
 from pydantic import Field
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
@@ -486,7 +485,6 @@ def create_mcp_server(
     mcp: FastMCP = FastMCP("mcp-neo4j-cypher")
 
     namespace_prefix = _format_namespace(namespace)
-    allow_writes = not read_only
 
     # =====================================================================
     # get_neo4j_schema TOOL DISABLED

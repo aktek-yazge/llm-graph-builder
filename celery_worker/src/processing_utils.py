@@ -34,10 +34,8 @@ from src.db_writer import enqueue_db_write
 
 # Langfuse LLM Observability
 from src.shared.langfuse_client import (
-    trace_llm_call,
     trace_document_processing,
     log_llm_usage,
-    flush_langfuse,
 )
 
 # Domain-specific prompts

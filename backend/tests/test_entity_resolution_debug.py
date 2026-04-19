@@ -13,7 +13,6 @@ load_dotenv()
 
 from entity_resolver import resolve_entity_before_creation
 from neo4j import GraphDatabase
-import logging
 
 # logging.basicConfig(level=logging.DEBUG)  # main.py'de yapılıyor
 

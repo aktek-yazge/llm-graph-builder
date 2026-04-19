@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
 from typing import Any, Optional
 
 from .ontology_model import AgentOntology
@@ -329,8 +328,16 @@ class KnowledgeStore:
 
     # ─── IDENTITY ──────────────────────────────────────────────────
 
-    async def save_identity(self, agent_id: str, name: str, purpose: str) -> None:
-        await self.upsert(agent_id, "identity", "main", {"name": name, "purpose": purpose}, confidence=1.0)
+    async def save_identity(
+        self, agent_id: str, name: str, purpose: str,
+        llm_provider: str | None = None, llm_model: str | None = None,
+    ) -> None:
+        data: dict[str, str] = {"name": name, "purpose": purpose}
+        if llm_provider:
+            data["llm_provider"] = llm_provider
+        if llm_model:
+            data["llm_model"] = llm_model
+        await self.upsert(agent_id, "identity", "main", data, confidence=1.0)
 
     async def load_identity(self, agent_id: str) -> dict[str, str]:
         row = await self.get(agent_id, "identity", "main")
@@ -340,6 +347,133 @@ class KnowledgeStore:
         if isinstance(value, str):
             value = json.loads(value)
         return value
+
+    async def update_agent_model(
+        self, agent_id: str, llm_provider: str, llm_model: str,
+    ) -> dict[str, str]:
+        """Update only model fields in identity, preserving name/purpose."""
+        identity = await self.load_identity(agent_id)
+        identity["llm_provider"] = llm_provider
+        identity["llm_model"] = llm_model
+        await self.upsert(agent_id, "identity", "main", identity, confidence=1.0)
+        return identity
+
+    # ─── GLOBAL RESOURCES ──────────────────────────────────────────
+
+    async def list_all_resources(self) -> list[dict[str, Any]]:
+        """Aggregate sample_files + source_urls across ALL agents with identity info."""
+        rows = await self.pg.fetch(
+            """
+            SELECT ak.agent_id,
+                   ak.knowledge_type,
+                   ak.key,
+                   ak.value,
+                   ak.created_at,
+                   COALESCE(id_row.value->>'name', 'Agent') AS agent_name
+            FROM agent_knowledge ak
+            LEFT JOIN LATERAL (
+                SELECT value FROM agent_knowledge
+                WHERE agent_id = ak.agent_id
+                  AND knowledge_type = 'identity'
+                  AND key = 'main'
+                ORDER BY version DESC LIMIT 1
+            ) id_row ON TRUE
+            LEFT JOIN agent_lifecycle al ON al.agent_id = ak.agent_id
+            WHERE ak.knowledge_type IN ('sample_files', 'source_urls')
+              AND (al.deleted_at IS NULL OR al.agent_id IS NULL)
+            ORDER BY ak.created_at DESC
+            """
+        )
+        resources: list[dict[str, Any]] = []
+        for r in rows:
+            val = r["value"]
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            agent_id = r["agent_id"]
+            agent_name = r["agent_name"] or "Agent"
+            created_at = str(r["created_at"]) if r["created_at"] else None
+
+            if r["knowledge_type"] == "sample_files":
+                for f in val.get("files", []):
+                    resources.append({
+                        "resource_id": f.get("resource_id", ""),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "type": "file",
+                        "filename": f.get("filename", ""),
+                        "content_type": f.get("content_type", ""),
+                        "size": f.get("size", 0),
+                        "path": f.get("path", ""),
+                        "created_at": created_at,
+                    })
+            elif r["knowledge_type"] == "source_urls":
+                for s in val.get("sources", []):
+                    resources.append({
+                        "resource_id": f"url_{uuid.uuid4().hex[:8]}",
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "type": s.get("type", "url"),
+                        "filename": s.get("url", ""),
+                        "content_type": "",
+                        "size": 0,
+                        "path": s.get("url", ""),
+                        "created_at": created_at,
+                    })
+        return resources
+
+    async def delete_resource_by_id(self, resource_id: str) -> bool:
+        """Remove a specific file resource by its resource_id from agent_knowledge."""
+        rows = await self.pg.fetch(
+            """
+            SELECT id, agent_id, key, value
+            FROM agent_knowledge
+            WHERE knowledge_type = 'sample_files'
+            """
+        )
+        for r in rows:
+            val = r["value"]
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            files = val.get("files", [])
+            remaining = [f for f in files if f.get("resource_id") != resource_id]
+            if len(remaining) < len(files):
+                if remaining:
+                    val["files"] = remaining
+                    val["paths"] = [f.get("path", "") for f in remaining]
+                    await self.pg.execute(
+                        "UPDATE agent_knowledge SET value = $1::jsonb WHERE id = $2",
+                        json.dumps(val, ensure_ascii=False),
+                        r["id"],
+                    )
+                else:
+                    await self.pg.execute(
+                        "DELETE FROM agent_knowledge WHERE id = $1", r["id"]
+                    )
+                return True
+        return False
+
+    # ─── ACTIVE WORKFLOW ──────────────────────────────────────────
+
+    async def save_active_workflow(self, agent_id: str, workflow_id: str) -> None:
+        await self.upsert(
+            agent_id, "workflow_state", "active",
+            {"active_workflow_id": workflow_id}, confidence=1.0,
+        )
+
+    async def load_active_workflow(self, agent_id: str) -> str | None:
+        row = await self.get(agent_id, "workflow_state", "active")
+        if not row:
+            return None
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        return value.get("active_workflow_id")
 
     # ─── HISTORY ──────────────────────────────────────────────────
 

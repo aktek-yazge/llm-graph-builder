@@ -8,6 +8,7 @@ import {
   type Plan,
   type PlanStep,
   type DeletedAgentInfo,
+  type WorkflowListItem,
   listAgents,
   createAgent as apiCreateAgent,
   deleteAgent as apiDeleteAgent,
@@ -34,6 +35,11 @@ import {
   removePlanStep as apiRemovePlanStep,
   clearPlan as apiClearPlan,
   respondPlanModeRequest as apiRespondPlanModeRequest,
+  listWorkflows as apiListWorkflows,
+  createWorkflowApi,
+  deleteWorkflowApi,
+  setActiveWorkflow as apiSetActiveWorkflow,
+  renameWorkflowApi,
 } from '../services/evolvingApi';
 import { useAgentSSE } from '../hooks/useAgentSSE';
 
@@ -69,9 +75,17 @@ interface AgentContextType {
 
   deletedAgents: DeletedAgentInfo[];
 
+  workflows: WorkflowListItem[];
+  activeWorkflowId: string | null;
+  loadWorkflows: (agentId?: string) => Promise<void>;
+  selectWorkflow: (workflowId: string) => Promise<void>;
+  createNewWorkflow: (name: string) => Promise<void>;
+  removeWorkflow: (workflowId: string) => Promise<void>;
+  renameWorkflow: (workflowId: string, name: string) => Promise<void>;
+
   loadAgents: () => Promise<void>;
   selectAgent: (agentId: string) => Promise<void>;
-  createAgent: (name: string, purpose: string) => Promise<AgentInfo>;
+  createAgent: (name: string, purpose: string, llmProvider?: string, llmModel?: string) => Promise<AgentInfo>;
   removeAgent: (agentId: string) => Promise<void>;
   restoreAgent: (agentId: string) => Promise<void>;
   purgeAgent: (agentId: string) => Promise<void>;
@@ -118,6 +132,24 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; path: string }>>([]);
   const [deletedAgents, setDeletedAgents] = useState<DeletedAgentInfo[]>([]);
+
+  const [workflows, setWorkflows] = useState<WorkflowListItem[]>([]);
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null);
+
+  const loadWorkflows = useCallback(
+    async (agentId?: string) => {
+      const id = agentId || activeAgent?.agent_id;
+      if (!id) return;
+      try {
+        const resp = await apiListWorkflows(id);
+        setWorkflows(resp.data.workflows || []);
+        setActiveWorkflowId(resp.data.active_workflow_id || (resp.data.workflows?.[0]?.workflow_id ?? null));
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
 
   const abortRef = useRef<AbortController | null>(null);
   const { notifications, connected: sseConnected } = useAgentSSE(activeAgent?.agent_id ?? null);
@@ -211,6 +243,16 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       }
     }
   }, [notifications, activeAgent, sessionId]);
+
+  useEffect(() => {
+    if (!activeAgent || notifications.length === 0) return;
+    const latest = notifications[0];
+    if (!latest) return;
+    const et = latest.event_type;
+    if (et === 'workflow_created' || et === 'workflow_deleted' || et === 'active_workflow_changed') {
+      loadWorkflows(activeAgent.agent_id);
+    }
+  }, [notifications, activeAgent, loadWorkflows]);
 
   useEffect(() => {
     handledInjectionsRef.current.clear();
@@ -320,13 +362,22 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       } catch {
         setMode('plan');
       }
+
+      try {
+        const wfResp = await apiListWorkflows(agentId);
+        setWorkflows(wfResp.data.workflows || []);
+        setActiveWorkflowId(wfResp.data.active_workflow_id || (wfResp.data.workflows?.[0]?.workflow_id ?? null));
+      } catch {
+        setWorkflows([]);
+        setActiveWorkflowId(null);
+      }
     },
     [agents]
   );
 
   const createAgent = useCallback(
-    async (name: string, purpose: string) => {
-      const resp = await apiCreateAgent(name, purpose);
+    async (name: string, purpose: string, llmProvider?: string, llmModel?: string) => {
+      const resp = await apiCreateAgent(name, purpose, llmProvider, llmModel);
       const agent = resp.data;
       setAgents((prev) => [agent, ...prev]);
       setActiveAgent(agent);
@@ -334,9 +385,68 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       setSessionId('');
       setOntology(null);
       setDiscoveries([]);
+      setWorkflows([]);
+      setActiveWorkflowId(null);
       return agent;
     },
     []
+  );
+
+  const selectWorkflow = useCallback(
+    async (workflowId: string) => {
+      const agentId = activeAgent?.agent_id;
+      if (!agentId) return;
+      try {
+        await apiSetActiveWorkflow(agentId, workflowId);
+        setActiveWorkflowId(workflowId);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
+  );
+
+  const createNewWorkflow = useCallback(
+    async (name: string) => {
+      const agentId = activeAgent?.agent_id;
+      if (!agentId) return;
+      try {
+        const resp = await createWorkflowApi(agentId, name);
+        setActiveWorkflowId(resp.data.workflow_id);
+        await loadWorkflows(agentId);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent, loadWorkflows]
+  );
+
+  const removeWorkflow = useCallback(
+    async (workflowId: string) => {
+      const agentId = activeAgent?.agent_id;
+      if (!agentId) return;
+      try {
+        await deleteWorkflowApi(agentId, workflowId);
+        await loadWorkflows(agentId);
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent, loadWorkflows]
+  );
+
+  const renameWorkflow = useCallback(
+    async (workflowId: string, name: string) => {
+      const agentId = activeAgent?.agent_id;
+      if (!agentId) return;
+      try {
+        await renameWorkflowApi(agentId, workflowId, name);
+        setWorkflows((prev) => prev.map((w) => (w.workflow_id === workflowId ? { ...w, name } : w)));
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeAgent]
   );
 
   const refreshDeletedAgents = useCallback(async () => {
@@ -748,6 +858,13 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     plan,
     todos,
     deletedAgents,
+    workflows,
+    activeWorkflowId,
+    loadWorkflows,
+    selectWorkflow,
+    createNewWorkflow,
+    removeWorkflow,
+    renameWorkflow,
     loadAgents,
     selectAgent,
     createAgent,
@@ -779,7 +896,8 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   }), [
     agents, activeAgent, ontology, discoveries, messages, sessionId, isStreaming,
     batchProgress, notifications, sseConnected, mode, plan, todos, deletedAgents,
-    uploadedFiles,
+    workflows, activeWorkflowId, uploadedFiles,
+    loadWorkflows, selectWorkflow, createNewWorkflow, removeWorkflow, renameWorkflow,
     loadAgents, selectAgent, createAgent, removeAgent, restoreAgent, purgeAgent,
     refreshDeletedAgents, sendMessage, editAndResend, rewindAndResend, uploadFilesFn,
     cancelStream, refreshOntology, refreshDiscoveries, approveDiscoveryFn,

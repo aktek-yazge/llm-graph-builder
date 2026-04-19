@@ -3,7 +3,6 @@
 Real tool call format test
 """
 
-import os
 import sys
 from pathlib import Path
 

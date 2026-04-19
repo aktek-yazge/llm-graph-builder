@@ -7,9 +7,8 @@ Provides embedding generation functionality for Cypher queries
 import logging
 import sys
 import os
-from typing import Tuple, Any
-from fastmcp import Client, Context, FastMCP
-from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
+from fastmcp import FastMCP
+from fastmcp.prompts.prompt import TextContent
 
 
 from fastmcp.tools.tool import ToolResult

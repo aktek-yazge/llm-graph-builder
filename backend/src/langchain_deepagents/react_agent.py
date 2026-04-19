@@ -50,8 +50,6 @@ import asyncio
 import json
 import logging
 import os
-import re
-import time
 from typing import AsyncGenerator, Dict, Any, Optional, List, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -85,18 +83,15 @@ print("=" * 60 + "\n")
 from src.shared.context import set_request_context, clear_request_context
 
 # Global Schema Cache import
-from src.shared.schema_cache import get_cached_schema, get_schema_cache, get_raw_schema
+from src.shared.schema_cache import get_cached_schema
 
 # Langfuse LLM Observability + Prompt Management + Sessions
 from src.shared.langfuse_client import (
     get_langfuse,
-    get_langfuse_callback_handler,
-    trace_llm_call,
     log_llm_usage,
     flush_langfuse,
     get_prompt,
-    create_prompt,
-    langfuse_session,  # Session grouping for all traces
+    create_prompt,  # Session grouping for all traces
 )
 
 # Query-level Semantic Cache
@@ -109,7 +104,6 @@ from src.config.domains import get_valid_domains, is_valid_domain, get_domain_co
 from src.shared.guardrails import (
     validate_cypher_query,
     validate_output,
-    validate_user_input,
     check_hallucination,
     GUARDRAILS_ENABLED,
     GUARDRAILS_HALLUCINATION_CHECK,
@@ -120,7 +114,6 @@ from src.shared.feedback import (
     get_few_shot_examples,
     get_corrections_for_fewshot,
     format_few_shot_prompt,
-    evaluate_cypher_queries,
     evaluate_from_blackboard,
     get_blackboard_dir,
     FEEDBACK_ENABLED,
@@ -789,7 +782,6 @@ except ImportError as e:
 if TYPE_CHECKING:
     from src.shared.redis_cache import (
         setup_semantic_cache,
-        is_cache_available,
         get_cache_stats as get_redis_cache_stats,
     )
 
@@ -1181,8 +1173,6 @@ LANGFUSE_PROMPT_LABEL = os.environ.get("LANGFUSE_PROMPT_LABEL", "production")
 
 from .prompts import (
     get_domain_prompts,
-    build_full_prompt,
-    # Backward compatibility - aynı isimlerle export edilir
     SHARED_SYSTEM_BASE,
     CYPHER_TOOL_USAGE,
     SHARED_CONTENT,
@@ -1858,7 +1848,6 @@ Lütfen sorguyu düzelt ve tekrar dene."""
         end_record: int = 0,
     ) -> str:
         """Sorgu sonuçlarının devamını oku. Pagination için start_record/end_record kullan."""
-        import re
         import glob as glob_module
 
         # Sıra numaralı dosya formatını destekle: NN_step_name_status.txt
@@ -2200,7 +2189,11 @@ class ReactAgent:
         return schema
 
     def _fetch_ontology_context(self) -> str:
-        """Agent Builder'dan ontoloji bilgisini cek (varsa)."""
+        """Agent Builder'dan ontoloji bilgisini cek (varsa).
+
+        Once GraphRAG endpoint'i dener (yayinlanmis workflow snapshot'i);
+        yoksa eski ontoloji endpoint'ine duser (geriye uyumlu).
+        """
         agent_builder_url = os.getenv("AGENT_BUILDER_URL", "")
         agent_id = os.getenv("AGENT_ID", "")
         if not agent_builder_url or not agent_id:
@@ -2209,39 +2202,54 @@ class ReactAgent:
         import httpx
         try:
             with httpx.Client(timeout=5.0) as client:
-                resp = client.get(f"{agent_builder_url}/api/v2/evolving/agents/{agent_id}/ontology")
+                gre_resp = client.get(
+                    f"{agent_builder_url}/api/v2/evolving/agents/{agent_id}/graphrag-endpoint"
+                )
+                if gre_resp.status_code == 200:
+                    gre = gre_resp.json()
+                    if gre.get("status") == "active" and gre.get("ontology_snapshot"):
+                        return self._format_ontology(gre["ontology_snapshot"])
+
+                resp = client.get(
+                    f"{agent_builder_url}/api/v2/evolving/agents/{agent_id}/ontology"
+                )
                 if resp.status_code != 200:
                     return ""
                 data = resp.json()
 
-            parts = ["\n## DOMAIN ONTOLOGY (from Agent Builder)\n"]
-            if data.get("domain"):
-                parts.append(f"Domain: {data['domain']}")
-            if data.get("goal"):
-                parts.append(f"Goal: {data['goal']}")
-
-            entities = data.get("entity_classes", [])
-            if entities:
-                parts.append("\n### Entity Types")
-                for e in entities:
-                    props = e.get("properties", [])
-                    prop_str = ", ".join(
-                        f"{p['name']}[{p.get('type','string')}]" for p in props
-                    ) if props else ""
-                    parts.append(f"- **{e['name']}**: {e.get('description','')} ({prop_str})")
-
-            rels = data.get("relationship_predicates", [])
-            if rels:
-                parts.append("\n### Relationship Types")
-                for r in rels:
-                    parts.append(f"- {r.get('source','')} -[{r['name']}]-> {r.get('target','')}")
-
-            _log(f"📋 Ontology loaded: {len(entities)} entities, {len(rels)} relationships")
-            return "\n".join(parts)
+            return self._format_ontology(data)
 
         except Exception as e:
             _log(f"⚠️ Agent Builder ontology fetch skipped: {e}", "warning")
             return ""
+
+    @staticmethod
+    def _format_ontology(data: dict) -> str:
+        """Ontoloji verisini prompt formatina cevir."""
+        parts = ["\n## DOMAIN ONTOLOGY (from Agent Builder)\n"]
+        if data.get("domain"):
+            parts.append(f"Domain: {data['domain']}")
+        if data.get("goal"):
+            parts.append(f"Goal: {data['goal']}")
+
+        entities = data.get("entity_classes", [])
+        if entities:
+            parts.append("\n### Entity Types")
+            for e in entities:
+                props = e.get("properties", [])
+                prop_str = ", ".join(
+                    f"{p['name']}[{p.get('type','string')}]" for p in props
+                ) if props else ""
+                parts.append(f"- **{e['name']}**: {e.get('description','')} ({prop_str})")
+
+        rels = data.get("relationship_predicates", [])
+        if rels:
+            parts.append("\n### Relationship Types")
+            for r in rels:
+                parts.append(f"- {r.get('source','')} -[{r['name']}]-> {r.get('target','')}")
+
+        _log(f"📋 Ontology loaded: {len(entities)} entities, {len(rels)} relationships")
+        return "\n".join(parts)
 
     def _get_neo4j_url(self) -> str:
         """Neo4j URL'ini al - sunucu başlangıcıyla aynı format kullan"""
@@ -3324,9 +3332,6 @@ class ReactAgent:
                                     cache_read = input_details.get("cache_read", 0)
                                     ephemeral_5m = input_details.get(
                                         "ephemeral_5m_input_tokens", 0
-                                    )
-                                    ephemeral_1h = input_details.get(
-                                        "ephemeral_1h_input_tokens", 0
                                     )
 
                                     # Cache durumu özeti

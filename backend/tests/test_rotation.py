@@ -3,7 +3,6 @@
 Log rotation test - büyük miktarda log üretip rotation'ı test eder
 """
 import sys
-import os
 
 # Backend src klasörünü path'e ekle
 sys.path.insert(0, 'src')

@@ -4,7 +4,6 @@ Test filter replacement behavior: "peki almanca?" should replace English require
 """
 
 import sys
-import os
 sys.path.append('/workspace/backend/src')
 
 from intelligent_agent import generate_agent_response, setup_logging

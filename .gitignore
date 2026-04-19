@@ -227,5 +227,9 @@ infisical/.env
 # MegaMemory knowledge graph
 .megamemory/
 
+# Zombie scanner reports
+.zombie-reports/
+tools/zombie-scanner/.venv/
+
 # Agent Builder frontend
 agent-builder/frontend/node_modules/

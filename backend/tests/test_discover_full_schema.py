@@ -5,7 +5,6 @@ MCP Neo4j tool ile gerçek veri testi
 """
 
 import sys
-import os
 sys.path.append('/workspace/backend')
 
 # Mock graph class for MCP testing

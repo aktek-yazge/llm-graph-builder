@@ -1,0 +1,7 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": ["src/main.tsx", "src/App.tsx", "vite.config.ts"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignore": ["src/vite-env.d.ts", "**/*.test.*", "**/*.spec.*"],
+  "ignoreDependencies": ["eslint-plugin-react-hooks", "eslint-plugin-react-refresh"]
+}

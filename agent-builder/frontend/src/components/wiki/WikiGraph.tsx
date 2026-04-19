@@ -71,14 +71,15 @@ export default function WikiGraph({ graph, onSelectPage }: Props) {
           width: w,
           height: h,
           background: '#fff',
-          border: `2px solid ${CATEGORY_COLORS[cat as keyof typeof CATEGORY_COLORS]}`,
-          borderRadius: 8,
+          border: `1px solid ${CATEGORY_COLORS[cat as keyof typeof CATEGORY_COLORS].dot}20`,
+          borderRadius: 10,
           padding: 6,
           fontSize,
           fontWeight: 500,
-          color: '#1f2937',
+          color: '#212529',
           textAlign: 'center' as const,
           cursor: 'pointer',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
         },
       };
     });
@@ -88,7 +89,7 @@ export default function WikiGraph({ graph, onSelectPage }: Props) {
       source: ge.source,
       target: ge.target,
       animated: false,
-      style: { stroke: '#cbd5e1', strokeWidth: 1.5 },
+      style: { stroke: '#e9ecef', strokeWidth: 1 },
     }));
 
     return { initialNodes: layoutGraph(nodes, edges), initialEdges: edges };
@@ -121,16 +122,16 @@ export default function WikiGraph({ graph, onSelectPage }: Props) {
         maxZoom={2}
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={20} size={1} />
-        <Controls showInteractive={false} />
+        <Background gap={20} size={1} color="#e9ecef" variant={'dots' as any} />
+        <Controls showInteractive={false} style={{ border: '1px solid #e9ecef', borderRadius: '8px', overflow: 'hidden' }} />
         <MiniMap
-          nodeStrokeWidth={3}
+          nodeStrokeWidth={1}
           pannable
           zoomable
-          style={{ height: 100, width: 150 }}
+          style={{ height: 80, width: 120, border: '1px solid #e9ecef', borderRadius: '8px' }}
           nodeColor={(n) => {
             const cat = (n.data as { category?: WikiCategory }).category;
-            return cat ? CATEGORY_COLORS[cat] : '#cbd5e1';
+            return cat ? CATEGORY_COLORS[cat].dot : '#dee2e6';
           }}
         />
       </ReactFlow>

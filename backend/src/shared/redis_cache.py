@@ -19,7 +19,7 @@ Kullanım:
 import os
 import json
 import logging
-from typing import Optional, Sequence, List, Any, Union
+from typing import Optional, Sequence, Any
 from dotenv import load_dotenv
 
 # .env dosyasını yükle

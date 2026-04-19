@@ -8,8 +8,6 @@ from dotenv import load_dotenv
 from score import *
 from src.main import *
 from src.QA_integration import QA_RAG
-from langserve import add_routes
-from graphdatascience import GraphDataScience
 from src.entities.source_node import sourceNode
 
 # Load environment variables if needed

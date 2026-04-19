@@ -12,7 +12,6 @@ import os
 import re
 import unicodedata
 from typing import Any, LiteralString, Optional, cast
-from urllib.parse import parse_qs, urlparse
 
 from fastmcp.server import FastMCP
 from mcp.types import ToolAnnotations

@@ -9,13 +9,13 @@ export const CATEGORY_LABELS: Record<WikiCategory, string> = {
   general: 'General',
 };
 
-export const CATEGORY_COLORS: Record<WikiCategory, string> = {
-  entities: '#6366f1',
-  relationships: '#ec4899',
-  patterns: '#22c55e',
-  analysis: '#f97316',
-  sources: '#0ea5e9',
-  general: '#64748b',
+export const CATEGORY_COLORS: Record<WikiCategory, { bg: string; text: string; dot: string }> = {
+  entities: { bg: '#eef0ff', text: '#3b3f8c', dot: '#6366f1' },
+  relationships: { bg: '#fff0f6', text: '#9c3060', dot: '#e64980' },
+  patterns: { bg: '#eefbf0', text: '#2b7a3c', dot: '#40c057' },
+  analysis: { bg: '#fff4e6', text: '#b45309', dot: '#fd7e14' },
+  sources: { bg: '#e7f5ff', text: '#1971c2', dot: '#339af0' },
+  general: { bg: '#f1f3f5', text: '#495057', dot: '#868e96' },
 };
 
 export const CATEGORY_ORDER: WikiCategory[] = [

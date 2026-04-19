@@ -20,14 +20,12 @@ import os
 import sys
 import json
 import logging
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Any
 from datetime import datetime
 import neo4j
-from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import openai
 from openai import OpenAI
 
 # Load environment variables

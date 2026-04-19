@@ -1,10 +1,8 @@
 import logging
 import os
 import time
-import re
-import difflib
 from typing import Optional
-from neo4j.exceptions import TransientError, ServiceUnavailable, SessionExpired
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 from langchain_neo4j import Neo4jGraph
 from src.shared.common_fn import (
     delete_uploaded_local_file,
@@ -12,7 +10,7 @@ from src.shared.common_fn import (
 )
 from src.entities.source_node import sourceNode
 from src.utf8_utils import normalize_unicode_text, normalize_file_name
-from src.utils.log_helpers import log_delete, log_processing
+from src.utils.log_helpers import log_delete
 
 # Entity resolution pre-processing KALDIRILDI - post-processing LLM ile yapılıyor
 # from src.entity_resolver import resolve_entity_before_creation
@@ -24,7 +22,7 @@ from functools import wraps
 from prompts import load_prompt, get_domain
 
 # Generic graph executor for dynamic graph creation
-from src.generic_graph_executor import GenericGraphExecutor, create_graph_from_llm_output
+from src.generic_graph_executor import GenericGraphExecutor
 
 load_dotenv()
 
@@ -2840,7 +2838,6 @@ Yanıt formatı (sadece JSON, başka açıklama ekleme):
 
                         # Control character'ları temizle (JSON'da geçersiz: \x00-\x1F arası, \x7F hariç \n, \t, \r)
                         import re
-                        import string
 
                         # JSON'da geçerli control character'lar: \n (0x0A), \t (0x09), \r (0x0D)
                         # Diğer control character'ları (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F) temizle
@@ -4582,7 +4579,6 @@ KRİTİK:
                 logging.info(f"✅ Ana poliçe eşleştirmesi başarılı: {file_name}")
 
                 # Kronolojik zinciri kur (FIRST_ENDORSEMENT/NEXT_ENDORSEMENT) - bulunan policy bilgilerini kullan
-                found_policy_number = match_result.get("policy_number", "")
                 found_policy_id = match_result.get("policy_id", "")
 
                 if found_policy_id and isinstance(found_policy_id, str):

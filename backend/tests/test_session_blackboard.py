@@ -8,8 +8,6 @@ import os
 import sys
 import pytest
 import uuid
-from datetime import datetime
-from typing import List
 
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

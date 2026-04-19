@@ -8,7 +8,6 @@ import sys
 import os
 import json
 import logging
-from typing import Dict, Any
 
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "backend"))

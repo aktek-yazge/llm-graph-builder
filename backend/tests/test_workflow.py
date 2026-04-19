@@ -3,7 +3,6 @@
 LLM-driven vector search workflow'unu test eder
 """
 
-import os
 import sys
 import logging
 from pathlib import Path
@@ -12,7 +11,7 @@ from pathlib import Path
 backend_path = Path(__file__).parent / "backend"
 sys.path.insert(0, str(backend_path))
 
-from src.llm import get_llm, is_reasoning_model
+from src.llm import is_reasoning_model
 from src.intelligent_agent import IntelligentAgent
 
 # Logging setup

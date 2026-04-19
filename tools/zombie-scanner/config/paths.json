@@ -1,0 +1,25 @@
+{
+  "python_packages": [
+    {"name": "backend", "path": "backend", "src": "backend/src"},
+    {"name": "agent-builder-backend", "path": "agent-builder/backend", "src": "agent-builder/backend/src"},
+    {"name": "celery-worker", "path": "celery_worker", "src": "celery_worker/src"},
+    {"name": "code-agent-builder", "path": "code-agent-builder", "src": "code-agent-builder"},
+    {"name": "mcp-services", "path": "mcp-services", "src": "mcp-services"},
+    {"name": "mcp-neo4j-cypher", "path": "mcp-servers/mcp-neo4j-cypher", "src": "mcp-servers/mcp-neo4j-cypher"}
+  ],
+  "frontend_packages": [
+    {"name": "frontend", "path": "frontend", "src": "frontend/src"},
+    {"name": "agent-builder-frontend", "path": "agent-builder/frontend", "src": "agent-builder/frontend/src"}
+  ],
+  "global_excludes": [
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".git",
+    ".eggs",
+    "*.egg-info"
+  ]
+}

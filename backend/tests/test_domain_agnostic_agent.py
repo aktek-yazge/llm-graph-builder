@@ -6,9 +6,7 @@ Yeni domain-agnostic yaklaşımı test eder
 
 import sys
 import os
-import asyncio
 import logging
-from typing import Dict, Any
 
 # Path ayarla
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "backend"))

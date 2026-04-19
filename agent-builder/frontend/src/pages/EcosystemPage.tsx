@@ -110,7 +110,7 @@ export default function EcosystemPage() {
           icon={<ArrowBackIcon />}
           size="sm"
           variant="ghost"
-          onClick={() => navigate('/evolving')}
+          onClick={() => navigate('/agents')}
         />
         <Text fontSize="md" fontWeight="bold">
           {eco?.agent.name || agentId}

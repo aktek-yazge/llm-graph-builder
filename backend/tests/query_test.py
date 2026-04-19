@@ -6,7 +6,6 @@ OpenAI embedding kullanarak spesifik sorgu testi
 import os
 import openai
 from neo4j import GraphDatabase
-import numpy as np
 from dotenv import load_dotenv
 
 # Load environment variables

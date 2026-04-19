@@ -8,7 +8,7 @@ tekil olarak çıkarır ve detaylı şema bilgisi sağlar.
 import os
 import sys
 import json
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 from langchain_neo4j import Neo4jGraph
 from dotenv import load_dotenv
 

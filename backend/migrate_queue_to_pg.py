@@ -1,4 +1,3 @@
-import sys
 import os
 from pathlib import Path
 # Add project root (two levels up) to PYTHONPATH so that 'src' package is importable

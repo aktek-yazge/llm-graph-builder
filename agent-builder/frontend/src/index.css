@@ -4,4 +4,83 @@
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #212529;
+}
+
+::selection {
+  background: #dbe4ff;
+  color: #212529;
+}
+
+/* assistant-ui Thread: remove max-width constraints, fill available space */
+.aui-root,
+.aui-thread-root {
+  height: 100% !important;
+  max-height: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.aui-thread-viewport {
+  max-width: 100% !important;
+  padding-left: 1rem !important;
+  padding-right: 1rem !important;
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+}
+
+.aui-thread-viewport > * {
+  max-width: 100% !important;
+}
+
+.aui-composer-root {
+  max-width: 100% !important;
+  flex-shrink: 0 !important;
+}
+
+/* ── Assistant message styling ── */
+.aui-assistant-message {
+  line-height: 1.6;
+}
+
+.aui-assistant-message-content {
+  max-width: 100% !important;
+  width: 100%;
+}
+
+/* React Flow overrides for minimal style */
+.react-flow__controls-button {
+  background: white !important;
+  border: none !important;
+  border-bottom: 1px solid #f1f3f5 !important;
+}
+
+.react-flow__controls-button:hover {
+  background: #f8f9fa !important;
+}
+
+.react-flow__controls-button svg {
+  fill: #868e96 !important;
+}
+
+/* Smooth scrollbar for webkit */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #dee2e6;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #adb5bd;
 }

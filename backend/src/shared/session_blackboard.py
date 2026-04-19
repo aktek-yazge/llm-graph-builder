@@ -27,18 +27,15 @@ Environment Variables:
     SESSION_BLACKBOARD_TTL_HOURS: Hours to keep data (default: 24)
 """
 
-import json
 import logging
 import os
-import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import psycopg2
-from psycopg2 import pool, sql
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor, Json
 
 logger = logging.getLogger(__name__)

@@ -8,8 +8,6 @@ from typing import List
 import os
 import hashlib
 import time
-import re
-from datetime import datetime
 from langchain_neo4j import Neo4jVector
 import asyncio
 
@@ -746,17 +744,6 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
         
         firstChunk = (i == 0)
         
-        # Detaylı chunk loglama
-        content_preview = content[:100] + "..." if len(content) > 100 else content
-        
-        # Aynı content'in farklı yerlerde olup olmadığını kontrol et (bilgi amaçlı)
-        similar_content_count = sum(1 for item in lst_chunks_including_hash 
-                                   if item['chunk_doc'].page_content.strip() == content)
-        # Verbose similar content logging disabled
-        # if similar_content_count > 0:
-        #     logging.info(f"   � INFO: Similar content found in {similar_content_count} previous chunk(s) - this is normal for headers/footers")
-        # logging.info(f"   📝 Content preview: '{content_preview}'")
-        
         # Verbose relationship logging disabled
         # if i > 0:
         #     logging.info(f"🔗 RELATIONSHIP: Chunk #{position-1} (ID={previous_chunk_id[:8] if previous_chunk_id else 'None'}...) -> Chunk #{position} (ID={current_chunk_id[:8]}...)")
@@ -927,29 +914,8 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
                 """
             await asyncio.to_thread(execute_graph_query, graph, query_to_create_FIRST_relation, {"f_name": file_name, "relationships": first_relationships})
         
-        # Debug: FIRST_CHUNK ilişkilerini kontrol et
-        first_check_query = "MATCH (d:Document {fileName: $file_name})-[:FIRST_CHUNK]->(c:Chunk) RETURN count(*) as first_count"
-        first_check_result = await asyncio.to_thread(execute_graph_query, graph, first_check_query, {"file_name": file_name})
-        # logging.info(f"🔍 DEBUG - FIRST_CHUNK relationships after creation: {first_check_result[0]['first_count'] if first_check_result else 0}")
-        
         # NEXT_CHUNK ilişkilerini position bazlı oluştur (daha güvenli)
         # logging.info(f"🔄 Creating NEXT_CHUNK relationships using position-based approach")
-        
-        # Önce mevcut chunk'ların position'larını kontrol et
-        position_check_query = """
-            MATCH (c:Chunk {fileName: $file_name})
-            RETURN c.position as position, c.id as chunk_id
-            ORDER BY c.position
-        """
-        existing_positions = await asyncio.to_thread(execute_graph_query, graph, position_check_query, {"file_name": file_name})
-        
-        # Verbose position logging disabled
-        # if existing_positions:
-        #     logging.info(f"📊 EXISTING CHUNKS: Found {len(existing_positions)} chunks with positions:")
-        #     for i, pos_data in enumerate(existing_positions[:10]):  # İlk 10'unu logla
-        #         logging.info(f"   Position {pos_data['position']}: ID={pos_data['chunk_id'][:8]}...")
-        #     if len(existing_positions) > 10:
-        #         logging.info(f"   ... ve {len(existing_positions) - 10} chunk daha")
         
         # Optimized query with CALL IN TRANSACTIONS: 
         # - Her 50 satırda auto-commit yapılır
@@ -967,8 +933,7 @@ async def create_chunks_for_upload(graph, chunks, file_name, page_images=None, g
             } IN TRANSACTIONS OF 50 ROWS
             RETURN count(*) as created_count
         """
-        next_result = await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
-        # logging.info(f"✅ Created {next_result[0]['created_count'] if next_result else 0} NEXT_CHUNK relationships using CALL IN TRANSACTIONS")
+        await asyncio.to_thread(execute_graph_query, graph, query_to_create_NEXT_relation, {"file_name": file_name})
         
     except Exception as relationship_error:
         # İlişki oluşturma hatası - rollback yap

@@ -49,6 +49,11 @@ class AgentRegistry:
         from .notification_manager import NotificationManager
         self.notifications = NotificationManager(pg=pg)
 
+    @property
+    def knowledge(self):
+        from .knowledge_store import KnowledgeStore
+        return KnowledgeStore(self._pg)
+
     async def get_or_create(self, agent_id: str) -> Any:
         """Return a cached agent or create a new one. Refuses soft-deleted agents."""
         if agent_id in self._agents:
@@ -203,14 +208,24 @@ class AgentRegistry:
 
     async def _create_agent(self, agent_id: str, mcp_client) -> Any:
         from .self_evolving_agent import SelfEvolvingAgent
+        from .knowledge_store import KnowledgeStore
 
-        agent = SelfEvolvingAgent(
+        ks = KnowledgeStore(self._pg)
+        identity = await ks.load_identity(agent_id)
+
+        kwargs: dict = dict(
             agent_id=agent_id,
             pg=self._pg,
             celery_app=self._celery_app,
             mcp_client=mcp_client,
             notification_mgr=self.notifications,
         )
+        if identity.get("llm_provider"):
+            kwargs["llm_provider"] = identity["llm_provider"]
+        if identity.get("llm_model"):
+            kwargs["llm_model"] = identity["llm_model"]
+
+        agent = SelfEvolvingAgent(**kwargs)
         await agent.ensure_ready()
         return agent
 

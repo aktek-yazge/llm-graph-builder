@@ -18,7 +18,7 @@ import logging
 import os
 import re
 import urllib.parse
-from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING, Sequence, Callable
+from typing import AsyncGenerator, Dict, Any, Optional, List, Set, TYPE_CHECKING
 from datetime import datetime
 
 # Global Schema Cache import
@@ -2180,7 +2180,6 @@ Bulgularını kaydetmek için write_finding tool'unu kullan:
                     
                     # Agent son yanıtı
                     elif kind == "on_chain_end":
-                        event_name = event.get("name", "")
                         output = event.get("data", {}).get("output", {})
                         
                         if isinstance(output, dict) and "messages" in output:

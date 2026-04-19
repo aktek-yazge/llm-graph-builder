@@ -9,7 +9,6 @@ import {
   IconButton,
   VStack,
   Tooltip,
-  useColorMode,
   Collapse,
   Badge,
   Modal,
@@ -22,16 +21,20 @@ import {
   FormControl,
   FormLabel,
   Textarea,
+  Select,
   useDisclosure,
 } from '@chakra-ui/react';
-import {
-  AddIcon,
-  DeleteIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  RepeatIcon,
-} from '@chakra-ui/icons';
+import { Plus, Trash2, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
 import { useAgentContext } from '../context/AgentContext';
+
+const AVAILABLE_MODELS = [
+  { provider: 'openai', model: 'gpt-5.4', label: 'GPT-5.4' },
+  { provider: 'openai', model: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+  { provider: 'anthropic', model: 'claude-sonnet-4-6-20250414', label: 'Claude Sonnet 4.6' },
+  { provider: 'anthropic', model: 'claude-opus-4-7-20250414', label: 'Claude Opus 4.7' },
+  { provider: 'google', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+  { provider: 'google', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+];
 
 function formatDeletedAt(iso: string | null): string {
   if (!iso) return '';
@@ -64,14 +67,14 @@ export default function EvolvingAgentSidebar() {
   } = useDisclosure();
   const [newName, setNewName] = useState('');
   const [newPurpose, setNewPurpose] = useState('');
+  const [newModel, setNewModel] = useState('');
   const [creating, setCreating] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
-  const { colorMode } = useColorMode();
-  const isDark = colorMode === 'dark';
 
   const resetCreateForm = () => {
     setNewName('');
     setNewPurpose('');
+    setNewModel('');
     setCreating(false);
   };
 
@@ -88,14 +91,14 @@ export default function EvolvingAgentSidebar() {
 
   const handleSelect = async (agentId: string) => {
     await selectAgent(agentId);
-    navigate(`/evolving/${agentId}`, { replace: true });
+    navigate(`/agents/${agentId}`, { replace: true });
   };
 
   const handleSoftDelete = async (e: React.MouseEvent, agentId: string) => {
     e.stopPropagation();
     if (
       window.confirm(
-        'Agent çöp kutusuna taşınacak. Tüm veriler korunur ve istediğin zaman geri yükleyebilirsin. Devam edilsin mi?'
+        'Agent cop kutusuna tasinacak. Tum veriler korunur ve istedigin zaman geri yukleyebilirsin. Devam edilsin mi?'
       )
     ) {
       await removeAgent(agentId);
@@ -112,7 +115,7 @@ export default function EvolvingAgentSidebar() {
     e.stopPropagation();
     if (
       window.confirm(
-        `"${name}" agent'ı KALICI olarak silinecek. Tüm dosyalar, OCR sonuçları, ontoloji ve wiki verileri geri getirilemez şekilde yok edilecek.\n\nDevam etmek istediğine emin misin?`
+        `"${name}" agent'i KALICI olarak silinecek. Tum dosyalar, OCR sonuclari, ontoloji ve wiki verileri geri getirilemez sekilde yok edilecek.\n\nDevam etmek istedigine emin misin?`
       )
     ) {
       await purgeAgent(agentId);
@@ -123,13 +126,21 @@ export default function EvolvingAgentSidebar() {
     if (!newName.trim() || creating) return;
     setCreating(true);
     try {
-      const agent = await createAgent(newName.trim(), newPurpose.trim());
+      const selected = AVAILABLE_MODELS.find(
+        (m) => `${m.provider}/${m.model}` === newModel,
+      );
+      const agent = await createAgent(
+        newName.trim(),
+        newPurpose.trim(),
+        selected?.provider,
+        selected?.model,
+      );
       resetCreateForm();
       closeCreate();
-      navigate(`/evolving/${agent.agent_id}`, { replace: true });
-    } catch (err) {
+      navigate(`/agents/${agent.agent_id}`, { replace: true });
+    } catch {
       setCreating(false);
-      window.alert('Agent oluşturulamadı. Lütfen tekrar deneyin.');
+      window.alert('Agent olusturulamadi. Lutfen tekrar deneyin.');
     }
   };
 
@@ -137,28 +148,28 @@ export default function EvolvingAgentSidebar() {
     <Flex
       direction="column"
       h="full"
-      w="64"
+      w="220px"
       flexShrink={0}
       borderRight="1px"
-      borderColor={isDark ? 'gray.700' : 'gray.200'}
-      bg={isDark ? 'gray.800' : 'white'}
+      borderColor="border.subtle"
+      bg="surface.primary"
     >
-      {/* Header */}
       <Flex
         align="center"
         justify="space-between"
-        p={4}
+        px={4}
+        py={3}
         borderBottom="1px"
-        borderColor={isDark ? 'gray.700' : 'gray.200'}
+        borderColor="border.subtle"
       >
-        <Text fontWeight="semibold" fontSize="md">
+        <Text fontWeight="600" fontSize="body" color="text.primary">
           Agent'lar
         </Text>
-        <Tooltip label="Yeni agent oluştur" hasArrow>
+        <Tooltip label="Yeni agent olustur" hasArrow>
           <IconButton
             aria-label="Yeni agent"
-            icon={<AddIcon />}
-            size="sm"
+            icon={<Plus size={14} strokeWidth={2} />}
+            size="xs"
             variant="ghost"
             onClick={() => {
               resetCreateForm();
@@ -168,63 +179,77 @@ export default function EvolvingAgentSidebar() {
         </Tooltip>
       </Flex>
 
-      {/* Agent list */}
       <Box flex={1} overflowY="auto">
         {agents.length === 0 && (
-          <Box p={4} textAlign="center" color="gray.500">
-            <Text fontSize="sm">Henuz agent yok. Yeni bir agent olusturun.</Text>
+          <Box p={4} textAlign="center">
+            <Text fontSize="caption" color="text.tertiary">
+              Henuz agent yok.
+            </Text>
           </Box>
         )}
-        {agents.map((agent) => (
-          <Flex
-            key={agent.agent_id}
-            align="center"
-            justify="space-between"
-            px={4}
-            py={3}
-            cursor="pointer"
-            _hover={{ bg: isDark ? 'gray.700' : 'gray.100' }}
-            bg={
-              activeAgent?.agent_id === agent.agent_id
-                ? isDark
-                  ? 'blue.900'
-                  : 'blue.50'
-                : 'transparent'
-            }
-            borderLeft={activeAgent?.agent_id === agent.agent_id ? '2px solid' : '2px solid transparent'}
-            borderColor={activeAgent?.agent_id === agent.agent_id ? 'blue.500' : 'transparent'}
-            onClick={() => handleSelect(agent.agent_id)}
-          >
-            <Box minW={0} flex={1}>
-              <Text fontSize="sm" fontWeight="medium" isTruncated>
-                {agent.name}
-              </Text>
-              <Text fontSize="xs" color="gray.500" isTruncated>
-                {agent.is_empty
-                  ? 'Ontoloji bos'
-                  : `${agent.entity_count} entity, ${agent.relationship_count} rel`}
-              </Text>
-            </Box>
-            <Tooltip label="Çöpe taşı (geri alınabilir)" hasArrow placement="left">
+        {agents.map((agent) => {
+          const isActive = activeAgent?.agent_id === agent.agent_id;
+          return (
+            <Flex
+              key={agent.agent_id}
+              align="center"
+              justify="space-between"
+              px={3}
+              py={2.5}
+              mx={1.5}
+              my={0.5}
+              cursor="pointer"
+              borderRadius="8px"
+              bg={isActive ? 'surface.tertiary' : 'transparent'}
+              _hover={{ bg: isActive ? 'surface.tertiary' : 'surface.secondary' }}
+              transition="background 0.12s"
+              onClick={() => handleSelect(agent.agent_id)}
+              position="relative"
+            >
+              {isActive && (
+                <Box
+                  position="absolute"
+                  left="0"
+                  top="8px"
+                  bottom="8px"
+                  w="2px"
+                  borderRadius="full"
+                  bg="brand.500"
+                />
+              )}
+              <Box minW={0} flex={1}>
+                <Text
+                  fontSize="13px"
+                  fontWeight={isActive ? '600' : '400'}
+                  color={isActive ? 'text.primary' : 'text.secondary'}
+                  noOfLines={1}
+                >
+                  {agent.name}
+                </Text>
+                <Text fontSize="11px" color="text.tertiary" noOfLines={1}>
+                  {agent.is_empty
+                    ? 'Ontoloji bos'
+                    : `${agent.entity_count} entity, ${agent.relationship_count} rel`}
+                </Text>
+              </Box>
               <IconButton
-                aria-label="Çöpe taşı"
-                icon={<DeleteIcon />}
+                aria-label="Cope tasi"
+                icon={<Trash2 size={12} strokeWidth={1.5} />}
                 size="xs"
                 variant="ghost"
-                color="gray.400"
-                _hover={{ color: 'orange.500' }}
+                color="text.quaternary"
+                _hover={{ color: 'status.failed' }}
                 onClick={(e) => handleSoftDelete(e as React.MouseEvent, agent.agent_id)}
+                opacity={0}
+                _groupHover={{ opacity: 1 }}
+                sx={{ '.chakra-flex:hover &': { opacity: 1 } }}
+                transition="opacity 0.12s"
               />
-            </Tooltip>
-          </Flex>
-        ))}
+            </Flex>
+          );
+        })}
 
-        {/* Trash bin */}
-        <Box
-          mt={2}
-          borderTop="1px"
-          borderColor={isDark ? 'gray.700' : 'gray.200'}
-        >
+        <Box mt={1} borderTop="1px" borderColor="border.subtle">
           <Flex
             align="center"
             justify="space-between"
@@ -235,22 +260,31 @@ export default function EvolvingAgentSidebar() {
               setTrashOpen((v) => !v);
               if (!trashOpen) refreshDeletedAgents();
             }}
-            _hover={{ bg: isDark ? 'gray.700' : 'gray.100' }}
+            _hover={{ bg: 'surface.secondary' }}
+            transition="background 0.12s"
           >
-            <Flex align="center" gap={2}>
-              {trashOpen ? <ChevronDownIcon /> : <ChevronRightIcon />}
-              <Text fontSize="xs" fontWeight="semibold" color={isDark ? 'gray.300' : 'gray.600'}>
-                Çöp Kutusu
+            <Flex align="center" gap={1.5}>
+              {trashOpen
+                ? <ChevronDown size={12} strokeWidth={1.5} />
+                : <ChevronRight size={12} strokeWidth={1.5} />}
+              <Text fontSize="caption" fontWeight="500" color="text.tertiary">
+                Cop Kutusu
               </Text>
               {deletedAgents.length > 0 && (
-                <Badge colorScheme="orange" variant="subtle" fontSize="2xs">
+                <Badge
+                  bg="surface.tertiary"
+                  color="text.tertiary"
+                  fontSize="micro"
+                  borderRadius="full"
+                  px={1.5}
+                >
                   {deletedAgents.length}
                 </Badge>
               )}
             </Flex>
             <IconButton
               aria-label="Yenile"
-              icon={<RepeatIcon />}
+              icon={<RotateCcw size={11} strokeWidth={1.5} />}
               size="xs"
               variant="ghost"
               onClick={(e) => {
@@ -263,10 +297,8 @@ export default function EvolvingAgentSidebar() {
           <Collapse in={trashOpen} animateOpacity>
             <Box pb={2}>
               {deletedAgents.length === 0 ? (
-                <Box px={4} py={3}>
-                  <Text fontSize="xs" color="gray.500">
-                    Çöp boş.
-                  </Text>
+                <Box px={4} py={2}>
+                  <Text fontSize="caption" color="text.quaternary">Cop bos.</Text>
                 </Box>
               ) : (
                 deletedAgents.map((agent) => (
@@ -275,35 +307,35 @@ export default function EvolvingAgentSidebar() {
                     align="center"
                     justify="space-between"
                     px={4}
-                    py={2}
-                    _hover={{ bg: isDark ? 'gray.700' : 'gray.50' }}
+                    py={1.5}
+                    _hover={{ bg: 'surface.secondary' }}
                   >
                     <Box minW={0} flex={1}>
-                      <Text fontSize="sm" fontWeight="medium" isTruncated color={isDark ? 'gray.300' : 'gray.700'}>
+                      <Text fontSize="caption" color="text.secondary" noOfLines={1}>
                         {agent.name}
                       </Text>
-                      <Text fontSize="2xs" color="gray.500" isTruncated>
+                      <Text fontSize="micro" color="text.quaternary" noOfLines={1}>
                         {formatDeletedAt(agent.deleted_at)}
                       </Text>
                     </Box>
-                    <Flex gap={1}>
-                      <Tooltip label="Geri yükle" hasArrow>
+                    <Flex gap={0.5}>
+                      <Tooltip label="Geri yukle" hasArrow>
                         <IconButton
-                          aria-label="Geri yükle"
-                          icon={<RepeatIcon />}
+                          aria-label="Geri yukle"
+                          icon={<RotateCcw size={11} strokeWidth={1.5} />}
                           size="xs"
                           variant="ghost"
-                          color="green.500"
+                          color="status.completed"
                           onClick={(e) => handleRestore(e as React.MouseEvent, agent.agent_id)}
                         />
                       </Tooltip>
-                      <Tooltip label="Kalıcı sil" hasArrow>
+                      <Tooltip label="Kalici sil" hasArrow>
                         <IconButton
-                          aria-label="Kalıcı sil"
-                          icon={<DeleteIcon />}
+                          aria-label="Kalici sil"
+                          icon={<Trash2 size={11} strokeWidth={1.5} />}
                           size="xs"
                           variant="ghost"
-                          color="red.500"
+                          color="status.failed"
                           onClick={(e) =>
                             handlePurge(e as React.MouseEvent, agent.agent_id, agent.name)
                           }
@@ -318,7 +350,6 @@ export default function EvolvingAgentSidebar() {
         </Box>
       </Box>
 
-      {/* Create agent modal */}
       <Modal
         isOpen={isCreateOpen}
         onClose={handleCloseCreate}
@@ -326,17 +357,18 @@ export default function EvolvingAgentSidebar() {
         size="md"
         closeOnOverlayClick={!creating}
       >
-        <ModalOverlay backdropFilter="blur(2px)" />
-        <ModalContent bg={isDark ? 'gray.800' : 'white'}>
-          <ModalHeader fontSize="md">Yeni Agent Oluştur</ModalHeader>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader fontSize="subtitle" fontWeight="600">Yeni Agent Olustur</ModalHeader>
           <ModalCloseButton isDisabled={creating} />
           <ModalBody pb={4}>
             <VStack spacing={4} align="stretch">
               <FormControl isRequired>
-                <FormLabel fontSize="sm">Ad</FormLabel>
+                <FormLabel fontSize="caption" fontWeight="500" color="text.secondary">Ad</FormLabel>
                 <Input
                   size="sm"
-                  placeholder="örn: Sigorta Agent"
+                  variant="filled"
+                  placeholder="orn: Sigorta Agent"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   autoFocus
@@ -349,39 +381,54 @@ export default function EvolvingAgentSidebar() {
                 />
               </FormControl>
               <FormControl>
-                <FormLabel fontSize="sm">Amaç (opsiyonel)</FormLabel>
+                <FormLabel fontSize="caption" fontWeight="500" color="text.secondary">Amac (opsiyonel)</FormLabel>
                 <Textarea
                   size="sm"
-                  placeholder="örn: Poliçe belgelerini işle, müşteri risk profili çıkar"
+                  variant="filled"
+                  placeholder="orn: Police belgelerini isle, musteri risk profili cikar"
                   value={newPurpose}
                   onChange={(e) => setNewPurpose(e.target.value)}
                   rows={3}
                   resize="vertical"
+                  borderRadius="8px"
                 />
-                <Text fontSize="xs" color="gray.500" mt={1}>
-                  Agent'ın domain'i ve ilk hedefi. Sonradan değiştirilebilir.
+                <Text fontSize="micro" color="text.quaternary" mt={1}>
+                  Agent'in domain'i ve ilk hedefi. Sonradan degistirilebilir.
+                </Text>
+              </FormControl>
+              <FormControl>
+                <FormLabel fontSize="caption" fontWeight="500" color="text.secondary">LLM Model</FormLabel>
+                <Select
+                  size="sm"
+                  variant="filled"
+                  value={newModel}
+                  onChange={(e) => setNewModel(e.target.value)}
+                  borderRadius="8px"
+                >
+                  <option value="">Sistem Varsayilani</option>
+                  {AVAILABLE_MODELS.map((m) => (
+                    <option key={`${m.provider}/${m.model}`} value={`${m.provider}/${m.model}`}>
+                      {m.label} ({m.provider})
+                    </option>
+                  ))}
+                </Select>
+                <Text fontSize="micro" color="text.quaternary" mt={1}>
+                  Bos birakilirsa sistem varsayilani kullanilir. Sonradan degistirilebilir.
                 </Text>
               </FormControl>
             </VStack>
           </ModalBody>
           <ModalFooter gap={2}>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleCloseCreate}
-              isDisabled={creating}
-            >
-              İptal
+            <Button variant="ghost" onClick={handleCloseCreate} isDisabled={creating}>
+              Iptal
             </Button>
             <Button
-              size="sm"
-              colorScheme="blue"
               onClick={handleCreate}
               isLoading={creating}
-              loadingText="Oluşturuluyor"
+              loadingText="Olusturuluyor"
               isDisabled={!newName.trim()}
             >
-              Oluştur
+              Olustur
             </Button>
           </ModalFooter>
         </ModalContent>

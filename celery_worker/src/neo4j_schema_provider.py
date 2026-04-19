@@ -12,7 +12,7 @@ Bu sayede Opus 4.5 mevcut yapıya uygun entity ve relationship üretir.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from langchain_neo4j import Neo4jGraph
 

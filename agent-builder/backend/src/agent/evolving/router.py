@@ -30,7 +30,6 @@ from pathlib import Path as FsPath
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Path, UploadFile, File, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -46,6 +45,8 @@ class CreateAgentRequest(BaseModel):
     name: str = "Yeni Agent"
     purpose: str = ""
     tenant_id: str = "default"
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 class AgentInfo(BaseModel):
@@ -57,6 +58,8 @@ class AgentInfo(BaseModel):
     entity_count: int = 0
     relationship_count: int = 0
     is_empty: bool = True
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -156,10 +159,16 @@ async def create_agent(request: Request, body: CreateAgentRequest):
     from .knowledge_store import KnowledgeStore
     store = KnowledgeStore(registry._pg)
     await store.ensure_table()
-    await store.save_identity(agent_id, name=body.name, purpose=body.purpose)
+    await store.save_identity(
+        agent_id, name=body.name, purpose=body.purpose,
+        llm_provider=body.llm_provider, llm_model=body.llm_model,
+    )
     await store.ensure_lifecycle_row(agent_id)
 
-    return AgentInfo(agent_id=agent_id, name=body.name, purpose=body.purpose)
+    return AgentInfo(
+        agent_id=agent_id, name=body.name, purpose=body.purpose,
+        llm_provider=body.llm_provider, llm_model=body.llm_model,
+    )
 
 
 @router.get("/agents", response_model=List[AgentInfo], summary="List active evolving agents")
@@ -188,6 +197,8 @@ async def list_agents(
             entity_count=len(ontology.entity_classes),
             relationship_count=len(ontology.relationship_predicates),
             is_empty=ontology.is_empty,
+            llm_provider=identity.get("llm_provider"),
+            llm_model=identity.get("llm_model"),
         ))
     return agents
 
@@ -226,6 +237,32 @@ async def delete_agent(
         return {"purged": True, "agent_id": agent_id}
     await registry.delete(agent_id)
     return {"deleted": True, "agent_id": agent_id, "soft": True}
+
+
+class UpdateAgentModelRequest(BaseModel):
+    llm_provider: str
+    llm_model: str
+
+
+@router.patch("/agents/{agent_id}/model", response_model=AgentInfo, summary="Update agent LLM model")
+async def update_agent_model(request: Request, agent_id: str = Path(...), body: UpdateAgentModelRequest = ...):
+    registry = _get_registry(request)
+
+    from .knowledge_store import KnowledgeStore
+    store = KnowledgeStore(registry._pg)
+    await store.update_agent_model(agent_id, body.llm_provider, body.llm_model)
+
+    # Evict cached agent so it restarts with the new model on next request
+    if agent_id in registry._agents:
+        old_agent = registry._agents.pop(agent_id)
+        try:
+            await old_agent.close() if hasattr(old_agent, "close") else None
+        except Exception:
+            pass
+
+    agent = await _get_agent(request, agent_id)
+    summary = await agent.get_ontology_summary()
+    return AgentInfo(**summary)
 
 
 @router.post("/agents/{agent_id}/restore", summary="Restore a soft-deleted evolving agent")
@@ -680,7 +717,7 @@ async def batch_progress(request: Request, agent_id: str, batch_id: str = ""):
     registry = _get_registry(request)
     from .tools.batch_tools import create_batch_tools
     tools = create_batch_tools(agent_id, pg=registry._pg)
-    progress_tool = tools[1]
+    progress_tool = tools[2]
     result = await progress_tool.ainvoke({"batch_id": batch_id})
     if isinstance(result, str):
         try:
@@ -696,7 +733,7 @@ async def batch_problems(request: Request, agent_id: str, batch_id: str = "", li
     registry = _get_registry(request)
     from .tools.batch_tools import create_batch_tools
     tools = create_batch_tools(agent_id, pg=registry._pg)
-    problem_tool = tools[2]
+    problem_tool = tools[3]
     result = await problem_tool.ainvoke({"batch_id": batch_id, "limit": limit})
     return json.loads(result) if isinstance(result, str) else result
 
@@ -707,7 +744,7 @@ async def review_queue(request: Request, agent_id: str, batch_id: str = "", limi
     registry = _get_registry(request)
     from .tools.batch_tools import create_batch_tools
     tools = create_batch_tools(agent_id, pg=registry._pg)
-    review_tool = tools[3]
+    review_tool = tools[4]
     result = await review_tool.ainvoke({"batch_id": batch_id, "limit": limit})
     return json.loads(result) if isinstance(result, str) else result
 
@@ -829,9 +866,9 @@ async def celery_callback(request: Request, payload: CallbackPayload):
     if not agent_id and payload.batch_id:
         try:
             row = await registry._pg.fetchrow(
-                "SELECT agent_id FROM batch_jobs WHERE batch_id = $1", payload.batch_id,
+                "SELECT workspace_id FROM batch_jobs WHERE id = $1", payload.batch_id,
             )
-            agent_id = row["agent_id"] if row else ""
+            agent_id = row["workspace_id"] if row else ""
         except Exception:
             pass
 
@@ -879,8 +916,8 @@ async def _process_batch_completion(
     try:
         pending = await pg.fetchrow(
             """
-            SELECT agent_id, session_id, thread_id, status, event_text_template
-            FROM pending_resumes WHERE batch_id=$1
+            SELECT workspace_id, session_id, thread_id, status, event_text_template
+            FROM pending_resumes WHERE batch_job_id=$1
             """,
             batch_id,
         )
@@ -895,7 +932,7 @@ async def _process_batch_completion(
 
     routed = False
     if pending and pending["status"] == "waiting":
-        agent_id_target = pending["agent_id"]
+        agent_id_target = pending["workspace_id"]
         session_id_target = pending["session_id"]
         template = pending["event_text_template"] or ""
 
@@ -904,7 +941,7 @@ async def _process_batch_completion(
                 """
                 UPDATE pending_resumes
                 SET status='resumed', resumed_at=NOW()
-                WHERE batch_id=$1 AND status='waiting'
+                WHERE batch_job_id=$1 AND status='waiting'
                 """,
                 batch_id,
             )
@@ -968,9 +1005,9 @@ async def _resume_safety_sweep(registry) -> int:
     try:
         rows = await pg.fetch(
             """
-            SELECT pr.batch_id
+            SELECT pr.batch_job_id
             FROM pending_resumes pr
-            JOIN batch_jobs bj ON bj.batch_id = pr.batch_id
+            JOIN batch_jobs bj ON bj.id = pr.batch_job_id
             WHERE pr.status='waiting' AND bj.status IN ('completed','failed')
             ORDER BY pr.created_at ASC
             LIMIT 50
@@ -986,10 +1023,10 @@ async def _resume_safety_sweep(registry) -> int:
     recovered = 0
     for row in rows:
         try:
-            await _process_batch_completion(registry, row["batch_id"])
+            await _process_batch_completion(registry, row["batch_job_id"])
             recovered += 1
         except Exception as exc:
-            logger.warning("safety sweep resume failed for %s: %s", row["batch_id"], exc)
+            logger.warning("safety sweep resume failed for %s: %s", row["batch_job_id"], exc)
 
     if recovered:
         logger.info("Resume safety net recovered %d pending batch(es)", recovered)
@@ -1076,17 +1113,17 @@ async def get_ecosystem(request: Request, agent_id: str):
     batch_info: dict[str, Any] = {"active_count": 0, "latest": None}
     try:
         rows = await registry._pg.fetch(
-            "SELECT batch_id, status, total_docs, processed_docs FROM batch_jobs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 5",
+            "SELECT id, status, total_documents, processed_documents FROM batch_jobs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 5",
             agent_id,
         )
-        active = [r for r in rows if r["status"] in ("pending", "processing", "running")]
+        active = [r for r in rows if r["status"] in ("pending", "processing", "running", "created")]
         batch_info["active_count"] = len(active)
         if rows:
             r = rows[0]
-            total = r["total_docs"] or 0
-            processed = r["processed_docs"] or 0
+            total = r["total_documents"] or 0
+            processed = r["processed_documents"] or 0
             batch_info["latest"] = {
-                "batch_id": r["batch_id"],
+                "batch_id": r["id"],
                 "status": r["status"],
                 "total": total,
                 "processed": processed,
@@ -1626,3 +1663,530 @@ async def list_agent_resources(request: Request, agent_id: str):
         })
 
     return {"resources": result, "total": len(result)}
+
+
+# ------------------------------------------------------------------
+# Workflow — Multi-workflow CRUD, execution, and template sharing
+# ------------------------------------------------------------------
+
+def _wf_to_dict(wf) -> dict:
+    """Serialize a WorkflowRow for JSON responses."""
+    return {
+        "workflow_id": wf.workflow_id,
+        "agent_id": wf.agent_id,
+        "name": wf.name,
+        "description": wf.description,
+        "version": wf.version,
+        "status": wf.status.value if hasattr(wf.status, "value") else wf.status,
+        "node_count": len(wf.dsl.nodes),
+        "is_template": wf.is_template,
+        "source_template_id": wf.source_template_id,
+        "dsl": wf.dsl.model_dump(),
+        "created_at": str(wf.created_at) if wf.created_at else None,
+        "updated_at": str(wf.updated_at) if wf.updated_at else None,
+    }
+
+
+@router.get("/workflow/node-types", summary="List available node types for workflow canvas")
+async def list_workflow_node_types():
+    from .workflow import nodes as _  # noqa: F401 — ensure registration
+    from .workflow.node_registry import get_catalog
+    catalog = get_catalog()
+    return {"node_types": [m.to_dict() for m in catalog]}
+
+
+# ── Multi-workflow CRUD ───────────────────────────────────────────
+
+@router.get("/agents/{agent_id}/workflows", summary="List all workflows for agent")
+async def list_workflows(request: Request, agent_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    workflows = await store.list_workflows(agent_id)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    items = []
+    for wf in workflows:
+        d = _wf_to_dict(wf)
+        del d["dsl"]
+        items.append(d)
+    return {"workflows": items, "active_workflow_id": active_id}
+
+
+class CreateWorkflowPayload(BaseModel):
+    name: str = "New Workflow"
+    description: str = ""
+
+
+@router.post("/agents/{agent_id}/workflows", summary="Create a new workflow")
+async def create_workflow_endpoint(request: Request, agent_id: str, payload: CreateWorkflowPayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.create_workflow(agent_id, payload.name, payload.description)
+    await registry.knowledge.save_active_workflow(agent_id, wf.workflow_id)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_created",
+        data={"workflow_id": wf.workflow_id, "name": wf.name},
+    )
+    return _wf_to_dict(wf)
+
+
+@router.get("/agents/{agent_id}/workflows/{workflow_id}", summary="Get specific workflow")
+async def get_workflow_by_id(request: Request, agent_id: str, workflow_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return _wf_to_dict(wf)
+
+
+class WorkflowDSLPayload(BaseModel):
+    dsl: dict
+
+
+@router.put("/agents/{agent_id}/workflows/{workflow_id}", summary="Update specific workflow DSL")
+async def update_workflow_by_id(request: Request, agent_id: str, workflow_id: str, payload: WorkflowDSLPayload):
+    from .workflow.models import WorkflowDSL
+    from .workflow.store import WorkflowStore
+
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    dsl = WorkflowDSL.model_validate(payload.dsl)
+    await store.save_dsl(workflow_id, dsl)
+
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_changed",
+        data={"workflow_id": workflow_id, "source": "manual"},
+    )
+    return {"workflow_id": workflow_id, "status": "updated", "node_count": len(dsl.nodes)}
+
+
+class RenameWorkflowPayload(BaseModel):
+    name: str
+
+
+@router.patch("/agents/{agent_id}/workflows/{workflow_id}", summary="Rename / update workflow metadata")
+async def patch_workflow(request: Request, agent_id: str, workflow_id: str, payload: RenameWorkflowPayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    await store.rename_workflow(workflow_id, payload.name)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_changed",
+        data={"workflow_id": workflow_id, "source": "rename"},
+    )
+    return {"workflow_id": workflow_id, "name": payload.name}
+
+
+@router.delete("/agents/{agent_id}/workflows/{workflow_id}", summary="Delete a workflow")
+async def delete_workflow_endpoint(request: Request, agent_id: str, workflow_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    await store.delete_workflow(workflow_id)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    if active_id == workflow_id:
+        remaining = await store.list_workflows(agent_id)
+        new_active = remaining[0].workflow_id if remaining else None
+        if new_active:
+            await registry.knowledge.save_active_workflow(agent_id, new_active)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_deleted",
+        data={"workflow_id": workflow_id},
+    )
+    return {"status": "deleted", "workflow_id": workflow_id}
+
+
+class SetActiveWorkflowPayload(BaseModel):
+    workflow_id: str
+
+
+@router.put("/agents/{agent_id}/active-workflow", summary="Set active workflow")
+async def set_active_workflow(request: Request, agent_id: str, payload: SetActiveWorkflowPayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(payload.workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    await registry.knowledge.save_active_workflow(agent_id, payload.workflow_id)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="active_workflow_changed",
+        data={"workflow_id": payload.workflow_id},
+    )
+    return {"active_workflow_id": payload.workflow_id}
+
+
+# ── Workflow runs (addressed by workflow_id) ──────────────────────
+
+class WorkflowRunPayload(BaseModel):
+    mode: str = "test_one"
+    inputs: dict | None = None
+
+
+@router.post("/agents/{agent_id}/workflows/{workflow_id}/runs", summary="Start run on specific workflow")
+async def start_workflow_run_by_id(request: Request, agent_id: str, workflow_id: str, payload: WorkflowRunPayload):
+    from .workflow.store import WorkflowStore
+    from .workflow.runtime import WorkflowRuntime
+
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    rt = WorkflowRuntime(
+        pg=registry._pg,
+        notification_mgr=registry.notifications,
+        celery_app=getattr(registry, '_celery_app', None),
+    )
+    summary = await rt.start_run(
+        agent_id=agent_id,
+        workflow_id=workflow_id,
+        mode=payload.mode,
+        inputs=payload.inputs,
+    )
+    return summary
+
+
+@router.post("/agents/{agent_id}/workflows/{workflow_id}/publish", summary="Publish specific workflow")
+async def publish_workflow_by_id(request: Request, agent_id: str, workflow_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    new_version = await store.publish(workflow_id)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_published",
+        data={"workflow_id": workflow_id, "version": new_version},
+    )
+    return {"workflow_id": workflow_id, "version": new_version, "status": "published"}
+
+
+# ── Global resources ──────────────────────────────────────────────
+
+@router.get("/resources", summary="List all resources across all agents")
+async def list_global_resources(request: Request):
+    registry = _get_registry(request)
+    ks = registry.knowledge
+    resources = await ks.list_all_resources()
+    return {"resources": resources, "total": len(resources)}
+
+
+@router.post("/resources/upload", summary="Upload files to a specific agent (global entry point)")
+async def upload_global_resource(
+    request: Request,
+    agent_id: str = Query(..., description="Target agent ID"),
+    files: List[UploadFile] = File(...),
+):
+    agent = await _get_agent(request, agent_id)
+
+    agent_dir = UPLOAD_DIR / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    file_infos: list[dict] = []
+    for f in files:
+        safe_name = f"{uuid.uuid4().hex[:8]}_{f.filename}"
+        dest = agent_dir / safe_name
+        content = await f.read()
+        dest.write_bytes(content)
+        saved_paths.append(str(dest))
+        file_infos.append({
+            "resource_id": f"res_{uuid.uuid4().hex[:8]}",
+            "filename": f.filename,
+            "content_type": f.content_type,
+            "size": len(content),
+            "path": str(dest),
+        })
+
+    await agent.store.upsert(
+        agent_id, "sample_files", f"batch_{uuid.uuid4().hex[:8]}",
+        {"files": file_infos, "paths": saved_paths},
+        source="user_upload",
+    )
+
+    logger.info("Global upload -> Agent %s: %d files", agent_id, len(files))
+    return {
+        "file_count": len(files),
+        "message": f"{len(files)} dosya yuklendi (agent: {agent_id}).",
+        "paths": saved_paths,
+    }
+
+
+@router.delete("/resources/{resource_id}", summary="Delete a resource by ID")
+async def delete_global_resource(request: Request, resource_id: str):
+    registry = _get_registry(request)
+    ks = registry.knowledge
+    deleted = await ks.delete_resource_by_id(resource_id)
+    if not deleted:
+        raise HTTPException(404, "Resource not found")
+    return {"status": "deleted", "resource_id": resource_id}
+
+
+# ── Global workflows list ─────────────────────────────────────────
+
+
+class CreateGlobalWorkflowPayload(BaseModel):
+    name: str = "New Workflow"
+    description: str = ""
+    agent_id: str | None = None
+
+
+@router.post("/workflows", summary="Create a standalone or agent-bound workflow")
+async def create_global_workflow(request: Request, payload: CreateGlobalWorkflowPayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.create_workflow(payload.agent_id, payload.name, payload.description)
+    if payload.agent_id:
+        try:
+            await registry.knowledge.save_active_workflow(payload.agent_id, wf.workflow_id)
+            await registry.notifications.notify(
+                agent_id=payload.agent_id,
+                event_type="workflow_created",
+                data={"workflow_id": wf.workflow_id, "name": wf.name},
+            )
+        except Exception:
+            pass
+    return _wf_to_dict(wf)
+
+
+@router.delete("/workflows/{workflow_id}", summary="Delete a workflow by ID (standalone or any)")
+async def delete_global_workflow(request: Request, workflow_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    await store.delete_workflow(workflow_id)
+    if wf.agent_id:
+        active_id = await registry.knowledge.load_active_workflow(wf.agent_id)
+        if active_id == workflow_id:
+            remaining = await store.list_workflows(wf.agent_id)
+            new_active = remaining[0].workflow_id if remaining else None
+            if new_active:
+                await registry.knowledge.save_active_workflow(wf.agent_id, new_active)
+    return {"status": "deleted", "workflow_id": workflow_id}
+
+
+@router.get("/workflows", summary="List all workflows across all agents")
+async def list_all_workflows(
+    request: Request,
+    search: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    items, total = await store.list_all_workflows(
+        search=search, status=status, limit=limit, offset=offset,
+    )
+    return {"workflows": items, "total": total}
+
+
+# ── Template sharing ─────────────────────────────────────────────
+
+@router.get("/workflow-templates", summary="List shared workflow templates")
+async def list_workflow_templates(request: Request, exclude_agent_id: str | None = None):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    templates = await store.list_templates(exclude_agent_id=exclude_agent_id)
+    return {"templates": templates}
+
+
+class ShareTemplatePayload(BaseModel):
+    description: str = ""
+
+
+@router.post("/agents/{agent_id}/workflows/{workflow_id}/share", summary="Share workflow as template")
+async def share_workflow_as_template(request: Request, agent_id: str, workflow_id: str, payload: ShareTemplatePayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    wf = await store.get(workflow_id)
+    if not wf or wf.agent_id != agent_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    await store.set_template(workflow_id, True, payload.description or wf.description)
+    return {"workflow_id": workflow_id, "is_template": True}
+
+
+class ImportTemplatePayload(BaseModel):
+    template_workflow_id: str
+    name: str | None = None
+
+
+@router.post("/agents/{agent_id}/import-template", summary="Import a shared template into agent")
+async def import_template(request: Request, agent_id: str, payload: ImportTemplatePayload):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    new_wf = await store.clone_workflow(
+        workflow_id=payload.template_workflow_id,
+        target_agent_id=agent_id,
+        new_name=payload.name,
+    )
+    await registry.knowledge.save_active_workflow(agent_id, new_wf.workflow_id)
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_created",
+        data={"workflow_id": new_wf.workflow_id, "name": new_wf.name, "source": "template"},
+    )
+    return _wf_to_dict(new_wf)
+
+
+# ── Compatibility aliases (old singular /workflow endpoints) ──────
+
+@router.get("/agents/{agent_id}/workflow", summary="Get active workflow DSL (compat)")
+async def get_workflow_compat(request: Request, agent_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    wf = await store.get_or_create(agent_id, active_workflow_id=active_id)
+    return _wf_to_dict(wf)
+
+
+@router.put("/agents/{agent_id}/workflow", summary="Update active workflow DSL (compat)")
+async def update_workflow_compat(request: Request, agent_id: str, payload: WorkflowDSLPayload):
+    from .workflow.models import WorkflowDSL
+    from .workflow.store import WorkflowStore
+
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    wf = await store.get_or_create(agent_id, active_workflow_id=active_id)
+
+    dsl = WorkflowDSL.model_validate(payload.dsl)
+    await store.save_dsl(wf.workflow_id, dsl)
+
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_changed",
+        data={"workflow_id": wf.workflow_id, "source": "manual"},
+    )
+    return {"workflow_id": wf.workflow_id, "status": "updated", "node_count": len(dsl.nodes)}
+
+
+@router.post("/agents/{agent_id}/workflow/runs", summary="Start run on active workflow (compat)")
+async def start_workflow_run_compat(request: Request, agent_id: str, payload: WorkflowRunPayload):
+    from .workflow.store import WorkflowStore
+    from .workflow.runtime import WorkflowRuntime
+
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    wf = await store.get_or_create(agent_id, active_workflow_id=active_id)
+
+    rt = WorkflowRuntime(
+        pg=registry._pg,
+        notification_mgr=registry.notifications,
+        celery_app=getattr(registry, '_celery_app', None),
+    )
+    summary = await rt.start_run(
+        agent_id=agent_id,
+        workflow_id=wf.workflow_id,
+        mode=payload.mode,
+        inputs=payload.inputs,
+    )
+    return summary
+
+
+@router.get("/agents/{agent_id}/workflow/runs", summary="List workflow runs")
+async def list_workflow_runs(
+    request: Request,
+    agent_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    runs = await store.list_runs(agent_id, limit=limit, offset=offset)
+    return {"runs": runs, "total": len(runs)}
+
+
+@router.get("/workflow/runs/{run_id}", summary="Get workflow run detail + steps")
+async def get_workflow_run(request: Request, run_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    run = await store.get_run(run_id)
+    if not run:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Run not found")
+    steps = await store.get_steps(run_id)
+    return {"run": run, "steps": steps}
+
+
+@router.post("/agents/{agent_id}/workflow/publish", summary="Publish active workflow (compat)")
+async def publish_workflow_compat(request: Request, agent_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    active_id = await registry.knowledge.load_active_workflow(agent_id)
+    wf = await store.get_or_create(agent_id, active_workflow_id=active_id)
+
+    new_version = await store.publish(wf.workflow_id)
+
+    await registry.notifications.notify(
+        agent_id=agent_id,
+        event_type="workflow_published",
+        data={"workflow_id": wf.workflow_id, "version": new_version},
+    )
+    return {"workflow_id": wf.workflow_id, "version": new_version, "status": "published"}
+
+
+@router.get("/graphrag-endpoints/{endpoint_id}", summary="Get GraphRAG endpoint details")
+async def get_graphrag_endpoint(request: Request, endpoint_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    ep = await store.get_graphrag_endpoint(endpoint_id)
+    if not ep:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    return ep
+
+
+@router.get("/agents/{agent_id}/graphrag-endpoint", summary="Get active GraphRAG endpoint for agent")
+async def get_active_graphrag_endpoint(request: Request, agent_id: str):
+    from .workflow.store import WorkflowStore
+    registry = _get_registry(request)
+    store = WorkflowStore(registry._pg)
+    ep = await store.get_active_endpoint(agent_id)
+    return ep or {"status": "none", "message": "No active endpoint. Publish a workflow first."}

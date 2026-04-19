@@ -1,6 +1,5 @@
 import os
 import time
-from celery.result import AsyncResult
 from src.celery_client import celery_app
 
 # Set env vars to match local setup

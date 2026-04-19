@@ -3,7 +3,6 @@
 Chunk analizi test scripti
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -11,7 +10,6 @@ from pathlib import Path
 backend_path = Path(__file__).parent / "backend"
 sys.path.insert(0, str(backend_path))
 
-from src.intelligent_agent import IntelligentAgent
 
 def test_chunk_analysis():
     """Chunk analizini test et"""

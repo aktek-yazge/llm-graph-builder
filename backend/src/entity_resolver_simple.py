@@ -4,7 +4,7 @@ Simplified Entity Resolution modülü - Neo4j similarity kullanır
 
 import logging
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 class SimpleEntityResolver:
     """

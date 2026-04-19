@@ -3,7 +3,6 @@
 Reasoning response parsing test
 """
 
-import os
 import sys
 from pathlib import Path
 

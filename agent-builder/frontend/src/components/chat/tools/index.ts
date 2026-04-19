@@ -24,3 +24,4 @@ export {
 } from './BatchToolUI';
 export { RunOcrToolUI, OcrAndAnalyzeToolUI } from './OcrToolUI';
 export { RequestPlanModeToolUI } from './PlanModeRequestToolUI';
+export { ToolStepsUI } from './ToolStepsGroup';

@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator
 
 from deepagents import create_deep_agent
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -39,6 +39,7 @@ from .tools.wiki_tools import create_wiki_tools
 from .tools.ocr_tools import create_ocr_tools
 from .tools.batch_tools import create_batch_tools
 from .tools.quality_tools import create_quality_tools
+from .tools.workflow_tools import create_workflow_tools
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,12 @@ class SelfEvolvingAgent:
         tools.extend(create_wiki_tools(self.agent_id, self.wiki))
         tools.extend(create_ocr_tools(self.agent_id, self._celery_app, store=self.store, memory=self.memory))
         tools.extend(create_batch_tools(self.agent_id, pg=self._pg, celery_app=self._celery_app))
+        tools.extend(create_workflow_tools(
+            self.agent_id,
+            pg=self._pg,
+            notification_mgr=self._notification_mgr,
+            celery_app=self._celery_app,
+        ))
         return tools
 
     def _build_subagent_tools(self) -> list:
@@ -600,6 +607,8 @@ class SelfEvolvingAgent:
             "rule_count": len(ontology.inference_rules),
             "constraint_count": len(ontology.constraints),
             "is_empty": ontology.is_empty,
+            "llm_provider": identity.get("llm_provider"),
+            "llm_model": identity.get("llm_model"),
         }
 
     async def get_skill_execution(self) -> dict[str, Any] | None:

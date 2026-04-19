@@ -22,7 +22,6 @@ from sqlalchemy import (
     Integer,
     String,
     DateTime,
-    Text,
     text,
 )
 from sqlalchemy.ext.declarative import declarative_base

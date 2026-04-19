@@ -20,7 +20,6 @@ for these operations (embedding in neo4j_server is separate).
 import json
 import logging
 from dataclasses import dataclass
-from enum import Enum
 from typing import Literal, Optional
 
 from fastmcp import Context

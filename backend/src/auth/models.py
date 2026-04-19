@@ -3,7 +3,6 @@
 User models for authentication
 """
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
 from datetime import datetime
 
 
