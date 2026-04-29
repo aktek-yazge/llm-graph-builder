@@ -425,12 +425,17 @@ class WorkflowStore:
         row = await self._pg.fetchrow(
             """
             INSERT INTO workflow_run_steps
-                (run_id, node_id, node_type, status, inputs_json, started_at)
-            VALUES ($1, $2, $3, $4, $5::jsonb, CASE WHEN $4='running' THEN NOW() ELSE NULL END)
+                (run_id, node_id, node_type, status, inputs_json, outputs_json, error,
+                 started_at, completed_at)
+            VALUES ($1, $2, $3, $4::varchar, $5::jsonb, $6::jsonb, $7,
+                    CASE WHEN $4::varchar='running' THEN NOW() ELSE NULL END,
+                    CASE WHEN $4::varchar IN ('completed','failed','skipped') THEN NOW() ELSE NULL END)
             RETURNING id
             """,
             run_id, node_id, node_type, status,
             json.dumps(inputs or {}, ensure_ascii=False, default=str),
+            json.dumps(outputs, ensure_ascii=False, default=str) if outputs is not None else None,
+            error,
         )
         return int(row["id"])
 

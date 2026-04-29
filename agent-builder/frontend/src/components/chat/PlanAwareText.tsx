@@ -13,7 +13,7 @@ function useMarkdownComponents(): Components {
     h1: ({ children }) => (
       <Text
         as="h1"
-        fontSize="lg"
+        fontSize="xl"
         fontWeight="bold"
         color={isDark ? 'gray.50' : 'gray.900'}
         mt={3}
@@ -26,7 +26,7 @@ function useMarkdownComponents(): Components {
     h2: ({ children }) => (
       <Text
         as="h2"
-        fontSize="md"
+        fontSize="lg"
         fontWeight="bold"
         color={isDark ? 'gray.100' : 'gray.800'}
         mt={3}
@@ -39,7 +39,7 @@ function useMarkdownComponents(): Components {
     h3: ({ children }) => (
       <Text
         as="h3"
-        fontSize="sm"
+        fontSize="md"
         fontWeight="bold"
         color={isDark ? 'blue.200' : 'blue.700'}
         mt={3}
@@ -52,7 +52,7 @@ function useMarkdownComponents(): Components {
     h4: ({ children }) => (
       <Text
         as="h4"
-        fontSize="sm"
+        fontSize="md"
         fontWeight="semibold"
         color={isDark ? 'purple.200' : 'purple.700'}
         mt={2}
@@ -64,10 +64,10 @@ function useMarkdownComponents(): Components {
     ),
     p: ({ children }) => (
       <Text
-        fontSize="sm"
+        fontSize="md"
         color={isDark ? 'gray.200' : 'gray.700'}
         mb={2}
-        lineHeight="1.65"
+        lineHeight="1.7"
       >
         {children}
       </Text>
@@ -95,10 +95,10 @@ function useMarkdownComponents(): Components {
     li: ({ children }) => (
       <Box
         as="li"
-        fontSize="sm"
+        fontSize="md"
         color={isDark ? 'gray.200' : 'gray.700'}
         mb={0.5}
-        lineHeight="1.6"
+        lineHeight="1.7"
         sx={{ '&::marker': { color: isDark ? 'blue.300' : 'blue.500' } }}
       >
         {children}
@@ -123,7 +123,7 @@ function useMarkdownComponents(): Components {
             border="1px solid"
             borderColor={isDark ? 'gray.700' : 'gray.200'}
             overflowX="auto"
-            fontSize="xs"
+            fontSize="sm"
             fontFamily="mono"
             lineHeight="1.6"
             color={isDark ? 'green.200' : 'gray.800'}
@@ -140,7 +140,7 @@ function useMarkdownComponents(): Components {
           borderRadius="md"
           bg={isDark ? 'gray.700' : 'gray.100'}
           color={isDark ? 'orange.200' : 'orange.600'}
-          fontSize="xs"
+          fontSize="sm"
           fontFamily="mono"
           fontWeight="medium"
         >
@@ -166,7 +166,7 @@ function useMarkdownComponents(): Components {
         <Box
           as="table"
           w="full"
-          fontSize="xs"
+          fontSize="sm"
           borderRadius="lg"
           overflow="hidden"
           border="1px solid"
@@ -204,7 +204,7 @@ function useMarkdownComponents(): Components {
         px={3}
         py={1.5}
         textAlign="left"
-        fontSize="xs"
+        fontSize="sm"
         fontWeight="bold"
         color={isDark ? 'gray.200' : 'gray.700'}
         textTransform="uppercase"
@@ -218,7 +218,7 @@ function useMarkdownComponents(): Components {
         as="td"
         px={3}
         py={1.5}
-        fontSize="xs"
+        fontSize="sm"
         color={isDark ? 'gray.300' : 'gray.600'}
       >
         {children}

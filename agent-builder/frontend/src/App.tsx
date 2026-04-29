@@ -6,6 +6,7 @@ import BuilderChat from './pages/BuilderChat';
 import ChatAgentList from './pages/ChatAgentList';
 import ChatAgentDetailPage from './pages/ChatAgentDetail';
 import EvolvingAgentPage from './pages/EvolvingAgentPage';
+import AgentListPage from './pages/AgentListPage';
 import WikiPage from './pages/WikiPage';
 import WorkflowPage from './pages/WorkflowPage';
 import WorkflowsPage from './pages/WorkflowsPage';
@@ -55,7 +56,7 @@ function AppRoutes() {
           <Route path="/" element={<ProtectedRoute><Navigate to="/dashboard" replace /></ProtectedRoute>} />
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
 
-          <Route path="/agents" element={<ProtectedRoute><EvolvingAgentPage /></ProtectedRoute>} />
+          <Route path="/agents" element={<ProtectedRoute><AgentListPage /></ProtectedRoute>} />
           <Route path="/agents/:agentId" element={<ProtectedRoute><EvolvingAgentPage /></ProtectedRoute>} />
           <Route path="/agents/:agentId/workflow" element={<ProtectedRoute><WorkflowPage /></ProtectedRoute>} />
           <Route path="/agents/:agentId/wiki" element={<ProtectedRoute><WikiPage /></ProtectedRoute>} />

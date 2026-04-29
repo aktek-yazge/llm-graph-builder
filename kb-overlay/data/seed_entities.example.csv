@@ -1,0 +1,11 @@
+name,type,aliases,metadata
+ABC Bilişim Teknolojileri A.Ş.,company,ABC Bilişim|ABC BT|abc bilisim,{"sector":"IT"}
+Türkiye İş Bankası A.Ş.,company,İş Bankası|İşbank|İŞBANK,{"bank_code":"0064"}
+Türk Ekonomi Bankası A.Ş.,company,TEB|Türk Ekonomi Bankası,{"bank_code":"0032"}
+T.C. Ziraat Bankası A.Ş.,company,Ziraat Bankası|Ziraat,{"bank_code":"0010"}
+Acme Holding A.Ş.,company,Acme|Acme Group,
+Mehmet Yılmaz,person,M. Yılmaz|Mehmed Yılmaz,
+Ayşe Demir,person,A. Demir,
+Microsoft Corporation,company,Microsoft|MSFT|MS Corp,{"ticker":"MSFT"}
+Apple Inc.,company,Apple|AAPL,{"ticker":"AAPL"}
+SAP SE,company,SAP|SAP AG,

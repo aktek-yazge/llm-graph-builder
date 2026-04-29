@@ -10,10 +10,15 @@ import {
 import {
   listAgents as listEvolvingAgents,
   AgentInfo,
+  DeletedAgentInfo,
   listAllWorkflows,
   GlobalWorkflowItem,
   setActiveWorkflow,
   createAgent,
+  deleteAgent,
+  restoreAgent,
+  purgeAgent,
+  listDeletedAgents,
 } from '../services/evolvingApi';
 import Breadcrumb from '../components/Breadcrumb';
 
@@ -97,6 +102,9 @@ export default function Dashboard() {
   const [newAgentModel, setNewAgentModel] = useState('');
   const [creating, setCreating] = useState(false);
 
+  const [deletedAgents, setDeletedAgents] = useState<DeletedAgentInfo[]>([]);
+  const [trashOpen, setTrashOpen] = useState(false);
+
   const loadRecentWorkflows = useCallback(async () => {
     setWfLoading(true);
     try {
@@ -122,10 +130,63 @@ export default function Dashboard() {
     }
   }, []);
 
+  const loadDeletedAgents = useCallback(async () => {
+    try {
+      const res = await listDeletedAgents();
+      setDeletedAgents(res.data.deleted || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleSoftDelete = async (e: React.MouseEvent, agentId: string) => {
+    e.stopPropagation();
+    if (
+      window.confirm(
+        'Agent cop kutusuna tasinacak. Tum veriler korunur ve istedigin zaman geri yukleyebilirsin. Devam edilsin mi?'
+      )
+    ) {
+      try {
+        await deleteAgent(agentId, false);
+        setEvolvingAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+        await loadDeletedAgents();
+        setTrashOpen(true);
+      } catch (err) {
+        console.error('Agent silinemedi:', err);
+      }
+    }
+  };
+
+  const handleRestore = async (e: React.MouseEvent, agentId: string) => {
+    e.stopPropagation();
+    try {
+      await restoreAgent(agentId);
+      setDeletedAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+      await loadEvolvingAgents();
+    } catch (err) {
+      console.error('Agent geri yuklenemedi:', err);
+    }
+  };
+
+  const handlePurge = async (e: React.MouseEvent, agentId: string, name: string) => {
+    e.stopPropagation();
+    if (
+      window.confirm(
+        `"${name}" agent'i KALICI olarak silinecek. Tum dosyalar, OCR sonuclari, ontoloji ve wiki verileri geri getirilemez sekilde yok edilecek.\n\nDevam etmek istedigine emin misin?`
+      )
+    ) {
+      try {
+        await purgeAgent(agentId);
+        setDeletedAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+      } catch (err) {
+        console.error('Agent kalici silinemedi:', err);
+      }
+    }
+  };
+
   useEffect(() => {
     loadData();
     loadEvolvingAgents();
     loadRecentWorkflows();
+    loadDeletedAgents();
     const es = dashboardApi.subscribeToEvents('', (event) => {
       setLiveEvents((prev) => [event, ...prev].slice(0, 30));
     });
@@ -395,6 +456,7 @@ export default function Dashboard() {
                     <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Entity</th>
                     <th className="text-right px-3 py-2.5 text-xs font-medium text-slate-500">Iliski</th>
                     <th className="text-left px-3 py-2.5 text-xs font-medium text-slate-500">Durum</th>
+                    <th className="text-center px-3 py-2.5 text-xs font-medium text-slate-500 w-16"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -432,12 +494,109 @@ export default function Dashboard() {
                           {ag.is_empty ? 'Bos' : 'Aktif'}
                         </span>
                       </td>
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          onClick={(e) => handleSoftDelete(e, ag.agent_id)}
+                          title="Cope tasi"
+                          className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50
+                                     opacity-0 group-hover:opacity-100 transition-all"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
+
+          {/* Trash Section */}
+          <div className="border-t border-slate-100">
+            <button
+              onClick={() => {
+                setTrashOpen((v) => !v);
+                if (!trashOpen) loadDeletedAgents();
+              }}
+              className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-50/50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <svg className={`w-3.5 h-3.5 text-slate-400 transition-transform ${trashOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-xs font-medium text-slate-500">Cop Kutusu</span>
+                {deletedAgents.length > 0 && (
+                  <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full">
+                    {deletedAgents.length}
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); loadDeletedAgents(); }}
+                className="p-1 rounded hover:bg-slate-100 transition-colors"
+                title="Yenile"
+              >
+                <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </button>
+
+            {trashOpen && (
+              <div className="pb-3">
+                {deletedAgents.length === 0 ? (
+                  <div className="px-5 py-3 text-center">
+                    <span className="text-xs text-slate-400">Cop kutusu bos</span>
+                  </div>
+                ) : (
+                  <div className="space-y-0.5">
+                    {deletedAgents.map((ag) => (
+                      <div
+                        key={ag.agent_id}
+                        className="flex items-center justify-between px-5 py-2 hover:bg-slate-50/50 transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-6 h-6 rounded-md bg-slate-200 flex items-center justify-center text-slate-500 text-[10px] font-bold shrink-0">
+                            {ag.name?.[0]?.toUpperCase() || 'A'}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="text-xs font-medium text-slate-600 truncate block">{ag.name}</span>
+                            {ag.deleted_at && (
+                              <span className="text-[10px] text-slate-400">
+                                {new Date(ag.deleted_at).toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' })}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={(e) => handleRestore(e, ag.agent_id)}
+                            title="Geri yukle"
+                            className="p-1.5 rounded-lg text-emerald-500 hover:bg-emerald-50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={(e) => handlePurge(e, ag.agent_id, ag.name)}
+                            title="Kalici sil"
+                            className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Two-Column: Workflows Table + Activity */}

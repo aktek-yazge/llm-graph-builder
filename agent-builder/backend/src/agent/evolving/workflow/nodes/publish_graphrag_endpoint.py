@@ -79,7 +79,7 @@ class PublishGraphRAGEndpointNode(NodeType):
             workflow_version=version,
             neo4j_uri=neo4j_uri,
             neo4j_database=neo4j_db,
-            ontology_snapshot=ontology.model_dump() if ontology else {},
+            ontology_snapshot=ontology.to_dict() if ontology else {},
             schema_summary=str(ontology) if ontology else "",
             name=endpoint_name,
             source_documents=source_documents,
@@ -101,7 +101,7 @@ class PublishGraphRAGEndpointNode(NodeType):
 
     @staticmethod
     async def _collect_source_documents(
-        ks, agent_id: str, file_paths: list[str],
+        ks, agent_id: str, files: list,
     ) -> list[dict[str, Any]]:
         """Build source_documents list from agent's sample_files knowledge."""
         sf_entries = await ks.get_all(agent_id, "sample_files")
@@ -117,14 +117,22 @@ class PublishGraphRAGEndpointNode(NodeType):
             for f in val.get("files", []):
                 all_files.append(f)
 
-        if file_paths:
-            path_set = set(file_paths)
-            matched = [
-                f for f in all_files
-                if f.get("path", "") in path_set or f.get("filename", "") in path_set
-            ]
-            if matched:
-                all_files = matched
+        if files:
+            path_set: set[str] = set()
+            for f in files:
+                if isinstance(f, dict):
+                    path_set.add(f.get("path", ""))
+                    path_set.add(f.get("filename", ""))
+                elif isinstance(f, str):
+                    path_set.add(f)
+            path_set.discard("")
+            if path_set:
+                matched = [
+                    f for f in all_files
+                    if f.get("path", "") in path_set or f.get("filename", "") in path_set
+                ]
+                if matched:
+                    all_files = matched
 
         docs = []
         seen_ids: set[str] = set()

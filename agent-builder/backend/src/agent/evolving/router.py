@@ -2153,6 +2153,31 @@ async def get_workflow_run(request: Request, run_id: str):
     return {"run": run, "steps": steps}
 
 
+class ApproveRunPayload(BaseModel):
+    decision: str = "approve"
+
+
+@router.post("/workflow/runs/{run_id}/approve", summary="Approve or reject a paused HITL run")
+async def approve_workflow_run(request: Request, run_id: str, payload: ApproveRunPayload):
+    """Resume a workflow run that is awaiting human approval.
+
+    ``decision`` can be ``approve`` (continue execution) or ``reject`` (fail the run).
+    """
+    from .workflow.runtime import WorkflowRuntime
+
+    registry = _get_registry(request)
+    rt = WorkflowRuntime(
+        pg=registry._pg,
+        notification_mgr=registry.notifications,
+        celery_app=getattr(registry, '_celery_app', None),
+    )
+    try:
+        summary = await rt.resume_run(run_id, payload.decision)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return summary
+
+
 @router.post("/agents/{agent_id}/workflow/publish", summary="Publish active workflow (compat)")
 async def publish_workflow_compat(request: Request, agent_id: str):
     from .workflow.store import WorkflowStore

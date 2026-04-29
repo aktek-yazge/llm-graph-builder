@@ -9,4 +9,8 @@ from . import (  # noqa: F401
     quality_gate,
     human_review,
     publish_graphrag_endpoint,
+    chunking,
+    entity_resolution,
+    embedding_writer,
+    community_detection,
 )

@@ -21,7 +21,6 @@ import type { LucideIcon } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AgentProvider, useAgentContext } from '../context/AgentContext';
 import { updateAgentModel } from '../services/evolvingApi';
-import EvolvingAgentSidebar from '../components/EvolvingAgentSidebar';
 import AssistantChat from '../components/AssistantChat';
 import OntologyPanel from '../components/OntologyPanel';
 import BatchMonitor from '../components/BatchMonitor';
@@ -213,8 +212,8 @@ function AgentPageInner() {
         flexShrink={0}
       >
         <Flex alignItems="center" gap={1.5} fontSize="caption" color="text.tertiary">
-          <Link to="/dashboard" className="hover:text-gray-900 transition-colors">
-            Dashboard
+          <Link to="/agents" className="hover:text-gray-900 transition-colors">
+            Agents
           </Link>
           <span>/</span>
           <Text color="text.primary" fontWeight="500" fontSize="caption">
@@ -262,7 +261,6 @@ function AgentPageInner() {
       <NotificationBar />
 
       <Flex flex={1} overflow="hidden">
-        <EvolvingAgentSidebar />
         <NavSidebar activeSection={activeSection} onSelect={setActiveSection} />
         <Box flex={1} overflow="hidden" h="100%" minH={0}>
           {sectionContent[activeSection]}

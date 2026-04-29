@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kb-overlay"
+version = "0.1.0"
+description = "Discovery-first entity resolution + alias dictionary overlay for Turkish KB"
+authors = [{name = "Agent Builder Team"}]
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "pyahocorasick>=2.1.0",
+    "rapidfuzz>=3.6.0",
+    "pydantic>=2.5.0",
+    "click>=8.1.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+ner = ["spacy>=3.7", "transformers>=4.40"]
+embed = ["sentence-transformers>=2.7", "numpy>=1.26"]
+neo4j = ["neo4j>=5.18", "langchain-neo4j>=0.1"]
+llm = ["openai>=1.30", "httpx>=0.27"]
+test = ["pytest>=8.0", "pytest-asyncio>=0.23", "pyyaml>=6.0"]
+all = [
+    "spacy>=3.7", "transformers>=4.40",
+    "sentence-transformers>=2.7", "numpy>=1.26",
+    "neo4j>=5.18", "langchain-neo4j>=0.1",
+    "openai>=1.30", "httpx>=0.27",
+    "pytest>=8.0", "pytest-asyncio>=0.23", "pyyaml>=6.0",
+]
+
+[project.scripts]
+kbo = "kb_overlay.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["kb_overlay*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

@@ -39,6 +39,44 @@ body {
 .aui-composer-root {
   max-width: 100% !important;
   flex-shrink: 0 !important;
+  margin: 0 12px 8px !important;
+  border-radius: 16px !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+  background: #fff !important;
+  overflow: hidden !important;
+  transition: border-color 0.15s, box-shadow 0.15s !important;
+}
+
+.aui-composer-root:focus-within {
+  border-color: #93c5fd !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08) !important;
+}
+
+.aui-composer-root textarea,
+.aui-composer-root [role="textbox"],
+.aui-composer-root input {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  padding: 10px 14px !important;
+  resize: none !important;
+}
+
+.aui-composer-root textarea:focus,
+.aui-composer-root [role="textbox"]:focus,
+.aui-composer-root input:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.aui-composer-send,
+.aui-composer-cancel {
+  border-radius: 10px !important;
+  margin: 4px 6px 4px 0 !important;
+  transition: all 0.15s !important;
 }
 
 /* ── Assistant message styling ── */

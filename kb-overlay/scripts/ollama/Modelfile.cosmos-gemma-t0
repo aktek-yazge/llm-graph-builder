@@ -1,0 +1,42 @@
+# Modelfile for ytu-ce-cosmos/Turkish-Gemma-9b-v0.1 (T0)
+# Quantization: Q4_K_M (~5.5 GB) — provided by mradermacher
+#
+# Build:
+#   ollama create cosmos-gemma:9b -f scripts/ollama/Modelfile.cosmos-gemma-t0
+#
+# Test:
+#   ollama run cosmos-gemma:9b "İstanbul'un en büyük üç şirketini say."
+#
+# Sampling defaults from the model card:
+#   temperature=0.6, top_p=0.95, top_k=20, min_p=0
+# (DO NOT use temperature=0 — model documentation warns about endless repetition)
+# We override per-call via Ollama API for NER (temperature=0.2 + format=json_schema)
+
+FROM /Users/mehmeterdogan/.cache/huggingface/cosmos-gemma-t0/Turkish-Gemma-9b-v0.1.Q4_K_M.gguf
+
+# Gemma 2 chat template (matches Cosmos's published chat_template)
+TEMPLATE """<start_of_turn>user
+{{ if .System }}{{ .System }}
+
+{{ end }}{{ .Prompt }}<end_of_turn>
+<start_of_turn>model
+{{ .Response }}<end_of_turn>
+"""
+
+# Stop tokens (Gemma 2 native + chat closers)
+PARAMETER stop "<start_of_turn>"
+PARAMETER stop "<end_of_turn>"
+
+# Cosmos-recommended sampling defaults (overridable per request)
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER min_p 0
+
+# Context window — Gemma 2 native 8K, KV-cache budget for laptops
+PARAMETER num_ctx 8192
+
+# Repetition control (Cosmos card recommends adjusting these for complex tasks)
+PARAMETER repeat_penalty 1.1
+
+SYSTEM """Sen Türkçe konuşan, Türkiye merkezli kurumsal/finansal/hukuki belgeleri analiz etmekte uzmanlaşmış bir asistansın. Yanıtlarını kısa, doğru ve dilbilgisi açısından temiz Türkçe ile ver. İstendiğinde JSON formatında yapısal çıktı üretirsin."""

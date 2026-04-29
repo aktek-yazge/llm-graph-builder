@@ -1,15 +1,21 @@
-"""resources_input — Source files / S3 prefix for the pipeline."""
+"""resources_input — Collect all raw files uploaded to the agent."""
 from __future__ import annotations
+
+import json
+import logging
 from typing import Any
+
 from ..node_registry import NodeType, ExecutionContext, PortDef, register
 from ..models import PortDirection
+
+logger = logging.getLogger(__name__)
 
 
 @register
 class ResourcesInputNode(NodeType):
     type_id = "resources_input"
     label = "Kaynaklar"
-    description = "Dosya yollarini veya S3 prefix'ini pipeline'a saglar."
+    description = "Agent'a yuklenmus tum belgeleri pipeline'a saglar."
     category = "input"
     icon = "folder"
     color = "#38A169"
@@ -22,12 +28,7 @@ class ResourcesInputNode(NodeType):
                 "file_paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Islenecek dosya yollari",
-                },
-                "s3_prefix": {
-                    "type": "string",
-                    "description": "Opsiyonel S3 prefix (s3://bucket/path)",
-                    "default": "",
+                    "description": "Opsiyonel: sadece belirli dosyalari isle",
                 },
             },
         }
@@ -41,14 +42,38 @@ class ResourcesInputNode(NodeType):
         return [PortDef(name="files", direction=PortDirection.OUTPUT, data_type="file_list")]
 
     async def execute(self, ctx: ExecutionContext, params: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-        file_paths = params.get("file_paths", [])
-        if not file_paths:
-            from ...tools.self_tools import _get_pg
-            pg = ctx.pg
-            rows = await pg.fetch(
-                "SELECT file_path FROM workspace_documents WHERE agent_id=$1 AND status != 'deleted' ORDER BY sequence",
-                ctx.agent_id,
-            )
-            file_paths = [r["file_path"] for r in rows]
+        from ...knowledge_store import KnowledgeStore
+        ks = KnowledgeStore(ctx.pg)
 
-        return {"files": file_paths}
+        explicit = params.get("file_paths", [])
+        if explicit:
+            files = [{"path": fp, "filename": fp.rsplit("/", 1)[-1]} for fp in explicit]
+            return {"files": files}
+
+        files: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        sf_entries = await ks.get_all(ctx.agent_id, "sample_files")
+        for entry in sf_entries:
+            val = entry.get("value", {})
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            for f in val.get("files", []):
+                rid = f.get("resource_id", "")
+                if rid and rid in seen_ids:
+                    continue
+                if rid:
+                    seen_ids.add(rid)
+                files.append({
+                    "resource_id": rid,
+                    "filename": f.get("filename", ""),
+                    "path": f.get("path", ""),
+                    "content_type": f.get("content_type", ""),
+                    "size": f.get("size", 0),
+                })
+
+        logger.info("resources_input: %d file(s) for agent %s", len(files), ctx.agent_id)
+        return {"files": files}

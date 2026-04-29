@@ -1,0 +1,78 @@
+# Türkçe entity yazım varyasyonları — golden test corpus.
+# Her grup: aynı canonical entity'ye çözmesi BEKLENEN yazım varyantları.
+
+company_suffix_variants:
+  description: "Türkçe şirket sonek temizlemesi sonrası aynı normalize key vermeli"
+  groups:
+    - canonical: "ABC Bilişim Teknolojileri A.Ş."
+      variants:
+        - "ABC Bilişim Teknolojileri A.Ş."
+        - "ABC Bilişim Teknolojileri AŞ"
+        - "ABC Bilişim Teknolojileri Anonim Şirketi"
+        - "ABC Bilişim Teknolojileri"
+        - "ABC Bilişim Teknolojileri A. Ş."
+        - "abc bilişim teknolojileri a.ş."
+
+    - canonical: "XYZ Sanayi ve Ticaret Limited Şirketi"
+      variants:
+        - "XYZ Sanayi ve Ticaret Ltd. Şti."
+        - "XYZ Sanayi ve Ticaret LTD ŞTİ"
+        - "XYZ San. ve Tic. Ltd. Şti."
+        - "XYZ San. Tic. Ltd. Şti."
+        - "XYZ Limited"
+
+    - canonical: "Acme Corp."
+      variants:
+        - "Acme Corp."
+        - "Acme Corporation"
+        - "Acme Inc."
+        - "Acme LLC"
+
+person_titles:
+  description: "Kişi unvanı temizlendiğinde aynı kişi"
+  groups:
+    - canonical: "Mehmet Yılmaz"
+      variants:
+        - "Mehmet Yılmaz"
+        - "Sayın Mehmet Yılmaz"
+        - "Dr. Mehmet Yılmaz"
+        - "Prof. Dr. Mehmet Yılmaz"
+        - "Sn. Mehmet Yılmaz"
+
+turkish_apostrophe_suffixes:
+  description: "Türkçe genitive/locative ekleri temizlenmeli"
+  groups:
+    - canonical: "ABC Bilişim"
+      variants:
+        - "ABC Bilişim"
+        - "ABC Bilişim'in"
+        - "ABC Bilişim'de"
+        - "ABC Bilişim'den"
+        - "ABC Bilişim'i"
+        - "ABC Bilişim'e"
+
+ascii_fold_collisions:
+  description: "Loose lookup'ta eşleşmeli ama strict'te ayrı tutulmalı"
+  groups:
+    - loose_match:
+        - "İş Bankası"
+        - "Iş Bankası"
+        - "is bankasi"
+        - "İŞ BANKASI"
+        - "iş bankası"
+
+typos_via_fuzzy:
+  description: "Fuzzy match (token_set_ratio >= 90) ile yakalanmalı"
+  groups:
+    - canonical: "ABC Bilişim Teknolojileri A.Ş."
+      typos:
+        - "ABC Bilisim Teknolojileri A.Ş."
+        - "ABC Biliisim Teknolojileri A.Ş."
+
+ambiguous:
+  description: "Aynı surface_form birden fazla canonical'a denk gelir; disambiguation gerekir"
+  groups:
+    - surface: "ABC"
+      candidates:
+        - "ABC Bilişim Teknolojileri A.Ş."
+        - "ABC Holding A.Ş."

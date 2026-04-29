@@ -5,8 +5,11 @@ Workflow Compiler
 Transforms a ``WorkflowDSL`` into a LangGraph ``StateGraph`` that can be
 executed with ``astream`` / ``ainvoke``.  Each DSL node becomes a graph node
 whose function delegates to the matching ``NodeType.execute``.  DSL edges
-become ``add_edge`` (unconditional) or ``add_conditional_edges``
-(``quality_gate`` with pass/fail ports).
+are used for both data flow (port wiring) and execution ordering.
+
+Execution follows topological order. Before running each node, the compiler
+checks if any upstream dependency (per DSL edges) failed; if so, the node
+is skipped. ``quality_gate`` nodes use conditional routing for pass/fail.
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ from .models import WorkflowDSL, EdgeDSL
 from .node_registry import get_executor, ExecutionContext
 
 logger = logging.getLogger(__name__)
+
+_SKIP_SENTINEL = "__skipped__"
 
 
 class WorkflowState(dict):
@@ -35,24 +40,33 @@ class WorkflowState(dict):
 def compile(dsl: WorkflowDSL, ctx: ExecutionContext) -> Any:
     """Compile DSL into a runnable LangGraph StateGraph.
 
+    Nodes are chained sequentially in topological order (to avoid LangGraph's
+    parallel-branch merge limitations). Each node gathers its inputs from the
+    accumulated state dict using the DSL edge definitions.
+
+    Before executing, each node checks whether any of its DSL predecessors
+    failed or was skipped. If so, the node is skipped automatically and a
+    ``{node_id}._skipped`` marker is written to state.
+
     Returns a compiled graph (``graph.compile()``).
     """
     if not dsl.nodes:
         raise ValueError("Workflow has no nodes")
 
     order = dsl.topological_order()
+    node_map = {n.id: n for n in dsl.nodes}
+
+    predecessors_map: dict[str, set[str]] = {n.id: set() for n in dsl.nodes}
+    for edge in dsl.edges:
+        predecessors_map[edge.to_node].add(edge.from_node)
 
     builder = StateGraph(dict)
-
-    conditional_sources: set[str] = set()
-    for node_dsl in dsl.nodes:
-        if node_dsl.type == "quality_gate":
-            conditional_sources.add(node_dsl.id)
 
     for node_dsl in dsl.nodes:
         executor = get_executor(node_dsl.type)
         node_params = node_dsl.params.copy()
         node_type_str = node_dsl.type
+        node_predecessors = predecessors_map.get(node_dsl.id, set())
 
         async def _node_fn(
             state: dict,
@@ -60,7 +74,27 @@ def compile(dsl: WorkflowDSL, ctx: ExecutionContext) -> Any:
             _params=node_params,
             _nid=node_dsl.id,
             _ntype=node_type_str,
+            _preds=frozenset(node_predecessors),
         ) -> dict:
+            failed_preds = _check_upstream_failures(state, _preds)
+            if failed_preds:
+                logger.info(
+                    "Skipping node %s (%s): upstream failed/skipped: %s",
+                    _nid, _ntype, ", ".join(failed_preds),
+                )
+                if ctx.notification_mgr:
+                    await ctx.notification_mgr.notify(
+                        agent_id=ctx.agent_id,
+                        event_type="run_step_skipped",
+                        data={
+                            "run_id": ctx.run_id,
+                            "node_id": _nid,
+                            "node_type": _ntype,
+                            "reason": f"upstream failed: {', '.join(failed_preds)}",
+                        },
+                    )
+                return {**state, f"{_nid}._skipped": True}
+
             inputs = _gather_inputs(state, dsl, _nid)
 
             if ctx.notification_mgr:
@@ -102,22 +136,34 @@ def compile(dsl: WorkflowDSL, ctx: ExecutionContext) -> Any:
 
         builder.add_node(node_dsl.id, _node_fn)
 
-    roots = dsl.root_nodes()
-    for root in roots:
-        builder.add_edge(START, root.id)
-
-    for node_id in order:
-        if node_id in conditional_sources:
-            _add_conditional_edges(builder, dsl, node_id)
+    for i, nid in enumerate(order):
+        if i == 0:
+            builder.add_edge(START, nid)
         else:
-            successors = dsl.successors(node_id)
-            if not successors:
-                builder.add_edge(node_id, END)
+            prev = order[i - 1]
+            prev_node = node_map.get(prev)
+            if prev_node and prev_node.type == "quality_gate":
+                _add_conditional_edges(builder, dsl, prev, fallback=nid)
             else:
-                for succ in successors:
-                    builder.add_edge(node_id, succ)
+                builder.add_edge(prev, nid)
+
+    last = order[-1]
+    last_node = node_map.get(last)
+    if last_node and last_node.type == "quality_gate":
+        _add_conditional_edges(builder, dsl, last)
+    else:
+        builder.add_edge(last, END)
 
     return builder.compile()
+
+
+def _check_upstream_failures(state: dict, predecessors: frozenset[str]) -> list[str]:
+    """Return list of predecessor node IDs that failed or were skipped."""
+    failed = []
+    for pred_id in predecessors:
+        if state.get(f"{pred_id}._error") or state.get(f"{pred_id}._skipped"):
+            failed.append(pred_id)
+    return failed
 
 
 def _gather_inputs(state: dict, dsl: WorkflowDSL, node_id: str) -> dict[str, Any]:
@@ -131,7 +177,7 @@ def _gather_inputs(state: dict, dsl: WorkflowDSL, node_id: str) -> dict[str, Any
     return inputs
 
 
-def _add_conditional_edges(builder, dsl: WorkflowDSL, gate_node_id: str) -> None:
+def _add_conditional_edges(builder, dsl: WorkflowDSL, gate_node_id: str, fallback: str | None = None) -> None:
     """Wire a quality_gate node's pass/fail outputs to different successors."""
     edge_map: dict[str, str] = {}
     for edge in dsl.edges:
@@ -142,16 +188,21 @@ def _add_conditional_edges(builder, dsl: WorkflowDSL, gate_node_id: str) -> None
                 edge_map["fail"] = edge.to_node
 
     if not edge_map:
-        builder.add_edge(gate_node_id, END)
+        if fallback:
+            builder.add_edge(gate_node_id, fallback)
+        else:
+            builder.add_edge(gate_node_id, END)
         return
 
     def _route(state: dict) -> str:
         result = state.get(f"{gate_node_id}._gate_result", "pass")
         if result in edge_map:
             return edge_map[result]
-        return END
+        return fallback or END
 
     destinations = list(edge_map.values())
+    if fallback and fallback not in destinations:
+        destinations.append(fallback)
     if END not in destinations:
         destinations.append(END)
 

@@ -9,7 +9,8 @@ import {
   Tooltip,
   useColorMode,
 } from '@chakra-ui/react';
-import { AttachmentIcon, CloseIcon, RepeatIcon } from '@chakra-ui/icons';
+import { CloseIcon } from '@chakra-ui/icons';
+import { Paperclip, MessageSquarePlus, X } from 'lucide-react';
 import { Thread } from '@assistant-ui/react-ui';
 import '@assistant-ui/react-ui/styles/index.css';
 import '@assistant-ui/react-ui/styles/tailwindcss/markdown.css';
@@ -119,70 +120,33 @@ function ChatShell() {
           position="absolute"
           inset={0}
           zIndex={50}
-          bg="rgba(59,130,246,0.12)"
-          border="3px dashed"
-          borderColor="blue.400"
-          borderRadius="lg"
+          bg="rgba(59,130,246,0.08)"
+          border="2px dashed"
+          borderColor="blue.300"
+          borderRadius="xl"
           align="center"
           justify="center"
           pointerEvents="none"
         >
           <Box textAlign="center">
-            <Text fontSize="2xl" fontWeight="bold" color="blue.500">
+            <Text fontSize="lg" fontWeight="600" color="blue.500">
               Dosyalari buraya birakin
             </Text>
-            <Text fontSize="sm" color="blue.400" mt={1}>
+            <Text fontSize="xs" color="blue.400" mt={1}>
               PDF, gorsel, CSV, DOCX vb.
             </Text>
           </Box>
         </Flex>
       )}
 
-      {/* Compact toolbar */}
-      <Flex
-        align="center"
-        justify="flex-end"
-        px={3}
-        py={1.5}
-        borderBottom="1px"
-        borderColor={isDark ? 'gray.700' : 'gray.100'}
-        flexShrink={0}
-        minH="36px"
-      >
-        <HStack spacing={2}>
-          {isStreaming && (
-            <HStack spacing={1} color="blue.400" fontSize="xs" mr={2}>
-              <Box w={2} h={2} bg="blue.400" borderRadius="full" className="animate-pulse" />
-              <Text>Yanitliyor...</Text>
-            </HStack>
-          )}
-          <Tooltip label="Dosya yukle" fontSize="xs">
-            <IconButton
-              aria-label="Dosya yukle"
-              icon={<AttachmentIcon />}
-              size="xs"
-              variant="ghost"
-              color="gray.400"
-              _hover={{ color: 'blue.400' }}
-              onClick={() => fileInputRef.current?.click()}
-              isDisabled={isStreaming}
-            />
-          </Tooltip>
-          {hasMessages && !isStreaming && (
-            <Tooltip label="Yeni konusma baslat" placement="bottom" fontSize="xs">
-              <IconButton
-                aria-label="Yeni konusma"
-                icon={<RepeatIcon />}
-                size="xs"
-                variant="ghost"
-                color="gray.400"
-                _hover={{ color: 'blue.400' }}
-                onClick={resetChat}
-              />
-            </Tooltip>
-          )}
-        </HStack>
-      </Flex>
+      {isStreaming && (
+        <Box flexShrink={0} px={4} pt={1.5} pb={0.5}>
+          <HStack spacing={1.5} color="blue.400" fontSize="xs">
+            <Box w={1.5} h={1.5} bg="blue.400" borderRadius="full" className="animate-pulse" />
+            <Text fontWeight="500">Yanitliyor...</Text>
+          </HStack>
+        </Box>
+      )}
 
       <input
         ref={fileInputRef}
@@ -193,7 +157,7 @@ function ChatShell() {
         onChange={handleFileSelect}
       />
 
-      {/* Assistant-UI Thread */}
+      {/* Thread */}
       <Box flex={1} minH={0} overflow="hidden" className={isDark ? 'aui-dark' : ''}>
         <Thread
           welcome={{
@@ -233,7 +197,7 @@ function ChatShell() {
           strings={{
             welcome: { message: 'Agent ile konusmaya baslayin' },
             composer: {
-              input: { placeholder: 'Mesajinizi yazin veya S3/MinIO linki yapistirin...' },
+              input: { placeholder: 'Mesajinizi yazin...' },
               send: { tooltip: 'Gonder' },
               cancel: { tooltip: 'Durdur' },
             },
@@ -241,40 +205,84 @@ function ChatShell() {
         />
       </Box>
 
-      {uploadedFiles.length > 0 && (
-        <Flex
-          px={4}
-          py={2}
-          bg={isDark ? 'gray.800' : 'blue.50'}
-          borderTop="1px"
-          borderColor={isDark ? 'gray.700' : 'blue.100'}
-          align="center"
-          gap={2}
-          flexWrap="wrap"
-          flexShrink={0}
-        >
-          <AttachmentIcon color="blue.400" boxSize={3} />
-          <Text fontSize="xs" color="blue.500" fontWeight="medium">
-            {uploadedFiles.length} dosya yuklendi:
-          </Text>
-          {uploadedFiles.map((f, i) => (
-            <Badge key={i} colorScheme="blue" fontSize="2xs" variant="subtle">
-              {f.name}
-            </Badge>
-          ))}
-          <Tooltip label="Dosya listesini temizle" fontSize="xs">
+      {/* Bottom action strip */}
+      <Flex
+        align="center"
+        px={4}
+        py={1.5}
+        flexShrink={0}
+        gap={1}
+        borderTop="1px"
+        borderColor={isDark ? 'whiteAlpha.100' : 'gray.100'}
+        bg={isDark ? 'gray.900' : 'gray.50'}
+      >
+        <Tooltip label="Dosya ekle" fontSize="xs" placement="top">
+          <IconButton
+            aria-label="Dosya ekle"
+            icon={<Paperclip size={14} strokeWidth={1.5} />}
+            size="xs"
+            variant="ghost"
+            color={isDark ? 'gray.500' : 'gray.400'}
+            _hover={{ color: 'blue.500', bg: isDark ? 'whiteAlpha.100' : 'gray.200' }}
+            borderRadius="md"
+            onClick={() => fileInputRef.current?.click()}
+            isDisabled={isStreaming}
+          />
+        </Tooltip>
+        {hasMessages && !isStreaming && (
+          <Tooltip label="Yeni sohbet" fontSize="xs" placement="top">
             <IconButton
-              aria-label="Temizle"
-              icon={<CloseIcon />}
+              aria-label="Yeni sohbet"
+              icon={<MessageSquarePlus size={14} strokeWidth={1.5} />}
               size="xs"
               variant="ghost"
-              color="gray.400"
-              onClick={clearUploadedFiles}
-              ml="auto"
+              color={isDark ? 'gray.500' : 'gray.400'}
+              _hover={{ color: 'blue.500', bg: isDark ? 'whiteAlpha.100' : 'gray.200' }}
+              borderRadius="md"
+              onClick={resetChat}
             />
           </Tooltip>
-        </Flex>
-      )}
+        )}
+
+        {/* Uploaded files chips */}
+        {uploadedFiles.length > 0 && (
+          <>
+            <Box w="1px" h="14px" bg={isDark ? 'whiteAlpha.200' : 'gray.200'} mx={1} />
+            <HStack spacing={1} flex={1} flexWrap="wrap" overflow="hidden">
+              {uploadedFiles.map((f, i) => (
+                <Badge
+                  key={i}
+                  bg={isDark ? 'whiteAlpha.100' : 'blue.50'}
+                  color={isDark ? 'blue.200' : 'blue.600'}
+                  fontSize="10px"
+                  fontWeight="500"
+                  px={2}
+                  py={0.5}
+                  borderRadius="md"
+                  display="flex"
+                  alignItems="center"
+                  gap={1}
+                >
+                  <Paperclip size={9} />
+                  {f.name.length > 20 ? f.name.slice(0, 18) + '...' : f.name}
+                </Badge>
+              ))}
+            </HStack>
+            <Tooltip label="Temizle" fontSize="xs">
+              <IconButton
+                aria-label="Temizle"
+                icon={<X size={12} strokeWidth={1.5} />}
+                size="xs"
+                variant="ghost"
+                color="gray.400"
+                _hover={{ color: 'red.400' }}
+                borderRadius="md"
+                onClick={clearUploadedFiles}
+              />
+            </Tooltip>
+          </>
+        )}
+      </Flex>
     </Flex>
   );
 }

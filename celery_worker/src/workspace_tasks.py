@@ -843,3 +843,327 @@ def process_document_mcp_task(
         _report_status(workspace_doc_id, "failed", error_message=str(e)[:500], agent_id=agent_id, batch_id=batch_id)
         _maybe_finalize_batch(batch_id)
         raise self.retry(exc=e, countdown=60, max_retries=2)
+
+
+# ============================================================================
+# WORKFLOW TASKS -- Text-based tasks for the workflow pipeline
+# ============================================================================
+
+import re as _re
+
+_SENTENCE_SPLIT_RE = _re.compile(r"(?<=[.!?])\s+")
+
+
+def _fixed_size_chunks(text: str, size: int, overlap: int) -> list:
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end - overlap if overlap < size else end
+    return chunks
+
+
+def _sentence_chunks(text: str, target_size: int, overlap: int) -> list:
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    chunks, current, current_len = [], [], 0
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if current_len + len(sent) > target_size and current:
+            chunks.append(" ".join(current))
+            if overlap > 0:
+                tail = " ".join(current)[-overlap:]
+                current, current_len = [tail], len(tail)
+            else:
+                current, current_len = [], 0
+        current.append(sent)
+        current_len += len(sent) + 1
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
+
+
+@app.task(bind=True, name="workspace.chunk_text", max_retries=3)
+def chunk_text_task(
+    self,
+    doc_id: str,
+    text: str,
+    file_name: str = "",
+    chunk_size: int = 2000,
+    overlap: int = 200,
+    strategy: str = "sentence_based",
+    agent_id: str = "",
+    batch_id: str = "",
+):
+    """
+    Text-bazli chunking. Workflow pipeline icin.
+
+    Returns:
+        {"doc_id": ..., "file_name": ..., "chunks": [{"text": ..., "index": ..., "char_count": ...}]}
+    """
+    logger.info("workspace.chunk_text: %s (%d chars, strategy=%s)", doc_id, len(text), strategy)
+
+    try:
+        if strategy == "sentence_based":
+            parts = _sentence_chunks(text, chunk_size, overlap)
+        else:
+            parts = _fixed_size_chunks(text, chunk_size, overlap)
+
+        chunks = [
+            {"text": p, "index": i, "char_count": len(p)}
+            for i, p in enumerate(parts)
+        ]
+
+        logger.info("workspace.chunk_text done: %s -> %d chunks", doc_id, len(chunks))
+        return {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "chunks": chunks,
+            "total_chunks": len(chunks),
+        }
+
+    except Exception as e:
+        logger.error("chunk_text failed for %s: %s", doc_id, e)
+        raise self.retry(exc=e, countdown=30, max_retries=3)
+
+
+@app.task(bind=True, name="workspace.create_embeddings", max_retries=3)
+def create_embeddings_task_workflow(
+    self,
+    doc_id: str,
+    texts: List[str],
+    entity_ids: Optional[List[str]] = None,
+    model: str = "openai",
+    neo4j_database: str = "",
+    agent_id: str = "",
+):
+    """
+    Text listesinden embedding olusturur ve opsiyonel olarak Neo4j'ye yazar.
+
+    Returns:
+        {"doc_id": ..., "embedded_count": ..., "status": ...}
+    """
+    logger.info("workspace.create_embeddings: %s (%d texts, model=%s)", doc_id, len(texts), model)
+
+    try:
+        embedder = None
+        if model == "openai":
+            from langchain_openai import OpenAIEmbeddings
+            embedder = OpenAIEmbeddings()
+        elif model == "gemini":
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            embedder = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        else:
+            from langchain_openai import OpenAIEmbeddings
+            embedder = OpenAIEmbeddings()
+
+        vectors = embedder.embed_documents(texts)
+        embedded_count = len(vectors)
+
+        if entity_ids and len(entity_ids) == len(vectors):
+            neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+            neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j")
+            neo4j_pass = os.getenv("NEO4J_PASSWORD", "password")
+            database = neo4j_database or os.getenv("NEO4J_DATABASE", "neo4j")
+
+            try:
+                from neo4j import GraphDatabase
+                driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pass))
+                with driver.session(database=database) as session:
+                    for eid, vec in zip(entity_ids, vectors):
+                        session.run("MATCH (n {id: $id}) SET n.embedding = $vec", id=eid, vec=vec)
+                driver.close()
+                logger.info("workspace.create_embeddings: wrote %d embeddings to Neo4j", len(entity_ids))
+            except Exception as neo4j_err:
+                logger.warning("Neo4j embedding write failed: %s", neo4j_err)
+
+        logger.info("workspace.create_embeddings done: %s -> %d embedded", doc_id, embedded_count)
+        return {
+            "doc_id": doc_id,
+            "embedded_count": embedded_count,
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.error("create_embeddings failed for %s: %s", doc_id, e)
+        raise self.retry(exc=e, countdown=60, max_retries=3)
+
+
+@app.task(bind=True, name="workspace.summarize_for_wiki", max_retries=3)
+def summarize_for_wiki_task(
+    self,
+    doc_id: str,
+    text: str,
+    file_name: str = "",
+    max_chars: int = 8000,
+    agent_id: str = "",
+):
+    """
+    OCR text'i LLM ile ozetler ve wiki sayfasi icin yapilandirilmis JSON doner.
+
+    Returns:
+        {"doc_id": ..., "title": ..., "summary": ..., "key_info": ...,
+         "entities_mentioned": [...], "category": ...}
+    """
+    logger.info("workspace.summarize_for_wiki: %s (%d chars)", doc_id, len(text))
+
+    try:
+        provider = os.getenv("EVOLVING_OCR_PROVIDER", "google").lower()
+        model_name = os.getenv("EVOLVING_OCR_MODEL", "gemini-2.5-flash")
+
+        if provider in ("google", "gemini"):
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.1)
+        elif provider in ("openai", "gpt"):
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(model=model_name, temperature=0.1)
+        else:
+            from langchain_anthropic import ChatAnthropic
+            llm = ChatAnthropic(model=model_name, temperature=0.1)
+
+        prompt = (
+            "Asagidaki OCR metni bir belgeden cikarilmistir. Bu metinden yapilandirilmis\n"
+            "bir wiki sayfasi olustur. Ciktini asagidaki JSON formatinda ver:\n\n"
+            '{\n'
+            '  "title": "Belgenin kisa basligini yaz",\n'
+            '  "summary": "2-3 cumlelik belge ozeti",\n'
+            '  "key_info": "- Madde 1\\n- Madde 2\\n- Madde 3 seklinde onemli bilgileri listele",\n'
+            '  "entities_mentioned": ["entity1", "entity2"],\n'
+            '  "category": "sources"\n'
+            '}\n\n'
+            "Kurallar:\n"
+            "- Turkce yaz.\n"
+            "- Gercek metinden cikar, UYDURMA.\n"
+            "- entities_mentioned: metinde gecen onemli kisileri, sirketleri, yerleri listele.\n"
+            "- category: sources, entities, analysis veya general olabilir.\n\n"
+            f"OCR Metni (ilk {max_chars} karakter):\n{text[:max_chars]}"
+        )
+
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        response = loop.run_until_complete(llm.ainvoke(prompt))
+        content = response.content if hasattr(response, "content") else str(response)
+
+        json_match = _re.search(r"\{[\s\S]*\}", content)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = {
+                "title": file_name.rsplit(".", 1)[0] if "." in file_name else file_name,
+                "summary": text[:200],
+                "key_info": "",
+                "entities_mentioned": [],
+                "category": "sources",
+            }
+
+        result = {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "title": parsed.get("title", file_name),
+            "summary": parsed.get("summary", ""),
+            "key_info": parsed.get("key_info", ""),
+            "entities_mentioned": parsed.get("entities_mentioned", []),
+            "category": parsed.get("category", "sources"),
+        }
+        logger.info("workspace.summarize_for_wiki done: %s -> %s", doc_id, result["title"])
+        return result
+
+    except Exception as e:
+        logger.error("summarize_for_wiki failed for %s: %s", doc_id, e)
+        raise self.retry(exc=e, countdown=60, max_retries=3)
+
+
+@app.task(bind=True, name="workspace.design_ontology", max_retries=3)
+def design_ontology_task(
+    self,
+    doc_id: str,
+    wiki_content: str,
+    existing_ontology_json: str = "",
+    max_wiki_chars: int = 15000,
+    agent_id: str = "",
+):
+    """
+    Wiki content'ten LLM ile ontoloji tasarimi yapar.
+
+    Returns:
+        {"doc_id": ..., "proposed_ontology": {...}, "status": ...}
+    """
+    logger.info("workspace.design_ontology: %s (%d chars wiki)", doc_id, len(wiki_content))
+
+    try:
+        provider = os.getenv("EVOLVING_OCR_PROVIDER", "google").lower()
+        model_name = os.getenv("EVOLVING_OCR_MODEL", "gemini-2.5-flash")
+
+        if provider in ("google", "gemini"):
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
+        elif provider in ("openai", "gpt"):
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(model=model_name, temperature=0.2)
+        else:
+            from langchain_anthropic import ChatAnthropic
+            llm = ChatAnthropic(model=model_name, temperature=0.2)
+
+        existing_str = existing_ontology_json if existing_ontology_json else "Henuz ontoloji yok."
+
+        prompt = (
+            "Asagidaki wiki sayfalari belge ozetlerini icermektedir. Bu sayfalardan\n"
+            "bir bilgi grafi ontolojisi tasarla.\n\n"
+            f"Mevcut ontoloji (varsa):\n{existing_str}\n\n"
+            f"Wiki sayfalari:\n{wiki_content[:max_wiki_chars]}\n\n"
+            "Ciktini su JSON formatinda ver:\n"
+            '{\n'
+            '  "domain": "Bu belgelerin ait oldugu alan",\n'
+            '  "goal": "Bu ontolojinin amaci (1 cumle)",\n'
+            '  "entity_classes": [\n'
+            '    {"name": "EntityAdi", "description": "tanim", "parent": "", "properties": [{"name": "prop", "type": "string", "constraint": "required", "description": "aciklama"}]}\n'
+            '  ],\n'
+            '  "relationship_predicates": [\n'
+            '    {"name": "ILISKI_ADI", "source": "KaynakEntity", "target": "HedefEntity", "edge_properties": [], "description": "aciklama"}\n'
+            '  ],\n'
+            '  "constraints": ["Kural 1", "Kural 2"]\n'
+            '}\n\n'
+            "Kurallar:\n"
+            "- Mevcut ontoloji varsa onunla BIRLESIK calis\n"
+            "- Entity isimleri PascalCase, relationship isimleri UPPER_SNAKE_CASE\n"
+            "- Turkce aciklamalar yaz"
+        )
+
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        response = loop.run_until_complete(llm.ainvoke(prompt))
+        content = response.content if hasattr(response, "content") else str(response)
+
+        json_match = _re.search(r"\{[\s\S]*\}", content)
+        if json_match:
+            proposed = json.loads(json_match.group())
+        else:
+            logger.warning("No JSON in ontology design response for %s", doc_id)
+            return {"doc_id": doc_id, "proposed_ontology": {}, "status": "no_json"}
+
+        logger.info(
+            "workspace.design_ontology done: %s -> %d entities, %d rels",
+            doc_id, len(proposed.get("entity_classes", [])),
+            len(proposed.get("relationship_predicates", [])),
+        )
+        return {
+            "doc_id": doc_id,
+            "proposed_ontology": proposed,
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.error("design_ontology failed for %s: %s", doc_id, e)
+        raise self.retry(exc=e, countdown=60, max_retries=3)

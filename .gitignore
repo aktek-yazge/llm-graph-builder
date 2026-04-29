@@ -233,3 +233,12 @@ tools/zombie-scanner/.venv/
 
 # Agent Builder frontend
 agent-builder/frontend/node_modules/
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+
+# SQLite / ChromaDB runtime files
+*.sqlite3
+*.db
+!schema.db
