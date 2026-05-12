@@ -30,6 +30,22 @@ const statusDotColors: Record<string, string> = {
   failed: '#ff6b6b',
 };
 
+// Output port adına göre semantik renk kodlaması (graphify-adopted quality_gate
+// üç-yol output: pass → yeşil, fail → kırmızı, ambiguous → turuncu).
+// Backend `node_registry`'den gelen output_ports.name ile eşleşir.
+const portColorByName: Record<string, string> = {
+  pass: '#51cf66',       // green
+  fail: '#ff6b6b',       // red
+  ambiguous: '#ffa94d',  // orange — düşük güven / human review gereksinimi
+};
+
+const PORT_COLOR_DEFAULT = '#dee2e6';
+
+const colorForPort = (portName: string, isInput: boolean): string => {
+  if (isInput) return PORT_COLOR_DEFAULT;
+  return portColorByName[portName] ?? PORT_COLOR_DEFAULT;
+};
+
 const WorkflowNode: FC<NodeProps> = ({ id, data: rawData, selected }) => {
   const data = rawData as unknown as WorkflowNodeData;
   const status = data.status || 'idle';
@@ -138,39 +154,47 @@ const WorkflowNode: FC<NodeProps> = ({ id, data: rawData, selected }) => {
         </Text>
       </Box>
 
-      {inputPorts.map((port, i) => (
-        <Handle
-          key={`in-${port.name}`}
-          type="target"
-          position={Position.Left}
-          id={port.name}
-          style={{
-            top: `${30 + i * 20}%`,
-            background: '#dee2e6',
-            width: 7,
-            height: 7,
-            border: '2px solid white',
-            boxShadow: '0 0 0 1px #dee2e6',
-          }}
-        />
-      ))}
+      {inputPorts.map((port, i) => {
+        const c = colorForPort(port.name, true);
+        return (
+          <Handle
+            key={`in-${port.name}`}
+            type="target"
+            position={Position.Left}
+            id={port.name}
+            title={port.name}
+            style={{
+              top: `${30 + i * 20}%`,
+              background: c,
+              width: 7,
+              height: 7,
+              border: '2px solid white',
+              boxShadow: `0 0 0 1px ${c}`,
+            }}
+          />
+        );
+      })}
 
-      {outputPorts.map((port, i) => (
-        <Handle
-          key={`out-${port.name}`}
-          type="source"
-          position={Position.Right}
-          id={port.name}
-          style={{
-            top: `${30 + i * 20}%`,
-            background: '#dee2e6',
-            width: 7,
-            height: 7,
-            border: '2px solid white',
-            boxShadow: '0 0 0 1px #dee2e6',
-          }}
-        />
-      ))}
+      {outputPorts.map((port, i) => {
+        const c = colorForPort(port.name, false);
+        return (
+          <Handle
+            key={`out-${port.name}`}
+            type="source"
+            position={Position.Right}
+            id={port.name}
+            title={port.name}
+            style={{
+              top: `${30 + i * 20}%`,
+              background: c,
+              width: 7,
+              height: 7,
+              border: '2px solid white',
+              boxShadow: `0 0 0 1px ${c}`,
+            }}
+          />
+        );
+      })}
     </Box>
   );
 };

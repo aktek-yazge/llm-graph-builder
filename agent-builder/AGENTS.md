@@ -518,9 +518,43 @@ konfigurasyonu degismediyse** LLM cagrisi tamamen atlanir. Cache key:
 veya LLM model guncellemesi otomatik invalidation tetikler. Manuel bypass:
 `--force` flag.
 
-**SQLite tablosu:** `ingest_cache` (kb-overlay schema v2). agent-builder
-tarafinda henuz yok (Celery worker text-hash check'i bagimsiz olarak
-implement edilebilir; bu konu acik soru).
+**SQLite tablosu (kb-overlay):** `ingest_cache` (schema v2).
+
+**PostgreSQL tablosu (Celery worker):** `extraction_cache` (event_store DB,
+schema v1). Her iki tablo da ayni semantik patern: composite PK
+`(doc_id, content_hash, extractor_version)`, UPSERT `ON CONFLICT DO UPDATE`,
+optional tenant filter.
+
+Module: `celery_worker/src/extraction_cache.py` — pure helpers (compute_hash,
+build_extractor_version) + DB-bagli helpers (init/check/save/clear).
+Integration: `workspace.extract_entities` task'i basinda lookup, sonunda save.
+Cache hit → LLM cagrisi atlanir, payload `extraction_result` JSONB'den
+replay edilir.
+
+`extractor_version` (Celery side) = `pipeline=agentic_ocr;schema=1;domain=...;skill=...`.
+Domain veya skill_id degisimi cache invalidation tetikler — cunku
+`process_agentic_ocr_text_mode` cagrisina prompt-shape farki yansitir.
+
+Manuel bypass: `force_refresh=True` task arg veya `EXTRACTION_CACHE_ENABLED=0`
+env var. Wire compat: ayni text icin kb-overlay ve celery_worker IDENTIK
+SHA-256 prefix uretir (`tests/test_extraction_cache.py::TestKbOverlayWireCompat`).
+
+### 10. QUALITY GATE THREE-WAY OUTPUT — UI PORT COLORING
+
+`quality_gate` workflow node'u `label_aware` policy'sinde uc ayri output
+port doner: `pass` (yesil), `fail` (kirmizi), `ambiguous` (turuncu). UI
+tarafinda `WorkflowNode.tsx` `colorForPort(port.name, isInput)` helper'i
+ile semantik renk kodlamasi yapar:
+
+| Port adi    | Renk    | Anlam                                      |
+|-------------|---------|--------------------------------------------|
+| pass        | #51cf66 | Numerik avg_confidence esik uzerinde       |
+| fail        | #ff6b6b | Numerik avg_confidence esik altinda        |
+| ambiguous   | #ffa94d | label_aware'de ambiguous_count > max       |
+
+Backend `node_registry`'den gelen output_ports.name ile eslesir, hardcoded
+listesi minimaldir — yeni port adi eklendiginde gri (default) gozukur,
+backwards compat. Hover tooltip port adini gosterir.
 
 ---
 

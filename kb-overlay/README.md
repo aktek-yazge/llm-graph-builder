@@ -216,6 +216,7 @@ KBO_NEO4J_PASS=testpass1 pytest tests/test_neo4j_store_smoke.py
 - **Neden harici alias sözlüğü (SQLite), Neo4j'de değil?** Alias trie'sini RAM'e in-process build etmek <1ms latency veriyor. Neo4j'de surface_form lookup'ı için her seferinde driver round-trip = 5-50ms. SQLite tek dosya, atomik backup, schema migration kolay.
 - **Neden gazetteer + NER hibrit?** Gazetteer = bilinen isimlerde %100 precision + <1ms. NER = open-world keşfi (yeni adaylar). Sadece NER kullanırsak nadir/akronim isimleri kaçırırız; sadece gazetteer kullanırsak yeni şirket göremeyiz.
 - **Neden agent raw isimle Cypher yazmasın?** Yazım varyasyonu sorununu sorgu zamanında değil **lookup katmanında** çözüyoruz. Agent her zaman `canonical_id` ile sorar; bu sayede Cypher hem güvenli hem deterministik.
+- **Neden NER için GLiNER, ilişki için Gemini?** 7+ model karşılaştırıldı (GLiNER, BERTurk, NuExtract, Gemma 26B, Qwen3.6 27B/35B, Gemini Flash). Hibrit fine-tuned GLiNER (250M) Aksa benchmark'ında 5 saniyede 4/4 kritik entity yakaladı — Gemma 26B'den 20×, Qwen 27B Dense'ten 120× hızlı. Karmaşık ilişki/normalize için Gemini Flash kullanılır (token maliyeti %80-90 azalır çünkü full doc yerine entity pencereleri gönderilir). Detay: [`docs/decisions/0001-ner-with-gliner-relations-with-llm.md`](docs/decisions/0001-ner-with-gliner-relations-with-llm.md).
 
 ## graphify-adopted patterns
 

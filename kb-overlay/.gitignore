@@ -13,3 +13,11 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 .DS_Store
+
+# Generated outputs — training data, model weights, run results
+data/hybrid_distill/
+data/synthetic_distill/
+data/turkish_ner/
+data/turkish_ner_gliner/
+models/
+runs/

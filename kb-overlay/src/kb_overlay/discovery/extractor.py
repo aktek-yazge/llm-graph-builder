@@ -14,6 +14,7 @@ from typing import Optional
 from ..confidence import ConfidenceLabel
 from ..dictionary import AliasSource, AliasStore, EntityType
 from ..gazetteer import GazetteerSpotter, SpottedMention
+from ..ingestion import normalize_ocr_text
 from ..normalize import normalize
 from ..resolver import CascadingResolver, ResolutionResult, ResolutionStage
 from ..resolver.cascading import label_from_stage
@@ -93,6 +94,7 @@ class DocumentExtractor:
         review_queue=None,  # ReviewQueue | None — circular import için lazy type
         auto_create_new_entities: bool = True,
         auto_create_min_confidence: float = 0.6,
+        ocr_normalize: bool = True,
     ):
         self.store = store
         self.resolver = resolver
@@ -101,6 +103,10 @@ class DocumentExtractor:
         self.review_queue = review_queue
         self.auto_create_new_entities = auto_create_new_entities
         self.auto_create_min_confidence = auto_create_min_confidence
+        # OCR çıktılarındaki yapay satır kırılmalarını birleştir
+        # (örn. "Aksa Akrilik Kimya Sanayii\nAnonim Şirketi" → tek satır).
+        # Tüm OCR belgeleri için sistemik düzeltme; opt-out için False ver.
+        self.ocr_normalize = ocr_normalize
 
     # ------------------------------------------------------------------ public
 
@@ -113,6 +119,12 @@ class DocumentExtractor:
     ) -> ExtractionResult:
         if not text:
             return ExtractionResult(doc_id=doc_id, text_length=0)
+
+        # En başta normalize: span'lar tüm pipeline'da normalized text'e göre
+        # tutarlı kalsın. SHA da normalized text üzerinden alınır → aynı
+        # belgenin iki farklı OCR satır kırılması varyasyonu aynı hash'e düşer.
+        if self.ocr_normalize:
+            text = normalize_ocr_text(text)
 
         sha = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
         self.store.register_document(doc_id, title=title, sha256=sha)

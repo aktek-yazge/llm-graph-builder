@@ -41,6 +41,33 @@ EVENT_STORE_DSN = os.getenv(
 
 IMAGE_RESOLUTION_SCALE = 2.0
 
+# Extraction cache (graphify-adopted content-hash skip).
+# Aynı doc + aynı extractor konfigürasyonu daha önce işlendiyse LLM çağrısı atlanır.
+# Cache key: (doc_id, sha256(text)[:16], extractor_version).
+# Schema init worker startup'ta yapılır; çalışmazsa cache devre dışı kalır,
+# task'lar normal akışta devam eder.
+EXTRACTION_CACHE_ENABLED = os.getenv("EXTRACTION_CACHE_ENABLED", "1") not in ("0", "false", "False")
+_extraction_cache_schema_initialized = False
+
+
+def _ensure_extraction_cache_schema() -> bool:
+    """Lazy idempotent schema init — ilk extract_entities task'inde tetiklenir."""
+    global _extraction_cache_schema_initialized
+    if _extraction_cache_schema_initialized:
+        return True
+    if not EXTRACTION_CACHE_ENABLED:
+        return False
+    try:
+        from src.extraction_cache import init_extraction_cache_schema
+    except ImportError:
+        logger.warning("extraction_cache module not importable")
+        return False
+    ok = init_extraction_cache_schema(EVENT_STORE_DSN)
+    if ok:
+        _extraction_cache_schema_initialized = True
+        logger.info("extraction_cache schema initialized")
+    return ok
+
 
 # ============================================================================
 # HELPERS
@@ -387,16 +414,89 @@ def extract_entities_task(
     domain: str = "",
     agent_id: str = "",
     batch_id: str = "",
+    force_refresh: bool = False,
 ):
     """
     OCR metinden schema-driven entity/relationship cikarir.
 
     Hybrid pipeline'in ikinci asamasi: AgenticOCR text mode.
 
+    Content-hash cache (graphify-adopted): ayni text + ayni extractor
+    konfigurasyonu daha once islendiyse LLM cagrisi ATLANIR. Cache key
+    `(doc_id, sha256(text)[:16], extractor_version)`. extractor_version =
+    `pipeline=agentic_ocr;schema=...;domain=...;skill=...`. domain veya
+    skill degisimi otomatik invalidation tetikler. ``force_refresh=True``
+    cache'i bypass eder.
+
     Returns:
-        {"doc_id": ..., "nodes": [...], "relationships": [...], "confidence_score": float}
+        {"doc_id": ..., "nodes": [...], "relationships": [...],
+         "confidence_score": float, "cached": bool}
     """
     logger.info("workspace.extract_entities: %s (%d chars)", workspace_doc_id, len(text))
+
+    # ── Cache lookup (LLM cagrisindan ONCE) ────────────────────────────
+    cache_hit = None
+    content_hash = None
+    extractor_version = None
+    if EXTRACTION_CACHE_ENABLED and not force_refresh and _ensure_extraction_cache_schema():
+        try:
+            from src.extraction_cache import (
+                build_extractor_version,
+                check_extraction_cache,
+                compute_content_hash,
+            )
+            content_hash = compute_content_hash(text)
+            extractor_version = build_extractor_version(domain=domain, skill_id=skill_id)
+            cache_hit = check_extraction_cache(
+                EVENT_STORE_DSN,
+                doc_id=workspace_doc_id,
+                content_hash=content_hash,
+                extractor_version=extractor_version,
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("extraction_cache lookup failed for %s: %s", workspace_doc_id, exc)
+
+    if cache_hit is not None and cache_hit.get("extraction_result"):
+        cached_payload = cache_hit["extraction_result"]
+        if isinstance(cached_payload, str):
+            try:
+                cached_payload = json.loads(cached_payload)
+            except json.JSONDecodeError:
+                cached_payload = None
+
+        if cached_payload:
+            logger.info(
+                "extraction_cache HIT %s (nodes=%d rels=%d age=%s)",
+                workspace_doc_id,
+                cache_hit["nodes_count"],
+                cache_hit["relationships_count"],
+                cache_hit.get("created_at"),
+            )
+            nodes = cached_payload.get("nodes", [])
+            rels = cached_payload.get("relationships", [])
+            cached_confidence = float(cached_payload.get("confidence_score") or 0.8)
+
+            _update_workspace_document(
+                workspace_doc_id, "entities_extracted",
+                confidence_score=cached_confidence, extraction_result=cached_payload,
+            )
+            _report_status(
+                workspace_doc_id,
+                "entities_extracted",
+                confidence_score=cached_confidence,
+                extraction_result=json.dumps(cached_payload, ensure_ascii=False, default=str),
+                agent_id=agent_id, batch_id=batch_id,
+            )
+            _maybe_finalize_batch(batch_id)
+            return {
+                "doc_id": workspace_doc_id,
+                "nodes": nodes,
+                "relationships": rels,
+                "confidence_score": cached_confidence,
+                "cached": True,
+            }
+
+    # ── Cache miss: gercek extraction ─────────────────────────────────
     _update_workspace_document(workspace_doc_id, "extracting_entities", celery_task_id=self.request.id)
     _report_status(workspace_doc_id, "extracting_entities", agent_id=agent_id, batch_id=batch_id)
 
@@ -419,7 +519,11 @@ def extract_entities_task(
         elif len(nodes) < 3:
             confidence = 0.5
 
-        result_payload = {"nodes": nodes[:50], "relationships": relationships[:50]}
+        result_payload = {
+            "nodes": nodes[:50],
+            "relationships": relationships[:50],
+            "confidence_score": confidence,
+        }
         _update_workspace_document(
             workspace_doc_id, "entities_extracted",
             confidence_score=confidence, extraction_result=result_payload,
@@ -433,11 +537,28 @@ def extract_entities_task(
         )
         _maybe_finalize_batch(batch_id)
 
+        # Cache write (basarili extraction sonrasi)
+        if EXTRACTION_CACHE_ENABLED and content_hash and extractor_version:
+            try:
+                from src.extraction_cache import save_extraction_cache
+                save_extraction_cache(
+                    EVENT_STORE_DSN,
+                    doc_id=workspace_doc_id,
+                    content_hash=content_hash,
+                    extractor_version=extractor_version,
+                    extraction_result=result_payload,
+                    agent_id=agent_id,
+                    batch_id=batch_id,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("extraction_cache save failed for %s: %s", workspace_doc_id, exc)
+
         return {
             "doc_id": workspace_doc_id,
             "nodes": nodes,
             "relationships": relationships,
             "confidence_score": confidence,
+            "cached": False,
         }
 
     except Exception as e:

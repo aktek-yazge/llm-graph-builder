@@ -279,13 +279,19 @@ class GlinerBackend(NerBackend):
 def get_ner_backend(name: str = "naive", **kwargs) -> NerBackend:
     """Backend factory.
 
-    ``name`` ∈ {'naive', 'spacy', 'gliner', 'llm'}.
+    ``name`` ∈ {'naive', 'spacy', 'gliner', 'llm', 'nuextract'}.
 
     LLM backend için ek kwargs:
       - provider: 'ollama' (default) | 'openai' | 'stub'
       - model: provider'a göre model adı (default: 'cosmos-gemma:9b')
       - base_url: Ollama/OpenAI endpoint (env'den de okunur)
       - temperature, chunk_chars, chunk_overlap, min_confidence (LlmNerBackend)
+
+    NuExtract backend için ek kwargs (NuExtractNerBackend.__init__):
+      - model: Ollama tag (default 'hf.co/numind/NuExtract-2.0-8B-GGUF:Q8_0')
+      - base_url, chunk_chars, temperature, default_confidence
+      - 'provider' kabul edilir ama yok sayılır (NuExtract direkt Ollama
+        /api/generate çağırır, provider arayüzü kullanılmaz)
     """
     name = name.lower()
     if name == "naive":
@@ -296,9 +302,11 @@ def get_ner_backend(name: str = "naive", **kwargs) -> NerBackend:
         return GlinerBackend(**kwargs)
     if name == "llm":
         return _build_llm_backend(**kwargs)
+    if name == "nuextract":
+        return _build_nuextract_backend(**kwargs)
     raise ValueError(
         f"Unknown NER backend: {name!r}. "
-        "Choose 'naive', 'spacy', 'gliner', or 'llm'."
+        "Choose 'naive', 'spacy', 'gliner', 'llm', or 'nuextract'."
     )
 
 
@@ -366,4 +374,38 @@ def _build_llm_backend(
         temperature=temperature,
         min_confidence=min_confidence,
         max_concurrency=max_concurrency,
+    )
+
+
+def _build_nuextract_backend(
+    *,
+    # provider/api_key burada anlamsız ama CLI aynı kwarg setiyle çağırıyor
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    temperature: float = 0.0,
+    chunk_chars: int = 18000,
+    chunk_overlap: int = 400,
+    min_confidence: float = 0.0,
+    max_concurrency: int = 1,
+    default_confidence: float = 0.85,
+) -> NerBackend:
+    """NuExtract-native backend factory.
+
+    Provider arayüzü yok — NuExtract direkt Ollama ``/api/generate`` çağırır.
+    CLI'den gelen ``provider`` ve ``api_key`` kwarg'ları (LLM backend'iyle
+    aynı CLI seti olduğu için) sessizce yok sayılır.
+    """
+    from .nuextract_ner import NuExtractNerBackend
+
+    return NuExtractNerBackend(
+        model=model or "hf.co/numind/NuExtract-2.0-8B-GGUF:Q8_0",
+        base_url=base_url,
+        chunk_chars=chunk_chars,
+        chunk_overlap=chunk_overlap,
+        temperature=temperature,
+        min_confidence=min_confidence,
+        max_concurrency=max_concurrency,
+        default_confidence=default_confidence,
     )

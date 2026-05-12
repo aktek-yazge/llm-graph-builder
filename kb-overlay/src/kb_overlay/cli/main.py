@@ -66,6 +66,7 @@ def _build_extractor(
     auto_create: bool = True,
     review_queue: Optional[ReviewQueue] = None,
     ner_kwargs: Optional[dict] = None,
+    ocr_normalize: bool = True,
 ) -> DocumentExtractor:
     spotter = None
     if use_gazetteer and GazetteerBuilder.is_available():
@@ -87,6 +88,7 @@ def _build_extractor(
         gazetteer_spotter=spotter,
         review_queue=review_queue,
         auto_create_new_entities=auto_create,
+        ocr_normalize=ocr_normalize,
     )
 
 
@@ -142,8 +144,11 @@ def init(ctx: click.Context) -> None:
     "--ner",
     "ner_name",
     default="naive",
-    type=click.Choice(["naive", "spacy", "gliner", "llm"]),
-    help="NER backend. 'llm' Ollama+Cosmos Turkish-Gemma'yı kullanır.",
+    type=click.Choice(["naive", "spacy", "gliner", "llm", "nuextract"]),
+    help=(
+        "NER backend. 'llm' = chat-style (Cosmos/Gemma/Trendyol vb.); "
+        "'nuextract' = NuExtract 2.0 native template format (Ollama)."
+    ),
 )
 @click.option(
     "--llm-provider",
@@ -193,6 +198,11 @@ def init(ctx: click.Context) -> None:
 @click.option("--fuzzy-threshold", default=90, type=int, show_default=True)
 @click.option("--encoding", default="utf-8", show_default=True)
 @click.option(
+    "--no-ocr-normalize",
+    is_flag=True,
+    help="OCR satır kırılması düzeltmeyi kapat (örn. 'Aksa Akrilik\\nA.Ş.' → birleştirme yok)",
+)
+@click.option(
     "--force",
     is_flag=True,
     help="Content-hash cache'i bypass et — aynı dosya/extractor olsa bile yeniden işle",
@@ -220,6 +230,7 @@ def ingest(
     no_auto_create: bool,
     fuzzy_threshold: int,
     encoding: str,
+    no_ocr_normalize: bool,
     force: bool,
     no_cache: bool,
 ) -> None:
@@ -244,8 +255,8 @@ def ingest(
     content_hash = _compute_content_hash(text)
     extractor_version = _build_extractor_version(
         ner_name=ner_name,
-        llm_provider=llm_provider if ner_name == "llm" else None,
-        llm_model=llm_model if ner_name == "llm" else None,
+        llm_provider=llm_provider if ner_name in ("llm", "nuextract") else None,
+        llm_model=llm_model if ner_name in ("llm", "nuextract") else None,
     )
 
     if not no_cache and not force:
@@ -271,7 +282,7 @@ def ingest(
             return
 
     ner_kwargs: dict = {}
-    if ner_name == "llm":
+    if ner_name in ("llm", "nuextract"):
         ner_kwargs = {
             "provider": llm_provider,
             "model": llm_model,
@@ -281,6 +292,16 @@ def ingest(
             "max_concurrency": llm_max_concurrency,
             "chunk_chars": llm_chunk_chars,
         }
+        # NuExtract için temperature default 0.0 olmalı (NuExtract dökümanı)
+        # ve chunk_chars 18000 daha uygun (32K context). Kullanıcı CLI'den
+        # değer geçtiyse onu yine dinleriz; geçmediyse Click default'u
+        # (0.2 / 6000) ile geliyor — onları nuextract için override edelim.
+        if ner_name == "nuextract":
+            # Click default değerleriyse → NuExtract-uygun değerlere kaydır
+            if llm_temperature == 0.2:  # Click default
+                ner_kwargs["temperature"] = 0.0
+            if llm_chunk_chars == 6000:  # Click default
+                ner_kwargs["chunk_chars"] = 18000
     extractor = _build_extractor(
         store,
         ner_name=ner_name,
@@ -289,6 +310,7 @@ def ingest(
         auto_create=not no_auto_create,
         review_queue=review_q,
         ner_kwargs=ner_kwargs,
+        ocr_normalize=not no_ocr_normalize,
     )
 
     result = extractor.extract(text, doc_id=doc_id, title=title)
