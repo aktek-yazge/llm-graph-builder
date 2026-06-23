@@ -766,6 +766,13 @@ except ImportError as e:
 MCP_HTTP_HOST = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
 MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8002"))
 
+# MCP sunucusunun (Docker konteyneri) Neo4j'ye bağlanmak için kullanacağı URL.
+# MCP konteynerin içinde "localhost" konteynerin kendisidir; host'taki Neo4j'ye
+# erişmek için host.docker.internal gerekir. Backend host'ta çalışırken NEO4J_URI
+# localhost olabilir, ama MCP tool'una geçilecek db_url MCP_NEO4J_URI olmalı.
+# Üretimde (backend+MCP aynı ağda) MCP_NEO4J_URI tanımsızsa NEO4J_URI'ye düşer.
+MCP_DB_URL = os.environ.get("MCP_NEO4J_URI") or os.environ.get("NEO4J_URI")
+
 # Stdio MCP servers toggle
 MCP_STDIO_ENABLED = os.environ.get("MCP_STDIO_ENABLED", "true").lower() == "true"
 
@@ -1252,7 +1259,7 @@ def create_react_tools(mcp_tools: List, session_id: str, question_id: str, user_
             # Multi-tenant: Add db credentials from environment
             db_params = {
                 "query": cypher,
-                "db_url": os.environ.get("NEO4J_URI"),
+                "db_url": MCP_DB_URL,
                 "db_username": os.environ.get("NEO4J_USERNAME"),
                 "db_password": os.environ.get("NEO4J_PASSWORD"),
                 "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
@@ -1370,7 +1377,7 @@ Lütfen sorguyu düzelt ve tekrar dene."""
                 "query_text": query_text,
                 "cypher_query": cypher,
                 "params": {},
-                "db_url": os.environ.get("NEO4J_URI"),
+                "db_url": MCP_DB_URL,
                 "db_username": os.environ.get("NEO4J_USERNAME"),
                 "db_password": os.environ.get("NEO4J_PASSWORD"),
                 "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
@@ -1577,7 +1584,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
                 result_data = await mcp_embedding.ainvoke({
                     "query_text": query_text,
                     "cypher_query": cypher,
-                    "db_url": os.environ.get("NEO4J_URI"),
+                    "db_url": MCP_DB_URL,
                     "db_username": os.environ.get("NEO4J_USERNAME"),
                     "db_password": os.environ.get("NEO4J_PASSWORD"),
                     "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
@@ -1657,7 +1664,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
             # Multi-tenant: Add db credentials from environment
             result_data = await mcp_read.ainvoke({
                 "query": cypher,
-                "db_url": os.environ.get("NEO4J_URI"),
+                "db_url": MCP_DB_URL,
                 "db_username": os.environ.get("NEO4J_USERNAME"),
                 "db_password": os.environ.get("NEO4J_PASSWORD"),
                 "db_database": os.environ.get("NEO4J_DATABASE", "neo4j"),
@@ -1889,9 +1896,16 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     
     if REACT_TOOL_MODE == "cypher":
         # CYPHER MODE: Model doğrudan Cypher yazar
-        # Primary tool'lar: execute_cypher_query, execute_cypher_query_with_embedding
-        tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
-        _log(f"🔧 TOOL MODE: cypher (direct Cypher queries)")
+        # Primary tool: execute_cypher_query
+        # Embedding tool'u sadece REACT_EMBEDDING=true ise eklenir (vektör index olmayan
+        # DB'lerde, örn. ticaret sicili grafiği, kapatılmalıdır → REACT_EMBEDDING=false)
+        embedding_enabled = os.getenv("REACT_EMBEDDING", "true").lower() == "true"
+        if embedding_enabled:
+            tools = [execute_cypher_query, execute_cypher_query_with_embedding] + base_tools
+            _log(f"🔧 TOOL MODE: cypher (direct Cypher + embedding)")
+        else:
+            tools = [execute_cypher_query] + base_tools
+            _log(f"🔧 TOOL MODE: cypher (direct Cypher, embedding DISABLED)")
     else:
         # DSL MODE (default): Model DSL üretir, sistem Cypher'a derler
         # Primary tool: execute_graph_dsl, fallback: execute_cypher_query
@@ -1949,7 +1963,7 @@ class ReactAgent:
     """
     
     # Geçerli domain'ler
-    VALID_DOMAINS = {"sigorta", "bakim"}
+    VALID_DOMAINS = {"sigorta", "bakim", "ticaret"}
     
     def __init__(self, graph, model_name: Optional[str] = None, reasoning_effort: Optional[str] = None, domain: Optional[str] = None):
         """
@@ -1964,7 +1978,8 @@ class ReactAgent:
             domain: Prompt domain'i. ZORUNLU parametre.
                 - "sigorta": Sigorta poliçeleri, müşteriler, teminatlar
                 - "bakim": WAT Motor bakım/arıza yönetimi (CMMS)
-        
+                - "ticaret": Ticaret Sicili Gazetesi belgeleri (Company→Document→Chunk→Entity)
+
         Raises:
             ValueError: domain parametresi belirtilmemişse veya geçersizse
         """
@@ -2038,7 +2053,13 @@ class ReactAgent:
         """
         if not session_id:
             return []
-        
+
+        # Tek-history modu: Bu instance kendi sohbet geçmişini TUTMAZ.
+        # (Örn. LangGraph/Mongo tek doğru kaynak; takip bağlamını çağıran taşır.)
+        # Cache'i bozmaz: sistem prompt'u prefix'i değişmez, yalnızca history boş kalır.
+        if os.environ.get("REACT_DISABLE_HISTORY", "false").lower() == "true":
+            return []
+
         # History limit: 100 mesaj (Anthropic cache için yeterli context)
         HISTORY_LIMIT = 100
         
@@ -2091,7 +2112,11 @@ class ReactAgent:
         """PostgreSQL'e mesaj kaydet"""
         if not session_id:
             return
-        
+
+        # Tek-history modu: yazma da kapalı (bkz. _get_conversation_history).
+        if os.environ.get("REACT_DISABLE_HISTORY", "false").lower() == "true":
+            return
+
         try:
             from src.shared.postgres_chat_history import create_postgres_chat_message_history
             from langchain_core.messages import HumanMessage, AIMessage
@@ -2114,6 +2139,7 @@ class ReactAgent:
         prompt_names = {
             "sigorta": "react-agent-system",
             "bakim": "react-agent-wat-motor",
+            "ticaret": "react-agent-ticaret-sicili",
         }
         return prompt_names.get(self.domain, LANGFUSE_PROMPT_NAME)
     
@@ -2141,12 +2167,12 @@ class ReactAgent:
         # Domain'e göre prompt al
         _log(f"📋 Domain: {self.domain}, Tool mode: {REACT_TOOL_MODE.upper()}")
         
-        # Bakım domain'i sadece Cypher mode destekler
+        # Bakım ve Ticaret domain'leri sadece Cypher mode destekler (DSL yok)
         effective_mode = REACT_TOOL_MODE
-        if self.domain == "bakim":
-            effective_mode = "cypher"  # Bakım domain'i için DSL desteklenmiyor
+        if self.domain in ("bakim", "ticaret"):
+            effective_mode = "cypher"  # Bu domain'ler için DSL desteklenmiyor
             if REACT_TOOL_MODE == "dsl":
-                _log(f"⚠️ Bakım domain'i DSL desteklemiyor, cypher mode'a geçiliyor", "warning")
+                _log(f"⚠️ '{self.domain}' domain'i DSL desteklemiyor, cypher mode'a geçiliyor", "warning")
         
         # Domain ve mode'a göre prompt'ları al
         prompts = get_domain_prompts(self.domain, effective_mode)

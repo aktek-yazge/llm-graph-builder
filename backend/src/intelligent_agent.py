@@ -558,18 +558,14 @@ GÖREV:
                     logger.info(f"📄 Satır {i+1}:")
 
                     # Chunk bilgileri varsa detaylı logla
-                    if "node.text" in row or "text" in row:
-                        text_content = row.get("node.text") or row.get("text", "")
+                    if "node.text" in row or "text" in row or "c.text" in row or "metin" in row:
+                        text_content = row.get("node.text") or row.get("text") or row.get("c.text") or row.get("metin", "")
                         score = row.get("score", "N/A")
 
-                        # Chunk metadata'sını bul
-                        chunk_id = row.get("node.chunkId") or row.get("chunkId", "N/A")
-                        page_number = row.get("node.page_number") or row.get(
-                            "page_number", "N/A"
-                        )
-                        position = row.get("node.position") or row.get(
-                            "position", "N/A"
-                        )
+                        # Chunk metadata'sını bul (ticaret sicili şeması: key/page/order)
+                        chunk_id = row.get("node.key") or row.get("c.key") or row.get("key") or row.get("chunkId", "N/A")
+                        page_number = row.get("node.page") or row.get("c.page") or row.get("page") or row.get("sayfa", "N/A")
+                        position = row.get("node.order") or row.get("c.order") or row.get("order", "N/A")
 
                         logger.info(f"   📊 Chunk ID: {chunk_id}")
                         logger.info(f"   📄 Sayfa: {page_number}")
@@ -1027,7 +1023,7 @@ LLM'İN KARARI: {action}
 🎯 GÖREV: Bu Cypher sorgusu neden hata verdi? SYNTAX HATASINI tespit et ve SADECE TEK CÜMLE ile düzeltilmiş çözümü öner.
 
 SYNTAX HATASI ANALİZİ:
-1. Property isimleri schema'ya uygun mu? (örn: fileName vs filename)
+1. Property isimleri schema'ya uygun mu? (örn: Document.name, Entity.value, Chunk.text — fileName/Entity.name YOK)
 3. String normalizasyon fonksiyonları doğru mu? (apoc.text.clean vs)
 4. APOC fonksiyonları varsa syntax'ı doğru mu?
 
@@ -1046,8 +1042,8 @@ BOŞ SONUÇ VERDİ: {cypher_query}
 
 ARAMA STRATEJİSİ:
 1. Eğer birden fazla kelimeden oluşan bir arama başarısız olursa ayrı ayrı aramayı denemesi için yönlendir
-2. Sonuç yoksa → Document node fileName aramaya geç - **ZORUNLU: kelimeler tek başlarında arandıktan sonra bile Entity node'larında bulunmayan bilgiler için Document.fileName'de ara!**
-3. **KRİTİK: Vector/Semantic arama gerekiyorsa vector embeddingleri bulması için LLM tool calling yapmasını öner**
+2. Entity'lerde bulunamazsa → `Chunk.text` içeriğinde CONTAINS ile aramayı öner (asıl metin chunk'larda)
+3. **KRİTİK: Embedding/vektör YOK — semantic arama önerme; içerik için `Chunk.text` CONTAINS kullan**
 
 Öneriler: string alanlar için mutlaka CONTAINS - apoc.text.clean() öner.
 
@@ -1183,28 +1179,28 @@ SADECE TEK CÜMLE ile cevap ver."""
                 )
                 context_prompt += f"- Kalan deneme hakkı: {remaining}\n"
                 context_prompt += f"- **STRATEJİ**: Filtreleri sadeleştir, daha basit WHERE koşulları kullan\n"
-                context_prompt += f"- **ÖNERİ**: Müşteri adının bir kısmını, yılı daha gevşek aramayı dene\n\n"
+                context_prompt += f"- **ÖNERİ**: İsmin/şirketin bir kısmını, daha gevşek CONTAINS ile aramayı dene\n\n"
             else:
                 context_prompt += (
-                    f"- **SONUÇ**: Entity query limiti aşıldı, vector search'e geç!\n"
+                    f"- **SONUÇ**: Entity query limiti aşıldı, içerik aramasına geç!\n"
                 )
-                context_prompt += f"- **ZORUNLU**: generate_embeddings_for_cypher TOOL'UNU ÇAĞIR + GDS similarity kullan\n\n"
+                context_prompt += f"- **ZORUNLU**: `Chunk.text` üzerinde CONTAINS ile içerik araması yap (embedding YOK)\n\n"
 
-        # Bulunan document filename'lerini ekle
+        # Bulunan belge adlarını ekle
         if state.discovered_document_filenames:
-            context_prompt += "**🔍 KEŞFEDİLEN DOCUMENT FILENAME'LERİ:**\n"
+            context_prompt += "**🔍 KEŞFEDİLEN BELGE ADLARI (Document.name):**\n"
             for i, filename in enumerate(state.discovered_document_filenames, 1):
                 context_prompt += f'  {i}. "{filename}"\n'
 
             context_prompt += (
-                f"\n**⚠️ SONRAKİ CHUNK SORGUSUNDA BU FILENAME'LERİ KULLAN:**\n"
+                f"\n**⚠️ SONRAKİ CHUNK SORGUSUNDA BU BELGE ADLARINI KULLAN:**\n"
             )
             context_prompt += f"```cypher\n"
             context_prompt += (
-                f"WHERE d.fileName IN {state.discovered_document_filenames}\n"
+                f"MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)\nWHERE d.name IN {state.discovered_document_filenames}\n"
             )
             context_prompt += f"```\n"
-            context_prompt += f"**TEKRAR filename contains araması yapma!**\n\n"
+            context_prompt += f"**TEKRAR belge adı contains araması yapma!**\n\n"
 
         for finding in state.successful_findings[-5:]:  # Son 5 başarılı bulguyu al
             context_prompt += (
@@ -2270,6 +2266,18 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                             filename
                                         )
 
+                                # Ticaret sicili şeması: Document.name / Chunk.document / belge alias
+                                for doc_key in ("d.name", "name", "c.document", "document", "belge", "node.document"):
+                                    if row.get(doc_key):
+                                        filename = row[doc_key]
+                                        if (
+                                            isinstance(filename, str)
+                                            and filename not in state.discovered_document_filenames
+                                            and filename not in document_filenames_found
+                                        ):
+                                            document_filenames_found.append(filename)
+                                            state.discovered_document_filenames.append(filename)
+
                         # Cypher sonuçlarını basit şekilde işle - otomatik chunk arama yapmadan
                         data_summary = []
                         for row in result[:5]:  # İlk 5 sonucu özetle
@@ -2346,34 +2354,46 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 document_name = None
 
                                 # Farklı chunk field'larını kontrol et
-                                if "text" in row:
-                                    chunk_text = row["text"]
+                                if "text" in row or "metin" in row:
+                                    chunk_text = row.get("text") or row.get("metin")
                                     chunk_id = row.get(
-                                        "chunkId",
+                                        "key",
                                         row.get(
-                                            "chunk_id",
-                                            f"cypher_{state.iteration_count}_{chunks_found}",
+                                            "chunkId",
+                                            row.get(
+                                                "chunk_id",
+                                                f"cypher_{state.iteration_count}_{chunks_found}",
+                                            ),
                                         ),
                                     )
                                     page_number = row.get(
-                                        "pageNumber", row.get("page_number", 0)
+                                        "page", row.get("sayfa", row.get("pageNumber", row.get("page_number", 0)))
                                     )
-                                    document_name = row.get(
-                                        "documentFileName",
-                                        row.get("document_name", "Unknown"),
+                                    document_name = (
+                                        row.get("document")
+                                        or row.get("belge")
+                                        or row.get("name")
+                                        or row.get("documentFileName")
+                                        or row.get("document_name")
+                                        or "Unknown"
                                     )
                                 elif (
                                     "c.text" in row
                                 ):  # Direct field return (c.text, c.chunkId, etc.)
                                     chunk_text = row["c.text"]
                                     chunk_id = row.get(
-                                        "c.chunkId",
-                                        f"cypher_{state.iteration_count}_{chunks_found}",
+                                        "c.key",
+                                        row.get(
+                                            "c.chunkId",
+                                            f"cypher_{state.iteration_count}_{chunks_found}",
+                                        ),
                                     )
-                                    page_number = row.get("c.page_number", 0)
+                                    page_number = row.get("c.page", row.get("c.page_number", 0))
                                     # Document name'i çeşitli alanlardan almaya çalış
                                     document_name = (
-                                        row.get("document_name")
+                                        row.get("c.document")
+                                        or row.get("d.name")
+                                        or row.get("document_name")
                                         or row.get("d.fileName")
                                         or row.get("fileName")
                                     )
@@ -2381,7 +2401,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                     # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
                                     if not document_name and chunk_id:
                                         try:
-                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_query = "MATCH (c:Chunk {key: $chunk_id})<-[:HAS_CHUNK]-(d:Document) RETURN d.name as fileName"
                                             doc_result = self.graph.query(
                                                 doc_query, {"chunk_id": chunk_id}
                                             )
@@ -2403,12 +2423,17 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                 ):  # Neo4j return (node.text, node.chunkId, etc.)
                                     chunk_text = row["node.text"]
                                     chunk_id = row.get(
-                                        "node.chunkId",
-                                        f"cypher_{state.iteration_count}_{chunks_found}",
+                                        "node.key",
+                                        row.get(
+                                            "node.chunkId",
+                                            f"cypher_{state.iteration_count}_{chunks_found}",
+                                        ),
                                     )
-                                    page_number = row.get("node.page_number", 0)
+                                    page_number = row.get("node.page", row.get("node.page_number", 0))
                                     document_name = (
-                                        row.get("document_name")
+                                        row.get("node.document")
+                                        or row.get("d.name")
+                                        or row.get("document_name")
                                         or row.get("d.fileName")
                                         or row.get("fileName")
                                     )
@@ -2416,7 +2441,7 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                     # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
                                     if not document_name and chunk_id:
                                         try:
-                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_query = "MATCH (c:Chunk {key: $chunk_id})<-[:HAS_CHUNK]-(d:Document) RETURN d.name as fileName"
                                             doc_result = self.graph.query(
                                                 doc_query, {"chunk_id": chunk_id}
                                             )
@@ -2437,16 +2462,19 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                     chunk_data = row["c"]
                                     chunk_text = chunk_data.get("text")
                                     chunk_id = chunk_data.get(
-                                        "chunkId",
-                                        f"cypher_{state.iteration_count}_{chunks_found}",
+                                        "key",
+                                        chunk_data.get(
+                                            "chunkId",
+                                            f"cypher_{state.iteration_count}_{chunks_found}",
+                                        ),
                                     )
-                                    page_number = chunk_data.get("pageNumber", 0)
-                                    document_name = chunk_data.get("fileName")
+                                    page_number = chunk_data.get("page", chunk_data.get("pageNumber", 0))
+                                    document_name = chunk_data.get("document") or chunk_data.get("fileName")
 
                                     # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
                                     if not document_name and chunk_id:
                                         try:
-                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_query = "MATCH (c:Chunk {key: $chunk_id})<-[:HAS_CHUNK]-(d:Document) RETURN d.name as fileName"
                                             doc_result = self.graph.query(
                                                 doc_query, {"chunk_id": chunk_id}
                                             )
@@ -2467,16 +2495,19 @@ Bu deneyimleri dikkate alarak strateji belirle."""
                                     chunk_data = row["chunk"]
                                     chunk_text = chunk_data.get("text")
                                     chunk_id = chunk_data.get(
-                                        "chunkId",
-                                        f"cypher_{state.iteration_count}_{chunks_found}",
+                                        "key",
+                                        chunk_data.get(
+                                            "chunkId",
+                                            f"cypher_{state.iteration_count}_{chunks_found}",
+                                        ),
                                     )
-                                    page_number = chunk_data.get("pageNumber", 0)
-                                    document_name = chunk_data.get("fileName")
+                                    page_number = chunk_data.get("page", chunk_data.get("pageNumber", 0))
+                                    document_name = chunk_data.get("document") or chunk_data.get("fileName")
 
                                     # Eğer document name bulunamazsa, chunk ID'den document bilgisini alalım
                                     if not document_name and chunk_id:
                                         try:
-                                            doc_query = "MATCH (c:Chunk {chunkId: $chunk_id})-[:PART_OF]->(d:Document) RETURN d.fileName as fileName"
+                                            doc_query = "MATCH (c:Chunk {key: $chunk_id})<-[:HAS_CHUNK]-(d:Document) RETURN d.name as fileName"
                                             doc_result = self.graph.query(
                                                 doc_query, {"chunk_id": chunk_id}
                                             )
@@ -2788,13 +2819,41 @@ Bu deneyimleri dikkate alarak strateji belirle."""
             schema_text = f"""NEO4J GRAPH DATABASE SCHEMA:
 {compact_schema}
 
-🎯 DOMAIN CONTEXT:
-Bu graph database, genel amaçlı bir veri sistemidir. Schema dinamik olarak sistem tarafından sağlanır:
-- **Nodes**: Schema'da tanımlı tüm varlık türleri (node labels)
-- **Properties**: Her node türünün sahip olduğu özellikler (property keys)
-- **Relationships**: Varlıklar arasındaki bağlantılar (relationship types)
+🎯 DOMAIN CONTEXT — TİCARET SİCİLİ GAZETESİ GRAFİĞİ:
+Bu veritabanı, Türkiye Ticaret Sicili Gazetesi belgelerinden çıkarılmış bir bilgi grafiğidir.
+Belgeler GLiNER ile işlenmiş; her belge bağlam (chunk) parçalarına bölünmüş ve her chunk'tan
+varlıklar (Entity) çıkarılmıştır. Graf modeli:
 
-**KRİTİK**: Sorguları yazarken MUTLAKA schema'da tanımlı node türlerini, property'leri ve relationship'leri kullan!"""
+  (:Company {{name}})                         — hedef şirket/grup (klasör adı, örn. Aksa, Akkök)
+  (:Document {{name, year, date, gazette_no, type, entity_count}}) — her gazete belgesi
+  (:Chunk {{key, text, document, order, page}}) — belgedeki bir bağlam parçası (asıl METİN burada: c.text)
+  (:Entity:<Tür> {{key, value, label}})        — chunk'tan çıkarılmış varlık (değer = e.value)
+
+İLİŞKİLER:
+  (Company)-[:HAS_DOCUMENT]->(Document)
+  (Document)-[:HAS_CHUNK]->(Chunk)
+  (Chunk)-[:HAS_PERSON|HAS_COMPANY|HAS_INSTITUTION|HAS_AMOUNT|HAS_DATE|HAS_CITY|HAS_ADDRESS|
+           HAS_SHARE|HAS_ACTIVITY|HAS_NOTARY|HAS_REGISTRY_NO|HAS_ROLE|HAS_TAX_NO {{score}}]->(Entity)
+
+ENTITY ALT-TÜRLERİ (label): Person (kişi), MentionedCompany (metinde geçen şirket), Institution (kurum),
+  Amount (para tutarı), Date (tarih), City (şehir), Address (adres), Share (hisse), Activity (faaliyet),
+  Notary (noter), RegistryNumber (sicil no), Role (görev), TaxNumber (vergi no).
+
+KRİTİK PROPERTY İSİMLERİ (yanlış isim kullanma!):
+- Belge adı: `Document.name`  (❌ fileName/source_file DEĞİL)
+- Varlık değeri: `Entity.value` (❌ name DEĞİL)
+- Chunk metni: `Chunk.text`, sayfa: `Chunk.page`, sıra: `Chunk.order`, anahtar: `Chunk.key`
+- Chunk → belge bağı: `(:Document)-[:HAS_CHUNK]->(:Chunk)` veya doğrudan `Chunk.document` (belge adı)
+
+⚠️ BU VERİTABANINDA EMBEDDING / VEKTÖR INDEX **YOKTUR**.
+- `generate_embeddings_for_cypher` tool'unu ASLA çağırma; `$embedding_vector`, `gds.similarity.cosine`,
+  `node.embedding` KULLANMA — hata verir.
+- İçerik/semantic arama yerine `Chunk.text` üzerinde metin araması yap:
+  `toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('arama_terimi'))`
+- Sayfa görseli (page_link) yoktur; `add_page_resource` çağırma. Kaynak göstermek için final answer'da
+  belge adını (Document.name) ve sayfa numarasını (Chunk.page) metin olarak belirt.
+
+**KRİTİK**: Sorguları yazarken MUTLAKA yukarıdaki schema'da tanımlı node türlerini, property'leri ve relationship'leri kullan!"""
 
         except Exception as e:
             logger.warning(f"Schema çekme hatası: {e}")
@@ -2819,8 +2878,12 @@ Kullanıcı sorularını analiz ederek en uygun graph database sorgularını olu
 
 
 ### 🔍 AKILLI ARAMA STRATEJİSİ:
-**CONTENT SORULARI için direkt semantic search kullan** (taksit, tutar, detay, açıklama, tablo)
-**METADATA SORULARI için entity araması** 
+**VARLIK SORULARI için Entity araması** (kişi, şirket, kurum, tarih, tutar, adres, görev, sicil/vergi no)
+- İlgili tür: `MATCH (e:Person) WHERE toLower(apoc.text.clean(e.value)) CONTAINS toLower(apoc.text.clean('isim'))`
+**İÇERİK/DETAY SORULARI için Chunk.text araması** (bir belgede ne yazıyor, bağlam, açıklama)
+- `MATCH (c:Chunk) WHERE toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('terim'))`
+**İLİŞKİSEL SORULAR için Chunk üzerinden bağ kur** (aynı chunk'ta geçen varlıklar = birlikte geçenler):
+- `MATCH (p:Person)<-[:HAS_PERSON]-(c:Chunk)-[:HAS_COMPANY]->(co:MentionedCompany)`
 
 
 ### �📝 CYPHER QUERY KURALLARI:
@@ -2929,109 +2992,60 @@ LIMIT 5
 - Node properties üzerinden filtreleme
 - Eğer birden fazla kelimeden oluşan bir node arama başarısız olursa ayrı ayrı arama yap
 
-**CONTENT ARAMALARI**: Belge içeriği ve semantic arama için  
-- Chunk nodes üzerinden text içeriği arama
-- Embedding-based similarity search
+**CONTENT ARAMALARI**: Belge içeriği için (bir belgede ne yazıyor, bağlam, açıklama)
+- `Chunk.text` üzerinde `CONTAINS` ile metin arama (embedding/vektör YOK!)
 
-**HİBRİT ARAMALARI**: Hem metadata hem content gereken durumlarda
-- Önce entity filtresi, sonra content arama
-- Filename discovery → content search chain
+**HİBRİT ARAMALARI**: Hem varlık hem içerik gereken durumlarda
+- Önce Entity filtresi (örn. ilgili Person/MentionedCompany), sonra o varlığa bağlı Chunk.text'i incele
+- Varlık → Chunk: `MATCH (e:Person)<-[:HAS_PERSON]-(c:Chunk)<-[:HAS_CHUNK]-(d:Document)`
 
 
-**AKILLI CHUNK ARAMA**: Eğer gelen chunk'lar eksik bilgi içeriyorsa (kesik cümleler, tablo devamı), 
-sonraki chunk'ları da getir: `WHERE node.position > X AND node.position < X+5`
+**AKILLI CHUNK ARAMA**: Eğer gelen chunk eksik bilgi içeriyorsa (kesik cümle, tablo devamı),
+aynı belgedeki komşu chunk'ları `Chunk.order` ile getir:
+`MATCH (d:Document {{name:$ad}})-[:HAS_CHUNK]->(c:Chunk) WHERE c.order >= X AND c.order < X+5 RETURN c.text ORDER BY c.order`
 - Cypher sonucunu DEĞERLENDİR: Bu yeterli mi, yoksa daha fazla chunk lazım mı?
 
-### 🔍 VECTOR ARAMA STRATEJİSİ (Schema-Driven, Domain Agnostic):
+### 🔍 İÇERİK ARAMA STRATEJİSİ (Cypher, embedding YOK):
 
-**A) METADATA + VECTOR ARAMA (Schema-Driven):**
+⚠️ Bu veritabanında embedding/vektör index yoktur. `gds.similarity.cosine`, `$embedding_vector`,
+`node.embedding` ASLA kullanma. İçerik aramasını her zaman `Chunk.text` üzerinde metin eşleştirmesiyle yap.
+
+**A) DOĞRUDAN İÇERİK ARAMASI:**
 ```cypher
-WITH $embedding_vector AS queryVec
-MATCH (content_node)-[rel]->(container_node)
-WHERE toLower(apoc.text.clean(coalesce(toString(container_node.schema_property), ''))) CONTAINS toLower(apoc.text.clean("filter_term"))
-  AND content_node.embedding IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN content_node.text, labels(content_node), labels(container_node), score
-ORDER BY score DESC LIMIT 10
+MATCH (c:Chunk)
+WHERE toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('arama_terimi'))
+RETURN c.document AS belge, c.page AS sayfa, c.text AS metin
+LIMIT 10
 ```
 
-**B) SADECE VECTOR ARAMA (Schema-Driven):**
+**B) BELGE FİLTRELİ İÇERİK ARAMASI (önce belge bulundu ise):**
 ```cypher
-WITH $embedding_vector AS queryVec
-MATCH (content_node)-[rel]->(container_node)
-WHERE content_node.embedding IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN content_node.text, labels(content_node), labels(container_node), score
-ORDER BY score DESC LIMIT 15
+MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+WHERE d.name IN $belge_listesi
+  AND toLower(apoc.text.clean(c.text)) CONTAINS toLower(apoc.text.clean('arama_terimi'))
+RETURN d.name AS belge, c.page AS sayfa, c.text AS metin
+ORDER BY c.order LIMIT 10
 ```
 
-**C) FİLTRELİ VECTOR ARAMA (Schema-Driven + Context):**
+**C) VARLIK + İÇERİK (bir kişi/şirket hakkında ne yazıyor):**
 ```cypher
-WITH $embedding_vector AS queryVec
-MATCH (content_node)-[rel]->(container_node)
-WHERE container_node.schema_property IN $context_list
-  AND content_node.embedding IS NOT NULL
-WITH content_node, container_node, gds.similarity.cosine(content_node.embedding, queryVec) AS score
-WHERE score >= 0.5
-RETURN content_node.text, labels(content_node), labels(container_node), score
-ORDER BY score DESC LIMIT 10
+MATCH (e:Person)<-[:HAS_PERSON]-(c:Chunk)
+WHERE toLower(apoc.text.clean(e.value)) CONTAINS toLower(apoc.text.clean('isim'))
+RETURN c.document AS belge, c.page AS sayfa, c.text AS metin
+LIMIT 10
 ```
 
-**NOT**: Yukarıdaki örneklerde:
-- `SchemaContentType`, `SchemaContainerType`: Schema'dan öğrenilen gerçek node türleri
-- `SchemaRelationType`: Schema'dan öğrenilen gerçek relationship türü
-- `schema_*_property`: Schema'dan öğrenilen gerçek property isimleri
-- LLM bu placeholder'ları schema bilgisi ile değiştirmeli!
+**NOT**: Yukarıdaki örneklerde node türünü (Person/MentionedCompany/Institution/...) ve property'leri
+soruya göre seç; ama her zaman SCHEMA'da tanımlı isimleri kullan (Entity.value, Chunk.text, Document.name).
 
 
 
-### AVAILABLE TOOLS (OpenAI Function Calling):
+### AVAILABLE TOOLS:
 
-**generate_embeddings_for_cypher(text)**: 
-- Cypher sorgularında kullanmak üzere text'ten embedding oluşturur
-- text: Metadata temizlenmiş anahtar kelimeler/kavramlar (örn: "taksit tutarı", "prim bilgileri")
-- LLM embedding'leri görmez, sadece Cypher'da $embedding_vector değişkeni olarak kullanır
-- KULLANIM: Tool çağır → Cypher'da "gds.similarity.cosine(c.embedding, $embedding_vector)" ile semantic similarity kullan
-
-**🎯 ANAHTAR KELİME SEÇİM STRATEJİSİ:**
-- **KRİTİK KURAL**: Müşteri adı, yıl, poliçe türü gibi metadata'yı embedding'e ekleme!
-- **SADECE İÇERİK TERİMLERİ**: Belgede aranacak kavram/içerik kelimelerini kullan
-- **ÖRNEK YANLIŞ**: "ayça hanım 2020 d4 konut poliçesi taksit tablosu" ❌
-- **ÖRNEK DOĞRU**: "taksit tablosu ödeme planı" ✅
-- ❌ TEK KELİME YETERLI DEĞİL: "taksit" → çok genel, yanlış chunk'lar bulabilir
-- ✅ BAĞLAMLI TERIMLER KULLAN: "taksit tutarları", "ödeme planı", "taksit tablosu"
-- ✅ SAYISAL VERİ: "prim tutarı", "hasar bedeli", "teminat limiti", "ödeme miktarı"
-- ✅ TABLO/LİSTE: "ödeme vadesi", "taksit vadesi", "ödeme planı tablosu"
-- ✅ KONTEKST EKLEYİN: Kullanıcı "taksitleri" diyorsa → "taksit tutarları ödeme planı"
-- **METADATA FİLTRELEME**: Cypher'da WHERE ile müşteri/yıl/tip filtresi uygula, embedding'de kullanma!
-
-**add_page_resource(page_link)** - KRİTİK KULLANIM KURALLARI:
-- ⚠️ SADECE final answer'da kullandığın ve soruya cevap veren chunk'ların page_link'lerini ekle!
-- ❌ Cypher sonucunda gelen TÜM page_link'leri ekleme!
-- ✅ Önce chunk içeriğini analiz et, soruya cevap veriyor mu kontrol et
-- ✅ Sadece relevance_score > 0.5 olan ve soruya cevap veren chunk'ların page_link'lerini ekle
-- ✅ İlgisiz chunk'ların (genel şartlar, başlık sayfaları, footer'lar vb.) page_link'lerini ekleme
-- `page_link` parametresi: SADECE soruya cevap veren chunk'ların page_link değeri
-
-#### 🛠️ TOOL KULLANIM KURALLARI:
-
-**TOOL CALLING**: Tool'ları çağırmak için OpenAI Function Calling kullan:
-- **generate_embeddings_for_cypher**: Semantic/Vector arama için embedding oluştur  
-- **add_page_resource**: Chunk'lardan sayfa referanslarını kaydet (SADECE kullandığın chunk'ların!)
-
-**ZORUNLU TOOL ÇAĞIRMA DURUMLARI:**
-
-1. **Vector/Semantic/Chunk Search Gerektiğinde → generate_embeddings_for_cypher ÇAĞIR:**
-   - Kullanıcı semantik sorular soruyorsa (benzerlik, içerik arama)
-
-2. **Cypher Sonuçlarından Sayfa Referansı Alınca → add_page_resource ÇAĞIR (KRİTİK FİLTRELEME):**
-   - ⚠️ ÖNCE chunk içeriğini analiz et: Bu chunk soruya cevap veriyor mu?
-   - ⚠️ Relevance score kontrolü: score > 0.5 olan chunk'ları tercih et
-   - ⚠️ SADECE final answer'da kullandığın chunk'ların page_link'lerini ekle
-   - ❌ Tüm Cypher sonuçlarındaki page_link'leri ekleme!
-   - ✅ Örnek: "Ayça Hanım'ın primi" sorusu için prim bilgisi içeren chunk'ın page_link'ini ekle, genel şartlar chunk'ının page_link'ini ekleme
+Bu veritabanı için **tool çağırmana gerek yoktur** — tüm aramaları doğrudan `cypher_query` eylemi ile yap.
+- ❌ `generate_embeddings_for_cypher`: KULLANMA (embedding yok).
+- ❌ `add_page_resource`: KULLANMA (sayfa görseli/page_link yok). Kaynak göstermek için final answer'da
+  belge adını (Document.name) ve sayfa numarasını (Chunk.page) metin olarak yaz.
 
 ### 🔗 PARAMETER INHERITANCE:
 
@@ -3070,20 +3084,18 @@ Content: [Cypher sorgusu | final cevap]
 ### 🎯 ACTION STRATEJİLERİ:
 
 **cypher_query**: Schema'daki node/relationship'leri kullanarak veri araştırması
-- Eğer semantic arama gerekiyorsa → önce tool'u çağır, sonra cypher_query yap
-- Eğer entity araması gerekiyorsa → schema'daki node türlerini ve property'lerini kullanarak cypher_query yap
-- Eğer metadata + content araması gerekiyorsa → önce entity
-- **1. İTERASYON**: Entity'leri bul (Customer, Policy) - p.source_file'ı mutlaka RETURN et!
-- **2. İTERASYON**: Keşfedilen filename'leri kullan - WHERE d.fileName IN [liste] formatında!
-- **KRİTİK**: Filename CONTAINS araması yapma, direkt IN listesi kullan!
-- **Chunk Metadata İçin**: node.chunkId, node.page_number, node.position, score'u da döndür  
-- **ZORUNLU**: Cypher sonucunda chunk bulunca, faydalandığın her chunk için add_page_resource(page_link) çağır!
+- Varlık araması → ilgili Entity alt-türünü (Person, MentionedCompany, Institution, ...) ve `e.value`'yu kullan
+- İçerik araması → `Chunk.text` üzerinde CONTAINS; embedding/tool YOK
+- **1. İTERASYON**: İlgili varlığı/belgeyi bul - belge bağı için `Document.name`'i (veya `Chunk.document`) RETURN et!
+- **2. İTERASYON**: Keşfedilen belge adlarını kullan - `WHERE d.name IN [liste]` formatında!
+- **KRİTİK**: Belge adı CONTAINS araması yerine, bulunan adlarla direkt IN listesi kullan!
+- **Chunk Metadata İçin**: `c.key`, `c.page`, `c.order`, `c.document`'i de döndür
 
 
 **final_answer**: Son cevabı ver
-- **ÖNEMLİ**: Final answer'da sayfa referanslarını KENDİN ekleme! 
-- Sistem otomatik olarak tool ile eklenen sayfaları ekleyecek
-- Sadece sorunun cevabını yaz, referanslarla ilgilenmeyece
+- Soruyu Türkçe ve kullanıcı dostu dille yanıtla
+- Kaynak göster: ilgili belge adını (Document.name) ve sayfa numarasını (Chunk.page) cevap içinde belirt
+- Bilgi grafikte yoksa "bu bilgi belgelerde bulunamadı" de, uydurma!
 
 ## 🎯 ITERATION BAŞLANGICI:
 
@@ -3092,16 +3104,17 @@ Her iterasyon başında şunları değerlendir:
 2. **Context Analizi**: Bu soru önceki konuşmayla ilgili mi? Belirsiz kelimeler (kaç, hangi, ne zaman) önceki varlıkları referans alıyor mu?
 3. **Önceki Bulgular**: Hangi veriler elde edildi?
 4. **Schema Mapping**: Soruya hangi node/relationship'ler cevap verebilir?
-5. **Strateji Seçimi**: Metadata mı, content mi, yoksa hibrit arama mı?
+5. **Strateji Seçimi**: Varlık araması mı, içerik araması mı, yoksa hibrit mi?
 
-## ⚠️ ÖNEMLİ NOTLAR (Schema-Driven, Domain Agnostic):
+## ⚠️ ÖNEMLİ NOTLAR:
 
 - **KRİTİK: SCHEMA FIRST!** Her sorgu öncesi schema'yı incele ve sadece orada tanımlı node/property/relationship kullan!
-- **KRİTİK: SEMANTIC ARAMA İÇİN TOOL ÇAĞIR!** Vector/semantic arama gerektiğinde generate_embeddings_for_cypher TOOL'UNU çağır, sonra cypher_query eylemi yap!
-- Schema'da olmayan node/property/relationship kullanma - sadece schema'dan öğrendiklerini kullan
-- İçerik node'larından faydalanıyorsan mutlaka add_page_resource çağır (schema'daki reference property'yi kullan)
-- Embedding'lerde metadata kullanma, sadece content terimleri
-- Final answer'da kullanıcı dostu dil kullan, teknik terimlerden kaçın
+- **KRİTİK: EMBEDDING/VEKTÖR YOK!** `generate_embeddings_for_cypher`, `$embedding_vector`, `gds.similarity.cosine`,
+  `node.embedding` KULLANMA. İçerik aramasını `Chunk.text` CONTAINS ile yap.
+- Doğru property isimlerini kullan: `Document.name`, `Entity.value`, `Chunk.text`, `Chunk.page`, `Chunk.order`.
+- `add_page_resource` ve page_link KULLANMA (yok). Kaynağı final answer metninde belge adı + sayfa olarak ver.
+- String karşılaştırmalarında daima `toLower(apoc.text.clean(...)) CONTAINS toLower(apoc.text.clean(...))` kullan.
+- Final answer'da Türkçe, kullanıcı dostu dil kullan; bilgi yoksa uydurma.
 
 Şimdi kullanıcının sorusunu analiz et ve schema'yı kullanarak en uygun yaklaşımı belirle."""
 

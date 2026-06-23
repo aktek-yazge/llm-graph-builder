@@ -1,0 +1,258 @@
+# LangGraph Agent → Ticaret Sicili Backend Entegrasyon Spec'i
+
+> Bu doküman **uzaktaki LangGraph sunucusundaki** Claude sohbetine verilmek üzere hazırlandı.
+> Amaç: LangGraph agent'ı, kullanıcı **ticaret sicili gazeteleri** ile ilgili bir soru sorduğunda,
+> bu işi kendi içinde yapmak yerine **ayrı bir backend servisindeki ReAct agent'ına** HTTP ile
+> devretsin (tıpkı qdrant search tool'unu çağırdığı gibi, ama bu sefer bir HTTP tool olarak).
+
+---
+
+## 0. Bağlam (ne yapıyoruz)
+
+- Elimizde, **Türkiye Ticaret Sicili Gazetesi** belgelerinden kurulmuş bir Neo4j bilgi grafiği var
+  (şirketler, kişiler, görevler, sermaye/hisse, tarihler, adresler, kurumlar, noterler, sicil/vergi no).
+- Bu grafiğin üzerinde çalışan, domain'e özel prompt'larla ince ayar yapılmış bir **ReAct agent**
+  zaten bir backend uygulamasında **HTTP endpoint** olarak servis ediliyor:
+  `POST /chat_bot_stream`. Bu endpoint Cypher üretimini, şema bilgisini, "teknik terim gösterme /
+  embedding kullanma" kurallarını **kendi içinde** halleder.
+- **Senin görevin (LangGraph tarafı):** Bu endpoint'i çağıran bir **tool** ekle ve agent'ın,
+  ticaret sicili / gazete / şirket kuruluş-tescil türü sorularda bu tool'u seçmesini sağla.
+- **ÖNEMLİ:** Bu sorularda Cypher/şema/embedding'i SEN üretme. Sadece kullanıcının doğal dildeki
+  sorusunu bu endpoint'e ilet, dönen Türkçe cevabı kullanıcıya/akışa geri ver. Zekâ karşı tarafta.
+
+---
+
+## 1. HTTP Sözleşmesi (endpoint'in tam davranışı)
+
+**İstek**
+
+| Alan | Değer |
+|---|---|
+| Method | `POST` |
+| URL | `{TICARET_BASE_URL}/chat_bot_stream` |
+| Content-Type | `multipart/form-data` (form alanları) |
+| Yanıt | **SSE** (Server-Sent Events) — `text/event-stream`, her satır `data: {json}\n\n` |
+
+**Gönderilecek form alanları**
+
+| Alan | Zorunlu | Ne göndermeli |
+|---|---|---|
+| `question` | ✅ | Kullanıcının doğal dildeki sorusu (Türkçe). Değiştirme, olduğu gibi ilet. |
+| `session_id` | ✅ | Konuşma kimliği. LangGraph'taki thread/conversation id'sini geçir; yoksa `uuid4()` üret. |
+| `domain` | ✅ | Sabit: `ticaret` |
+| `agent_type` | ⬜ | Varsayılan `deep_agent` (ReAct'i tetikler). Göndermesen de olur, gönderirsen `deep_agent`. |
+| `question_id` | ⬜ | Log korelasyonu için opsiyonel benzersiz id. |
+| `user_id` | ⬜ | Varsa kullanıcı kimliği (izleme için). |
+
+**❌ GÖNDERME (kritik):**
+- `uri`, `userName`, `password`, `database` → **gönderme.** Neo4j kimlik bilgileri sunucunun kendi
+  ortam değişkenlerinden gelir. Gönderirsen göz ardı edilir; karıştırma.
+- `mode=graph` → **ASLA gönderme.** `mode="graph"` sunucuda APOC gerektiren bir şema yenilemesini
+  tetikler ve bu veritabanında APOC yoktur → istek patlar. `mode` alanını ya hiç gönderme ya da
+  `graph` dışında bir değer ver. **Boş bırak.**
+
+**Yanıt (SSE event tipleri)** — her `data:` satırı bir JSON; `type` alanına bak:
+
+| `type` | Anlamı | İlgili alanlar |
+|---|---|---|
+| `status` | İlerleme bildirimi | `message`, `status` |
+| `thinking_step` | Ara akıl yürütme adımı (loglanabilir) | `message` |
+| `message_chunk` | Cevabın token-token akışı | `content`, `full_message`, `is_final_answer` |
+| `final_response` | **NİHAİ CEVAP** | `content` (cevap metni), `sources` `{documents:[], pages:[]}`, `metrics` |
+| `timing` | Süre/tüketim özeti | `elapsed_time`, `total_tokens` |
+| `error` | Hata | `message`, `error` |
+
+### 1.1. Event'lerin tam JSON yapısı (gerçek koddan)
+
+Akış sırası tipik olarak: birkaç `status` → birkaç `thinking_step` → çok sayıda `message_chunk`
+→ **bir** `final_response` → bir `timing`. Her biri ayrı bir `data: {...}\n\n` satırıdır.
+
+```jsonc
+// status (sunucu ilerleme bildirimi)
+{"type": "status", "message": "🚀 ReAct Agent ile işleniyor...", "status": "react_agent_processing"}
+
+// thinking_step (kullanıcı-dostu ara adım; teknik değil)
+{"type": "thinking_step", "message": "Belgeler aranıyor...", "session_id": "abc"}
+
+// message_chunk (cevabın parça parça akışı — delta)
+{"type": "message_chunk", "content": "Aksa'nın ", "full_message": "Aksa'nın ",
+ "is_final_answer": true, "session_id": "abc"}
+
+// final_response (NİHAİ CEVAP — entegrasyonda kullanacağın event budur)
+{
+  "type": "final_response",
+  "content": "Aksa'nın 1990 yılına ait 12 belgesi bulunmaktadır. ...",
+  "sources": {
+    "documents": ["Aksa-15.10.1990-...md", "..."],
+    "pages": [3, 7]
+  },
+  "metrics": {
+    "total_time": 4.21, "tool_calls": 2, "llm_calls": 3,
+    "input_tokens": 5123, "output_tokens": 210, "cached_tokens": 0,
+    "total_tokens": 5333, "cache_hit_rate": 0.0, "estimated_cost_usd": 0.01,
+    "hallucination_warning": false, "redis_cache_active": false,
+    "few_shot_examples_used": 0, "llm_judge": "background"
+  },
+  "tool_calls_detail": [ /* iç tool çağrı kayıtları — entegrasyonda gerekmez */ ],
+  "session_id": "abc",
+  "timestamp": "2026-06-22T12:58:14.123456"
+}
+
+// timing (akışın sonunda özet)
+{"type": "timing", "status": "finished", "elapsed_time": "4.21",
+ "total_tokens": 5333, "timestamp": "..."}
+
+// error (hata olursa final_response yerine bu gelir)
+{"type": "error", "status": "error", "message": "Streaming sırasında bir hata oluştu",
+ "error": "<detay>", "timestamp": "..."}
+```
+
+> **Entegrasyon için yalnızca `final_response` yeterlidir:** `content` = kullanıcıya verilecek
+> Türkçe cevap, `sources.documents` = dayanak belge adları, `sources.pages` = sayfa numaraları.
+> `metrics` ve `tool_calls_detail` opsiyoneldir (izleme/log için).
+
+**Cevabı çıkarma kuralı:**
+1. `type == "final_response"` event'inin `content` alanı = nihai cevap. **Bunu kullan.**
+2. `sources` alanı dayanak belge adlarını/sayfalarını verir; istersen kullanıcıya iliştir.
+3. Yedek: `final_response` hiç gelmezse, tüm `message_chunk` event'lerinin `content`'lerini sırayla
+   birleştir.
+4. `error` event'i gelirse mesajı hata olarak yukarı taşı.
+
+---
+
+## 2. Referans HTTP istemcisi (Python, httpx — SSE topla → tek cevap döndür)
+
+> LangGraph tool'unun gövdesinde bunu kullan. Streaming'i içeride yutar, dışarıya **tek bir
+> nihai cevap** verir (tool çağrısı için en temizi budur).
+
+```python
+import os, json, uuid
+import httpx
+
+TICARET_BASE_URL = os.environ.get("TICARET_BASE_URL", "http://CANLI_SUNUCU_ADRESI:PORT")
+
+async def ticaret_sicili_sorgula(soru: str, session_id: str | None = None) -> dict:
+    """Ticaret sicili gazeteleri backend'ine soruyu iletir, nihai cevabı döndürür."""
+    session_id = session_id or str(uuid.uuid4())
+    data = {
+        "question": soru,
+        "session_id": session_id,
+        "domain": "ticaret",
+        "agent_type": "deep_agent",
+        # mode GÖNDERİLMİYOR (graph modunu tetiklememek için)
+    }
+    cevap, kaynaklar, hata = "", {"documents": [], "pages": []}, None
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", f"{TICARET_BASE_URL}/chat_bot_stream", data=data) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                try:
+                    evt = json.loads(line[len("data:"):].strip())
+                except json.JSONDecodeError:
+                    continue
+                t = evt.get("type")
+                if t == "final_response":
+                    cevap = evt.get("content") or cevap
+                    kaynaklar = evt.get("sources") or kaynaklar
+                elif t == "message_chunk" and not cevap:
+                    cevap += evt.get("content") or ""
+                elif t == "error":
+                    hata = evt.get("error") or evt.get("message")
+    if hata and not cevap:
+        return {"ok": False, "error": hata}
+    return {"ok": True, "cevap": cevap, "kaynaklar": kaynaklar, "session_id": session_id}
+```
+
+> Senkron LangGraph node'u kullanıyorsan aynı mantığı `httpx.Client().stream(...)` ile senkron yaz,
+> ya da `asyncio.run(...)` ile sar. (`requests` SSE için uygun değil; `httpx` veya `sseclient` kullan.)
+
+---
+
+## 3. LangGraph tarafında ne ekleyeceksin
+
+1. **Yeni bir tool** tanımla — qdrant search tool'unun yanına, **aynı kalıpta**. Tool gövdesi
+   yukarıdaki `ticaret_sicili_sorgula` fonksiyonunu çağırsın.
+
+2. **Tool açıklaması (description) — routing'in kalbi.** Agent'ın LLM'i hangi soruda bu tool'u
+   seçeceğine bu metinle karar verir. Önerilen açıklama:
+
+   > "Türkiye Ticaret Sicili Gazetesi belgeleriyle ilgili soruları yanıtlar: şirketlerin kuruluş,
+   > tescil, genel kurul, yönetim/temsil, sermaye artırımı, adres değişikliği, fesih ilanları;
+   > bir şirketin/kişinin gazete belgeleri, ortaklar, yöneticiler, görevler, sermaye/hisse,
+   > sicil ve vergi numaraları, noter ve tarih bilgileri. Şirket, gazete, ticaret sicili,
+   > tescil ilanı geçen sorularda bunu kullan. Girdi: kullanıcının sorusu (Türkçe, aynen)."
+
+3. **Routing notu (sistem prompt'una ekleme, opsiyonel ama önerilir):**
+
+   > "Ticaret sicili / gazete ilanı / şirket tescil-kuruluş türü sorularda `ticaret_sicili_sorgula`
+   > tool'unu kullan; bu konuyu qdrant ile yanıtlamaya çalışma. Tool'un döndürdüğü Türkçe cevabı
+   > olduğu gibi kullan, üzerine teknik terim/şema ekleme."
+
+4. **Ortam değişkeni:** `TICARET_BASE_URL` = ticaret backend'inin canlı adresi
+   (örn. `http://10.x.x.x:8000` veya `https://ticaret.dahili.alan`). Şu an dev'de; canlıya
+   taşındığında bu değeri güncelle.
+
+---
+
+## 4. Hızlı doğrulama (entegrasyonu kurduktan sonra)
+
+```bash
+# 1) Ham endpoint canlı mı + ticaret hattı çalışıyor mu (curl ile SSE):
+curl -N -X POST "$TICARET_BASE_URL/chat_bot_stream" \
+  -F "question=Aksa'nın kaç belgesi var?" \
+  -F "session_id=test-1" \
+  -F "domain=ticaret"
+# Beklenen: akışın sonunda 'type":"final_response"' içeren, 'content' alanında Türkçe cevap
+# (ör. "Aksa'nın 313 belgesi var.") bulunan bir data: satırı.
+```
+
+- `final_response.content` doluysa ve doğru cevabı içeriyorsa HTTP sözleşmesi tamam.
+- Sonra LangGraph agent'ına ticaret sicili sorusu sor → agent'ın `ticaret_sicili_sorgula`
+  tool'unu seçtiğini ve cevabı döndürdüğünü gözle doğrula.
+- Alakasız (ör. genel qdrant) bir soru sor → agent'ın bu tool'u **seçmediğini** doğrula
+  (routing yanlış pozitif vermemeli).
+
+---
+
+## 4b. Sohbet geçmişi (tek-history) — KİM tutuyor
+
+**Karar: tek history, sahibi LangGraph/Mongo.** Ticaret backend'i bu entegrasyonda **stateless**
+çalışır — kendi sohbet geçmişini (Postgres) ne okur ne yazar (`REACT_DISABLE_HISTORY=true`).
+
+Bunun pratik sonuçları, **LangGraph tarafında ne yapman gerektiği**:
+
+1. **Takip sorularını sen bağlamla yeniden formüle et.** Backend önceki turu hatırlamaz. Kullanıcı
+   "1990'dakiler hangileri?" derse, tool'a **"Aksa'nın 1990 yılındaki belgeleri hangileri?"** gibi
+   **kendi içinde tam (self-contained)** bir soru gönder. (Bu zaten orkestratör agent'ın doğal işi.)
+2. **`session_id` = LangGraph konuşma/thread id'si.** Backend bunu hafıza için kullanmaz ama
+   loglarda 1:1 izlenebilirlik sağlar. (İstersen her çağrıda taze `uuid4` da geçebilirsin; fark
+   sadece izlenebilirlik.)
+3. **Geçmişi istek gövdesinde GÖNDERMENE gerek yok.** `history` benzeri bir alan beklenmiyor;
+   bağlamı `question` metnine gömüyorsun.
+
+**Token cache'i bozmaz:** Cache'lenen pahalı kısım sistem prompt'u + DB şemasıdır (her çağrıda
+sabit). Stateless mod bu prefix'i değiştirmediği için cache isabeti korunur, hatta artar.
+
+> İleride backend'in çok-turlu bağlamı kendisinin görmesini istersen (A2): isteğe bir `history`
+> alanı (önceki `{role, content}` turları) ekleyip backend'i ona göre uyarlarız; `REACT_DISABLE_HISTORY`
+> kapatılır. Şu an buna gerek yok.
+
+## 5. Sık karşılaşılacak tuzaklar
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| İstek APOC/`ProcedureNotFound` hatasıyla patlıyor | `mode=graph` gönderilmiş | `mode` alanını **hiç gönderme** |
+| Cevap boş geliyor | Yanlış event tipinden okuma | Cevabı `final_response.content`'ten al (yedek: `message_chunk` birleştir) |
+| Yanlış domain prompt'u devrede | `domain` gönderilmemiş ve sunucu varsayılanı farklı | Daima `domain=ticaret` gönder |
+| Bağlantı reddi | `TICARET_BASE_URL` yanlış / ağ erişimi yok | Adresi ve iki sunucu arası erişimi doğrula |
+| Yanıt çok uzun sürüyor / timeout | ReAct döngüsü ağır soru | İstemci timeout'unu artır (≥120 sn) |
+
+---
+
+## Özet
+
+LangGraph tarafında **tek bir HTTP tool** ekliyorsun; o tool `POST {BASE_URL}/chat_bot_stream`'e
+`question + session_id + domain=ticaret` gönderip SSE'den `final_response.content`'i topluyor.
+Cypher/şema/embedding işini karşı taraf yapıyor — sen sadece doğru soruda doğru tool'u seçiyorsun.

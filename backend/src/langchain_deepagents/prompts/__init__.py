@@ -55,16 +55,30 @@ def get_domain_prompts(domain: str, mode: str = "cypher") -> Dict[str, str]:
             WAT_TOOL_USAGE,
             WAT_CONTENT,
         )
-        
+
         return {
             "system_base": WAT_SYSTEM_BASE,
             "tool_usage": WAT_TOOL_USAGE,
             "thinking_guide": "",  # Bakım domain'inde thinking guide yok
             "content": WAT_CONTENT,
         }
-    
+
+    elif domain == "ticaret":
+        from .ticaret import (
+            TICARET_SYSTEM_BASE,
+            TICARET_TOOL_USAGE,
+            TICARET_CONTENT,
+        )
+
+        return {
+            "system_base": TICARET_SYSTEM_BASE,
+            "tool_usage": TICARET_TOOL_USAGE,
+            "thinking_guide": "",  # Ticaret domain'inde thinking guide yok
+            "content": TICARET_CONTENT,
+        }
+
     else:
-        raise ValueError(f"Unknown domain: {domain}. Supported: sigorta, bakim")
+        raise ValueError(f"Unknown domain: {domain}. Supported: sigorta, bakim, ticaret")
 
 
 def build_full_prompt(domain: str, mode: str = "cypher") -> str:
