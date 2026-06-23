@@ -2132,7 +2132,58 @@ class ReactAgent:
                     conversation_history.add_message(AIMessage(content=content))
         except Exception as e:
             _log(f"⚠️ History save error: {e}", "warning")
-    
+
+    def _normalize_external_history(self, raw: Any) -> List[Dict[str, Any]]:
+        """
+        İstekle gelen (LangGraph state.messages) sohbet geçmişini agent mesaj
+        formatına çevir: [{"role": "user"/"assistant", "content": "..."}].
+
+        Tek-history (A2): Geçmişin tek kaynağı LangGraph/Mongo'dur. LangGraph kendi
+        state.messages'ından son N soru/cevabı bu alanda gönderir; backend onu yeni
+        sorunun ÖNÜNE ekler (bkz. agent_input["messages"] = history + [soru]) → LLM
+        tüm geçmişi görür, tıpkı eski Postgres mantığı gibi.
+
+        Cache: content düz string'e indirgenir ve history en sona eklenir; cache'lenen
+        prefix = sistem prompt + şema (create_agent(system_prompt=...)) sabit kalır →
+        token cache BOZULMAZ.
+
+        - Kabul edilen roller: user/human → user, assistant/ai → assistant (system atlanır).
+        - Defansif tavan: son REACT_EXTERNAL_HISTORY_LIMIT mesaj (varsayılan 40).
+        """
+        if not raw:
+            return []
+        try:
+            import json as _json
+            items = _json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as e:
+            _log(f"⚠️ External history parse error: {e}", "warning")
+            return []
+        if not isinstance(items, list):
+            return []
+
+        role_map = {"user": "user", "human": "user", "assistant": "assistant", "ai": "assistant"}
+        messages: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            role = role_map.get(str(item.get("role", "")).lower())
+            if role is None:
+                continue  # system vb. atla
+            content = item.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            if not content.strip():
+                continue
+            messages.append({"role": role, "content": content})
+
+        try:
+            limit = int(os.environ.get("REACT_EXTERNAL_HISTORY_LIMIT", "40"))
+        except ValueError:
+            limit = 40
+        if limit > 0 and len(messages) > limit:
+            messages = messages[-limit:]
+        return messages
+
     def _get_langfuse_prompt_name(self) -> str:
         """Domain'e göre Langfuse prompt adını döndür."""
         # Domain bazlı Langfuse prompt isimleri
@@ -2614,8 +2665,17 @@ class ReactAgent:
                 "session_id": session_id,
             }
             
-            # History al
-            conversation_history = self._get_conversation_history(session_id)
+            # History al.
+            # Tek-history (A2): LangGraph kendi state.messages'ından son N soru/cevabı
+            # istekte 'chat_history' olarak gönderir → onu kullan (Postgres'e bakma).
+            # Gönderilmezse Postgres mantığına düş (REACT_DISABLE_HISTORY=true ise boş döner).
+            external_history = kwargs.get("chat_history")
+            if external_history:
+                conversation_history = self._normalize_external_history(external_history)
+                _log(f"📜 External history (LangGraph): {len(conversation_history)} msgs")
+            else:
+                conversation_history = self._get_conversation_history(session_id)
+            # Backend kendi geçmişini TUTMAZ; kaynak LangGraph/Mongo (REACT_DISABLE_HISTORY ile no-op).
             self._save_to_history(session_id, "Human", question)
             
             # Agent config al veya oluştur

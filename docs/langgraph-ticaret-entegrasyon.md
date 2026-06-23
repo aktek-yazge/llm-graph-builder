@@ -41,6 +41,7 @@
 | `session_id` | ✅ | Konuşma kimliği. LangGraph'taki thread/conversation id'sini geçir; yoksa `uuid4()` üret. |
 | `domain` | ✅ | Sabit: `ticaret` |
 | `agent_type` | ⬜ | Varsayılan `deep_agent` (ReAct'i tetikler). Göndermesen de olur, gönderirsen `deep_agent`. |
+| `chat_history` | ⬜ | Tek-history (A2): `state.messages`'tan son N soru/cevap. JSON string: `[{"role":"user"/"assistant","content":"..."}]`, eskiden yeniye. Detay §4b. |
 | `question_id` | ⬜ | Log korelasyonu için opsiyonel benzersiz id. |
 | `user_id` | ⬜ | Varsa kullanıcı kimliği (izleme için). |
 
@@ -131,7 +132,11 @@ import httpx
 
 TICARET_BASE_URL = os.environ.get("TICARET_BASE_URL", "http://CANLI_SUNUCU_ADRESI:PORT")
 
-async def ticaret_sicili_sorgula(soru: str, session_id: str | None = None) -> dict:
+async def ticaret_sicili_sorgula(
+    soru: str,
+    session_id: str | None = None,
+    gecmis: list[dict] | None = None,  # state.messages'tan son N {role, content}
+) -> dict:
     """Ticaret sicili gazeteleri backend'ine soruyu iletir, nihai cevabı döndürür."""
     session_id = session_id or str(uuid.uuid4())
     data = {
@@ -141,6 +146,9 @@ async def ticaret_sicili_sorgula(soru: str, session_id: str | None = None) -> di
         "agent_type": "deep_agent",
         # mode GÖNDERİLMİYOR (graph modunu tetiklememek için)
     }
+    # Tek-history (A2): geçmişi backend LLM'i görsün diye gönder (bkz. §4b)
+    if gecmis:
+        data["chat_history"] = json.dumps(gecmis[-30:], ensure_ascii=False)
     cevap, kaynaklar, hata = "", {"documents": [], "pages": []}, None
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream("POST", f"{TICARET_BASE_URL}/chat_bot_stream", data=data) as resp:
@@ -216,28 +224,49 @@ curl -N -X POST "$TICARET_BASE_URL/chat_bot_stream" \
 
 ---
 
-## 4b. Sohbet geçmişi (tek-history) — KİM tutuyor
+## 4b. Sohbet geçmişi (tek-history, A2) — KİM tutuyor, NASIL gönderiliyor
 
-**Karar: tek history, sahibi LangGraph/Mongo.** Ticaret backend'i bu entegrasyonda **stateless**
-çalışır — kendi sohbet geçmişini (Postgres) ne okur ne yazar (`REACT_DISABLE_HISTORY=true`).
+**Karar: tek history, sahibi LangGraph/Mongo.** Backend kendi sohbet geçmişini Postgres'e
+**YAZMAZ** (`REACT_DISABLE_HISTORY=true`). Ama backend'in LLM'i geçmişi **görsün** istiyoruz —
+tıpkı eski Postgres mantığında olduğu gibi (her istekte son N soru/cevap mesaj olarak veriliyor).
 
-Bunun pratik sonuçları, **LangGraph tarafında ne yapman gerektiği**:
+**Bunu sen sağlıyorsun:** LangGraph kendi `state.messages`'ından **son N soru/cevabı** (örn. 15
+soru + 15 cevap) alıp isteğe `chat_history` alanı olarak ekler. Backend bu listeyi yeni sorunun
+**önüne** koyar → LLM tüm geçmişi bağlam olarak görür.
 
-1. **Takip sorularını sen bağlamla yeniden formüle et.** Backend önceki turu hatırlamaz. Kullanıcı
-   "1990'dakiler hangileri?" derse, tool'a **"Aksa'nın 1990 yılındaki belgeleri hangileri?"** gibi
-   **kendi içinde tam (self-contained)** bir soru gönder. (Bu zaten orkestratör agent'ın doğal işi.)
-2. **`session_id` = LangGraph konuşma/thread id'si.** Backend bunu hafıza için kullanmaz ama
-   loglarda 1:1 izlenebilirlik sağlar. (İstersen her çağrıda taze `uuid4` da geçebilirsin; fark
-   sadece izlenebilirlik.)
-3. **Geçmişi istek gövdesinde GÖNDERMENE gerek yok.** `history` benzeri bir alan beklenmiyor;
-   bağlamı `question` metnine gömüyorsun.
+**`chat_history` formatı** (JSON string, multipart form alanı):
 
-**Token cache'i bozmaz:** Cache'lenen pahalı kısım sistem prompt'u + DB şemasıdır (her çağrıda
-sabit). Stateless mod bu prefix'i değiştirmediği için cache isabeti korunur, hatta artar.
+```json
+[
+  {"role": "user", "content": "Aksa'nın kaç belgesi var?"},
+  {"role": "assistant", "content": "Aksa'nın 42 belgesi var."},
+  {"role": "user", "content": "peki bunların kaçı 2023 yılına ait?"},
+  {"role": "assistant", "content": "..."}
+]
+```
 
-> İleride backend'in çok-turlu bağlamı kendisinin görmesini istersen (A2): isteğe bir `history`
-> alanı (önceki `{role, content}` turları) ekleyip backend'i ona göre uyarlarız; `REACT_DISABLE_HISTORY`
-> kapatılır. Şu an buna gerek yok.
+- Roller: `user`/`human` → kullanıcı, `assistant`/`ai` → asistan. `system` atlanır.
+- **Sıralama: en eskiden en yeniye** (son tur en sonda). Yeni soruyu `chat_history`'e KOYMA;
+  o `question` alanında gider.
+- **Pencere:** son 15 soru + 15 cevap ≈ 30 mesaj gönder. Backend defansif tavanı
+  `REACT_EXTERNAL_HISTORY_LIMIT` (vars. 40) ile son N'i alır.
+- LangChain mesajlarından üretim örneği:
+  ```python
+  hist = [{"role": "user" if m.type == "human" else "assistant",
+           "content": m.content}
+          for m in state["messages"][-30:]
+          if m.type in ("human", "ai")]
+  data["chat_history"] = json.dumps(hist, ensure_ascii=False)
+  ```
+- Bu modda takip sorusunu yeniden formüle etmen ŞART değil; "bunların kaçı 2023?" gibi bağlamlı
+  soruyu olduğu gibi gönderebilirsin çünkü backend geçmişi görür. (Yine de net soru hep daha iyi.)
+
+**`session_id` = LangGraph konuşma/thread id'si.** Backend bunu hafıza için kullanmaz (geçmiş
+artık `chat_history`'den geliyor); sadece loglarda 1:1 izlenebilirlik sağlar.
+
+**Token cache'i bozmaz:** Cache'lenen pahalı kısım sistem prompt'u + DB şemasıdır ve `create_agent`
+ile en başta sabit kalır. `chat_history` mesajları bu prefix'ten SONRA eklenir → prefix değişmez,
+cache isabeti korunur. (gpt-5 otomatik prefix cache; sistem prompt'u her çağrıda aynı.)
 
 ## 5. Sık karşılaşılacak tuzaklar
 
