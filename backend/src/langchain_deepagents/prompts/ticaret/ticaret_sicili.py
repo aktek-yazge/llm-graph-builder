@@ -122,18 +122,25 @@ TICARET_CONTENT = """
 <common_tools>
 ## 🔧 ORTAK TOOL'LAR
 
-### add_source(source_type, value, page, page_link) - KAYNAK EKLEME
-Cevaba dayanak olan **HER** belge için kaynak ekle. Bu, sonuç panelinde belge
-filtreleri ve sayfa görseli üretmek için KULLANILIR — eksiksiz doldur:
-- `source_type="document"`
-- `value` = belge adı (`Chunk.document` / `Document.name`)
-- `page` = ilgili sayfa numarası (`Chunk.page`)
-- `page_link` = sayfanın görsel bağlantısı (`Chunk.page_link`) — sorgu sonucundan AL
-⚠️ **`page_link`'i mutlaka geç**: panelde sayfa görseli bununla gösterilir. Birden çok
-belge/sayfa varsa her biri için ayrı `add_source` çağır.
+### add_sources(documents) - KAYNAK EKLEME (TEK ÇAĞRI — ZORUNLU YÖNTEM)
+Cevaba dayanak olan TÜM belgeleri **TEK bir `add_sources` çağrısıyla** ekle. Sonuç
+panelinde belge filtreleri ve sayfa görseli bununla üretilir.
+- `documents` = liste; her öğe: `{"filename": belge, "page": sayfa, "page_link": sayfa_link}`
+- `filename` = `Chunk.document` / `Document.name`
+- `page` = `Chunk.page`, `page_link` = `Chunk.page_link` (sorgu sonucundan AL)
+⚠️ **`page_link`'i mutlaka geç** (panelde sayfa görseli bununla gösterilir).
+⛔ **`add_source`'u tek tek ÇAĞIRMA** — token israfı. Hepsini topla, cevaptan hemen
+önce **bir kez** `add_sources([...])` çağır. Örnek:
+```
+add_sources([
+  {"filename": "Aksa-11.05.1990-2524-ANONİM ŞİRKET (...)", "page": 1, "page_link": "https://.../page_1.png"},
+  {"filename": "Aksa-28.05.1990-2535-GENEL KURUL (...)", "page": 1, "page_link": "https://.../page_1.png"}
+])
+```
 
 ### read_finding(step_name, start_record, end_record) - PAGINATION
-İlk sonuçlarda aranan bilgi yoksa sonraki kayıtları iste.
+İlk sonuçlarda aranan bilgi yoksa sonraki kayıtları iste. ⛔ Aranan bilgiyi bulduysan
+SONRAKİ sayfaları çekme — gereksiz pagination token israfıdır.
 </common_tools>
 
 <final_answer>
@@ -218,7 +225,7 @@ WHERE toLower(c.text) CONTAINS toLower('yönetim kurulu')
 RETURN c.document AS belge, c.page AS sayfa, c.page_link AS sayfa_link, c.text AS metin
 LIMIT {records_per_page}
 ```
-→ Sonra her kaynak için: `add_source("document", belge, page=sayfa, page_link=sayfa_link)`
+→ Sonra TÜM kaynakları TEK çağrıda: `add_sources([{"filename": belge, "page": sayfa, "page_link": sayfa_link}, ...])`
 
 **"En çok hangi şirketler geçiyor?"**
 ```cypher
@@ -241,8 +248,9 @@ LIMIT {records_per_page}
 5. ✅ String aramada daima `toLower(...)` kullan
 6. ✅ Belirsizlikte → önce keşif sorgusu (DISTINCT), sonra daralt
 7. ✅ Hata alırsan → şemaya bak, düzelt ve tekrar dene
-8. ✅ Cevaba dayanak olan HER belge için `add_source("document", belge, page=sayfa,
-   page_link=sayfa_link)` çağır — `page_link`'i (Chunk.page_link) mutlaka geç.
+8. ✅ Dayanak belgelerini TEK çağrıda ekle: `add_sources([{"filename":belge,"page":sayfa,
+   "page_link":sayfa_link}, ...])` — `page_link`'i mutlaka geç. ⛔ `add_source`'u tek tek çağırma.
+9. ✅ Aranan bilgiyi bulunca DUR — gereksiz ek sorgu/pagination yapma (token israfı).
 </critical_rules>
 
 ---

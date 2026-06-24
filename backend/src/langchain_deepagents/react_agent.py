@@ -1933,7 +1933,44 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
             return f"✅ Sayfa kaynağı eklendi: {value}"
         else:
             return f"❌ Geçersiz source_type. 'document' veya 'page' olmalı."
-    
+
+    @tool
+    def add_sources(documents: List[Dict[str, Any]]) -> str:
+        """Birden çok kaynak belgeyi TEK çağrıda ekle (ÖNERİLEN — add_source'u tek
+        tek çağırma). Token'dan tasarruf için dayanak belgelerini topla ve cevaptan
+        ÖNCE bir kez bununla ekle.
+
+        documents: liste; her öğe {"filename": belge_adı, "page": sayfa, "page_link": sayfa_link}.
+        (page/page_link opsiyonel; sorgu sonucundaki belge/sayfa/sayfa_link'ten al.)
+        """
+        sources = _get_session_sources(question_id)
+        added = 0
+        for doc in documents or []:
+            if not isinstance(doc, dict):
+                continue
+            filename = doc.get("filename") or doc.get("value") or doc.get("belge")
+            if not filename:
+                continue
+            page = doc.get("page", doc.get("sayfa"))
+            page_link = doc.get("page_link") or doc.get("sayfa_link")
+            norm_page = page
+            try:
+                if page is not None:
+                    norm_page = int(page)
+            except (ValueError, TypeError):
+                norm_page = page
+            sources["documents"].add(filename)
+            key = (filename, norm_page)
+            existing = sources["items"].get(key, {})
+            sources["items"][key] = {
+                "filename": filename,
+                "page": norm_page,
+                "page_link": page_link or existing.get("page_link"),
+            }
+            added += 1
+        _log(f"📎 add_sources: {added} kaynak TEK çağrıda eklendi")
+        return f"✅ {added} belge kaynağı eklendi (tek çağrı)."
+
     # =========================================================================
     # READ FINDING TOOL - Pagination destekli sonuç okuma
     # =========================================================================
@@ -2014,7 +2051,7 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     # REACT_TOOL_MODE=dsl   → execute_graph_dsl (DSL → Cypher derleme)
     # REACT_TOOL_MODE=cypher → execute_cypher_query + execute_cypher_query_with_embedding (doğrudan Cypher)
     
-    base_tools = [add_source, read_finding]  # Her iki modda da ortak
+    base_tools = [add_source, add_sources, read_finding]  # Her iki modda da ortak
     
     if REACT_TOOL_MODE == "cypher":
         # CYPHER MODE: Model doğrudan Cypher yazar
