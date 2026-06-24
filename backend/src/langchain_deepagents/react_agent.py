@@ -1019,9 +1019,11 @@ def _reset_session_result_counter(session_id: str):
 _session_sources: Dict[str, Dict[str, set]] = {}
 
 
-def _get_session_sources(question_id: str) -> Dict[str, set]:
+def _get_session_sources(question_id: str) -> Dict[str, Any]:
     if question_id not in _session_sources:
-        _session_sources[question_id] = {"documents": set(), "pages": set()}
+        # documents/pages: geriye-uyum (sigorta/bakım). items: ticaret yapılandırılmış
+        # kaynaklar; (filename, page) ile dedup, page_link/thumbnail taşır.
+        _session_sources[question_id] = {"documents": set(), "pages": set(), "items": {}}
     return _session_sources[question_id]
 
 
@@ -1087,8 +1089,106 @@ def _generate_page_links_markdown(page_links: set) -> str:
         except Exception as e:
             _log(f"❌ page_link markdown hatası: {e}", "error")
             continue
-    
+
     return markdown_section
+
+
+# ============================================================================
+# TİCARET — Yapılandırılmış kaynak belge çıktısı (LangGraph entegrasyonu)
+# ============================================================================
+def _parse_ticaret_filename(filename: str) -> Dict[str, Optional[str]]:
+    """Ticaret belge adından firma/yıl/gazete no/tip ayıkla.
+
+    Beklenen format: '{firma}-{GG.AA.YYYY}-{gazete_no}-{tip}'
+    Örn: 'Aksa-21.04.1980-382-ANONİM ŞİRKET (YÖNETİM - TEMSİL VE DİĞER)'
+    → firm=Aksa, year=1980, gazette_no=382, gazette_type='ANONİM ŞİRKET (...)'
+    Parse edilemezse alanlar None döner (firm fallback: ilk '-' öncesi).
+    """
+    import re
+
+    name = (filename or "").strip()
+    for ext in (".pdf", ".PDF", ".md", ".png"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+            break
+
+    m = re.match(
+        r"^(?P<firm>.+?)-(?P<date>\d{1,2}\.\d{1,2}\.\d{4})-(?P<no>\d+)-(?P<type>.+)$",
+        name,
+    )
+    if m:
+        return {
+            "firm": m.group("firm").strip() or None,
+            "year": m.group("date").split(".")[-1],
+            "gazette_no": m.group("no"),
+            "gazette_type": m.group("type").strip() or None,
+        }
+
+    # Kısmi fallback: en azından firma (ilk '-' öncesi) ve varsa 4 haneli yıl
+    firm = name.split("-")[0].strip() if "-" in name else (name or None)
+    year_match = re.search(r"(19|20)\d{2}", name)
+    return {
+        "firm": firm,
+        "year": year_match.group(0) if year_match else None,
+        "gazette_no": None,
+        "gazette_type": None,
+    }
+
+
+def _build_ticaret_file_link(page_link: Optional[str]) -> Optional[str]:
+    """Chunk.page_link'ten görsel URL.
+
+    page_link Chunk property'sinde zaten TAM URL olarak tutuluyor → doğrudan kullanılır
+    (ekstra base-URL birleştirmesi yok). Boşsa None döner.
+    """
+    if not page_link:
+        return None
+    return str(page_link).strip() or None
+
+
+def _build_ticaret_documents(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Ticaret final_response için yapılandırılmış kaynak belge listesi üret.
+
+    LangGraph tarafı DocFilters (firm/year/gazette) + MultimodalDocItem (file_link/
+    thumbnail) üretebilsin diye her kaynak için tam alan seti döndürür.
+    firm/year/gazette_no/gazette_type belge adından parse edilir; file_link
+    Chunk.page_link'ten gelir (add_source ile taşınır).
+    """
+    items = sources.get("items") or {}
+    if items:
+        records = list(items.values())
+    else:
+        # add_source yapılandırılmış veri taşımadıysa en azından belge adlarını döndür
+        records = [
+            {"filename": fn, "page": None, "page_link": None}
+            for fn in sources.get("documents", [])
+        ]
+
+    docs: List[Dict[str, Any]] = []
+    seen = set()
+    for rec in records:
+        filename = rec.get("filename")
+        if not filename:
+            continue
+        page = rec.get("page")
+        key = (filename, page)
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed = _parse_ticaret_filename(filename)
+        docs.append(
+            {
+                "filename": filename,
+                "page": page,
+                "file_link": _build_ticaret_file_link(rec.get("page_link")),
+                "thumbnail": _build_ticaret_file_link(rec.get("thumbnail")),
+                "firm": parsed["firm"],
+                "year": parsed["year"],
+                "gazette_type": parsed["gazette_type"],
+                "gazette_no": parsed["gazette_no"],
+            }
+        )
+    return docs
 
 
 # ============================================================================
@@ -1797,13 +1897,35 @@ Lütfen schema'ya uygun node/property/relationship kullanın."""
     # ADD SOURCE TOOL
     # =========================================================================
     @tool
-    def add_source(source_type: str, value: str) -> str:
-        """Kaynak ekle. source_type=document/page, value=dosya_adı. Detaylar prompt'ta."""
+    def add_source(
+        source_type: str,
+        value: str,
+        page: Optional[int] = None,
+        page_link: Optional[str] = None,
+    ) -> str:
+        """Kaynak ekle. source_type=document/page, value=belge adı.
+        Ticaret: yapılandırılmış kaynak için page (Chunk.page) ve page_link
+        (Chunk.page_link, sorgu sonucundan) da geç. Detaylar prompt'ta."""
         sources = _get_session_sources(question_id)
-        
+
         if source_type == "document":
             sources["documents"].add(value)
-            _log(f"📎 Document: {value}")
+            # Yapılandırılmış kaynak (LangGraph: file_link/firm/year/gazette) için
+            # page + page_link sakla; (belge, sayfa) ile dedup et.
+            norm_page = page
+            try:
+                if page is not None:
+                    norm_page = int(page)
+            except (ValueError, TypeError):
+                norm_page = page
+            key = (value, norm_page)
+            existing = sources["items"].get(key, {})
+            sources["items"][key] = {
+                "filename": value,
+                "page": norm_page,
+                "page_link": page_link or existing.get("page_link"),
+            }
+            _log(f"📎 Document: {value} (page={norm_page}, link={'✓' if page_link else '✗'})")
             return f"✅ Belge kaynağı eklendi: {value}"
         elif source_type == "page":
             sources["pages"].add(value)
@@ -3315,32 +3437,38 @@ class ReactAgent:
                 
                 # Markdown formatında kaynakları cevaba ekle
                 final_response = response_text
-                
+
+                # NOT: Ticaret'te kaynak markdown'u content'e EKLENMEZ. Cevap LangGraph'a
+                # gider ve panel yapılandırılmış `sources.documents`'tan üretilir; ayrıca
+                # eklenen linkler bu kurulumda kırık (localhost) olur. Diğer domain'lerde
+                # (sigorta/bakım) eski davranış korunur.
+                append_source_markdown = self.domain != "ticaret"
+
                 # Dosya linkleri ekle
-                if sources["documents"]:
+                if append_source_markdown and sources["documents"]:
                     file_markdown = _generate_file_links_markdown(sources["documents"])
                     final_response += file_markdown
                     _log(f"📎 {len(sources['documents'])} belge kaynağı eklendi")
-                
+
                 # Sayfa görselleri ekle
-                if sources["pages"]:
+                if append_source_markdown and sources["pages"]:
                     page_markdown = _generate_page_links_markdown(sources["pages"])
                     final_response += page_markdown
                     _log(f"🖼️ {len(sources['pages'])} sayfa görseli eklendi")
-                
-                # Hallucination uyarısı ekle
+
+                # Hallucination uyarısı ekle (her domain'de)
                 if hallucination_warning:
                     final_response += hallucination_warning
-                
-                # Markdown kaynakları stream et (message_chunk olarak)
+
+                # Markdown kaynakları stream et (message_chunk olarak) — ticaret'te yok
                 source_markdown = ""
-                if sources["documents"]:
+                if append_source_markdown and sources["documents"]:
                     source_markdown += _generate_file_links_markdown(sources["documents"])
-                if sources["pages"]:
+                if append_source_markdown and sources["pages"]:
                     source_markdown += _generate_page_links_markdown(sources["pages"])
                 if hallucination_warning:
                     source_markdown += hallucination_warning
-                
+
                 if source_markdown:
                     yield {
                         "type": "message_chunk",
@@ -3351,7 +3479,19 @@ class ReactAgent:
                     }
                 
                 self._save_to_history(session_id, "AI", final_response)
-                
+
+                # Kaynak payload'u: ticaret → yapılandırılmış belge nesneleri (LangGraph
+                # DocFilters + MultimodalDocItem için); diğer domain'ler → eski düz şekil.
+                if self.domain == "ticaret":
+                    sources_payload: Dict[str, Any] = {
+                        "documents": _build_ticaret_documents(sources)
+                    }
+                else:
+                    sources_payload = {
+                        "documents": list(sources["documents"]),
+                        "pages": list(sources["pages"]),
+                    }
+
                 total_time = time.time() - total_start
                 
                 # İstatistik özetini logla
@@ -3365,10 +3505,7 @@ class ReactAgent:
                         question=question,
                         response=final_response,
                         session_id=session_id,
-                        sources={
-                            "documents": list(sources["documents"]),
-                            "pages": list(sources["pages"]),
-                        },
+                        sources=sources_payload,
                         metrics=token_stats,
                     )
                 except Exception as cache_write_error:
@@ -3493,10 +3630,7 @@ class ReactAgent:
                 yield {
                     "type": "final_response",
                     "content": final_response,
-                    "sources": {
-                        "documents": list(sources["documents"]),
-                        "pages": list(sources["pages"]),
-                    },
+                    "sources": sources_payload,
                     "metrics": {
                         "total_time": round(total_time, 2),
                         "tool_calls": tool_call_count,

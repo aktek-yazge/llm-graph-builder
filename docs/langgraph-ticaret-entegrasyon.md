@@ -84,8 +84,18 @@ Akış sırası tipik olarak: birkaç `status` → birkaç `thinking_step` → �
   "type": "final_response",
   "content": "Aksa'nın 1990 yılına ait 12 belgesi bulunmaktadır. ...",
   "sources": {
-    "documents": ["Aksa-15.10.1990-...md", "..."],
-    "pages": [3, 7]
+    "documents": [
+      {
+        "filename": "Aksa-21.04.1980-382-ANONİM ŞİRKET (YÖNETİM - TEMSİL VE DİĞER)",
+        "page": 1,
+        "file_link": "https://.../images/aksa_..._page_1.png",
+        "thumbnail": null,
+        "firm": "Aksa",
+        "year": "1980",
+        "gazette_type": "ANONİM ŞİRKET (YÖNETİM - TEMSİL VE DİĞER)",
+        "gazette_no": "382"
+      }
+    ]
   },
   "metrics": {
     "total_time": 4.21, "tool_calls": 2, "llm_calls": 3,
@@ -108,13 +118,30 @@ Akış sırası tipik olarak: birkaç `status` → birkaç `thinking_step` → �
  "error": "<detay>", "timestamp": "..."}
 ```
 
-> **Entegrasyon için yalnızca `final_response` yeterlidir:** `content` = kullanıcıya verilecek
-> Türkçe cevap, `sources.documents` = dayanak belge adları, `sources.pages` = sayfa numaraları.
+> **Entegrasyon için yalnızca `final_response` yeterlidir:** `content` = değerlendirici LLM'in
+> okuyacağı olgusal cevap, `sources.documents` = yapılandırılmış kaynak belge nesneleri.
 > `metrics` ve `tool_calls_detail` opsiyoneldir (izleme/log için).
+
+**`sources.documents` alan eşlemesi (ticaret domain):** her öğe bir kaynak sayfadır.
+
+| Alan | İçerik | Sizdeki hedef |
+|---|---|---|
+| `file_link` | Sayfanın görsel URL'i — `Chunk.page_link` (tam URL, doğrudan) | `MultimodalDocItem.FileLink` — `null` olabilir (page_link boşsa) |
+| `filename` | Belge adı | `Filename` / `Source` |
+| `page` | Sayfa numarası | `Page` (`null` olabilir) |
+| `thumbnail` | Küçük görsel (genelde `null` → `file_link` kullanın) | `Thumbnail` (opsiyonel) |
+| `firm` | Belge adından parse edilmiş firma | `DocFilters.firm_keywords` |
+| `year` | Belge adından parse edilmiş yıl | `DocFilters.year_keywords` |
+| `gazette_type` | Belge adından parse edilmiş tip | `DocFilters.document_keywords` |
+| `gazette_no` | Gazete sayısı | (ek meta) |
+
+> Not: `file_link` doğrudan `Chunk.page_link`'ten gelir (tam URL olarak tutuluyor, dönüştürme yok);
+> boşsa `null`. Backend `firm/year/gazette_type/gazette_no`'yu belge adından parse eder; LLM
+> yalnızca `filename + page + page_link` taşır.
 
 **Cevabı çıkarma kuralı:**
 1. `type == "final_response"` event'inin `content` alanı = nihai cevap. **Bunu kullan.**
-2. `sources` alanı dayanak belge adlarını/sayfalarını verir; istersen kullanıcıya iliştir.
+2. `sources.documents[]` = yapılandırılmış kaynaklar (yukarıdaki tablo) → DocFilters + panel görseli.
 3. Yedek: `final_response` hiç gelmezse, tüm `message_chunk` event'lerinin `content`'lerini sırayla
    birleştir.
 4. `error` event'i gelirse mesajı hata olarak yukarı taşı.
