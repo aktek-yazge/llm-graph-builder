@@ -541,7 +541,12 @@ class TokenTracker:
         - Input: $1.25
         - Cached Input (read): $0.125 (10x cheaper!)
         - Output: $10.00
-        
+
+        GPT-5.x mini (gpt-5-mini, gpt-5.4-mini, per 1M tokens):
+        - Input: $0.75
+        - Cached Input (read): $0.075 (10x cheaper!)
+        - Output: $4.50
+
         GPT-4o Standard (per 1M tokens):
         - Input: $2.50
         - Cached Input (read): $1.25
@@ -591,6 +596,13 @@ class TokenTracker:
             cache_read_price = 0.30
             cache_creation_price = 3.75
             output_price = 15.00
+        # GPT-5.x mini (gpt-5-mini, gpt-5.4-mini, vb.) — DİKKAT: gpt-5'ten ÖNCE kontrol edilmeli
+        # (çünkü "gpt-5" substring'i mini model adında da bulunur, yoksa gpt-5 fiyatı uygulanır)
+        elif "gpt-5" in model_lower and "mini" in model_lower:
+            input_price = 0.75
+            cache_read_price = 0.075
+            cache_creation_price = 0.75  # OpenAI'da cache creation ek ücret yok (normal input fiyatı)
+            output_price = 4.50
         # GPT-5
         elif "gpt-5" in model_lower:
             input_price = 1.25

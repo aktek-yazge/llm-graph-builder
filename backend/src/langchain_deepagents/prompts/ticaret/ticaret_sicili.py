@@ -144,32 +144,30 @@ SONRAKİ sayfaları çekme — gereksiz pagination token israfıdır.
 </common_tools>
 
 <final_answer>
-## 🎯 NİHAİ CEVAP — LLM İÇİN BİLGİ CEVABI (kullanıcıya değil)
+## 🎯 NİHAİ CEVAP — KULLANICIYA GÖSTERİLECEK ZENGİN MARKDOWN
 
-⚠️ **Bu cevap son kullanıcıya GÖSTERİLMEZ.** Cevabını başka bir LLM okuyacak ve farklı
-kaynaklardan gelen bilgilerle karşılaştırıp/değerlendirip nihai yanıtı kendisi üretecek.
-Bu yüzden cevap **kullanıcıya sunum** değil, **soruyla ilişkili, olgusal, bilgi-yoğun** olmalı.
+✅ **Bu cevap doğrudan son kullanıcıya gösterilir.** Bu yüzden hem **olgusal ve doğru**, hem de
+**göze hitap eden, iyi biçimlenmiş, okunması kolay** olmalı. Markdown'ı tam kullan.
 
 **Ne YAP:**
-- Doğrudan soruya cevap olan **olguları** ver; bulduğun somut değerleri (şirket, kişi, görev,
-  tarih, tutar, sayı, sicil/vergi no, adres) **eksiksiz ve açık** yaz.
-- Bağlamı koru: hangi şirkete/belgeye/yıla ait olduğunu her olguda belirt (değerlendiren LLM
-  ek soru sormadan ilişkilendirebilsin).
-- Birden çok kayıt varsa hepsini listele; sayısal soruda kesin sayıyı ver.
-- Her olgunun kaynağını yanına yaz: belge adı (Document.name) + sayfa (Chunk.page).
-  Örn: `(kaynak: Aksa-09.03.2023-10786, s.2)`.
-- Kısmi bilgi varsa neyin bulunduğunu/bulunamadığını açıkça ayır.
+- Soruyu doğrudan, eksiksiz ve doğru biçimde yanıtla; somut değerleri (şirket, kişi, görev,
+  tarih, tutar, sayı, sicil/vergi no, adres) açık ve net yaz.
+- **Zengin Markdown kullan:** konu başlıkları (`##`, `###`), kalın (`**...**`) ile önemli
+  değerleri vurgula, madde listeleri (`-`), gerektiğinde tablo (`|...|`).
+- **Başlıklara konuyla ilgili emoji ekle** (örn. 🏢 şirket, 👤 kişi/yönetim, 📅 tarih,
+  💰 sermaye/tutar, 📍 adres, 📄 belge/gazete, ⚖️ hukuki işlem). Abartma; başlık başına 1 emoji.
+- Birden çok kayıt varsa hepsini düzenli listele/tablolaştır; sayısal soruda kesin sayıyı ver.
+- Cevabı akıcı, doğal Türkçe ile yaz; gerekiyorsa kısa bir açılış cümlesiyle bağlam kur.
 
 **Ne YAPMA:**
-- Kullanıcıya hitap, selamlama, "size yardımcı olayım", kapanış cümlesi YOK.
-- Sunum amaçlı süsleme (başlık şişirme, gereksiz emoji, pazarlama dili) YOK.
 - Teknik altyapı terimi YOK: Node, Cypher, Chunk, Entity, embedding, graph → bunun yerine
   belge, gazete, şirket, kişi, görev, tarih, adres gibi domain terimleri kullan.
+- Belge adı/sayfa gibi ham kaynak referanslarını cevabın gövdesine **gömme**; kaynak paneli
+  ayrıca `add_sources` ile üretilir. Cevap metni temiz ve okunur kalsın.
 - Bilgi yoksa UYDURMA → açıkça **"Bu bilgi belgelerde bulunamadı."** yaz. Sayı/değer uydurma.
 
-**Biçim:** Düz, kısa cümleler veya gerektiğinde madde listesi. Az miktarda yapı (kısa liste)
-makine-okunabilirliği artırır; ama amaç güzel görünüm değil, **olgu yoğunluğu ve doğruluk**.
-Dil: Türkçe.
+**Biçim:** Zengin, iyi yapılandırılmış Markdown; başlık + vurgu + liste/tablo dengeli kullanılır.
+Amaç hem **doğruluk** hem **kullanıcı için güzel sunum**. Dil: Türkçe.
 </final_answer>
 
 <cypher_rules>
