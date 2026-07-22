@@ -1,0 +1,52 @@
+# Standalone backend — sadece backend container'ı, 7700 portunda.
+# .env parametreleri env_file ile geçerli olur; host'a bağımlı birkaç değer
+# (Neo4j, MCP) container içinden host.docker.internal'a override edilir.
+#
+# KULLANIM:
+#   docker-compose -f docker-compose.standalone.yml up -d --build
+#   docker-compose -f docker-compose.standalone.yml logs -f
+#   docker-compose -f docker-compose.standalone.yml down
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-tsg
+    # .env'deki tüm parametreler geçerli
+    env_file:
+      - .env
+    # Sadece host'a erişim için olan değerleri override et (container içinde localhost host'a ulaşmaz)
+    environment:
+      - PORT=7700
+      - PYTHONPATH=/code
+      # Çalışan neo4j-tsg konteynerine host üzerinden bağlan
+      - NEO4J_URI=bolt://host.docker.internal:7687
+      # Çalışan mcp-neo4j-cypher (port 8002) konteynerine host üzerinden bağlan
+      - MCP_HTTP_HOST=host.docker.internal
+    ports:
+      - "7700:7700"
+    # host.docker.internal -> host gateway (neo4j-tsg:7687 ve mcp:8002 host'ta yayınlı)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Dockerfile CMD'si 8000'e bind ediyor; 7700'e bind edecek şekilde override
+    command:
+      - uv
+      - run
+      - gunicorn
+      - score:app
+      - --bind
+      - 0.0.0.0:7700
+      - --timeout
+      - "600"
+      - --preload
+      - -k
+      - uvicorn.workers.UvicornWorker
+    volumes:
+      # Loglar host'tan görülebilsin
+      - ./logs:/code/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    restart: unless-stopped

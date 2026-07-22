@@ -10439,4 +10439,4 @@ if __name__ == "__main__":
     # Uvicorn access logger'ını kapat (HTTP request logları)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     # host=0.0.0.0 → dışarıdan (diğer sunuculardan) erişilebilir. Port env ile override edilebilir.
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "7700")))
